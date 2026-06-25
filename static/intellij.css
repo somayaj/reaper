@@ -1,0 +1,367 @@
+/* IntelliJ IDEA Darcula-inspired theme for Reaper */
+
+:root {
+  --ij-bg: #2b2b2b;
+  --ij-editor: #2b2b2b;
+  --ij-panel: #3c3f41;
+  --ij-panel-header: #3c3f41;
+  --ij-border: #515658;
+  --ij-border-light: #323232;
+  --ij-text: #bbbbbb;
+  --ij-text-bright: #a9b7c6;
+  --ij-text-dim: #808080;
+  --ij-accent: #589df6;
+  --ij-accent-hover: #6ba6f7;
+  --ij-selection: #214283;
+  --ij-tab-active: #4e5254;
+  --ij-tab-inactive: #2b2b2b;
+  --ij-tab-border-active: #6897bb;
+  --ij-toolbar: #3c3f41;
+  --ij-status: #3c3f41;
+  --ij-gutter: #313335;
+  --ij-run: #62b53e;
+  --ij-run-hover: #73c04d;
+  --ij-modified: #ffc66d;
+  --ij-added: #629755;
+  --ij-deleted: #bc3f3c;
+  --ij-toolwindow-active: #484a4c;
+}
+
+html, body {
+  font-family: 'JetBrains Mono', 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+}
+
+/* Tool window strip (activity bar) */
+.ij-toolstrip {
+  background: var(--ij-panel);
+  border-right: 1px solid var(--ij-border);
+  width: 38px;
+}
+
+.activity-btn {
+  border-radius: 0;
+  width: 38px;
+  height: 38px;
+  border-left: 2px solid transparent;
+  color: var(--ij-text-dim);
+}
+
+.activity-btn:hover {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-text);
+}
+
+.activity-btn.active {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-accent);
+  border-left-color: var(--ij-accent);
+  box-shadow: none;
+}
+
+/* Sidebar / tool window */
+#sidebar {
+  background: var(--ij-panel);
+  border-right: 1px solid var(--ij-border);
+}
+
+#sidebar > div:first-child {
+  background: var(--ij-panel-header);
+  border-bottom: 1px solid var(--ij-border);
+  padding: 6px 8px;
+}
+
+#sidebar-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ij-text);
+}
+
+/* Project tree */
+.tree-item {
+  border-radius: 0;
+  line-height: 22px;
+  font-size: 12px;
+}
+
+.tree-item:hover,
+.tree-file:hover {
+  background: var(--ij-selection);
+  color: var(--ij-text-bright);
+}
+
+.tree-item.active,
+.tree-file.active {
+  background: var(--ij-selection);
+  color: var(--ij-text-bright);
+  box-shadow: inset 2px 0 0 var(--ij-accent);
+}
+
+details > summary {
+  list-style: none;
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+details > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 12px;
+  font-size: 10px;
+  color: var(--ij-text-dim);
+  transition: transform 0.1s;
+}
+
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.ij-icon-dir { color: #c09553; }
+.ij-icon-java { color: #9876aa; }
+.ij-icon-gradle { color: #6a8759; }
+.ij-icon-kotlin { color: #7f52ff; }
+.ij-icon-rust { color: #a17358; }
+.ij-icon-js { color: #cbcb41; }
+.ij-icon-json { color: #6897bb; }
+.ij-icon-md { color: #6897bb; }
+.ij-icon-file { color: var(--ij-text-dim); }
+
+/* Main header — IntelliJ menu bar */
+.ij-menubar {
+  background: var(--ij-panel);
+  border-bottom: 1px solid var(--ij-border);
+  height: 36px;
+}
+
+.ij-menubar select {
+  border-radius: 4px;
+  background: var(--ij-bg);
+  border: 1px solid var(--ij-border);
+  font-size: 12px;
+  padding: 3px 24px 3px 8px;
+}
+
+.ij-menubar select:focus {
+  border-color: var(--ij-accent);
+  outline: none;
+}
+
+/* Editor toolbar */
+.ij-toolbar {
+  background: var(--ij-toolbar);
+  border-bottom: 1px solid var(--ij-border);
+  min-height: 30px;
+  padding: 0 6px;
+  gap: 2px;
+}
+
+.ij-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: var(--ij-text);
+  transition: background 0.1s;
+}
+
+.ij-toolbar-btn:hover:not(:disabled) {
+  background: var(--ij-toolwindow-active);
+}
+
+.ij-toolbar-btn.run {
+  color: var(--ij-run);
+}
+
+.ij-toolbar-btn.run:hover:not(:disabled) {
+  background: rgba(98, 181, 62, 0.15);
+}
+
+.ij-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--ij-border);
+  margin: 0 4px;
+}
+
+.ij-toolbar select {
+  background: var(--ij-bg);
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  color: var(--ij-run);
+}
+
+/* Tabs */
+#tab-bar {
+  background: var(--ij-tab-inactive);
+  border-bottom: 1px solid var(--ij-border);
+  min-height: 28px;
+}
+
+.ij-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border-right: 1px solid var(--ij-border);
+  background: var(--ij-tab-inactive);
+  color: var(--ij-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 180px;
+  user-select: none;
+}
+
+.ij-tab:hover {
+  background: var(--ij-tab-active);
+  color: var(--ij-text);
+}
+
+.ij-tab.active {
+  background: var(--ij-tab-active);
+  color: var(--ij-text-bright);
+  border-top: 2px solid var(--ij-tab-border-active);
+  height: 28px;
+}
+
+.ij-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-tab.dirty .ij-tab-label::after {
+  content: ' ●';
+  color: var(--ij-modified);
+  font-size: 8px;
+  vertical-align: middle;
+}
+
+.ij-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--ij-text-dim);
+  opacity: 0;
+  flex-shrink: 0;
+}
+
+.ij-tab:hover .ij-tab-close,
+.ij-tab.active .ij-tab-close {
+  opacity: 1;
+}
+
+.ij-tab-close:hover {
+  background: var(--ij-border);
+  color: var(--ij-text-bright);
+}
+
+/* Breadcrumbs */
+.ij-breadcrumbs {
+  background: var(--ij-gutter);
+  border-bottom: 1px solid var(--ij-border-light);
+  padding: 2px 8px;
+  min-height: 22px;
+  font-size: 11px;
+  color: var(--ij-text-dim);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+}
+
+.ij-crumb {
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--ij-text-dim);
+}
+
+.ij-crumb:hover {
+  background: var(--ij-selection);
+  color: var(--ij-accent);
+}
+
+.ij-crumb-sep {
+  color: var(--ij-text-dim);
+  opacity: 0.5;
+  user-select: none;
+}
+
+/* Editor area */
+#editor-container {
+  background: var(--ij-editor);
+}
+
+main {
+  background: var(--ij-bg);
+}
+
+/* Status bar */
+.ij-statusbar {
+  background: var(--ij-status);
+  border-top: 1px solid var(--ij-border);
+  height: 22px;
+  font-size: 11px;
+  color: var(--ij-text-dim);
+}
+
+.ij-status-segment {
+  padding: 0 8px;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  border-right: 1px solid var(--ij-border-light);
+}
+
+.ij-status-segment:hover {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-text);
+  cursor: default;
+}
+
+.ij-status-segment.clickable {
+  cursor: pointer;
+}
+
+/* Panels */
+.panel-scroll {
+  scrollbar-color: #606366 transparent;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb {
+  background: #606366;
+  border-radius: 0;
+}
+
+#panel-terminal {
+  background: var(--ij-bg);
+}
+
+#terminal-output {
+  color: var(--ij-text-bright);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Diff panel */
+#diff-panel {
+  background: var(--ij-panel);
+  border-top: 1px solid var(--ij-border);
+}
+
+/* Toast positioning above status bar */
+#toast {
+  bottom: 28px;
+}

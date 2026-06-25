@@ -1,0 +1,11 @@
+/target/
+/data/
+.cursor/
+*.swp
+*.swo
+.DS_Store
+.env
+.env.*
+
+# Cursor bridge deps (installed locally via install-deps.mjs)
+/cursor-bridge/node_modules/

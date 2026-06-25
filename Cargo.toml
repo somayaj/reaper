@@ -1,0 +1,22 @@
+[package]
+name = "reaper"
+version = "0.1.0"
+edition = "2021"
+description = "Reaper — local git host and developer studio"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+http-body-util = "0.1"
+mime = "0.3"
+url = "2"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
