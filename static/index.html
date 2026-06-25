@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reaper — IDE</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            surface: {
+              950: '#2b2b2b',
+              900: '#3c3f41',
+              850: '#313335',
+              800: '#4e5254',
+              700: '#515658',
+              600: '#606366',
+            },
+            accent: {
+              DEFAULT: '#589df6',
+              hover: '#6ba6f7',
+              muted: '#589df622',
+              ring: '#589df655',
+            },
+            git: {
+              added: '#629755',
+              modified: '#ffc66d',
+              deleted: '#bc3f3c',
+              untracked: '#808080',
+            }
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+            sans: ['Segoe UI', 'Inter', 'system-ui', 'sans-serif'],
+          },
+          boxShadow: {
+            glow: 'none',
+            panel: 'none',
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/intellij.css?v=1" />
+  <style>
+    html, body { height: 100%; }
+    #editor { min-height: 0; }
+    .panel-scroll { scrollbar-width: thin; }
+    @keyframes pulse-soft { 0%,100%{opacity:.5} 50%{opacity:1} }
+    .loading-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
+    .diff-add { color: #629755; }
+    .diff-del { color: #bc3f3c; }
+    .diff-hunk { color: #6897bb; }
+    .agent-msg-user { background: #214283; border: 1px solid #515658; }
+    .agent-msg-assistant { background: #3c3f41; border: 1px solid #515658; }
+    .agent-msg-system { background: transparent; color: #808080; font-size: 11px; }
+    .agent-dock-btn.active { color: #589df6; background: #484a4c; }
+    #agent-dock-right { width: 20rem; }
+    #agent-dock-bottom { height: 16rem; }
+    @media (min-width: 1024px) { #agent-dock-right { width: 22rem; } }
+    @media (min-width: 1280px) { #agent-dock-right { width: 24rem; } }
+  </style>
+</head>
+<body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden selection:bg-accent/30">
+
+  <!-- Loading overlay -->
+  <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
+    <div class="flex flex-col items-center gap-4">
+      <img src="/logo.svg" alt="" class="w-14 h-14 logo-mark loading-dot" />
+      <p id="loading-text" class="text-sm text-gray-500">Loading…</p>
+    </div>
+  </div>
+
+  <!-- Main menu bar -->
+  <header class="ij-menubar flex items-center justify-between px-2 shrink-0">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href="/" class="flex items-center gap-2.5 shrink-0 group">
+        <img src="/logo.svg" alt="Reaper" class="w-8 h-8 logo-mark transition-transform group-hover:scale-105" />
+        <div class="hidden sm:block leading-none">
+          <div class="text-sm font-semibold text-white tracking-tight">Reaper</div>
+          <div class="text-[10px] text-gray-600 font-medium mt-0.5">IDE</div>
+        </div>
+      </a>
+
+      <div class="w-px h-6 bg-surface-700 hidden sm:block"></div>
+
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="relative">
+          <select id="repo-select" class="appearance-none bg-surface-800/80 border border-surface-700 hover:border-surface-600 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent-ring min-w-[140px] max-w-[200px] truncate transition-colors">
+            <option value="">Select repo…</option>
+          </select>
+          <svg class="w-4 h-4 text-gray-500 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </div>
+        <div class="relative">
+          <select id="branch-select" disabled class="appearance-none bg-surface-800/80 border border-surface-700 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-ring min-w-[100px] disabled:opacity-40 transition-colors">
+            <option value="">branch</option>
+          </select>
+          <svg class="w-4 h-4 text-gray-500 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </div>
+      </div>
+
+      <div id="file-breadcrumb" class="hidden md:flex items-center gap-1.5 text-xs text-gray-600 truncate min-w-0">
+        <span class="text-gray-700">/</span>
+        <span id="breadcrumb-path" class="font-mono text-gray-500 truncate"></span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-1.5 shrink-0">
+      <button id="btn-sync" disabled title="Pull latest" class="p-2 rounded text-gray-400 hover:text-white hover:bg-surface-800 disabled:opacity-30 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      </button>
+      <button id="btn-repo-info" disabled title="Repository details" class="p-2 rounded text-gray-400 hover:text-white hover:bg-surface-800 disabled:opacity-30 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 9h6M9 13h6"/></svg>
+      </button>
+      <button id="btn-save" disabled class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 disabled:opacity-30 transition-colors">
+        Save <kbd class="text-[10px] px-1 py-0.5 rounded bg-surface-800 border border-surface-700 text-gray-500">⌘S</kbd>
+      </button>
+      <button id="btn-new-repo" class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold shadow-glow transition-all hover:shadow-lg">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
+        <span class="hidden sm:inline">New</span>
+      </button>
+      <button id="btn-open-agent" title="Cursor Agent" class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-accent/40 bg-accent/10 hover:bg-accent/20 text-accent font-medium transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+        <span class="hidden sm:inline">Agent</span>
+      </button>
+    </div>
+  </header>
+
+  <div id="workspace" class="flex flex-col h-[calc(100%-3.625rem)]">
+
+    <div id="workspace-row" class="flex flex-1 min-h-0">
+
+    <!-- Tool window strip -->
+    <nav class="ij-toolstrip flex flex-col items-center py-1 gap-0 shrink-0">
+      <button data-panel="explorer" class="activity-btn active flex items-center justify-center transition-colors" title="Project (Alt+1)">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+      </button>
+      <button data-panel="git" class="activity-btn relative flex items-center justify-center transition-colors" title="Commit (Alt+9)">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 15l8.5-9"/></svg>
+        <span id="git-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-git-modified text-surface-950 text-[10px] font-bold flex items-center justify-center">0</span>
+      </button>
+      <button data-panel="history" class="activity-btn flex items-center justify-center transition-colors" title="Git Log">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      </button>
+      <button data-panel="agent" class="activity-btn flex items-center justify-center transition-colors" title="Agent">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+      </button>
+      <button data-panel="terminal" class="activity-btn flex items-center justify-center mt-auto transition-colors" title="Terminal">
+        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3"/></svg>
+      </button>
+    </nav>
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="w-60 lg:w-64 bg-surface-900/50 border-r border-surface-700/80 flex flex-col shrink-0">
+      <div class="flex items-center justify-between px-2 py-1 border-b border-surface-700/60 shrink-0">
+        <span id="sidebar-title" class="text-[11px] font-semibold text-gray-300">Project</span>
+        <div class="flex items-center gap-1">
+          <button id="btn-new-file" disabled title="New file (⌘N)" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 disabled:opacity-30 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
+          </button>
+          <input id="tree-filter" type="search" placeholder="Filter…" class="hidden w-24 bg-surface-800 border border-surface-700 rounded px-2 py-0.5 text-[11px] text-gray-400 focus:outline-none focus:ring-1 focus:ring-accent-ring" />
+        </div>
+      </div>
+
+      <div id="panel-explorer" class="panel flex-1 overflow-auto panel-scroll p-1.5">
+        <div id="file-tree" class="text-[13px] font-mono">
+          <div class="flex flex-col items-center justify-center py-12 px-4 text-center">
+            <img src="/logo.svg" alt="" class="w-10 h-10 opacity-30 mb-3 logo-mark" />
+            <p class="text-xs text-gray-600">Select a repo to browse files</p>
+          </div>
+        </div>
+      </div>
+
+      <div id="panel-git" class="panel hidden flex-1 overflow-hidden flex flex-col min-h-0">
+        <div id="git-status-list" class="flex-1 overflow-auto panel-scroll p-1.5"></div>
+        <div class="p-3 border-t border-surface-700/80 bg-surface-850 space-y-2">
+          <textarea id="commit-message" rows="2" placeholder="Commit message…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none"></textarea>
+          <button id="btn-commit" disabled class="w-full py-2 rounded-lg bg-git-added/15 text-git-added border border-git-added/25 hover:bg-git-added/25 text-sm font-semibold disabled:opacity-30 transition-colors">Commit & Push</button>
+        </div>
+      </div>
+
+      <div id="panel-history" class="panel hidden flex-1 overflow-auto panel-scroll p-1.5">
+        <div id="commit-history" class="space-y-1"></div>
+      </div>
+
+      <div id="panel-terminal" class="panel hidden flex-1 flex flex-col min-h-0 bg-surface-950">
+        <div id="terminal-output" class="flex-1 overflow-auto panel-scroll p-3 font-mono text-[11px] leading-relaxed text-gray-500"></div>
+        <div class="flex items-center border-t border-surface-700 bg-surface-900">
+          <span class="pl-3 pr-1 text-git-added font-mono text-sm">❯</span>
+          <input id="terminal-input" type="text" placeholder="git status" disabled class="flex-1 bg-transparent py-2.5 pr-3 text-sm font-mono text-gray-200 placeholder-gray-600 focus:outline-none" />
+        </div>
+      </div>
+
+      <div id="panel-agent" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden h-full">
+        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2">
+          <div id="agent-status" class="text-[10px] text-gray-500 truncate min-w-0">Checking…</div>
+          <div class="flex items-center gap-0.5 shrink-0">
+            <div class="flex items-center border border-surface-700 rounded-md overflow-hidden mr-0.5" title="Agent position">
+              <button type="button" data-agent-dock="left" class="agent-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Dock left">Left</button>
+              <button type="button" data-agent-dock="right" class="agent-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock right">Right</button>
+              <button type="button" data-agent-dock="bottom" class="agent-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock bottom">Bottom</button>
+            </div>
+            <button id="btn-agent-retry" title="Restart bridge" class="hidden p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+            <button id="btn-agent-settings" title="API key settings" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            </button>
+            <button id="btn-agent-clear" title="New conversation" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="agent-key-saved" class="hidden px-2 py-1.5 border-b border-surface-700/60 bg-surface-850 shrink-0 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-wide text-gray-500">API key</div>
+            <div id="cursor-key-masked" class="text-xs font-mono text-gray-400 truncate">••••</div>
+          </div>
+          <button id="btn-edit-cursor-key" type="button" class="text-[11px] text-accent hover:underline shrink-0">Change</button>
+        </div>
+
+        <form id="agent-setup" class="p-2 border-b border-surface-700/60 bg-surface-850 shrink-0 space-y-2">
+          <p class="text-[11px] text-gray-500 leading-relaxed">Paste your key from <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noopener" class="text-accent hover:underline">Cursor → Integrations</a></p>
+          <input id="cursor-api-key" name="api_key" type="password" autocomplete="off" placeholder="cursor_… or crsr_…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <div class="flex gap-2">
+            <button type="button" id="btn-cancel-cursor-key" class="hidden flex-1 py-1.5 rounded-lg border border-surface-700 text-gray-400 text-xs hover:bg-surface-800">Cancel</button>
+            <button type="submit" id="btn-save-cursor-key" class="flex-1 py-1.5 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-xs font-semibold">Save key</button>
+          </div>
+        </form>
+
+        <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-2 space-y-2 min-h-0">
+          <div class="agent-msg-system text-center py-4 px-2">
+            Ask the Cursor agent to edit files, run git commands, or explain the codebase.
+          </div>
+        </div>
+
+        <div class="p-2 border-t border-surface-700/80 bg-surface-900 shrink-0 space-y-1.5">
+          <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
+          <div class="flex items-center justify-between gap-2">
+            <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
+            <button id="btn-agent-send" disabled class="px-3 py-1 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-xs font-semibold disabled:opacity-30 transition-colors">Send</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Editor area -->
+    <main class="flex-1 flex flex-col min-w-0 bg-surface-950">
+      <!-- Run toolbar (IntelliJ-style) -->
+      <div id="editor-toolbar" class="ij-toolbar hidden items-center shrink-0">
+        <button id="tb-run" disabled title="Run (F5)" class="ij-toolbar-btn run" type="button">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <button id="tb-save" disabled title="Save (⌘S)" class="ij-toolbar-btn" type="button">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+        </button>
+        <button id="tb-format" disabled title="Reformat (⇧⌥F)" class="ij-toolbar-btn" type="button">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M4 6h16M4 12h10M4 18h7"/></svg>
+        </button>
+        <span class="ij-toolbar-sep"></span>
+        <select id="gradle-task" disabled title="Gradle task" class="hidden text-[11px] font-mono disabled:opacity-30">
+          <option value="run">run</option>
+          <option value="build">build</option>
+        </select>
+        <span id="toolbar-run-label" class="text-[11px] text-gray-500 ml-1 hidden"></span>
+      </div>
+      <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
+        <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto">
+          <div id="empty-state" class="flex-1 flex flex-col items-center justify-center text-center p-10">
+            <img src="/logo.svg" alt="Reaper" class="w-20 h-20 logo-mark mb-6" />
+            <h2 class="text-xl font-semibold text-white mb-2 tracking-tight">Welcome to Reaper</h2>
+            <p class="text-sm text-gray-500 max-w-sm leading-relaxed mb-8">Host repos, edit code with syntax highlighting, and run git — a focused studio for developers.</p>
+            <div class="flex flex-wrap items-center justify-center gap-3">
+              <button id="btn-new-repo-empty" class="px-5 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-sm font-semibold shadow-glow transition-all">Create repository</button>
+            </div>
+            <div class="mt-10 grid grid-cols-3 gap-6 max-w-md text-left">
+              <div><div class="text-accent text-lg mb-1">⌘S</div><div class="text-[11px] text-gray-600">Save file</div></div>
+              <div><div class="text-accent text-lg mb-1">⌘K</div><div class="text-[11px] text-gray-600">Command palette</div></div>
+              <div><div class="text-accent text-lg mb-1">Tab</div><div class="text-[11px] text-gray-600">Terminal autocomplete</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="editor-breadcrumbs" class="ij-breadcrumbs hidden"></div>
+      <div id="editor-container" class="flex-1 hidden min-h-0 relative">
+        <div id="editor" class="h-full w-full"></div>
+      </div>
+      <div id="diff-panel" class="hidden border-t border-surface-700 bg-surface-900 shrink-0 flex flex-col max-h-56">
+        <div class="flex items-center justify-between px-3 py-1.5 border-b border-surface-700/80 bg-surface-850 gap-2 min-w-0">
+          <div class="min-w-0">
+            <span class="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Diff</span>
+            <span id="diff-path" class="text-[10px] text-gray-600 font-mono truncate block"></span>
+          </div>
+          <button id="btn-close-diff" class="text-gray-600 hover:text-gray-300 text-xs px-2 py-0.5 rounded hover:bg-surface-800 shrink-0">Close</button>
+        </div>
+        <pre id="diff-content" class="flex-1 overflow-auto panel-scroll p-3 font-mono text-[11px] leading-relaxed whitespace-pre"></pre>
+      </div>
+    </main>
+
+    <!-- Agent dock (right) -->
+    <aside id="agent-dock-right" class="hidden bg-surface-900/50 border-l border-surface-700/80 flex flex-col shrink-0 min-h-0"></aside>
+    </div>
+
+    <!-- Agent dock (bottom) -->
+    <div id="agent-dock-bottom" class="hidden shrink-0 bg-surface-900/80 border-t border-surface-700/80 flex flex-col min-h-0"></div>
+  </div>
+
+  <!-- Status bar (IntelliJ-style) -->
+  <footer class="ij-statusbar flex items-stretch shrink-0">
+    <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
+      <span id="status-message">Ready</span>
+    </div>
+    <div class="flex-1"></div>
+    <div id="status-right" class="flex items-stretch shrink-0 h-full">
+      <span id="status-cursor" class="ij-status-segment font-mono">1:1</span>
+      <span id="status-encoding" class="ij-status-segment">UTF-8</span>
+      <span id="status-indent" class="ij-status-segment">Spaces: 4</span>
+      <span id="status-language" class="ij-status-segment"></span>
+      <span id="status-branch" class="ij-status-segment"></span>
+      <span id="status-changes" class="ij-status-segment"></span>
+    </div>
+  </footer>
+
+  <!-- Repository info modal -->
+  <div id="repo-info-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="glass border border-surface-700 rounded-lg shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3 border-b border-surface-700 bg-surface-900">
+        <h3 class="text-sm font-semibold text-white">Repository</h3>
+        <button type="button" id="repo-info-close" class="text-gray-500 hover:text-gray-200 text-lg leading-none px-1">×</button>
+      </div>
+      <div id="repo-info" class="p-5 space-y-4 text-sm max-h-[70vh] overflow-auto panel-scroll"></div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="px-6 pt-6 pb-4">
+        <div class="flex items-center gap-3 mb-1">
+          <img src="/logo.svg" alt="" class="w-9 h-9 logo-mark" />
+          <div>
+            <h3 class="text-lg font-semibold text-white">New repository</h3>
+            <p class="text-xs text-gray-500">Hosted locally · HTTP git remote</p>
+          </div>
+        </div>
+      </div>
+      <form id="new-repo-form" class="px-6 pb-2 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Name</label>
+          <input name="name" required pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="my-project or org/my-project" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring transition-shadow" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Description <span class="text-gray-600">(optional)</span></label>
+          <input name="description" placeholder="What is this repo for?" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
+          <input type="checkbox" name="init_readme" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
+          Initialize with README
+        </label>
+      </form>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
+        <button type="button" id="modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="submit" form="new-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New file modal -->
+  <div id="file-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="px-6 pt-6 pb-4">
+        <h3 class="text-lg font-semibold text-white">New file</h3>
+        <p class="text-xs text-gray-500 mt-1">Path relative to repository root</p>
+      </div>
+      <form id="new-file-form" class="px-6 pb-2">
+        <label class="block text-xs font-medium text-gray-400 mb-1.5">File path</label>
+        <input name="path" required pattern="[a-zA-Z0-9._/-]+" placeholder="src/main.rs" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+      </form>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
+        <button type="button" id="file-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="submit" form="new-file-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command palette -->
+  <div id="palette-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-start justify-center z-50 pt-[15vh] p-4">
+    <div class="w-full max-w-lg glass border border-surface-700 rounded-xl shadow-2xl overflow-hidden">
+      <input id="palette-input" type="text" placeholder="Type a command…" class="w-full bg-transparent px-4 py-3.5 text-sm text-white border-b border-surface-700 focus:outline-none placeholder-gray-600" />
+      <div id="palette-results" class="max-h-64 overflow-auto panel-scroll py-1"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script src="/monaco-languages.js?v=1"></script>
+  <script src="/app.js?v=11"></script>
+</body>
+</html>
