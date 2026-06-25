@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
+  <!-- Darcula-style app mark: flat panel + monogram R + git node -->
+  <rect width="64" height="64" rx="14" fill="#3C3F41"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#515658" stroke-width="1" fill="none"/>
+  <!-- Code gutter hint -->
+  <rect x="12" y="16" width="2" height="32" rx="1" fill="#515658" opacity="0.7"/>
+  <!-- R monogram -->
+  <path fill="#589DF6" d="M22 18h11.2c5.2 0 8.8 2.6 8.8 7.2 0 3.4-1.8 5.8-4.8 6.8L44 46h-6.2l-6.4-12.4H28V46h-6V18zm6 6.2v8.2h4.8c2.6 0 4.1-1.2 4.1-4.1 0-2.7-1.5-4.1-4.1-4.1H28z"/>
+  <!-- Git branch node -->
+  <circle cx="46" cy="44" r="4" fill="#3C3F41" stroke="#629755" stroke-width="2"/>
+  <path d="M46 40V34" stroke="#629755" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="46" cy="31" r="2.5" fill="#629755"/>
+</svg>

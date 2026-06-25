@@ -1,0 +1,11 @@
+{
+  "name": "reaper-cursor-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.22"
+  }
+}
