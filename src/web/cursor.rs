@@ -17,11 +17,14 @@ use crate::workspace;
 #[derive(Deserialize)]
 pub struct ChatBody {
     pub prompt: String,
+    pub model: Option<String>,
+    pub mode: Option<String>,
 }
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/cursor/status", axum::routing::get(cursor_status))
+        .route("/api/cursor/models", axum::routing::get(cursor_models))
         .route("/api/cursor/bridge/restart", axum::routing::post(restart_bridge))
         .route("/api/repos/{name}/cursor/chat", axum::routing::post(cursor_chat))
         .route(
@@ -53,6 +56,41 @@ async fn cursor_status_json(state: &AppState) -> serde_json::Value {
     serde_json::to_value(state.settings.cursor_view(bridge_ok, bridge_error)).unwrap_or_default()
 }
 
+async fn cursor_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let api_key = match state.settings.cursor_api_key() {
+        Some(k) => k,
+        None => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "Cursor API key not configured",
+            );
+        }
+    };
+
+    if !state.cursor_bridge.health().await {
+        if let Err(e) = ensure_bridge_running().await {
+            tracing::warn!("Cursor bridge auto-retry failed: {e:#}");
+        }
+    }
+    if !state.cursor_bridge.health().await {
+        let detail = last_bridge_error().await.unwrap_or_else(|| {
+            "Bridge offline — click Retry in Settings or restart Reaper".into()
+        });
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, detail);
+    }
+
+    match state.cursor_bridge.list_models(&api_key).await {
+        Ok(models) => Json(models).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
+                return api_error(StatusCode::UNAUTHORIZED, hint);
+            }
+            api_error(StatusCode::BAD_REQUEST, msg)
+        }
+    }
+}
+
 async fn cursor_chat(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -68,7 +106,7 @@ async fn cursor_chat(
         None => {
             return api_error(
                 StatusCode::BAD_REQUEST,
-                "Cursor API key not configured; add in Agent panel or set REAPER_CURSOR_API_KEY",
+                "Cursor API key not configured; open Settings → Cursor agent or set REAPER_CURSOR_API_KEY",
             );
         }
     };
@@ -80,7 +118,7 @@ async fn cursor_chat(
     }
     if !state.cursor_bridge.health().await {
         let detail = last_bridge_error().await.unwrap_or_else(|| {
-            "Bridge offline — click Retry in Agent panel or restart Reaper".into()
+            "Bridge offline — click Retry in Settings or restart Reaper".into()
         });
         return api_error(StatusCode::SERVICE_UNAVAILABLE, detail);
     }
@@ -95,6 +133,15 @@ async fn cursor_chat(
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
+    let model = body
+        .model
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| state.settings.cursor_model());
+    let mode = body
+        .mode
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| state.settings.cursor_mode());
+
     let session_id = match state.cursor_sessions.get(&name) {
         Some(id) => id,
         None => {
@@ -103,7 +150,8 @@ async fn cursor_chat(
                 .create_session(
                     &cwd.display().to_string(),
                     &api_key,
-                    &state.settings.cursor_model(),
+                    &model,
+                    &mode,
                 )
                 .await
             {
@@ -123,7 +171,11 @@ async fn cursor_chat(
         }
     };
 
-    let resp = match state.cursor_bridge.chat_stream(&session_id, prompt).await {
+    let resp = match state
+        .cursor_bridge
+        .chat_stream(&session_id, prompt, Some(model.as_str()), Some(mode.as_str()))
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             state.cursor_sessions.remove(&name);

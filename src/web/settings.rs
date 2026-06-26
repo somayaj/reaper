@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, put},
+    routing::{delete, get, patch, put},
 };
 use serde::Deserialize;
 
@@ -16,7 +16,11 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/settings/tokens", get(list_tokens).put(set_token))
         .route("/api/settings/tokens/{host}", delete(remove_token))
         .route("/api/settings/gemini", get(get_gemini).put(set_gemini).delete(clear_gemini))
+        .route("/api/settings/gemini/model", patch(set_gemini_model))
         .route("/api/settings/cursor", get(get_cursor).put(set_cursor).delete(clear_cursor))
+        .route("/api/settings/cursor/model", patch(set_cursor_model))
+        .route("/api/settings/cursor/mode", patch(set_cursor_mode))
+        .route("/api/settings/jdk", get(get_jdk).patch(set_jdk).delete(clear_jdk))
 }
 
 async fn list_tokens(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -77,6 +81,25 @@ async fn set_gemini(
         if let Err(e) = state.settings.set_gemini_model(model) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
+    }
+    Json(state.settings.gemini_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetGeminiModelRequest {
+    model: String,
+}
+
+async fn set_gemini_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetGeminiModelRequest>,
+) -> impl IntoResponse {
+    let model = body.model.trim();
+    if model.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "model required");
+    }
+    if let Err(e) = state.settings.set_gemini_model(model.to_string()) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
     Json(state.settings.gemini_view()).into_response()
 }
@@ -144,6 +167,84 @@ async fn clear_cursor(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         crate::cursor::last_bridge_error().await
     };
     Json(state.settings.cursor_view(bridge_ok, bridge_error)).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetCursorModelRequest {
+    model: String,
+}
+
+async fn set_cursor_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetCursorModelRequest>,
+) -> impl IntoResponse {
+    let model = body.model.trim();
+    if model.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "model required");
+    }
+    if let Err(e) = state.settings.set_cursor_model(model.to_string()) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    let bridge_ok = state.cursor_bridge.health().await;
+    let bridge_error = if bridge_ok {
+        None
+    } else {
+        crate::cursor::last_bridge_error().await
+    };
+    Json(state.settings.cursor_view(bridge_ok, bridge_error)).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetCursorModeRequest {
+    mode: String,
+}
+
+async fn set_cursor_mode(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetCursorModeRequest>,
+) -> impl IntoResponse {
+    let mode = body.mode.trim();
+    if mode.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "mode required");
+    }
+    if let Err(e) = state.settings.set_cursor_mode(mode.to_string()) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    let bridge_ok = state.cursor_bridge.health().await;
+    let bridge_error = if bridge_ok {
+        None
+    } else {
+        crate::cursor::last_bridge_error().await
+    };
+    Json(state.settings.cursor_view(bridge_ok, bridge_error)).into_response()
+}
+
+async fn get_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.settings.jdk_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetJdkRequest {
+    java_home: String,
+}
+
+async fn set_jdk(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetJdkRequest>,
+) -> impl IntoResponse {
+    let home = body.java_home.trim();
+    if home.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "java_home required");
+    }
+    if let Err(e) = state.settings.set_java_home(home.to_string()) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    Json(state.settings.jdk_view()).into_response()
+}
+
+async fn clear_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let _ = state.settings.clear_java_home();
+    Json(state.settings.jdk_view()).into_response()
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {

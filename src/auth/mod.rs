@@ -3,6 +3,19 @@ use url::Url;
 
 use crate::settings::SettingsStore;
 
+pub fn derive_repo_name_from_url(raw: &str) -> Result<String> {
+    let clean = normalize_remote_url(raw)?;
+    let url = parse_git_url(&clean)?;
+    let mut path = url.path().trim_start_matches('/').to_string();
+    if let Some(stripped) = path.strip_suffix(".git") {
+        path = stripped.to_string();
+    }
+    if path.is_empty() || !crate::config::Config::is_valid_repo_name(&path) {
+        bail!("could not derive repository name from URL; enter a name manually");
+    }
+    Ok(path)
+}
+
 pub fn host_from_url(raw: &str) -> Result<String> {
     let url = parse_git_url(raw)?;
     url.host_str()

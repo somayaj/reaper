@@ -52,6 +52,11 @@ pub async fn run_git_agent(
         clean: true,
         files: vec![],
         stdout: String::new(),
+        merge: workspace::conflict::MergeState {
+            active: false,
+            kind: None,
+        },
+        conflict_count: 0,
     });
 
     let context = format!(
@@ -135,4 +140,49 @@ fn extract_json_block(text: &str) -> Option<String> {
 
 pub fn allowed_commands_help() -> &'static str {
     "status, log, branch, show, diff, tag, remote, rev-parse, describe, shortlog, blame, ls-tree, cat-file, rev-list, name-rev, for-each-ref, add, commit, checkout, pull, push, fetch, merge, rebase, stash, reset, switch, restore, clean, mv, rm"
+}
+
+pub async fn suggest_commit_message(
+    settings: &SettingsStore,
+    ws: &Path,
+) -> Result<String> {
+    let api_key = settings.gemini_api_key().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Gemini API key not configured. Open Settings → AI or set REAPER_GEMINI_API_KEY."
+        )
+    })?;
+
+    let status = workspace::workspace_status(ws)?;
+    if status.clean {
+        bail!("nothing to commit");
+    }
+
+    let diff = workspace::diff_for_commit(ws)?;
+    let files_summary = status
+        .files
+        .iter()
+        .map(|f| format!("{} ({})", f.path, f.status))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let context = format!(
+        "Branch: {}\n\nChanged files:\n{}\n\nDiff:\n{}",
+        status.branch,
+        files_summary,
+        truncate_for_prompt(&diff, 14_000),
+    );
+
+    let client = GeminiClient::new(api_key, settings.gemini_model());
+    client.suggest_commit_message(&context).await
+}
+
+fn truncate_for_prompt(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    format!(
+        "{}…\n\n[diff truncated — {} bytes total]",
+        &text[..max],
+        text.len()
+    )
 }

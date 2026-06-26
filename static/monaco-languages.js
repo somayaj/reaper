@@ -144,7 +144,7 @@
   }
 
   const DEF_PREFIXES = [
-    'class', 'interface', 'enum', 'record', 'struct', 'trait', 'mod', 'type', 'object',
+    'class', 'module', 'interface', 'enum', 'record', 'struct', 'trait', 'mod', 'type', 'object',
     'def', 'fun', 'function', 'fn', 'func', 'const', 'let', 'var',
   ];
 
@@ -169,7 +169,7 @@
           break;
         }
       }
-      const py = line.match(/^\s*def\s+([A-Za-z_]\w*)/);
+      const py = line.match(/^\s*def\s+(?:self\.)?([A-Za-z_]\w*)/);
       if (py) {
         symbols.push({
           name: py[1],
@@ -181,6 +181,33 @@
       }
     });
     return symbols;
+  }
+
+  function completionKind(kind) {
+    const map = {
+      class: monaco.languages.CompletionItemKind.Class,
+      interface: monaco.languages.CompletionItemKind.Interface,
+      enum: monaco.languages.CompletionItemKind.Enum,
+      annotation: monaco.languages.CompletionItemKind.Interface,
+      property: monaco.languages.CompletionItemKind.Property,
+      value: monaco.languages.CompletionItemKind.Value,
+    };
+    return map[kind] || monaco.languages.CompletionItemKind.Text;
+  }
+
+  async function fetchCompletions(helpers, model, position, prefix) {
+    const repo = helpers.getRepo();
+    const path = helpers.getActivePath?.() || '';
+    if (!repo || !path) return [];
+
+    const q = new URLSearchParams({
+      path,
+      line: String(position.lineNumber),
+      column: String(position.column),
+      prefix: prefix || '',
+    });
+    const items = await helpers.api(`${helpers.repoApi(repo, '/workspace/completions')}?${q}`);
+    return Array.isArray(items) ? items : [];
   }
 
   function setupEditorFeatures(editor, helpers) {
@@ -206,7 +233,7 @@
 
     monaco.languages.registerDefinitionProvider(Array.from(langs), {
       async provideDefinition(model, position) {
-        if (!helpers.repoApi || !helpers.getRepo) return null;
+        if (!helpers.repoApi || !helpers.getRepo || !helpers.openFileAt) return null;
         const repo = helpers.getRepo();
         if (!repo) return null;
         const path = helpers.getActivePath?.() || '';
@@ -219,12 +246,104 @@
           });
           const hit = await helpers.api(`${helpers.repoApi(repo, '/workspace/definition')}?${q}`);
           if (!hit?.path) return null;
+          await helpers.openFileAt(hit.path, hit.line, hit.column);
+          const editor = helpers.getEditor?.();
+          const activeModel = editor?.getModel();
+          if (!activeModel) return null;
+          const nameLen = (hit.name || 'symbol').length;
+          const line = Math.max(1, hit.line || 1);
+          const col = Math.max(1, hit.column || 1);
           return {
-            uri: monaco.Uri.parse(`file:///${hit.path}`),
-            range: new monaco.Range(hit.line, hit.column, hit.line, hit.column + (hit.name?.length || 1)),
+            uri: activeModel.uri,
+            range: new monaco.Range(line, col, line, col + nameLen),
           };
         } catch {
           return null;
+        }
+      },
+    });
+
+    monaco.languages.registerCompletionItemProvider(['java', 'kotlin', 'groovy'], {
+      triggerCharacters: ['.', '@'],
+      async provideCompletionItems(model, position) {
+        if (!helpers.repoApi || !helpers.getRepo) return { suggestions: [] };
+        const repo = helpers.getRepo();
+        const path = helpers.getActivePath?.() || '';
+        if (!repo || !path) return { suggestions: [] };
+
+        const word = model.getWordUntilPosition(position);
+        const prefix = word.word || '';
+        if (!prefix && model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column)).slice(-1) !== '@') {
+          return { suggestions: [] };
+        }
+
+        try {
+          const items = await fetchCompletions(helpers, model, position, prefix);
+          if (!items.length) return { suggestions: [] };
+
+          const range = new monaco.Range(
+            position.lineNumber,
+            word.startColumn,
+            position.lineNumber,
+            word.endColumn,
+          );
+
+          return {
+            suggestions: items.map((item) => ({
+              label: item.label,
+              kind: completionKind(item.kind),
+              detail: item.detail || undefined,
+              insertText: item.label,
+              range,
+            })),
+          };
+        } catch {
+          return { suggestions: [] };
+        }
+      },
+    });
+
+    monaco.languages.registerCompletionItemProvider(['ini', 'yaml'], {
+      triggerCharacters: ['.', '=', ':'],
+      async provideCompletionItems(model, position) {
+        if (!helpers.repoApi || !helpers.getRepo) return { suggestions: [] };
+        const path = helpers.getActivePath?.() || '';
+        if (!path) return { suggestions: [] };
+        const lower = path.toLowerCase();
+        if (!lower.endsWith('.properties') && !lower.endsWith('.yml') && !lower.endsWith('.yaml')) {
+          return { suggestions: [] };
+        }
+
+        const word = model.getWordUntilPosition(position);
+        const linePrefix = model.getValueInRange(
+          new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column),
+        );
+        const prefix = word.word || linePrefix.split(/[=:#]/).pop()?.trim() || '';
+
+        try {
+          const items = await fetchCompletions(helpers, model, position, prefix);
+          if (!items.length) return { suggestions: [] };
+
+          const startCol = Math.max(1, position.column - prefix.length);
+          const range = new monaco.Range(
+            position.lineNumber,
+            startCol,
+            position.lineNumber,
+            position.column,
+          );
+
+          return {
+            suggestions: items.map((item) => ({
+              label: item.label,
+              kind: completionKind(item.kind),
+              detail: item.detail || undefined,
+              documentation: item.detail ? { value: item.detail } : undefined,
+              insertText: item.label,
+              range,
+            })),
+          };
+        } catch {
+          return { suggestions: [] };
         }
       },
     });
@@ -308,5 +427,21 @@
     });
   }
 
-  window.ReaperLang = { langForPath, langLabel, registerGroovy, setupEditorFeatures, extractSymbols };
+  function isDiagnosablePath(path) {
+    if (!path || path.startsWith('.reaper/')) return false;
+    const base = (path.split('/').pop() || '').toLowerCase();
+    if (!base || base.startsWith('.')) return false;
+    if (base === 'dockerfile' || base.startsWith('dockerfile.')) return true;
+    if (base === 'makefile' || base === 'gnumakefile' || base === 'cmakelists.txt') return true;
+    return langForPath(path) !== 'plaintext';
+  }
+
+  window.ReaperLang = {
+    langForPath,
+    langLabel,
+    isDiagnosablePath,
+    registerGroovy,
+    setupEditorFeatures,
+    extractSymbols,
+  };
 })();

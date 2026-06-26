@@ -21,8 +21,11 @@ pub fn router(state: AppState) -> Router {
         .merge(cursor::routes())
         .merge(settings::routes())
         .merge(git_http::routes())
-        .route_service("/", ServeFile::new("static/index.html"))
-        .fallback_service(ServeDir::new("static"))
+        .route_service(
+            "/",
+            ServeFile::new(state.config.static_dir.join("index.html")),
+        )
+        .fallback_service(ServeDir::new(state.config.static_dir.clone()))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::new(state))

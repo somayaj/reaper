@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
   <!-- Darcula-style app mark: flat panel + monogram R + git node -->
-  <rect width="64" height="64" rx="14" fill="#3C3F41"/>
-  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#515658" stroke-width="1" fill="none"/>
+  <rect width="64" height="64" rx="14" fill="#4E5254"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#6A6D70" stroke-width="1" fill="none"/>
   <!-- Code gutter hint -->
   <rect x="12" y="16" width="2" height="32" rx="1" fill="#515658" opacity="0.7"/>
   <!-- R monogram -->

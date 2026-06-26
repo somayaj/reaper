@@ -1,0 +1,56 @@
+// Reaper: print resolved compile/runtime classpath JARs and source JARs for IDE indexing.
+// stdout: JAR:/absolute/path  SOURCES:/absolute/path
+allprojects { project ->
+    project.tasks.register('reaperPrintClasspath') {
+        group = 'reaper'
+        description = 'Print classpath and source JARs for Reaper IDE indexing'
+        doLast {
+            def names = ['compileClasspath', 'runtimeClasspath', 'testCompileClasspath']
+            def seenJars = new LinkedHashSet<String>()
+            def seenSources = new LinkedHashSet<String>()
+
+            for (name in names) {
+                def conf = project.configurations.findByName(name)
+                if (conf == null || !conf.canBeResolved) {
+                    continue
+                }
+
+                conf.files.each { f ->
+                    if (f.name.endsWith('.jar') && seenJars.add(f.absolutePath)) {
+                        println 'JAR:' + f.absolutePath
+                    }
+                }
+
+                try {
+                    conf.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+                        def file = artifact.file
+                        if (file == null || !file.name.endsWith('.jar')) {
+                            return
+                        }
+                        def id = artifact.moduleVersion.id
+                        try {
+                            def dep = project.dependencies.create([
+                                group: id.group,
+                                name: id.name,
+                                version: id.version,
+                                classifier: 'sources',
+                                ext: 'jar',
+                            ])
+                            def srcConf = project.configurations.detachedConfiguration(dep)
+                            srcConf.transitive = false
+                            srcConf.resolve().each { srcFile ->
+                                if (srcFile.isFile() && seenSources.add(srcFile.absolutePath)) {
+                                    println 'SOURCES:' + srcFile.absolutePath
+                                }
+                            }
+                        } catch (Exception ignored) {
+                            // Module may not publish a sources artifact.
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Resolution metadata unavailable for this configuration.
+                }
+            }
+        }
+    }
+}

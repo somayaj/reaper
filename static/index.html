@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <script>
+    (function () {
+      var t = localStorage.getItem('reaper-theme') || 'navy';
+      var light = t === 'offwhite' || t === 'softgray';
+      document.documentElement.dataset.theme = t;
+      if (light) document.documentElement.classList.remove('dark');
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -13,25 +21,36 @@
         extend: {
           colors: {
             surface: {
-              950: '#2b2b2b',
-              900: '#3c3f41',
-              850: '#313335',
-              800: '#4e5254',
-              700: '#515658',
-              600: '#606366',
+              950: 'var(--c-surface-950)',
+              900: 'var(--c-surface-900)',
+              850: 'var(--c-surface-850)',
+              800: 'var(--c-surface-800)',
+              700: 'var(--c-surface-700)',
+              600: 'var(--c-surface-600)',
             },
             accent: {
-              DEFAULT: '#589df6',
-              hover: '#6ba6f7',
-              muted: '#589df622',
-              ring: '#589df655',
+              DEFAULT: 'var(--c-accent)',
+              hover: 'var(--c-accent-hover)',
+              muted: 'var(--c-accent-muted)',
+              ring: 'var(--c-accent-ring)',
             },
             git: {
-              added: '#629755',
-              modified: '#ffc66d',
-              deleted: '#bc3f3c',
-              untracked: '#808080',
-            }
+              added: 'var(--c-git-added)',
+              modified: 'var(--c-git-modified)',
+              deleted: 'var(--c-git-deleted)',
+              untracked: 'var(--c-git-untracked)',
+            },
+            gray: {
+              100: 'var(--c-gray-100)',
+              200: 'var(--c-gray-200)',
+              300: 'var(--c-gray-300)',
+              400: 'var(--c-gray-400)',
+              500: 'var(--c-gray-500)',
+              600: 'var(--c-gray-600)',
+              700: 'var(--c-gray-700)',
+              800: 'var(--c-gray-800)',
+              900: 'var(--c-gray-900)',
+            },
           },
           fontFamily: {
             mono: ['JetBrains Mono', 'Consolas', 'monospace'],
@@ -48,27 +67,24 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/intellij.css?v=1" />
+  <link rel="stylesheet" href="/intellij.css?v=36" />
+  <script src="/vendor/dompurify.min.js"></script>
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/agent-markdown.js?v=5"></script>
   <style>
-    html, body { height: 100%; }
+    html, body { height: 100%; margin: 0; }
     #editor { min-height: 0; }
-    .panel-scroll { scrollbar-width: thin; }
     @keyframes pulse-soft { 0%,100%{opacity:.5} 50%{opacity:1} }
     .loading-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
-    .diff-add { color: #629755; }
-    .diff-del { color: #bc3f3c; }
-    .diff-hunk { color: #6897bb; }
-    .agent-msg-user { background: #214283; border: 1px solid #515658; }
-    .agent-msg-assistant { background: #3c3f41; border: 1px solid #515658; }
-    .agent-msg-system { background: transparent; color: #808080; font-size: 11px; }
-    .agent-dock-btn.active { color: #589df6; background: #484a4c; }
     #agent-dock-right { width: 20rem; }
     #agent-dock-bottom { height: 16rem; }
-    @media (min-width: 1024px) { #agent-dock-right { width: 22rem; } }
-    @media (min-width: 1280px) { #agent-dock-right { width: 24rem; } }
+    #terminal-dock-right { width: 20rem; }
+    #terminal-dock-bottom { height: 16rem; }
+    @media (min-width: 1024px) { #agent-dock-right { width: 22rem; } #terminal-dock-right { width: 22rem; } }
+    @media (min-width: 1280px) { #agent-dock-right { width: 24rem; } #terminal-dock-right { width: 24rem; } }
   </style>
 </head>
-<body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden selection:bg-accent/30">
+<body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden ij-shell">
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -80,16 +96,93 @@
 
   <!-- Main menu bar -->
   <header class="ij-menubar flex items-center justify-between px-2 shrink-0">
-    <div class="flex items-center gap-3 min-w-0">
-      <a href="/" class="flex items-center gap-2.5 shrink-0 group">
-        <img src="/logo.svg" alt="Reaper" class="w-8 h-8 logo-mark transition-transform group-hover:scale-105" />
-        <div class="hidden sm:block leading-none">
-          <div class="text-sm font-semibold text-white tracking-tight">Reaper</div>
-          <div class="text-[10px] text-gray-600 font-medium mt-0.5">IDE</div>
-        </div>
+    <div class="flex items-center gap-1 min-w-0 flex-1">
+      <a href="/" class="flex items-center gap-2 shrink-0 group px-1">
+        <img src="/logo.svg" alt="Reaper" class="w-7 h-7 logo-mark" />
+        <span class="hidden lg:block text-sm font-semibold text-white tracking-tight">Reaper</span>
       </a>
 
-      <div class="w-px h-6 bg-surface-700 hidden sm:block"></div>
+      <nav class="ij-menu-nav" aria-label="Main menu">
+        <div class="ij-menu-root" data-menu="file">
+          <button type="button" class="ij-menu-trigger">File</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="new-repo">New repository<span class="ij-kbd">⌘⇧N</span></button>
+            <button type="button" class="ij-menu-item" data-action="clone">Clone from URL…</button>
+            <button type="button" class="ij-menu-item" data-action="new-file">New file<span class="ij-kbd">⌘N</span></button>
+            <div class="ij-menu-sep"></div>
+            <button type="button" class="ij-menu-item" data-action="save" disabled>Save<span class="ij-kbd">⌘S</span></button>
+            <button type="button" class="ij-menu-item" data-action="format" disabled>Reformat code<span class="ij-kbd">⇧⌥F</span></button>
+            <div class="ij-menu-sep"></div>
+            <button type="button" class="ij-menu-item" data-action="close-tab" disabled>Close tab<span class="ij-kbd">⌘W</span></button>
+          </div>
+        </div>
+        <div class="ij-menu-root" data-menu="git">
+          <button type="button" class="ij-menu-trigger">Git</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="commit-panel">Commit…</button>
+            <button type="button" class="ij-menu-item" data-action="pull" disabled>Pull</button>
+            <button type="button" class="ij-menu-item" data-action="push" disabled>Push to remote</button>
+            <button type="button" class="ij-menu-item" data-action="publish" disabled>Publish to GitHub…</button>
+            <div class="ij-menu-sep"></div>
+            <button type="button" class="ij-menu-item" data-action="repo-info" disabled>Repository details…</button>
+          </div>
+        </div>
+        <div class="ij-menu-root" data-menu="navigate">
+          <button type="button" class="ij-menu-trigger">Navigate</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="goto-class">Go to Class…<span class="ij-kbd">⌘O</span></button>
+          </div>
+        </div>
+        <div class="ij-menu-root" data-menu="view">
+          <button type="button" class="ij-menu-trigger">View</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="panel-explorer">Project<span class="ij-kbd">Alt+1</span></button>
+            <button type="button" class="ij-menu-item" data-action="panel-git">Commit<span class="ij-kbd">Alt+9</span></button>
+            <button type="button" class="ij-menu-item" data-action="panel-history">Git Log</button>
+            <button type="button" class="ij-menu-item" data-action="panel-terminal">Terminal</button>
+            <button type="button" class="ij-menu-item" data-action="panel-agent">Agent</button>
+            <div class="ij-menu-sep"></div>
+            <div class="ij-menu-heading">Terminal position</div>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="terminal-dock-left">Dock left</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="terminal-dock-right">Dock right</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="terminal-dock-bottom">Dock bottom</button>
+            <div class="ij-menu-heading">Agent position</div>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-left">Dock left</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-right">Dock right</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-bottom">Dock bottom</button>
+            <div class="ij-menu-sep"></div>
+            <button type="button" class="ij-menu-item" data-action="toggle-sidebar">Toggle sidebar</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="toggle-dotfiles" aria-pressed="false">Show hidden files<span class="ij-menu-hint">dotfiles, gradlew, gradle/wrapper</span></button>
+            <button type="button" class="ij-menu-item" data-action="command-palette">Command palette<span class="ij-kbd">⌘K</span></button>
+            <div class="ij-menu-sep"></div>
+            <label class="ij-menu-item ij-menu-theme" for="theme-select-menu">
+              <span>Color theme</span>
+              <select id="theme-select-menu" class="ij-theme-menu-select" title="Color theme"></select>
+            </label>
+            <label class="ij-menu-item ij-menu-theme" for="editor-font-size-menu">
+              <span>Editor font size</span>
+              <select id="editor-font-size-menu" class="ij-theme-menu-select" title="Editor font size"></select>
+            </label>
+          </div>
+        </div>
+        <div class="ij-menu-root" data-menu="run">
+          <button type="button" class="ij-menu-trigger">Run</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="run" disabled>Run<span class="ij-kbd">F5</span></button>
+          </div>
+        </div>
+        <div class="ij-menu-root" data-menu="settings">
+          <button type="button" class="ij-menu-trigger">Settings</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
+            <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
+          </div>
+        </div>
+      </nav>
+
+      <div class="w-px h-5 bg-surface-700 hidden md:block mx-1"></div>
 
       <div class="flex items-center gap-2 min-w-0">
         <div class="relative">
@@ -112,65 +205,91 @@
       </div>
     </div>
 
-    <div class="flex items-center gap-1.5 shrink-0">
-      <button id="btn-sync" disabled title="Pull latest" class="p-2 rounded text-gray-400 hover:text-white hover:bg-surface-800 disabled:opacity-30 transition-colors">
+    <div class="flex items-center gap-1 shrink-0">
+      <button id="btn-sync" disabled title="Pull latest" class="ij-header-btn icon">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
       </button>
-      <button id="btn-repo-info" disabled title="Repository details" class="p-2 rounded text-gray-400 hover:text-white hover:bg-surface-800 disabled:opacity-30 transition-colors">
+      <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 9h6M9 13h6"/></svg>
       </button>
-      <button id="btn-save" disabled class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 disabled:opacity-30 transition-colors">
-        Save <kbd class="text-[10px] px-1 py-0.5 rounded bg-surface-800 border border-surface-700 text-gray-500">⌘S</kbd>
+      <button id="btn-clone-repo" title="Clone from URL" class="ij-header-btn ghost hidden sm:inline-flex">
+        <span class="ij-header-icon" data-icon="clone"></span>
+        <span>Clone</span>
       </button>
-      <button id="btn-new-repo" class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold shadow-glow transition-all hover:shadow-lg">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
-        <span class="hidden sm:inline">New</span>
+      <button id="btn-new-repo" class="ij-header-btn primary hidden sm:inline-flex">
+        <span class="ij-header-icon" data-icon="newRepo"></span>
+        <span>New</span>
       </button>
-      <button id="btn-open-agent" title="Cursor Agent" class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-accent/40 bg-accent/10 hover:bg-accent/20 text-accent font-medium transition-colors">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
-        <span class="hidden sm:inline">Agent</span>
+      <button id="btn-open-agent" title="Cursor Agent" class="ij-header-btn ghost text-accent border-accent/30">
+        <span class="ij-header-icon" data-icon="agent"></span>
+        <span>Agent</span>
       </button>
     </div>
   </header>
 
-  <div id="workspace" class="flex flex-col h-[calc(100%-3.625rem)]">
+  <div id="workspace" class="ij-workspace">
 
-    <div id="workspace-row" class="flex flex-1 min-h-0">
+    <div id="workspace-row" class="ij-workspace-row">
 
     <!-- Tool window strip -->
     <nav class="ij-toolstrip flex flex-col items-center py-1 gap-0 shrink-0">
-      <button data-panel="explorer" class="activity-btn active flex items-center justify-center transition-colors" title="Project (Alt+1)">
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+      <button id="btn-sidebar-expand" type="button" class="activity-btn ij-sidebar-expand-btn" title="Show sidebar" aria-label="Show sidebar">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5l7 7-7 7"/></svg>
+        </span>
       </button>
-      <button data-panel="git" class="activity-btn relative flex items-center justify-center transition-colors" title="Commit (Alt+9)">
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 15l8.5-9"/></svg>
-        <span id="git-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-git-modified text-surface-950 text-[10px] font-bold flex items-center justify-center">0</span>
+      <button data-panel="explorer" class="activity-btn active" title="Project (Alt+1)">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+        </span>
       </button>
-      <button data-panel="history" class="activity-btn flex items-center justify-center transition-colors" title="Git Log">
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      <button data-panel="git" class="activity-btn" title="Commit (Alt+9)">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 15l8.5-9"/></svg>
+          <span id="git-badge" class="ij-activity-badge hidden">0</span>
+        </span>
       </button>
-      <button data-panel="agent" class="activity-btn flex items-center justify-center transition-colors" title="Agent">
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+      <button data-panel="history" class="activity-btn" title="Git Log">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        </span>
       </button>
-      <button data-panel="terminal" class="activity-btn flex items-center justify-center mt-auto transition-colors" title="Terminal">
-        <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3"/></svg>
+      <button data-panel="agent" class="activity-btn" title="Agent">
+        <span class="ij-activity-glyph" data-icon="agent" aria-hidden="true">
+          <span id="agent-badge" class="ij-activity-badge-dot hidden"></span>
+        </span>
+      </button>
+      <button data-panel="terminal" class="activity-btn mt-auto" title="Terminal">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3"/></svg>
+        </span>
       </button>
     </nav>
 
     <!-- Sidebar -->
-    <aside id="sidebar" class="w-60 lg:w-64 bg-surface-900/50 border-r border-surface-700/80 flex flex-col shrink-0">
-      <div class="flex items-center justify-between px-2 py-1 border-b border-surface-700/60 shrink-0">
-        <span id="sidebar-title" class="text-[11px] font-semibold text-gray-300">Project</span>
-        <div class="flex items-center gap-1">
-          <button id="btn-new-file" disabled title="New file (⌘N)" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 disabled:opacity-30 transition-colors">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
+    <aside id="sidebar" class="flex flex-col shrink-0">
+      <div class="ij-sidebar-header">
+        <div class="ij-sidebar-header-left">
+          <button id="btn-tree-back" type="button" class="ij-sidebar-btn ij-sidebar-back" title="Back to project file" aria-label="Back to project file" disabled>
+            <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7 7-7"/><path stroke-linecap="round" d="M3 12h18"/></svg>
           </button>
-          <input id="tree-filter" type="search" placeholder="Filter…" class="hidden w-24 bg-surface-800 border border-surface-700 rounded px-2 py-0.5 text-[11px] text-gray-400 focus:outline-none focus:ring-1 focus:ring-accent-ring" />
+          <span id="sidebar-title" class="ij-sidebar-title">Project</span>
+        </div>
+        <div class="ij-sidebar-actions">
+          <button id="btn-toggle-sidebar" type="button" class="ij-sidebar-btn" title="Hide sidebar" aria-label="Hide sidebar">
+            <svg class="ij-icon-collapse" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M15 19l-7-7 7-7"/></svg>
+            <svg class="ij-icon-expand hidden" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M9 5l7 7-7 7"/></svg>
+          </button>
+          <button id="btn-toggle-dotfiles" type="button" class="ij-sidebar-btn ij-sidebar-btn-text" title="Show dotfiles &amp; Gradle wrapper (gradlew, gradle/wrapper, …)" aria-label="Toggle dotfiles">.*</button>
+          <button id="btn-new-file" type="button" class="ij-sidebar-btn" disabled title="New file (⌘N)" aria-label="New file">
+            <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
+          </button>
+          <input id="tree-filter" type="search" placeholder="Filter…" class="ij-tree-filter hidden" />
         </div>
       </div>
 
-      <div id="panel-explorer" class="panel flex-1 overflow-auto panel-scroll p-1.5">
-        <div id="file-tree" class="text-[13px] font-mono">
+      <div id="panel-explorer" class="panel flex-1 overflow-auto panel-scroll">
+        <div id="file-tree" class="ij-file-tree">
           <div class="flex flex-col items-center justify-center py-12 px-4 text-center">
             <img src="/logo.svg" alt="" class="w-10 h-10 opacity-30 mb-3 logo-mark" />
             <p class="text-xs text-gray-600">Select a repo to browse files</p>
@@ -179,22 +298,53 @@
       </div>
 
       <div id="panel-git" class="panel hidden flex-1 overflow-hidden flex flex-col min-h-0">
-        <div id="git-status-list" class="flex-1 overflow-auto panel-scroll p-1.5"></div>
-        <div class="p-3 border-t border-surface-700/80 bg-surface-850 space-y-2">
-          <textarea id="commit-message" rows="2" placeholder="Commit message…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none"></textarea>
-          <button id="btn-commit" disabled class="w-full py-2 rounded-lg bg-git-added/15 text-git-added border border-git-added/25 hover:bg-git-added/25 text-sm font-semibold disabled:opacity-30 transition-colors">Commit & Push</button>
+        <div id="merge-banner" class="ij-merge-banner hidden shrink-0">
+          <div class="ij-merge-banner-text">
+            <strong id="merge-banner-title">Merge in progress</strong>
+            <span id="merge-banner-detail"></span>
+          </div>
+          <button id="btn-continue-merge" type="button" class="ij-merge-continue-btn">Complete merge</button>
+        </div>
+        <div id="commit-panel-header" class="ij-commit-panel-header shrink-0">
+          <div>
+            <span class="ij-commit-panel-title">Changes</span>
+            <p class="ij-commit-panel-hint">Click a file to preview its diff in the editor</p>
+          </div>
+          <span id="commit-file-count" class="ij-commit-file-count hidden"></span>
+        </div>
+        <div id="git-status-list" class="ij-git-status-list flex-1 overflow-auto panel-scroll min-h-0"></div>
+        <div class="ij-commit-compose shrink-0">
+          <div class="ij-commit-compose-header">
+            <label for="commit-message" class="ij-commit-compose-label">Commit message</label>
+            <button id="btn-suggest-commit" type="button" class="ij-ai-btn" title="Generate commit message from your changes" disabled>
+              <svg class="ij-ai-btn-icon" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+              <span class="ij-ai-btn-label">AI</span>
+            </button>
+          </div>
+          <textarea id="commit-message" rows="3" placeholder="Describe what changed and why…" class="ij-commit-message"></textarea>
+          <button id="btn-commit" disabled class="ij-commit-submit">Commit &amp; Push</button>
+          <p class="ij-commit-footnote">Stages all changes, commits, and pushes to your remote.</p>
         </div>
       </div>
 
-      <div id="panel-history" class="panel hidden flex-1 overflow-auto panel-scroll p-1.5">
-        <div id="commit-history" class="space-y-1"></div>
+      <div id="panel-history" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div id="commit-log-header" class="ij-commit-log-header shrink-0">Git Log</div>
+        <div id="commit-history" class="ij-commit-log flex-1 overflow-auto panel-scroll min-h-0"></div>
       </div>
 
       <div id="panel-terminal" class="panel hidden flex-1 flex flex-col min-h-0 bg-surface-950">
+        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2">
+          <span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Terminal</span>
+          <div class="flex items-center border border-surface-700 rounded-md overflow-hidden" title="Terminal position">
+            <button type="button" data-terminal-dock="left" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Dock left">Left</button>
+            <button type="button" data-terminal-dock="right" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock right">Right</button>
+            <button type="button" data-terminal-dock="bottom" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock bottom">Bottom</button>
+          </div>
+        </div>
         <div id="terminal-output" class="flex-1 overflow-auto panel-scroll p-3 font-mono text-[11px] leading-relaxed text-gray-500"></div>
         <div class="flex items-center border-t border-surface-700 bg-surface-900">
-          <span class="pl-3 pr-1 text-git-added font-mono text-sm">❯</span>
-          <input id="terminal-input" type="text" placeholder="git status" disabled class="flex-1 bg-transparent py-2.5 pr-3 text-sm font-mono text-gray-200 placeholder-gray-600 focus:outline-none" />
+          <span id="terminal-cwd" class="pl-3 pr-1 text-git-added font-mono text-[11px] truncate max-w-[45%] shrink-0" title="Working directory">repo ❯</span>
+          <input id="terminal-input" type="text" placeholder="bash — ls, ./gradlew build, git status…" disabled class="flex-1 bg-transparent py-2.5 pr-3 text-sm font-mono text-gray-200 placeholder-gray-600 focus:outline-none" />
         </div>
       </div>
 
@@ -210,7 +360,7 @@
             <button id="btn-agent-retry" title="Restart bridge" class="hidden p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
             </button>
-            <button id="btn-agent-settings" title="API key settings" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
+            <button id="btn-agent-settings" title="Open Settings" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
             </button>
             <button id="btn-agent-clear" title="New conversation" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
@@ -219,22 +369,13 @@
           </div>
         </div>
 
-        <div id="agent-key-saved" class="hidden px-2 py-1.5 border-b border-surface-700/60 bg-surface-850 shrink-0 flex items-center justify-between gap-2">
-          <div class="min-w-0">
-            <div class="text-[10px] uppercase tracking-wide text-gray-500">API key</div>
-            <div id="cursor-key-masked" class="text-xs font-mono text-gray-400 truncate">••••</div>
-          </div>
-          <button id="btn-edit-cursor-key" type="button" class="text-[11px] text-accent hover:underline shrink-0">Change</button>
+        <div id="agent-config-banner" class="hidden px-2 py-2 border-b border-surface-700/60 bg-surface-850 shrink-0">
+          <p class="text-[11px] text-gray-500 leading-relaxed">
+            Add your Cursor API key in
+            <button type="button" id="btn-agent-open-settings" class="text-accent hover:underline">Settings → Cursor agent</button>
+            to enable chat.
+          </p>
         </div>
-
-        <form id="agent-setup" class="p-2 border-b border-surface-700/60 bg-surface-850 shrink-0 space-y-2">
-          <p class="text-[11px] text-gray-500 leading-relaxed">Paste your key from <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noopener" class="text-accent hover:underline">Cursor → Integrations</a></p>
-          <input id="cursor-api-key" name="api_key" type="password" autocomplete="off" placeholder="cursor_… or crsr_…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
-          <div class="flex gap-2">
-            <button type="button" id="btn-cancel-cursor-key" class="hidden flex-1 py-1.5 rounded-lg border border-surface-700 text-gray-400 text-xs hover:bg-surface-800">Cancel</button>
-            <button type="submit" id="btn-save-cursor-key" class="flex-1 py-1.5 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-xs font-semibold">Save key</button>
-          </div>
-        </form>
 
         <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-2 space-y-2 min-h-0">
           <div class="agent-msg-system text-center py-4 px-2">
@@ -243,6 +384,16 @@
         </div>
 
         <div class="p-2 border-t border-surface-700/80 bg-surface-900 shrink-0 space-y-1.5">
+          <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0" title="Conversation mode">
+              <button type="button" data-agent-mode="agent" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Agent — edit files and run tools">Agent</button>
+              <button type="button" data-agent-mode="plan" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Plan — design before implementing">Plan</button>
+              <button type="button" data-agent-mode="ask" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Ask — read-only Q&amp;A">Ask</button>
+            </div>
+            <select id="agent-model" class="ij-theme-menu-select flex-1 min-w-0 text-[11px]" title="Cursor model" disabled>
+              <option value="composer-2.5">Composer 2.5</option>
+            </select>
+          </div>
           <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
           <div class="flex items-center justify-between gap-2">
             <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
@@ -251,6 +402,8 @@
         </div>
       </div>
     </aside>
+
+    <div id="sidebar-resizer" class="ij-sidebar-resizer" title="Drag to resize"></div>
 
     <!-- Editor area -->
     <main class="flex-1 flex flex-col min-w-0 bg-surface-950">
@@ -265,52 +418,66 @@
         <button id="tb-format" disabled title="Reformat (⇧⌥F)" class="ij-toolbar-btn" type="button">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M4 6h16M4 12h10M4 18h7"/></svg>
         </button>
-        <span class="ij-toolbar-sep"></span>
+        <span id="gradle-toolbar-sep" class="ij-toolbar-sep hidden"></span>
         <select id="gradle-task" disabled title="Gradle task" class="hidden text-[11px] font-mono disabled:opacity-30">
           <option value="run">run</option>
           <option value="build">build</option>
         </select>
         <span id="toolbar-run-label" class="text-[11px] text-gray-500 ml-1 hidden"></span>
       </div>
+      <div id="java-index-banner" class="hidden ij-java-index-banner shrink-0">
+        <span class="ij-java-index-spinner" aria-hidden="true"></span>
+        <span id="java-index-banner-text">Indexing Java sources…</span>
+      </div>
       <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
         <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto">
-          <div id="empty-state" class="flex-1 flex flex-col items-center justify-center text-center p-10">
-            <img src="/logo.svg" alt="Reaper" class="w-20 h-20 logo-mark mb-6" />
-            <h2 class="text-xl font-semibold text-white mb-2 tracking-tight">Welcome to Reaper</h2>
-            <p class="text-sm text-gray-500 max-w-sm leading-relaxed mb-8">Host repos, edit code with syntax highlighting, and run git — a focused studio for developers.</p>
-            <div class="flex flex-wrap items-center justify-center gap-3">
-              <button id="btn-new-repo-empty" class="px-5 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-sm font-semibold shadow-glow transition-all">Create repository</button>
-            </div>
-            <div class="mt-10 grid grid-cols-3 gap-6 max-w-md text-left">
-              <div><div class="text-accent text-lg mb-1">⌘S</div><div class="text-[11px] text-gray-600">Save file</div></div>
-              <div><div class="text-accent text-lg mb-1">⌘K</div><div class="text-[11px] text-gray-600">Command palette</div></div>
-              <div><div class="text-accent text-lg mb-1">Tab</div><div class="text-[11px] text-gray-600">Terminal autocomplete</div></div>
-            </div>
-          </div>
+          <div id="empty-state" class="ij-welcome"></div>
         </div>
       </div>
       <div id="editor-breadcrumbs" class="ij-breadcrumbs hidden"></div>
-      <div id="editor-container" class="flex-1 hidden min-h-0 relative">
-        <div id="editor" class="h-full w-full"></div>
-      </div>
-      <div id="diff-panel" class="hidden border-t border-surface-700 bg-surface-900 shrink-0 flex flex-col max-h-56">
-        <div class="flex items-center justify-between px-3 py-1.5 border-b border-surface-700/80 bg-surface-850 gap-2 min-w-0">
-          <div class="min-w-0">
-            <span class="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Diff</span>
-            <span id="diff-path" class="text-[10px] text-gray-600 font-mono truncate block"></span>
-          </div>
-          <button id="btn-close-diff" class="text-gray-600 hover:text-gray-300 text-xs px-2 py-0.5 rounded hover:bg-surface-800 shrink-0">Close</button>
+      <div id="editor-stage" class="ij-editor-stage flex-1 flex flex-col min-h-0 min-w-0">
+        <div id="editor-container" class="flex-1 min-h-0 relative">
+          <div id="editor" class="h-full w-full"></div>
         </div>
-        <pre id="diff-content" class="flex-1 overflow-auto panel-scroll p-3 font-mono text-[11px] leading-relaxed whitespace-pre"></pre>
+        <div id="diff-panel" class="hidden flex-1 flex flex-col min-h-0">
+          <div class="ij-diff-header">
+            <div class="min-w-0">
+              <span class="ij-diff-title">Diff</span>
+              <span id="diff-agent-live" class="ij-diff-live-badge hidden">Live</span>
+              <span id="diff-path" class="ij-diff-path"></span>
+            </div>
+            <button id="btn-close-diff" type="button" class="ij-diff-close-btn">Back to editor</button>
+          </div>
+          <div id="diff-content" class="ij-sbs-diff flex-1 overflow-auto panel-scroll min-h-0"></div>
+        </div>
+        <div id="conflict-panel" class="hidden flex flex-col min-h-0 border-t border-surface-700">
+          <div class="ij-conflict-panel-header">
+            <div class="min-w-0">
+              <span class="ij-conflict-panel-title">Merge conflicts</span>
+              <span id="conflict-path" class="ij-conflict-panel-path"></span>
+            </div>
+            <div class="ij-conflict-panel-actions">
+              <button id="btn-mark-conflict-resolved" type="button" class="ij-conflict-action-btn" title="Stage file after all hunks resolved">Mark resolved</button>
+              <button id="btn-close-conflict" type="button" class="ij-conflict-action-btn">Hide panel</button>
+            </div>
+          </div>
+          <div id="conflict-hunks" class="ij-conflict-hunks flex-1 overflow-auto panel-scroll min-h-0"></div>
+        </div>
       </div>
     </main>
 
     <!-- Agent dock (right) -->
-    <aside id="agent-dock-right" class="hidden bg-surface-900/50 border-l border-surface-700/80 flex flex-col shrink-0 min-h-0"></aside>
+    <aside id="agent-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
+
+    <!-- Terminal dock (right) -->
+    <aside id="terminal-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
     </div>
 
     <!-- Agent dock (bottom) -->
-    <div id="agent-dock-bottom" class="hidden shrink-0 bg-surface-900/80 border-t border-surface-700/80 flex flex-col min-h-0"></div>
+    <div id="agent-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0"></div>
+
+    <!-- Terminal dock (bottom) -->
+    <div id="terminal-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0"></div>
   </div>
 
   <!-- Status bar (IntelliJ-style) -->
@@ -320,6 +487,22 @@
     </div>
     <div class="flex-1"></div>
     <div id="status-right" class="flex items-stretch shrink-0 h-full">
+      <button id="status-diagnostics" type="button" class="ij-status-segment ij-status-diagnostics hidden" title="No problems">
+        <svg class="ij-diag-flag" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5v11h1v-4h8.5L11 6.5 12.5 2.5H3z"/></svg>
+        <span id="status-diag-count"></span>
+      </button>
+      <span class="ij-status-segment ij-theme-picker" title="Color theme">
+        <label for="theme-select">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z"/></svg>
+          <select id="theme-select" aria-label="Color theme"></select>
+        </label>
+      </span>
+      <span class="ij-status-segment ij-font-picker" title="Editor font size">
+        <label for="editor-font-size-status">
+          <span class="ij-font-picker-icon" aria-hidden="true">Aa</span>
+          <select id="editor-font-size-status" aria-label="Editor font size"></select>
+        </label>
+      </span>
       <span id="status-cursor" class="ij-status-segment font-mono">1:1</span>
       <span id="status-encoding" class="ij-status-segment">UTF-8</span>
       <span id="status-indent" class="ij-status-segment">Spaces: 4</span>
@@ -337,6 +520,65 @@
         <button type="button" id="repo-info-close" class="text-gray-500 hover:text-gray-200 text-lg leading-none px-1">×</button>
       </div>
       <div id="repo-info" class="p-5 space-y-4 text-sm max-h-[70vh] overflow-auto panel-scroll"></div>
+    </div>
+  </div>
+
+  <!-- Clone repository modal -->
+  <div id="clone-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="px-6 pt-6 pb-4">
+        <div class="flex items-center gap-3 mb-1">
+          <img src="/logo.svg" alt="" class="w-9 h-9 logo-mark" />
+          <div>
+            <h3 class="text-lg font-semibold text-white">Clone repository</h3>
+            <p class="text-xs text-gray-500">Import from GitHub, GitLab, or any HTTPS remote</p>
+          </div>
+        </div>
+      </div>
+      <form id="clone-repo-form" class="px-6 pb-2 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
+          <input id="clone-remote-url" name="remote_url" required placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
+          <input id="clone-local-name" name="name" pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <p class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
+      </form>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
+        <button type="button" id="clone-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Clone</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Publish to GitHub modal -->
+  <div id="publish-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="px-6 pt-6 pb-4">
+        <h3 class="text-lg font-semibold text-white">Publish to GitHub</h3>
+        <p class="text-xs text-gray-500 mt-1">Create a GitHub repo, link it, and push your current branch</p>
+      </div>
+      <form id="publish-repo-form" class="px-6 pb-2 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">GitHub repository</label>
+          <input id="publish-github-repo" name="github_repo" required placeholder="owner/repo or https://github.com/owner/repo" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <p class="text-[11px] text-gray-600">Uses your GitHub PAT from <button type="button" id="publish-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
+        <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
+          <input type="checkbox" name="create" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
+          Create repository on GitHub if it does not exist
+        </label>
+        <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
+          <input type="checkbox" name="private" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
+          Private repository
+        </label>
+      </form>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
+        <button type="button" id="publish-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="submit" form="publish-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Publish</button>
+      </div>
     </div>
   </div>
 
@@ -391,11 +633,128 @@
     </div>
   </div>
 
+  <!-- Settings modal -->
+  <div id="settings-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="ij-settings-modal glass border border-surface-700 rounded-lg shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[85vh]">
+      <div class="flex items-center justify-between px-5 py-3 border-b border-surface-700 bg-surface-900 shrink-0">
+        <h3 class="text-sm font-semibold text-white">Settings</h3>
+        <button type="button" id="settings-modal-close" class="text-gray-500 hover:text-gray-200 text-lg leading-none px-1">×</button>
+      </div>
+      <div class="ij-settings-body flex min-h-0 flex-1">
+        <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
+          <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
+        </nav>
+        <div class="ij-settings-content flex-1 overflow-auto panel-scroll p-5 min-h-0">
+          <section id="settings-panel-git" class="ij-settings-panel space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Personal access tokens</h4>
+              <p class="text-xs text-gray-500 mt-1">Stored locally in <code class="text-accent">data/settings.json</code>. Used for private HTTPS clone, pull, and push.</p>
+            </div>
+            <div id="settings-pat-list" class="ij-settings-token-list"></div>
+            <form id="settings-pat-form" class="space-y-3 border-t border-surface-700 pt-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-gray-400 mb-1.5">Host</label>
+                  <input id="settings-pat-host" name="host" required placeholder="github.com" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-gray-400 mb-1.5">Token</label>
+                  <input id="settings-pat-token" name="token" type="password" required autocomplete="off" placeholder="ghp_… or glpat-…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+                </div>
+              </div>
+              <p class="text-[11px] text-gray-600">Use <code class="font-mono">*</code> as the host for a default token. You can also set <code class="font-mono">REAPER_PAT</code> via environment.</p>
+              <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save token</button>
+            </form>
+          </section>
+          <section id="settings-panel-appearance" class="ij-settings-panel hidden space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Editor</h4>
+              <p class="text-xs text-gray-500 mt-1">Color theme is in the status bar or <strong class="text-gray-400 font-normal">View → Color theme</strong>.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-editor-font-size">Font size</label>
+              <select id="settings-editor-font-size" class="ij-theme-menu-select w-full max-w-xs" title="Editor font size"></select>
+              <p class="text-[11px] text-gray-600 mt-2">Applies to the code editor. Saved in this browser (10–28px).</p>
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                <input id="settings-show-dotfiles" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
+                Show hidden files in project tree
+              </label>
+              <p class="text-[11px] text-gray-600 mt-2">When off, dotfolders (<code class="font-mono">.vscode</code>, <code class="font-mono">.reaper</code>), <code class="font-mono">gradlew</code>, <code class="font-mono">gradle/wrapper</code>, and root <code class="font-mono">gradle.properties</code> are hidden.</p>
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                <input id="settings-auto-save" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" checked />
+                Auto-save
+              </label>
+              <p class="text-[11px] text-gray-600 mt-2">Save open files automatically after you stop typing. Enabled by default.</p>
+            </div>
+          </section>
+          <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Cursor agent</h4>
+              <p class="text-xs text-gray-500 mt-1">Paste your User API key from <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noopener" class="text-accent hover:underline">Cursor → Integrations</a>.</p>
+            </div>
+            <div id="settings-cursor-status" class="ij-settings-status"></div>
+            <form id="settings-cursor-form" class="space-y-3 border-t border-surface-700 pt-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">API key</label>
+                <input id="settings-cursor-key" name="api_key" type="password" autocomplete="off" placeholder="cursor_… or crsr_…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save key</button>
+                <button type="button" id="settings-cursor-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Remove key</button>
+                <button type="button" id="settings-cursor-restart" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Restart bridge</button>
+              </div>
+            </form>
+          </section>
+          <section id="settings-panel-ai" class="ij-settings-panel hidden space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Gemini (commit messages)</h4>
+              <p class="text-xs text-gray-500 mt-1">Powers the <strong class="text-gray-400 font-normal">AI</strong> button in the Commit panel. Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="text-accent hover:underline">Google AI Studio</a>.</p>
+            </div>
+            <div id="settings-gemini-status" class="ij-settings-status"></div>
+            <div class="space-y-2 border-t border-surface-700 pt-4">
+              <label for="settings-gemini-model" class="block text-xs font-medium text-gray-400">Model</label>
+              <select id="settings-gemini-model" class="ij-theme-menu-select w-full max-w-xs" title="Gemini model for commit messages"></select>
+              <p class="text-[11px] text-gray-600">Flash models are faster; Pro is better for long or complex diffs.</p>
+            </div>
+            <button type="button" id="settings-gemini-change-key" class="hidden px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Change API key</button>
+            <form id="settings-gemini-form" class="space-y-3 border-t border-surface-700 pt-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">API key</label>
+                <input id="settings-gemini-key" name="api_key" type="password" autocomplete="off" placeholder="AIza…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save key</button>
+                <button type="button" id="settings-gemini-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Remove key</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Command palette -->
-  <div id="palette-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-start justify-center z-50 pt-[15vh] p-4">
-    <div class="w-full max-w-lg glass border border-surface-700 rounded-xl shadow-2xl overflow-hidden">
-      <input id="palette-input" type="text" placeholder="Type a command…" class="w-full bg-transparent px-4 py-3.5 text-sm text-white border-b border-surface-700 focus:outline-none placeholder-gray-600" />
-      <div id="palette-results" class="max-h-64 overflow-auto panel-scroll py-1"></div>
+  <div id="palette-overlay" class="ij-overlay">
+    <div class="ij-palette">
+      <input id="palette-input" type="text" placeholder="Type a command or search files…" autocomplete="off" />
+      <div id="palette-results" class="max-h-72 overflow-auto panel-scroll py-1"></div>
+    </div>
+  </div>
+
+  <!-- Go to Class -->
+  <div id="goto-class-overlay" class="ij-overlay">
+    <div class="ij-palette ij-goto-class">
+      <div class="ij-goto-class-header">Go to Class</div>
+      <input id="goto-class-input" type="text" placeholder="Search classes (e.g. User, ACB, com.example.Foo)…" autocomplete="off" spellcheck="false" />
+      <div id="goto-class-results" class="max-h-80 overflow-auto panel-scroll py-1"></div>
+      <div id="goto-class-hint" class="ij-goto-class-hint">↑↓ navigate · Enter open · Esc close</div>
     </div>
   </div>
 
@@ -403,7 +762,9 @@
   <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
-  <script src="/monaco-languages.js?v=1"></script>
-  <script src="/app.js?v=11"></script>
+  <script src="/icons.js?v=1"></script>
+  <script src="/monaco-languages.js?v=8"></script>
+  <script src="/themes.js?v=8"></script>
+  <script src="/app.js?v=61"></script>
 </body>
 </html>

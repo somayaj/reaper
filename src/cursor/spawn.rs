@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -7,6 +8,8 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+use crate::config::running_in_app_bundle;
 
 use super::{CursorBridge, bridge_url};
 
@@ -30,13 +33,103 @@ async fn set_bridge_error(msg: Option<String>) {
 }
 
 pub fn bridge_dir() -> PathBuf {
+    bridge_source_dir()
+}
+
+fn bridge_deps_ready(dir: &Path) -> bool {
+    dir.join("node_modules/@cursor/sdk/package.json").is_file()
+        && dir.join("node_modules/@connectrpc/connect/package.json").is_file()
+}
+
+fn app_support_bridge_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home).join("Library/Application Support/Reaper/cursor-bridge")
+    })
+}
+
+fn sync_bridge_to_app_support(source: &Path, dest: &Path) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let marker = dest.join(".bridge-version");
+    let ready = bridge_deps_ready(dest);
+    let same_version = fs::read_to_string(&marker)
+        .map(|v| v.trim() == version)
+        .unwrap_or(false);
+
+    if ready && same_version && dest.join("server.mjs").is_file() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Setting up Cursor bridge in {}…",
+        dest.display()
+    );
+
+    if dest.exists() {
+        fs::remove_dir_all(dest).context("failed to clear old Cursor bridge runtime")?;
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("ditto")
+        .arg(source)
+        .arg(dest)
+        .status()
+        .context("failed to copy cursor-bridge into Application Support")?;
+
+    #[cfg(not(target_os = "macos"))]
+    let status = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(source)
+        .arg(dest)
+        .status()
+        .context("failed to copy cursor-bridge into Application Support")?;
+
+    if !status.success() {
+        bail!("failed to copy cursor-bridge into Application Support");
+    }
+    fs::write(&marker, version)?;
+    Ok(())
+}
+
+async fn prepare_bridge_dir() -> Result<PathBuf> {
+    let source = bridge_source_dir();
+    if !source.join("server.mjs").is_file() {
+        bail!(
+            "cursor-bridge not found at {}; set REAPER_CURSOR_BRIDGE_DIR",
+            source.display()
+        );
+    }
+
+    if running_in_app_bundle() {
+        let dest = app_support_bridge_dir()
+            .ok_or_else(|| anyhow::anyhow!("HOME not set; cannot install Cursor bridge"))?;
+        sync_bridge_to_app_support(&source, &dest)?;
+        return Ok(dest);
+    }
+
+    Ok(source)
+}
+
+fn bridge_source_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("REAPER_CURSOR_BRIDGE_DIR") {
         return PathBuf::from(dir);
     }
 
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cursor-bridge");
-    if manifest.join("server.mjs").is_file() {
-        return manifest;
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [
+                dir.join("../Resources/cursor-bridge"),
+                dir.join("../../cursor-bridge"),
+                dir.join("../cursor-bridge"),
+                dir.join("cursor-bridge"),
+            ] {
+                if candidate.join("server.mjs").is_file() {
+                    return candidate.canonicalize().unwrap_or(candidate);
+                }
+            }
+        }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
@@ -46,20 +139,9 @@ pub fn bridge_dir() -> PathBuf {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in [
-                dir.join("../../cursor-bridge"),
-                dir.join("../cursor-bridge"),
-                dir.join("cursor-bridge"),
-            ] {
-                if candidate.join("server.mjs").is_file() {
-                    return candidate
-                        .canonicalize()
-                        .unwrap_or(candidate);
-                }
-            }
-        }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cursor-bridge");
+    if manifest.join("server.mjs").is_file() {
+        return manifest;
     }
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cursor-bridge")
@@ -83,6 +165,10 @@ fn find_node() -> Result<PathBuf> {
         }
     }
 
+    if let Ok(path) = find_node_via_login_path() {
+        return Ok(path);
+    }
+
     if let Ok(path) = which_node() {
         return Ok(path);
     }
@@ -90,6 +176,22 @@ fn find_node() -> Result<PathBuf> {
     bail!(
         "Node.js not found. Install with `brew install node`, or set REAPER_NODE to Cursor's bundled node"
     );
+}
+
+fn find_node_via_login_path() -> Result<PathBuf> {
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("/usr/libexec/path_helper -s >/dev/null 2>&1; command -v node")
+        .output()
+        .context("failed to locate node via login PATH")?;
+    if !output.status.success() {
+        bail!("node not on login PATH");
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() || !PathBuf::from(&path).is_file() {
+        bail!("node not on login PATH");
+    }
+    Ok(PathBuf::from(path))
 }
 
 fn which_node() -> Result<PathBuf> {
@@ -109,7 +211,7 @@ fn which_node() -> Result<PathBuf> {
 }
 
 async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
-    if dir.join("node_modules/@cursor/sdk/package.json").is_file() {
+    if bridge_deps_ready(dir) {
         return Ok(());
     }
 
@@ -130,7 +232,7 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
             .status()
             .await
             .context("npm install failed to start")?;
-        if status.success() && dir.join("node_modules/@cursor/sdk/package.json").is_file() {
+        if status.success() && bridge_deps_ready(dir) {
             return Ok(());
         }
         tracing::warn!("npm install failed or incomplete; falling back to install-deps.mjs");
@@ -152,8 +254,8 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         bail!("install-deps.mjs failed in cursor-bridge");
     }
 
-    if !dir.join("node_modules/@cursor/sdk/package.json").is_file() {
-        bail!("@cursor/sdk missing after install");
+    if !bridge_deps_ready(dir) {
+        bail!("cursor-bridge dependencies incomplete after install");
     }
 
     Ok(())
@@ -196,14 +298,7 @@ pub async fn ensure_bridge_running() -> Result<()> {
         return Ok(());
     }
 
-    let dir = bridge_dir();
-    if !dir.join("server.mjs").exists() {
-        bail!(
-            "cursor-bridge not found at {}; set REAPER_CURSOR_BRIDGE_DIR",
-            dir.display()
-        );
-    }
-
+    let dir = prepare_bridge_dir().await?;
     let node = find_node()?;
     tracing::info!("Using Node.js at {}", node.display());
 

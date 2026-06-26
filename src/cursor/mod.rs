@@ -53,6 +53,7 @@ struct CreateSessionRequest<'a> {
     #[serde(rename = "apiKey")]
     api_key: &'a str,
     model: &'a str,
+    mode: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +65,14 @@ struct CreateSessionResponse {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     prompt: &'a str,
+    model: Option<&'a str>,
+    mode: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ListModelsRequest<'a> {
+    #[serde(rename = "apiKey")]
+    api_key: &'a str,
 }
 
 pub struct CursorBridge {
@@ -93,6 +102,7 @@ impl CursorBridge {
         cwd: &str,
         api_key: &str,
         model: &str,
+        mode: &str,
     ) -> Result<String> {
         let resp = self
             .client
@@ -101,6 +111,7 @@ impl CursorBridge {
                 cwd,
                 api_key,
                 model,
+                mode,
             })
             .send()
             .await
@@ -124,11 +135,17 @@ impl CursorBridge {
         &self,
         session_id: &str,
         prompt: &str,
+        model: Option<&str>,
+        mode: Option<&str>,
     ) -> Result<reqwest::Response> {
         let resp = self
             .client
             .post(format!("{}/sessions/{session_id}/chat", self.base))
-            .json(&ChatRequest { prompt })
+            .json(&ChatRequest {
+                prompt,
+                model,
+                mode,
+            })
             .send()
             .await
             .context("cursor bridge chat request failed")?;
@@ -145,6 +162,28 @@ impl CursorBridge {
         }
 
         Ok(resp)
+    }
+
+    pub async fn list_models(&self, api_key: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!("{}/models", self.base))
+            .json(&ListModelsRequest { api_key })
+            .send()
+            .await
+            .context("cursor bridge models request failed")?;
+
+        if !resp.status().is_success() {
+            let err: serde_json::Value = resp.json().await.unwrap_or_default();
+            bail!(
+                "{}",
+                err.get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("failed to list cursor models")
+            );
+        }
+
+        resp.json().await.context("invalid models response")
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {

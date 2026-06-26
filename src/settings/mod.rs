@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 const GEMINI_SETTINGS_KEY: &str = "__gemini__";
 const CURSOR_SETTINGS_KEY: &str = "__cursor__";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SettingsFile {
@@ -17,6 +18,10 @@ struct SettingsFile {
     gemini_model: Option<String>,
     #[serde(default)]
     cursor_model: Option<String>,
+    #[serde(default)]
+    cursor_mode: Option<String>,
+    #[serde(default)]
+    jdk_home: Option<String>,
 }
 
 #[derive(Clone)]
@@ -37,6 +42,7 @@ pub struct CursorSettingsView {
     pub configured: bool,
     pub masked: Option<String>,
     pub model: String,
+    pub mode: String,
     pub source: Option<String>,
     pub bridge_ok: bool,
     pub bridge_error: Option<String>,
@@ -64,6 +70,80 @@ impl SettingsStore {
             path: Arc::from(path),
             inner: Arc::new(RwLock::new(file)),
         })
+        .map(|store| {
+            store.sync_java_home_cache();
+            store
+        })
+    }
+
+    fn sync_java_home_cache(&self) {
+        let home = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.jdk_home.clone())
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from);
+        crate::jdk::set_configured_java_home(home);
+    }
+
+    pub fn java_home(&self) -> Option<String> {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(home) = &guard.jdk_home {
+                if !home.is_empty() {
+                    return Some(home.clone());
+                }
+            }
+        }
+        std::env::var("REAPER_JAVA_HOME")
+            .ok()
+            .filter(|h| !h.is_empty())
+    }
+
+    pub fn set_java_home(&self, home: String) -> Result<()> {
+        let home = home.trim().to_string();
+        if home.is_empty() {
+            anyhow::bail!("java_home required");
+        }
+        crate::jdk::validate_java_home(Path::new(&home))?;
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.jdk_home = Some(home);
+        self.save(&guard)?;
+        self.sync_java_home_cache();
+        Ok(())
+    }
+
+    pub fn clear_java_home(&self) -> Result<bool> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let removed = guard.jdk_home.take().is_some();
+        if removed {
+            self.save(&guard)?;
+        }
+        self.sync_java_home_cache();
+        Ok(removed)
+    }
+
+    pub fn jdk_view(&self) -> crate::jdk::JdkSettingsView {
+        let from_env = std::env::var("REAPER_JAVA_HOME")
+            .ok()
+            .filter(|h| !h.is_empty());
+
+        let from_file = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.jdk_home.clone())
+            .filter(|h| !h.is_empty());
+
+        let (configured, java_home, source) = if let Some(home) = from_file {
+            (true, Some(home), Some("settings".to_string()))
+        } else if let Some(home) = from_env {
+            (true, Some(home), Some("env:REAPER_JAVA_HOME".to_string()))
+        } else {
+            (false, None, None)
+        };
+
+        crate::jdk::jdk_settings_view(java_home.as_deref(), source.as_deref())
     }
 
     fn save(&self, file: &SettingsFile) -> Result<()> {
@@ -166,14 +246,27 @@ impl SettingsStore {
     }
 
     pub fn gemini_model(&self) -> String {
-        if let Ok(guard) = self.inner.read() {
-            if let Some(model) = &guard.gemini_model {
-                if !model.is_empty() {
-                    return model.clone();
-                }
-            }
+        let stored = self
+            .inner
+            .read()
+            .ok()
+            .map(|guard| stored_gemini_model(&guard))
+            .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.into());
+        normalize_gemini_model(&stored)
+    }
+
+    pub fn migrate_gemini_model(&self) -> Result<()> {
+        let stored = self
+            .inner
+            .read()
+            .ok()
+            .map(|guard| stored_gemini_model(&guard))
+            .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.into());
+        let normalized = normalize_gemini_model(&stored);
+        if normalized != stored {
+            self.set_gemini_model(normalized)?;
         }
-        std::env::var("REAPER_GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.0-flash".into())
+        Ok(())
     }
 
     pub fn set_gemini_api_key(&self, api_key: String) -> Result<()> {
@@ -220,7 +313,10 @@ impl SettingsStore {
         GeminiSettingsView {
             configured,
             masked,
-            model: self.gemini_model(),
+            model: {
+                let _ = self.migrate_gemini_model();
+                self.gemini_model()
+            },
             source,
         }
     }
@@ -272,6 +368,30 @@ impl SettingsStore {
         self.save(&guard)
     }
 
+    pub fn cursor_mode(&self) -> String {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(mode) = &guard.cursor_mode {
+                if matches!(mode.as_str(), "agent" | "plan" | "ask") {
+                    return mode.clone();
+                }
+            }
+        }
+        std::env::var("REAPER_CURSOR_MODE")
+            .ok()
+            .filter(|m| matches!(m.as_str(), "agent" | "plan" | "ask"))
+            .unwrap_or_else(|| "agent".into())
+    }
+
+    pub fn set_cursor_mode(&self, mode: String) -> Result<()> {
+        let mode = mode.trim().to_string();
+        if !matches!(mode.as_str(), "agent" | "plan" | "ask") {
+            anyhow::bail!("mode must be agent, plan, or ask");
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.cursor_mode = Some(mode);
+        self.save(&guard)
+    }
+
     pub fn cursor_view(&self, bridge_ok: bool, bridge_error: Option<String>) -> CursorSettingsView {
         let from_env = std::env::var("REAPER_CURSOR_API_KEY")
             .ok()
@@ -301,6 +421,7 @@ impl SettingsStore {
             configured,
             masked,
             model: self.cursor_model(),
+            mode: self.cursor_mode(),
             source,
             bridge_ok,
             bridge_error,
@@ -313,6 +434,26 @@ fn env_key_for_host(host: &str) -> String {
         "REAPER_PAT_{}",
         host.replace('.', "_").replace('-', "_").to_uppercase()
     )
+}
+
+fn stored_gemini_model(guard: &SettingsFile) -> String {
+    guard
+        .gemini_model
+        .clone()
+        .filter(|m| !m.is_empty())
+        .or_else(|| std::env::var("REAPER_GEMINI_MODEL").ok())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.into())
+}
+
+pub fn normalize_gemini_model(model: &str) -> String {
+    match model.trim() {
+        "gemini-2.0-flash" | "gemini-2.0-flash-001" | "gemini-2.0-flash-lite"
+        | "gemini-2.0-flash-lite-001" => DEFAULT_GEMINI_MODEL.into(),
+        "gemini-1.5-flash" | "gemini-1.5-flash-8b" | "gemini-1.5-flash-latest" | "gemini-1.5-pro"
+        | "gemini-1.5-pro-latest" => "gemini-2.5-flash".into(),
+        other => other.to_string(),
+    }
 }
 
 pub fn mask_token(token: &str) -> String {
