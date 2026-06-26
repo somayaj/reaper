@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build Reaper.icns from static/logo.svg (macOS only).
+# Build Reaper.icns from static/logo-icon.svg (macOS only).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SVG="$ROOT/static/logo.svg"
+SVG="$ROOT/static/logo-icon.svg"
 ICONSET="$ROOT/packaging/macos/Reaper.iconset"
 ICNS="$ROOT/packaging/macos/Reaper.icns"
 TMPDIR="${TMPDIR:-/tmp}/reaper-icon-$$"
@@ -21,7 +21,7 @@ fi
 mkdir -p "$TMPDIR"
 MASTER="$TMPDIR/master.png"
 
-echo "Rendering logo.svg..."
+echo "Rendering logo-icon.svg..."
 qlmanage -t -s 1024 -o "$TMPDIR" "$SVG" >/dev/null 2>&1
 mv "$TMPDIR/$(basename "$SVG").png" "$MASTER"
 

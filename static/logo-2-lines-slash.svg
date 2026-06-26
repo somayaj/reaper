@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper option 2">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1a1f28"/><stop offset="1" stop-color="#0d1016"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="46" y1="18" x2="18" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9cc4ff"/><stop offset="1" stop-color="#3574d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="12.5" stroke="#589df6" stroke-opacity="0.15" stroke-width="1"/>
+  <rect x="14" y="16" width="9" height="34" rx="1.5" fill="#252930"/>
+  <text x="18.5" y="26" fill="#5c6370" font-family="Menlo,Consolas,monospace" font-size="6" text-anchor="middle">1</text>
+  <text x="18.5" y="34" fill="#5c6370" font-family="Menlo,Consolas,monospace" font-size="6" text-anchor="middle">2</text>
+  <text x="18.5" y="42" fill="#5c6370" font-family="Menlo,Consolas,monospace" font-size="6" text-anchor="middle">3</text>
+  <text x="18.5" y="48" fill="#c49a3c" font-family="Menlo,Consolas,monospace" font-size="6" text-anchor="middle">4</text>
+  <rect x="25" y="22" width="28" height="2.8" rx="1.4" fill="#629755"/>
+  <rect x="25" y="30" width="24" height="2.8" rx="1.4" fill="#589df6"/>
+  <rect x="25" y="38" width="20" height="2.8" rx="1.4" fill="#a9b7c6"/>
+  <rect x="25" y="46" width="16" height="2.5" rx="1.2" fill="#ffc66d"/>
+  <path d="M46 18 L18 46" stroke="url(#slash)" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M46 18 L18 46" stroke="#ffffff" stroke-width="1" stroke-linecap="round" opacity="0.28"/>
+</svg>

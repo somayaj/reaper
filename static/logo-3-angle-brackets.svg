@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper option 3">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1a1f28"/><stop offset="1" stop-color="#0d1016"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="30" y1="46" x2="36" y2="18" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9cc4ff"/><stop offset="1" stop-color="#3574d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path d="M26 14 L16 32 L26 50" stroke="#629755" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M38 14 L48 32 L38 50" stroke="#ffc66d" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="27" y="28" width="10" height="2" rx="1" fill="#589df6" opacity="0.8"/>
+  <rect x="28" y="33" width="8" height="2" rx="1" fill="#a9b7c6" opacity="0.65"/>
+  <path d="M29 46 L35 18" stroke="url(#slash)" stroke-width="4" stroke-linecap="round"/>
+</svg>

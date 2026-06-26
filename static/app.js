@@ -877,7 +877,7 @@ function welcomeScreenHtml() {
     : '';
   const icons = window.ReaperIcons || {};
   return `
-    <img src="/logo.svg" alt="" class="ij-welcome-logo logo-mark" />
+    ${(window.ReaperLogo && window.ReaperLogo.reaperLogoHtml('welcome', { extraClass: 'ij-welcome-logo logo-mark' })) || ''}
     <h2>Welcome to Reaper</h2>
     <p class="ij-welcome-tagline">A local git host and developer studio — edit with syntax highlighting, commit, run Gradle & Java, and sync with GitHub.</p>
     <div class="ij-welcome-actions">

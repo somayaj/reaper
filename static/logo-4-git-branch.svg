@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper option 4">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1a1f28"/><stop offset="1" stop-color="#0d1016"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="42" y1="20" x2="28" y2="44" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9cc4ff"/><stop offset="1" stop-color="#3574d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- git branch -->
+  <path d="M32 46 V22 M32 22 C32 16 38 14 42 18 M32 22 C32 16 26 14 22 18" stroke="#629755" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="32" cy="46" r="5" fill="#2b2f36" stroke="#629755" stroke-width="2.5"/>
+  <circle cx="42" cy="18" r="4.5" fill="#629755"/>
+  <circle cx="22" cy="18" r="4.5" fill="#629755"/>
+  <!-- prune / reap cut -->
+  <path d="M44 16 L26 42" stroke="url(#slash)" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M38 18 L32 28" stroke="#629755" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.5"/>
+  <!-- reaped commit -->
+  <circle cx="36" cy="38" r="4" fill="#ffc66d" opacity="0.95"/>
+</svg>

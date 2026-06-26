@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper animated harvest">
+  <title>Reaper — code in, crops out</title>
+  <!-- Polyglot console -->
+  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
+    <text x="10" y="12" fill="#629755" opacity="0">$ git
+      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.06;0.9;0.96" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="10" y="19" fill="#589df6" opacity="0">&gt; build
+      <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.09;0.12;0.9;0.96" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="10" y="26" fill="#888888" opacity="0">&gt; run
+      <animate attributeName="opacity" values="0;0;0;1;1;0" keyTimes="0;0.12;0.15;0.18;0.9;0.96" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="10" y="33" opacity="0">
+      <tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan>
+      <animate attributeName="opacity" values="0;0;0;0;1;1;0" keyTimes="0;0.15;0.18;0.21;0.24;0.9;0.96" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="10" y="40" opacity="0">
+      <tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan>
+      <animate attributeName="opacity" values="0;0;0;0;0;1;1;0" keyTimes="0;0.18;0.21;0.24;0.27;0.3;0.9;0.96" dur="4s" repeatCount="indefinite"/>
+    </text>
+  </g>
+
+  <!-- Ground line only -->
+  <line x1="8" y1="52" x2="56" y2="52" stroke="#2a2218" stroke-width="1" opacity="0.6"/>
+
+  <!-- Conduit -->
+  <g opacity="0">
+    <path d="M32 40 L32 43" stroke="#444" stroke-width="1" stroke-dasharray="2 2"/>
+    <polygon points="32,44 30,41 34,41" fill="#444"/>
+    <animate attributeName="opacity" values="0;0;0.7;0.7;0" keyTimes="0;0.22;0.26;0.38;0.42" dur="4s" repeatCount="indefinite"/>
+  </g>
+
+  <!-- Code drops -->
+  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="5">
+    <text x="30" y="36" fill="#ed8b00" opacity="0">.java
+      <animate attributeName="opacity" values="0;0;1;0.9;0" keyTimes="0;0.2;0.24;0.36;0.4" dur="4s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 0;-4 14;-4 16" keyTimes="0;0.2;0.36;0.4" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="34" y="36" fill="#dea584" opacity="0">.rs
+      <animate attributeName="opacity" values="0;0;0;1;0.9;0" keyTimes="0;0.2;0.23;0.27;0.39;0.43" dur="4s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 0;0 0;2 14;2 16" keyTimes="0;0.2;0.23;0.39;0.43" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="32" y="37" fill="#629755" opacity="0">0
+      <animate attributeName="opacity" values="0;0;0;0;1;0" keyTimes="0;0.2;0.26;0.29;0.33;0.4" dur="4s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 0;0 0;0 0;0 15" keyTimes="0;0.2;0.26;0.29;0.4" dur="4s" repeatCount="indefinite"/>
+    </text>
+    <text x="38" y="37" fill="#589df6" opacity="0">1
+      <animate attributeName="opacity" values="0;0;0;0;0;1;0" keyTimes="0;0.2;0.29;0.32;0.35;0.38;0.42" dur="4s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 0;0 0;0 0;0 0;10 15" keyTimes="0;0.2;0.29;0.32;0.35;0.42" dur="4s" repeatCount="indefinite"/>
+    </text>
+  </g>
+
+  <text x="12" y="56" fill="#589df6" font-family="Consolas,monospace" font-size="12" opacity="0">
+    /
+    <animate attributeName="opacity" values="0;0;1;0.95;0" keyTimes="0;0.5;0.52;0.58;0.62" dur="4s" repeatCount="indefinite"/>
+    <animateTransform attributeName="transform" type="translate" values="0 10;0 10;0 0;30 -24;34 -28" keyTimes="0;0.5;0.52;0.58;0.62" dur="4s" repeatCount="indefinite"/>
+  </text>
+
+  <!-- Crops grow then reaped -->
+  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+    <g transform="translate(14,52)">
+      <g transform="translate(-14,-52)">
+        <line x1="14" y1="52" x2="14" y2="49" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="14" y="51" fill="#629755" font-size="6">0</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.32;0.38;0.44;0.52;0.58;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(20,52)">
+      <g transform="translate(-20,-52)">
+        <line x1="20" y1="52" x2="20" y2="49" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="20" y="51" fill="#589df6" font-size="6">1</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.34;0.4;0.46;0.52;0.6;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(26,52)">
+      <g transform="translate(-26,-52)">
+        <line x1="26" y1="52" x2="26" y2="45" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.36;0.42;0.48;0.52;0.62;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(32,52)">
+      <g transform="translate(-32,-52)">
+        <line x1="32" y1="52" x2="32" y2="41" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.38;0.44;0.5;0.52;0.64;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(38,52)">
+      <g transform="translate(-38,-52)">
+        <line x1="38" y1="52" x2="38" y2="41" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="38" y="51" fill="#589df6" font-size="6">1</text><text x="38" y="47" fill="#589df6" font-size="6">1</text><text x="38" y="43" fill="#589df6" font-size="6">1</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.4;0.46;0.52;0.54;0.66;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(44,52)">
+      <g transform="translate(-44,-52)">
+        <line x1="44" y1="52" x2="44" y2="37" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="44" y="51" fill="#c9a227" font-size="5.5">0</text><text x="44" y="47" fill="#c9a227" font-size="5.5">1</text><text x="44" y="43" fill="#c9a227" font-size="5.5">0</text><text x="44" y="39" fill="#c9a227" font-size="5.5">1</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.42;0.48;0.54;0.56;0.68;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(50,52)">
+      <g transform="translate(-50,-52)">
+        <line x1="50" y1="52" x2="50" y2="37" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="50" y="51" fill="#629755" font-size="6">0</text><text x="50" y="47" fill="#629755" font-size="6">0</text><text x="50" y="43" fill="#629755" font-size="6">0</text><text x="50" y="39" fill="#629755" font-size="6">0</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.44;0.5;0.56;0.58;0.7;0.72;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+    <g transform="translate(56,52)">
+      <g transform="translate(-56,-52)">
+        <line x1="56" y1="52" x2="56" y2="33" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+        <text x="56" y="51" fill="#589df6" font-size="6">1</text><text x="56" y="47" fill="#589df6" font-size="6">1</text><text x="56" y="43" fill="#589df6" font-size="6">1</text><text x="56" y="39" fill="#589df6" font-size="6">1</text><text x="56" y="35" fill="#589df6" font-size="6">1</text>
+      </g>
+      <animateTransform attributeName="transform" type="scale" values="1 0;1 0;1 0;1 1;1 1;1 0.2;1 0.2;1 0" keyTimes="0;0.46;0.52;0.58;0.6;0.72;0.78;0.82" dur="4s" repeatCount="indefinite" additive="sum"/>
+    </g>
+  </g>
+
+  <!-- Harvest output -->
+  <g opacity="0">
+    <text x="10" y="48" fill="#ffc66d" font-size="5">01</text>
+    <text x="10" y="44" fill="#ffc66d" font-size="5" opacity="0.85">01</text>
+    <text x="14" y="46" fill="#c9a227" font-size="4.5" opacity="0.7">01</text>
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.58;0.64;0.78;0.86" dur="4s" repeatCount="indefinite"/>
+  </g>
+
+</svg>
