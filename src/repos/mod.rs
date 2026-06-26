@@ -1,7 +1,10 @@
 pub mod metadata;
 mod remote;
 
-pub use remote::{ImportRepoRequest, LinkRemoteRequest, import_repo, link_remote, push_to_remote, sync_from_remote};
+pub use remote::{
+    ImportRepoRequest, LinkRemoteRequest, PublishResult, PublishToGitHubRequest, import_repo,
+    link_remote, publish_to_github, push_to_remote, sync_from_remote,
+};
 
 use std::path::Path;
 
