@@ -1112,20 +1112,27 @@ body.sidebar-collapsed .ij-sidebar-resizer {
 }
 
 .ij-tree-dir > .ij-tree-dir-row::before {
-  content: '';
+  content: none;
+}
+
+.ij-tree-chevron {
   width: 0;
   height: 0;
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
   border-left: 5px solid var(--ij-tree-folder);
   flex-shrink: 0;
-  margin-right: -2px;
+  margin-right: 2px;
   transition: transform 0.12s ease;
-  opacity: 0.75;
+  opacity: 0.85;
 }
 
-.ij-tree-dir[open] > .ij-tree-dir-row::before {
+.ij-tree-dir[open] > .ij-tree-dir-row .ij-tree-chevron {
   transform: rotate(90deg);
+}
+
+.ij-tree-dir[data-leaf="1"] > .ij-tree-dir-row .ij-tree-chevron {
+  visibility: hidden;
 }
 
 .ij-tree-children {
@@ -2003,6 +2010,168 @@ main { background: var(--ij-bg); }
   padding: 2px 6px;
   border: 1px solid var(--ij-border);
   border-radius: 4px;
+}
+
+/* ── Header pickers & branch search ────────────────────── */
+
+.ij-header-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 100px;
+  max-width: 200px;
+  padding: 6px 28px 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ij-border);
+  background: color-mix(in srgb, var(--ij-panel-header) 85%, transparent);
+  color: var(--ij-text);
+  font-size: 13px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+  position: relative;
+}
+
+.ij-header-picker:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ij-accent) 40%, var(--ij-border));
+  background: var(--ij-selection);
+  color: var(--ij-text-bright);
+}
+
+.ij-header-picker:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#branch-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  font-weight: 500;
+}
+
+.ij-header-picker-chevron {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--ij-text-dim);
+  pointer-events: none;
+}
+
+#branch-picker-overlay {
+  align-items: flex-start;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.ij-branch-picker {
+  max-width: 32rem;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+#branch-picker-input {
+  width: 100%;
+  padding: 10px 16px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ij-text-bright);
+  background: transparent;
+  border: none;
+  outline: none;
+  position: relative;
+  z-index: 1;
+}
+
+.ij-branch-picker-input-wrap {
+  position: relative;
+  border-bottom: 1px solid var(--ij-border);
+}
+
+.ij-branch-autocomplete-ghost {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: 10px;
+  bottom: 12px;
+  pointer-events: none;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.ij-branch-ghost-typed {
+  color: transparent;
+}
+
+.ij-branch-ghost-hint {
+  color: var(--ij-text-dim);
+  opacity: 0.55;
+}
+
+.ij-branch-match {
+  background: color-mix(in srgb, var(--ij-accent) 25%, transparent);
+  color: var(--ij-text-bright);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+#branch-picker-input::placeholder {
+  color: var(--ij-text-dim);
+}
+
+.ij-branch-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ij-branch-picker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  font-weight: 500;
+  color: var(--ij-text-bright);
+}
+
+.ij-branch-picker-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ij-text-dim);
+  padding: 2px 6px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+}
+
+.ij-branch-picker-item.current .ij-branch-picker-name {
+  color: var(--ij-accent);
+}
+
+.ij-branch-picker-item.current .ij-branch-picker-tag {
+  color: var(--ij-accent);
+  border-color: color-mix(in srgb, var(--ij-accent) 35%, var(--ij-border));
+}
+
+.ij-branch-picker-empty {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--ij-text-dim);
 }
 
 /* ── Panels & scrollbars ───────────────────────────────── */
