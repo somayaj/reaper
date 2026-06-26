@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
+  <title>Reaper</title>
+  <rect width="64" height="64" rx="14" fill="#0a0a0a"/>
+  <line x1="6" y1="58" x2="58" y2="58" stroke="#2a2218" stroke-width="1.2" opacity="0.6"/>
+  <path d="M32 10 L32 22" stroke="#444" stroke-width="1" stroke-dasharray="2 2" opacity="0.5"/>
+  <polygon points="32,24 30,21 34,21" fill="#444" opacity="0.5"/>
+  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6" font-weight="400">
+    <text x="28" y="20" fill="#ed8b00">.java</text>
+    <text x="36" y="22" fill="#dea584">.rs</text>
+    <text x="32" y="28" fill="#629755">0</text>
+  </g>
+  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" font-size="7">
+    <line x1="14" y1="58" x2="14" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="14" y="57" fill="#629755">0</text>
+    <line x1="20" y1="58" x2="20" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="20" y="57" fill="#589df6">1</text>
+    <line x1="26" y1="58" x2="26" y2="50" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="26" y="57" fill="#c9a227" font-size="6.5">0</text><text x="26" y="52" fill="#c9a227" font-size="6.5">1</text>
+    <line x1="32" y1="58" x2="32" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="32" y="57" fill="#629755">0</text><text x="32" y="52" fill="#629755">0</text><text x="32" y="47" fill="#629755">0</text>
+    <line x1="38" y1="58" x2="38" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="38" y="57" fill="#589df6">1</text><text x="38" y="52" fill="#589df6">1</text><text x="38" y="47" fill="#589df6">1</text>
+    <line x1="44" y1="58" x2="44" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="44" y="57" fill="#c9a227" font-size="6.5">0</text><text x="44" y="52" fill="#c9a227" font-size="6.5">1</text><text x="44" y="47" fill="#c9a227" font-size="6.5">0</text><text x="44" y="42" fill="#c9a227" font-size="6.5">1</text>
+    <line x1="50" y1="58" x2="50" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="50" y="57" fill="#629755">0</text><text x="50" y="52" fill="#629755">0</text><text x="50" y="47" fill="#629755">0</text><text x="50" y="42" fill="#629755">0</text>
+    <line x1="56" y1="58" x2="56" y2="36" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+    <text x="56" y="57" fill="#589df6">1</text><text x="56" y="52" fill="#589df6">1</text><text x="56" y="47" fill="#589df6">1</text><text x="56" y="42" fill="#589df6">1</text><text x="56" y="37" fill="#589df6">1</text>
+  </g>
+  <text x="10" y="50" fill="#ffc66d" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6">01</text>
+  <text x="10" y="44" fill="#ffc66d" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6" opacity="0.85">01</text>
+  <text x="18" y="44" fill="#589df6" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="14" font-weight="400" opacity="0.65">/</text>
+</svg>

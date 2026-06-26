@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper option 1">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1a1f28"/><stop offset="1" stop-color="#0d1016"/>
+    </linearGradient>
+    <linearGradient id="r" x1="16" y1="14" x2="44" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9cc4ff"/><stop offset="1" stop-color="#4a90e2"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="38" y1="14" x2="22" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9cc4ff"/><stop offset="1" stop-color="#3574d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <path fill="url(#r)" d="M18 14h14.5c7 0 12 4.5 12 11 0 5-3 8.6-7.8 10.2L46 50h-8.5L31 35.5H26V50h-8V14zm8 8v8.5h7.2c3.2 0 5.2-1.7 5.2-4.5 0-2.7-2-4.5-5.2-4.5H26z"/>
+  <rect x="22" y="30" width="22" height="2.5" rx="1.2" fill="#629755" opacity="0.9"/>
+  <path d="M40 16 L24 48" stroke="url(#slash)" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

@@ -16,8 +16,9 @@ cp "$BINARY" "$APP/Contents/MacOS/reaper"
 chmod +x "$APP/Contents/MacOS/reaper"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 
-if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]]; then
-  echo "Generating app icon from logo.svg..."
+if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
+  || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
+  echo "Generating app icon from logo-icon.svg..."
   "$ROOT/scripts/generate-macos-icon.sh"
 fi
 if [[ -f "$ROOT/packaging/macos/Reaper.icns" ]]; then
