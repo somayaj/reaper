@@ -2029,7 +2029,63 @@ main { background: var(--ij-bg); }
   background: var(--ij-bg);
 }
 
+.ij-clone-feedback {
+  min-height: 0;
+}
+
+.ij-clone-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--ij-accent) 35%, var(--ij-border));
+  background: color-mix(in srgb, var(--ij-accent) 8%, var(--ij-panel-header));
+  color: var(--ij-text-bright);
+  font-size: 12px;
+}
+
+.ij-clone-status.hidden {
+  display: none;
+}
+
+.ij-clone-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid color-mix(in srgb, var(--ij-accent) 25%, transparent);
+  border-top-color: var(--ij-accent);
+  border-radius: 50%;
+  animation: ij-clone-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes ij-clone-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ij-clone-error {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #ef4444;
+  background: rgba(127, 29, 29, 0.55);
+  color: #fecaca;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ij-clone-error.hidden {
+  display: none;
+}
+
+#clone-modal-overlay.ij-clone-modal--busy {
+  z-index: 70;
+}
+
 #toast {
+  z-index: 80;
   bottom: calc(var(--ij-status-h) + 8px);
   border-radius: 6px;
   font-size: 12px;

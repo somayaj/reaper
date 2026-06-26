@@ -67,7 +67,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/intellij.css?v=36" />
+  <link rel="stylesheet" href="/intellij.css?v=38" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=5"></script>
@@ -535,20 +535,27 @@
           </div>
         </div>
       </div>
-      <form id="clone-repo-form" class="px-6 pb-2 space-y-4">
+      <form id="clone-repo-form" class="px-6 pb-2 space-y-4" novalidate>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
           <input id="clone-remote-url" name="remote_url" required placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
-          <input id="clone-local-name" name="name" pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <input id="clone-local-name" name="name" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <div id="clone-feedback" class="ij-clone-feedback">
+          <div id="clone-status" class="ij-clone-status hidden" aria-live="polite">
+            <span class="ij-clone-spinner" aria-hidden="true"></span>
+            <span id="clone-status-text">Cloning…</span>
+          </div>
+          <div id="clone-error" class="ij-clone-error hidden" role="alert"></div>
         </div>
         <p class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
       </form>
       <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
         <button type="button" id="clone-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Clone</button>
+        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Clone</button>
       </div>
     </div>
   </div>
@@ -765,6 +772,6 @@
   <script src="/icons.js?v=1"></script>
   <script src="/monaco-languages.js?v=8"></script>
   <script src="/themes.js?v=8"></script>
-  <script src="/app.js?v=61"></script>
+  <script src="/app.js?v=63"></script>
 </body>
 </html>
