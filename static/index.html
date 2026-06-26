@@ -178,8 +178,9 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
             <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
-            <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
-            <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
+          <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
+          <button type="button" class="ij-menu-item" data-action="settings-storage">Workspaces…</button>
+          <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
           </div>
         </div>
       </nav>
@@ -546,6 +547,14 @@
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
           <input id="clone-local-name" name="name" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
         </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Checkout folder <span class="text-gray-600">(optional)</span></label>
+          <div class="flex gap-2">
+            <input id="clone-workspace-path" name="workspace_path" placeholder="Uses default from Settings → Workspaces" class="flex-1 min-w-0 bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+            <button type="button" id="clone-browse-workspace" class="shrink-0 px-3 py-2 text-xs rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors hidden" title="Choose folder">Browse…</button>
+          </div>
+          <p id="clone-workspace-hint" class="text-[11px] text-gray-600 mt-1.5">Leave empty to use your global workspaces folder plus repo name.</p>
+        </div>
         <div id="clone-feedback" class="ij-clone-feedback">
           <div id="clone-status" class="ij-clone-status hidden" aria-live="polite">
             <span class="ij-clone-spinner" aria-hidden="true"></span>
@@ -616,6 +625,14 @@
           <input type="checkbox" name="init_readme" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
           Initialize with README
         </label>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Checkout folder <span class="text-gray-600">(optional)</span></label>
+          <div class="flex gap-2">
+            <input id="new-repo-workspace-path" name="workspace_path" placeholder="Uses default from Settings → Workspaces" class="flex-1 min-w-0 bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+            <button type="button" id="new-repo-browse-workspace" class="shrink-0 px-3 py-2 text-xs rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors hidden" title="Choose folder">Browse…</button>
+          </div>
+          <p id="new-repo-workspace-hint" class="text-[11px] text-gray-600 mt-1.5">Full path to the working copy, or leave empty for the default location.</p>
+        </div>
       </form>
       <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
         <button type="button" id="modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
@@ -652,6 +669,7 @@
       <div class="ij-settings-body flex min-h-0 flex-1">
         <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
           <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="storage">Workspaces</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
@@ -676,6 +694,28 @@
               </div>
               <p class="text-[11px] text-gray-600">Use <code class="font-mono">*</code> as the host for a default token. You can also set <code class="font-mono">REAPER_PAT</code> via environment.</p>
               <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save token</button>
+            </form>
+          </section>
+          <section id="settings-panel-storage" class="ij-settings-panel hidden space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Default workspaces folder</h4>
+              <p class="text-xs text-gray-500 mt-1">Where Reaper checks out working copies. Each repo is placed in a subfolder named after the repo (e.g. <code class="font-mono text-accent">owner/repo</code>). Bare repos and settings stay under the data directory.</p>
+            </div>
+            <div id="settings-workspaces-status" class="ij-settings-status"></div>
+            <form id="settings-workspaces-form" class="space-y-3 border-t border-surface-700 pt-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-workspaces-root">Folder</label>
+                <div class="flex gap-2">
+                  <input id="settings-workspaces-root" name="workspaces_root" placeholder="~/Projects/reaper-workspaces" class="flex-1 min-w-0 bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+                  <button type="button" id="settings-workspaces-browse" class="shrink-0 px-3 py-2 text-xs rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors hidden" title="Choose folder">Browse…</button>
+                </div>
+                <p id="settings-workspaces-default" class="text-[11px] text-gray-600 mt-2"></p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save</button>
+                <button type="button" id="settings-workspaces-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Use default</button>
+              </div>
+              <p class="text-[11px] text-gray-600">Override with <code class="font-mono">REAPER_WORKSPACES_DIR</code> via environment. Per-repo paths can be set when cloning or creating a repository.</p>
             </form>
           </section>
           <section id="settings-panel-appearance" class="ij-settings-panel hidden space-y-4">

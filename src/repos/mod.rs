@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::config::{self, Config};
 use crate::git;
 use crate::settings::SettingsStore;
+use crate::workspace::{self, normalize_workspace_path};
 
 #[derive(Debug, Serialize)]
 pub struct RepoSummary {
@@ -27,6 +28,7 @@ pub struct RepoSummary {
     pub remote_host: Option<String>,
     pub remote_configured: bool,
     pub imported: bool,
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +58,9 @@ pub fn summarize_repo(
     let default_branch = git::default_branch(path).ok();
     let commits = git::log(path, 1_000).unwrap_or_default();
     let meta = metadata::load(config, name).unwrap_or_default();
+    let workspace_path = workspace::resolve_workspace_path(config, settings, name)
+        .ok()
+        .map(|p| p.display().to_string());
 
     Ok(RepoSummary {
         name: name.to_string(),
@@ -68,6 +73,7 @@ pub fn summarize_repo(
         remote_host: meta.remote_host.clone(),
         remote_configured: metadata::remote_auth_ready(&meta, settings),
         imported: meta.imported,
+        workspace_path,
     })
 }
 
@@ -93,6 +99,8 @@ pub struct CreateRepoRequest {
     pub init_with_readme: Option<bool>,
     pub readme: Option<String>,
     pub remote_url: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
 }
 
 pub fn create_repo(
@@ -132,15 +140,25 @@ pub fn create_repo(
         link_remote(config, settings, &req.name, LinkRemoteRequest { remote_url: url })?;
     }
 
+    if let Some(path) = req.workspace_path.filter(|p| !p.trim().is_empty()) {
+        let normalized = normalize_workspace_path(&path)?;
+        metadata::set_workspace_path(config, &req.name, &normalized)?;
+    }
+
     summarize_repo(config, settings, &req.name, &path)
 }
 
-pub fn delete_repo(config: &Config, name: &str) -> Result<()> {
+pub fn delete_repo(config: &Config, settings: &SettingsStore, name: &str) -> Result<()> {
     let path = config.repo_path(name);
     if !config.repo_exists(name) {
         bail!("repository not found");
     }
     std::fs::remove_dir_all(path)?;
+    if let Ok(ws) = workspace::resolve_workspace_path(config, settings, name) {
+        if ws.exists() {
+            let _ = std::fs::remove_dir_all(ws);
+        }
+    }
     let _ = metadata::delete(config, name);
     Ok(())
 }

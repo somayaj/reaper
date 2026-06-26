@@ -165,7 +165,7 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
     submitBtn.disabled = busy;
     submitBtn.textContent = busy ? 'Cloning…' : 'Clone';
   }
-  ['#clone-remote-url', '#clone-local-name'].forEach((sel) => {
+  ['#clone-remote-url', '#clone-local-name', '#clone-workspace-path'].forEach((sel) => {
     const input = $(sel);
     if (input) input.disabled = busy;
   });
@@ -210,6 +210,7 @@ function escapeHtml(str) {
 }
 
 let settingsTab = 'git';
+let workspacesSettings = null;
 
 function editorLineHeightFor(size) {
   return Math.round(size * (20 / 13));
@@ -456,8 +457,138 @@ async function loadCursorSettingsSection() {
   updateAgentUi();
 }
 
+async function loadWorkspacesSettings() {
+  workspacesSettings = await api('/api/settings/workspaces');
+  return workspacesSettings;
+}
+
+function effectiveWorkspacesRoot() {
+  return workspacesSettings?.workspaces_root || workspacesSettings?.default_root || '';
+}
+
+function defaultCheckoutPathFor(repoName) {
+  const root = effectiveWorkspacesRoot();
+  if (!root) return '';
+  const base = root.replace(/\/$/, '');
+  return repoName ? `${base}/${repoName}` : base;
+}
+
+function updateWorkspacePathHints(repoName = '') {
+  const hint = defaultCheckoutPathFor(repoName);
+  const cloneHint = $('#clone-workspace-hint');
+  const newHint = $('#new-repo-workspace-hint');
+  const clonePh = $('#clone-workspace-path');
+  const newPh = $('#new-repo-workspace-path');
+  if (cloneHint) {
+    cloneHint.textContent = hint && repoName
+      ? `Default checkout: ${hint} — or enter a custom full path below.`
+      : 'Leave empty to use your global workspaces folder plus repo name, or enter a custom full path.';
+  }
+  if (newHint) {
+    newHint.textContent = hint && repoName
+      ? `Default checkout: ${hint} — or enter a custom full path below.`
+      : 'Full path to the working copy, or leave empty for the default location.';
+  }
+  const ph = hint || 'Uses default from Settings → Workspaces';
+  if (clonePh && !clonePh.value.trim()) clonePh.placeholder = ph;
+  if (newPh && !newPh.value.trim()) newPh.placeholder = ph;
+}
+
+function syncBrowseButtons() {
+  const show = !!workspacesSettings?.folder_picker_available;
+  ['#clone-browse-workspace', '#new-repo-browse-workspace', '#settings-workspaces-browse'].forEach((sel) => {
+    const btn = $(sel);
+    if (btn) btn.classList.toggle('hidden', !show);
+  });
+}
+
+async function pickDirectory(prompt) {
+  const out = await api('/api/system/pick-directory', {
+    method: 'POST',
+    body: JSON.stringify({ prompt: prompt || 'Select folder' }),
+  });
+  return out?.path || '';
+}
+
+async function browseIntoInput(inputSel, prompt) {
+  const input = $(inputSel);
+  if (!input) return;
+  try {
+    const path = await pickDirectory(prompt);
+    if (path) {
+      input.value = path;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  } catch (err) {
+    toast(err.message || 'Could not open folder picker', 'error');
+  }
+}
+
+async function loadWorkspacesSettingsSection() {
+  const statusEl = $('#settings-workspaces-status');
+  const rootInput = $('#settings-workspaces-root');
+  const defaultEl = $('#settings-workspaces-default');
+  const clearBtn = $('#settings-workspaces-clear');
+  try {
+    const cfg = await loadWorkspacesSettings();
+    syncBrowseButtons();
+    if (rootInput) {
+      rootInput.value = cfg.workspaces_root || '';
+      rootInput.disabled = cfg.source === 'env:REAPER_WORKSPACES_DIR';
+    }
+    if (defaultEl) {
+      defaultEl.textContent = cfg.workspaces_root
+        ? `Active: ${cfg.workspaces_root}${cfg.source ? ` (${cfg.source})` : ''}`
+        : `Built-in default: ${cfg.default_root}/{repo-name}`;
+    }
+    if (statusEl) {
+      statusEl.innerHTML = cfg.source === 'env:REAPER_WORKSPACES_DIR'
+        ? '<p class="text-[11px] text-git-modified">Overridden by REAPER_WORKSPACES_DIR in the environment.</p>'
+        : '';
+    }
+    if (clearBtn) clearBtn.disabled = !cfg.workspaces_root || cfg.source === 'env:REAPER_WORKSPACES_DIR';
+    updateWorkspacePathHints();
+  } catch (err) {
+    if (statusEl) statusEl.innerHTML = `<p class="ij-settings-empty">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function saveWorkspacesRootFromSettings(e) {
+  e?.preventDefault();
+  const root = $('#settings-workspaces-root')?.value.trim();
+  if (!root) {
+    toast('Enter a folder path', 'error');
+    return;
+  }
+  try {
+    await api('/api/settings/workspaces', {
+      method: 'PATCH',
+      body: JSON.stringify({ workspaces_root: root }),
+    });
+    await loadWorkspacesSettingsSection();
+    toast('Workspaces folder saved', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function clearWorkspacesRootFromSettings() {
+  try {
+    await api('/api/settings/workspaces', { method: 'DELETE' });
+    await loadWorkspacesSettingsSection();
+    toast('Using default workspaces folder', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 async function loadSettingsModal() {
-  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection()]);
+  await Promise.all([
+    loadPatTokensList(),
+    loadCursorSettingsSection(),
+    loadGeminiSettingsSection(),
+    loadWorkspacesSettingsSection(),
+  ]);
   loadAppearanceSettingsSection();
   switchSettingsTab(settingsTab);
 }
@@ -474,6 +605,7 @@ async function showSettingsModal(tab = 'git') {
     if (tab === 'cursor') $('#settings-cursor-key')?.focus();
     else if (tab === 'ai') $('#settings-gemini-key')?.focus();
     else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
+    else if (tab === 'storage') $('#settings-workspaces-root')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
 }
@@ -1009,6 +1141,7 @@ function runMenuAction(action) {
     'switch-branch': showBranchPicker,
     settings: () => showSettingsModal('git'),
     'settings-git': () => showSettingsModal('git'),
+    'settings-storage': () => showSettingsModal('storage'),
     'settings-cursor': () => showSettingsModal('cursor'),
     'settings-appearance': () => showSettingsModal('appearance'),
     run: runActive,
@@ -1021,6 +1154,7 @@ const PALETTE_COMMANDS = [
   { id: 'clone', label: 'Clone from URL', run: showCloneModal },
   { id: 'settings', label: 'Settings', kbd: '⌘,', run: () => showSettingsModal('git') },
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
+  { id: 'settings-storage', label: 'Workspaces folder', run: () => showSettingsModal('storage') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
   { id: 'settings-appearance', label: 'Editor font size', run: () => showSettingsModal('appearance') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
@@ -2141,6 +2275,11 @@ function updateRepoInfo(detail) {
       <div class="text-xs text-gray-500">Clone URL</div>
       <code class="block text-xs bg-surface-950 border border-surface-700 rounded px-2 py-1.5 text-accent break-all select-all">${s.clone_url}</code>
     </div>
+    ${s.workspace_path ? `
+    <div class="space-y-2">
+      <div class="text-xs text-gray-500">Workspace checkout</div>
+      <code class="block text-xs bg-surface-950 border border-surface-700 rounded px-2 py-1.5 text-gray-300 break-all select-all">${escapeHtml(s.workspace_path)}</code>
+    </div>` : ''}
     ${s.remote_url ? `
     <div class="space-y-2">
       <div class="text-xs text-gray-500">Linked remote</div>
@@ -2227,6 +2366,8 @@ async function createRepo(e) {
     description: fd.get('description') || null,
     init_with_readme: fd.get('init_readme') === 'on',
   };
+  const workspacePath = String(fd.get('workspace_path') || '').trim();
+  if (workspacePath) body.workspace_path = workspacePath;
   try {
     const repo = await api('/api/repos', { method: 'POST', body: JSON.stringify(body) });
     hideModal();
@@ -2242,6 +2383,15 @@ async function createRepo(e) {
 
 function showCloneModal() {
   setCloneModalState({ busy: false, status: '', error: '' });
+  loadWorkspacesSettings()
+    .then(() => {
+      syncBrowseButtons();
+      const name = $('#clone-local-name')?.value.trim()
+        || deriveNameFromUrl($('#clone-remote-url')?.value)
+        || '';
+      updateWorkspacePathHints(name);
+    })
+    .catch(() => {});
   $('#clone-modal-overlay')?.classList.remove('hidden');
   $('#clone-modal-overlay')?.classList.add('flex');
   $('#clone-remote-url')?.focus();
@@ -2279,6 +2429,7 @@ async function cloneRepo(e) {
   const fd = new FormData(form);
   const remoteUrl = normalizeRemoteUrl(fd.get('remote_url'));
   const localName = String(fd.get('name') || '').trim();
+  const workspacePath = String(fd.get('workspace_path') || '').trim();
 
   setCloneModalState({ error: '', status: '' });
 
@@ -2303,6 +2454,7 @@ async function cloneRepo(e) {
   try {
     const body = { remote_url: remoteUrl };
     if (localName) body.name = localName;
+    if (workspacePath) body.workspace_path = workspacePath;
     const repo = await api('/api/repos/import', { method: 'POST', body: JSON.stringify(body) });
     setCloneModalState({ busy: false });
     hideCloneModal();
@@ -4311,6 +4463,13 @@ function switchPanel(name) {
 }
 
 function showModal() {
+  loadWorkspacesSettings()
+    .then(() => {
+      syncBrowseButtons();
+      const name = $('#new-repo-form input[name="name"]')?.value.trim() || '';
+      updateWorkspacePathHints(name);
+    })
+    .catch(() => {});
   $('#modal-overlay').classList.remove('hidden');
   $('#modal-overlay').classList.add('flex');
 }
@@ -4391,6 +4550,11 @@ function bindEvents() {
   $$('.ij-settings-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.settingsTab));
   });
+  $('#settings-workspaces-form')?.addEventListener('submit', saveWorkspacesRootFromSettings);
+  $('#settings-workspaces-clear')?.addEventListener('click', clearWorkspacesRootFromSettings);
+  $('#settings-workspaces-browse')?.addEventListener('click', () => browseIntoInput('#settings-workspaces-root', 'Select default workspaces folder'));
+  $('#clone-browse-workspace')?.addEventListener('click', () => browseIntoInput('#clone-workspace-path', 'Select checkout folder'));
+  $('#new-repo-browse-workspace')?.addEventListener('click', () => browseIntoInput('#new-repo-workspace-path', 'Select checkout folder'));
   $('#clone-open-settings')?.addEventListener('click', () => {
     hideCloneModal();
     showSettingsModal('git');
@@ -4592,11 +4756,19 @@ function bindEvents() {
     const nameInput = $('#clone-local-name');
     if (!nameInput || nameInput.dataset.userEdited === '1') return;
     const derived = deriveNameFromUrl(e.target.value);
-    if (derived) nameInput.value = derived;
+    if (derived) {
+      nameInput.value = derived;
+      updateWorkspacePathHints(derived);
+    }
   });
 
   $('#clone-local-name')?.addEventListener('input', (e) => {
     e.target.dataset.userEdited = e.target.value.trim() ? '1' : '';
+    updateWorkspacePathHints(e.target.value.trim() || deriveNameFromUrl($('#clone-remote-url')?.value));
+  });
+
+  $('#new-repo-form input[name="name"]')?.addEventListener('input', (e) => {
+    updateWorkspacePathHints(e.target.value.trim());
   });
 
   $('#file-modal-overlay').addEventListener('click', (e) => {

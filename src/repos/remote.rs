@@ -14,6 +14,8 @@ pub struct ImportRepoRequest {
     pub remote_url: String,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +72,11 @@ pub fn import_repo(
 
     git::set_remote_url(&path, "origin", &clean)?;
     metadata::set_remote(config, &name, &clean, &host)?;
+
+    if let Some(ws_path) = req.workspace_path.filter(|p| !p.trim().is_empty()) {
+        let normalized = workspace::normalize_workspace_path(&ws_path)?;
+        metadata::set_workspace_path(config, &name, &normalized)?;
+    }
 
     summarize_repo(config, settings, &name, &path)
 }
@@ -229,8 +236,10 @@ pub fn link_remote(
 
     metadata::set_remote(config, name, &clean, &host)?;
 
-    if config.workspace_path(name).exists() {
-        workspace::ensure_upstream_remote(&config.workspace_path(name), &clean)?;
+    if let Ok(ws) = workspace::resolve_workspace_path(config, settings, name) {
+        if ws.exists() {
+            workspace::ensure_upstream_remote(&ws, &clean)?;
+        }
     }
 
     summarize_repo(config, settings, name, &config.repo_path(name))
@@ -253,7 +262,7 @@ pub fn sync_from_remote(
         bail!("fetch failed: {}", fetch.stderr.trim());
     }
 
-    let ws = workspace::ensure_workspace(config, name)?;
+    let ws = workspace::ensure_workspace(config, settings, name)?;
     workspace::sync_workspace(&ws)
 }
 
@@ -267,7 +276,7 @@ pub fn push_to_remote(
         .remote_url
         .ok_or_else(|| anyhow::anyhow!("no remote linked"))?;
     let auth_url = auth::authenticated_url(&clean, settings)?;
-    let ws = workspace::ensure_workspace(config, name)?;
+    let ws = workspace::ensure_workspace(config, settings, name)?;
     let branch = git::run_git(Some(&ws), &["branch", "--show-current"])?
         .stdout
         .trim()

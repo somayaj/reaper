@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, patch, put},
+    routing::{delete, get, patch, post, put},
 };
 use serde::Deserialize;
 
@@ -21,6 +21,11 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/settings/cursor/model", patch(set_cursor_model))
         .route("/api/settings/cursor/mode", patch(set_cursor_mode))
         .route("/api/settings/jdk", get(get_jdk).patch(set_jdk).delete(clear_jdk))
+        .route(
+            "/api/settings/workspaces",
+            get(get_workspaces).patch(set_workspaces).delete(clear_workspaces),
+        )
+        .route("/api/system/pick-directory", post(pick_directory_handler))
 }
 
 async fn list_tokens(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -245,6 +250,64 @@ async fn set_jdk(
 async fn clear_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _ = state.settings.clear_java_home();
     Json(state.settings.jdk_view()).into_response()
+}
+
+async fn get_workspaces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.settings.workspaces_view(
+        &state.config.workspaces_dir.display().to_string(),
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct SetWorkspacesRequest {
+    workspaces_root: String,
+}
+
+async fn set_workspaces(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetWorkspacesRequest>,
+) -> impl IntoResponse {
+    let root = body.workspaces_root.trim();
+    if root.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "workspaces_root required");
+    }
+    if let Err(e) = state.settings.set_workspaces_root(root.to_string()) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    Json(state.settings.workspaces_view(
+        &state.config.workspaces_dir.display().to_string(),
+    ))
+    .into_response()
+}
+
+async fn clear_workspaces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let _ = state.settings.clear_workspaces_root();
+    Json(state.settings.workspaces_view(
+        &state.config.workspaces_dir.display().to_string(),
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct PickDirectoryRequest {
+    prompt: Option<String>,
+}
+
+async fn pick_directory_handler(
+    Json(body): Json<PickDirectoryRequest>,
+) -> impl IntoResponse {
+    let prompt = body
+        .prompt
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "Select folder".to_string());
+    match crate::system::pick_directory(&prompt) {
+        Ok(Some(path)) => {
+            Json(serde_json::json!({ "path": path.display().to_string() })).into_response()
+        }
+        Ok(None) => Json(serde_json::json!({ "path": null })).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {

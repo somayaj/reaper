@@ -9,6 +9,7 @@ mod gradle;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod paths;
 mod spring_props;
 mod symbols;
 
@@ -19,27 +20,44 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::git::{self, GitOutput};
+use crate::settings::SettingsStore;
 
-pub fn ensure_workspace(config: &Config, name: &str) -> Result<PathBuf> {
+pub use paths::{normalize_workspace_path, resolve_workspace_path};
+
+pub fn ensure_workspace(config: &Config, settings: &SettingsStore, name: &str) -> Result<PathBuf> {
     if !config.repo_exists(name) {
         bail!("repository not found");
     }
     config.ensure_dirs()?;
     let bare = config.repo_path(name);
-    let ws = config.workspace_path(name);
+    let ws = resolve_workspace_path(config, settings, name)?;
 
-    if !ws.exists() {
-        let out = git::run_git(
-            None,
-            &[
-                "clone",
-                bare.to_str().context("invalid bare path")?,
-                ws.to_str().context("invalid workspace path")?,
-            ],
-        )?;
-        if !out.success() {
-            bail!("clone failed: {}", out.stderr.trim());
+    if ws.exists() {
+        if ws.join(".git").is_dir() {
+            return Ok(ws);
         }
+        if ws.read_dir()?.next().is_some() {
+            bail!(
+                "workspace path exists but is not a git checkout: {}",
+                ws.display()
+            );
+        }
+    }
+
+    if let Some(parent) = ws.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let out = git::run_git(
+        None,
+        &[
+            "clone",
+            bare.to_str().context("invalid bare path")?,
+            ws.to_str().context("invalid workspace path")?,
+        ],
+    )?;
+    if !out.success() {
+        bail!("clone failed: {}", out.stderr.trim());
     }
     Ok(ws)
 }

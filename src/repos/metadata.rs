@@ -11,6 +11,8 @@ pub struct RepoMetadata {
     pub remote_url: Option<String>,
     pub remote_host: Option<String>,
     pub imported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
 }
 
 impl Default for RepoMetadata {
@@ -19,6 +21,7 @@ impl Default for RepoMetadata {
             remote_url: None,
             remote_host: None,
             imported: false,
+            workspace_path: None,
         }
     }
 }
@@ -59,15 +62,20 @@ pub fn remote_auth_ready(metadata: &RepoMetadata, settings: &SettingsStore) -> b
 }
 
 pub fn set_remote(config: &Config, name: &str, clean_url: &str, host: &str) -> Result<RepoMetadata> {
-    let metadata = RepoMetadata {
-        remote_url: Some(clean_url.to_string()),
-        remote_host: Some(host.to_string()),
-        imported: true,
-    };
+    let mut metadata = load(config, name)?;
+    metadata.remote_url = Some(clean_url.to_string());
+    metadata.remote_host = Some(host.to_string());
+    metadata.imported = true;
     save(config, name, &metadata)?;
     Ok(metadata)
 }
 
 pub fn clear_remote(config: &Config, name: &str) -> Result<()> {
     save(config, name, &RepoMetadata::default())
+}
+
+pub fn set_workspace_path(config: &Config, name: &str, path: &Path) -> Result<()> {
+    let mut metadata = load(config, name)?;
+    metadata.workspace_path = Some(path.to_string_lossy().into_owned());
+    save(config, name, &metadata)
 }

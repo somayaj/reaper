@@ -22,6 +22,8 @@ struct SettingsFile {
     cursor_mode: Option<String>,
     #[serde(default)]
     jdk_home: Option<String>,
+    #[serde(default)]
+    workspaces_root: Option<String>,
 }
 
 #[derive(Clone)]
@@ -54,6 +56,14 @@ pub struct GeminiSettingsView {
     pub masked: Option<String>,
     pub model: String,
     pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspacesSettingsView {
+    pub workspaces_root: Option<String>,
+    pub default_root: String,
+    pub source: Option<String>,
+    pub folder_picker_available: bool,
 }
 
 impl SettingsStore {
@@ -121,6 +131,67 @@ impl SettingsStore {
         }
         self.sync_java_home_cache();
         Ok(removed)
+    }
+
+    pub fn workspaces_root(&self) -> Option<String> {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(root) = &guard.workspaces_root {
+                if !root.is_empty() {
+                    return Some(root.clone());
+                }
+            }
+        }
+        std::env::var("REAPER_WORKSPACES_DIR")
+            .ok()
+            .filter(|r| !r.is_empty())
+    }
+
+    pub fn set_workspaces_root(&self, root: String) -> Result<()> {
+        let root = root.trim().to_string();
+        if root.is_empty() {
+            anyhow::bail!("workspaces_root required");
+        }
+        crate::workspace::normalize_workspace_path(&root)?;
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.workspaces_root = Some(root);
+        self.save(&guard)
+    }
+
+    pub fn clear_workspaces_root(&self) -> Result<bool> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let removed = guard.workspaces_root.take().is_some();
+        if removed {
+            self.save(&guard)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn workspaces_view(&self, default_root: &str) -> WorkspacesSettingsView {
+        let from_env = std::env::var("REAPER_WORKSPACES_DIR")
+            .ok()
+            .filter(|r| !r.is_empty());
+
+        let from_file = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.workspaces_root.clone())
+            .filter(|r| !r.is_empty());
+
+        let (workspaces_root, source) = if let Some(root) = from_file {
+            (Some(root), Some("settings".to_string()))
+        } else if let Some(root) = from_env {
+            (Some(root), Some("env:REAPER_WORKSPACES_DIR".to_string()))
+        } else {
+            (None, None)
+        };
+
+        WorkspacesSettingsView {
+            workspaces_root,
+            default_root: default_root.to_string(),
+            source,
+            folder_picker_available: cfg!(target_os = "macos"),
+        }
     }
 
     pub fn jdk_view(&self) -> crate::jdk::JdkSettingsView {

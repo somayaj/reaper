@@ -123,7 +123,7 @@ async fn cursor_chat(
         return api_error(StatusCode::SERVICE_UNAVAILABLE, detail);
     }
 
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };

@@ -111,12 +111,8 @@ async fn delete_repo_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match repos::delete_repo(&state.config, &name) {
-        Ok(()) => {
-            let ws = state.config.workspace_path(&name);
-            let _ = std::fs::remove_dir_all(ws);
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match repos::delete_repo(&state.config, &state.settings, &name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, e),
     }
 }
@@ -229,7 +225,7 @@ async fn open_workspace(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match workspace::ensure_workspace(&state.config, &name) {
+    match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => {
             let java_indexing = workspace::is_gradle_workspace(&ws);
             if java_indexing {
@@ -249,7 +245,7 @@ async fn sync_workspace(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -264,7 +260,7 @@ async fn workspace_tree(
     Path(name): Path<String>,
     Query(q): Query<TreeQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -295,7 +291,7 @@ async fn read_workspace_file(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -324,7 +320,7 @@ async fn create_workspace_file(
     Path(name): Path<String>,
     Json(body): Json<CreateFileRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -340,7 +336,7 @@ async fn save_workspace_file(
     Path(name): Path<String>,
     Json(body): Json<SaveFileRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -355,7 +351,7 @@ async fn delete_workspace_file(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -369,7 +365,7 @@ async fn workspace_status(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -390,7 +386,7 @@ async fn workspace_diff(
     Path(name): Path<String>,
     Query(q): Query<DiffQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -404,7 +400,7 @@ async fn commit_diff_handler(
     State(state): State<Arc<AppState>>,
     Path((name, hash)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -424,7 +420,7 @@ async fn conflict_stages_handler(
     Path(name): Path<String>,
     Query(q): Query<ConflictPathQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -444,7 +440,7 @@ async fn conflict_resolve_handler(
     Path(name): Path<String>,
     Json(body): Json<ConflictResolveRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -458,7 +454,7 @@ async fn conflict_continue_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -491,7 +487,7 @@ async fn suggest_commit_message_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -506,7 +502,7 @@ async fn workspace_commit(
     Path(name): Path<String>,
     Json(body): Json<CommitRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -526,7 +522,7 @@ async fn workspace_checkout(
     Path(name): Path<String>,
     Json(body): Json<CheckoutRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -541,7 +537,7 @@ async fn run_workspace_git(
     Path(name): Path<String>,
     Json(body): Json<GitCommandRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -573,7 +569,7 @@ async fn run_workspace_shell(
     Path(name): Path<String>,
     Json(body): Json<ShellRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -588,7 +584,7 @@ async fn workspace_shell_cd(
     Path(name): Path<String>,
     Json(body): Json<ShellCdRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -603,7 +599,7 @@ async fn java_main_info(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -623,7 +619,7 @@ async fn run_java_main_handler(
     Path(name): Path<String>,
     Json(body): Json<JavaRunRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -638,7 +634,7 @@ async fn gradle_project_info_handler(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -660,7 +656,7 @@ async fn run_gradle_handler(
     Path(name): Path<String>,
     Json(body): Json<GradleRunRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -696,7 +692,7 @@ async fn workspace_definition(
     Path(name): Path<String>,
     Query(q): Query<DefinitionQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -721,7 +717,7 @@ async fn workspace_classes(
     Path(name): Path<String>,
     Query(q): Query<ClassSearchQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -749,7 +745,7 @@ async fn workspace_completions(
     Path(name): Path<String>,
     Query(q): Query<CompletionQuery>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -779,7 +775,7 @@ async fn workspace_diagnostics(
     Path(name): Path<String>,
     Json(body): Json<DiagnosticsRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
@@ -805,7 +801,7 @@ async fn workspace_format(
     Path(name): Path<String>,
     Json(body): Json<FormatRequest>,
 ) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
+    let ws = match workspace::ensure_workspace(&state.config, &state.settings, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };

@@ -31,6 +31,7 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 | `REAPER_HOST` | `127.0.0.1` | Bind address |
 | `REAPER_PORT` | `8080` | HTTP port |
 | `REAPER_DATA_DIR` | `./data` | Root for repos, workspaces, and settings |
+| `REAPER_WORKSPACES_DIR` | — | Default folder for workspace checkouts (overrides `{data}/workspaces`; each repo gets a subfolder) |
 | `REAPER_PAT` | — | Default PAT for private HTTPS remotes |
 | `REAPER_PAT_GITHUB_COM` | — | Host-specific PAT (dots → underscores, uppercased) |
 | `REAPER_GIT_USERNAME` | `git` | Username for generic HTTPS git hosts |
