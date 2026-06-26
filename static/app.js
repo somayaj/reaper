@@ -69,6 +69,7 @@ const state = {
   javaIndexPoll: null,
   javaIndexNotified: false,
   javaIndexRunning: false,
+  javaIndexReady: false,
   treeNavAnchor: null,
   mergeState: null,
   conflictDecorationIds: [],
@@ -826,6 +827,9 @@ function updateJavaIndexUi(status) {
   const banner = $('#java-index-banner');
   banner?.classList.add('hidden');
 
+  state.javaIndexRunning = status?.state === 'running';
+  state.javaIndexReady = status?.state === 'ready' && (status?.dependency_jars || 0) > 0;
+
   if (status?.state === 'running') {
     if (status.symbol_count > 0) {
       setStatusMessage(`Updating Java index (${Number(status.symbol_count).toLocaleString()} symbols ready)…`);
@@ -841,6 +845,7 @@ function updateJavaIndexUi(status) {
     const detail = status.cached ? 'from cache' : 'rebuilt';
     toast(`Java index ready — ${n} symbols (${detail})`, 'success');
     terminalLog(`Java index ready: ${n} symbols`);
+    if (state.activeTab?.endsWith('.java')) scheduleDiagnostics();
   } else if (status?.state === 'error' && !state.javaIndexNotified) {
     state.javaIndexNotified = true;
     toast(`Java indexing failed: ${status.error || 'unknown error'}`, 'error');
@@ -2815,6 +2820,10 @@ function isDiagnosablePath(path) {
 function scheduleDiagnostics() {
   if (diagTimer) clearTimeout(diagTimer);
   if (!isDiagnosablePath(state.activeTab)) {
+    clearDiagnostics();
+    return;
+  }
+  if (state.activeTab?.endsWith('.java') && state.javaIndexRunning) {
     clearDiagnostics();
     return;
   }
