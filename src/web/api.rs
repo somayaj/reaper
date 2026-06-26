@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::repos::{
-    self, CreateRepoRequest, ImportRepoRequest, LinkRemoteRequest, import_repo, link_remote,
-    push_to_remote, sync_from_remote,
+    self, CreateRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishToGitHubRequest,
+    import_repo, link_remote, publish_to_github, push_to_remote, sync_from_remote,
 };
+use crate::agent as git_agent;
 use crate::state::AppState;
 use crate::workspace;
 
@@ -25,6 +26,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/import", post(import_repo_handler))
         .route("/api/repos/{name}/remote/push", post(push_remote_handler))
         .route("/api/repos/{name}/remote/pull", post(pull_remote_handler))
+        .route("/api/repos/{name}/remote/publish", post(publish_github_handler))
         .route("/api/repos/{name}/remote", put(link_remote_handler))
         .route("/api/repos/{name}/agent", post(agent::run_agent))
         .route("/api/repos/{name}/branches", get(get_branches))
@@ -42,14 +44,25 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/api/repos/{name}/workspace/status", get(workspace_status))
         .route("/api/repos/{name}/workspace/diff", get(workspace_diff))
+        .route("/api/repos/{name}/workspace/conflict", get(conflict_stages_handler))
+        .route("/api/repos/{name}/workspace/conflict/resolve", post(conflict_resolve_handler))
+        .route("/api/repos/{name}/workspace/conflict/continue", post(conflict_continue_handler))
+        .route("/api/repos/{name}/workspace/commit/{hash}/diff", get(commit_diff_handler))
+        .route("/api/repos/{name}/workspace/commit/suggest", post(suggest_commit_message_handler))
         .route("/api/repos/{name}/workspace/commit", post(workspace_commit))
         .route("/api/repos/{name}/workspace/checkout", post(workspace_checkout))
         .route("/api/repos/{name}/workspace/git", post(run_workspace_git))
+        .route("/api/repos/{name}/workspace/shell", post(run_workspace_shell))
+        .route("/api/repos/{name}/workspace/shell/cd", post(workspace_shell_cd))
         .route("/api/repos/{name}/workspace/java/info", get(java_main_info))
         .route("/api/repos/{name}/workspace/java/run", post(run_java_main_handler))
         .route("/api/repos/{name}/workspace/gradle/info", get(gradle_project_info_handler))
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition))
+        .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
+        .route("/api/repos/{name}/workspace/completions", get(workspace_completions))
+        .route("/api/repos/{name}/workspace/java/index-status", get(java_index_status))
+        .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
         .route("/api/repos/{name}/workspace/format", post(workspace_format))
         .route(
             "/api/repos/{name}",
@@ -139,6 +152,17 @@ async fn push_remote_handler(
     }
 }
 
+async fn publish_github_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<PublishToGitHubRequest>,
+) -> impl IntoResponse {
+    match publish_to_github(&state.config, &state.settings, &name, body).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 async fn get_branches(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -206,7 +230,17 @@ async fn open_workspace(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     match workspace::ensure_workspace(&state.config, &name) {
-        Ok(ws) => Json(serde_json::json!({ "path": ws.display().to_string() })).into_response(),
+        Ok(ws) => {
+            let java_indexing = workspace::is_gradle_workspace(&ws);
+            if java_indexing {
+                state.java_index_jobs.ensure_building(&name, &ws);
+            }
+            Json(serde_json::json!({
+                "path": ws.display().to_string(),
+                "java_indexing": java_indexing,
+            }))
+            .into_response()
+        }
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -228,15 +262,27 @@ async fn sync_workspace(
 async fn workspace_tree(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<TreeQuery>,
 ) -> impl IntoResponse {
     let ws = match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::build_tree(&ws) {
+    let result = if q.recursive.unwrap_or(false) {
+        workspace::build_tree(&ws)
+    } else {
+        workspace::build_tree_level(&ws, q.dir.as_deref())
+    };
+    match result {
         Ok(tree) => Json(tree).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+#[derive(Deserialize)]
+struct TreeQuery {
+    dir: Option<String>,
+    recursive: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -354,10 +400,105 @@ async fn workspace_diff(
     }
 }
 
+async fn commit_diff_handler(
+    State(state): State<Arc<AppState>>,
+    Path((name, hash)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::commit_diff(&ws, hash.trim()) {
+        Ok(diff) => Json(serde_json::json!({ "diff": diff })).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConflictPathQuery {
+    path: String,
+}
+
+async fn conflict_stages_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<ConflictPathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::conflict_stages(&ws, q.path.trim()) {
+        Ok(stages) => Json(stages).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConflictResolveRequest {
+    path: String,
+}
+
+async fn conflict_resolve_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ConflictResolveRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::mark_conflict_resolved(&ws, body.path.trim()) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn conflict_continue_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let merge = workspace::conflict::merge_state(&ws);
+    let result = if merge.kind.as_deref() == Some("rebase") {
+        git::run_git(Some(&ws), &["rebase", "--continue"])
+    } else if merge.kind.as_deref() == Some("cherry-pick") {
+        git::run_git(Some(&ws), &["cherry-pick", "--continue"])
+    } else {
+        git::run_git(Some(&ws), &["commit", "--no-edit"])
+    };
+    match result {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 #[derive(Deserialize)]
 struct CommitRequest {
     message: String,
     paths: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct SuggestCommitResponse {
+    message: String,
+}
+
+async fn suggest_commit_message_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match git_agent::suggest_commit_message(&state.settings, &ws).await {
+        Ok(message) => Json(SuggestCommitResponse { message }).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 async fn workspace_commit(
@@ -406,6 +547,53 @@ async fn run_workspace_git(
     };
     match workspace::run_workspace_git(&ws, &body.args) {
         Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ShellRequest {
+    command: String,
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ShellCdRequest {
+    target: String,
+    cwd: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ShellCdResponse {
+    cwd: String,
+}
+
+async fn run_workspace_shell(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ShellRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::run_workspace_shell(&ws, body.cwd.as_deref(), &body.command) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_shell_cd(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ShellCdRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::change_workspace_directory(&ws, body.cwd.as_deref(), &body.target) {
+        Ok(cwd) => Json(ShellCdResponse { cwd }).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -512,8 +700,91 @@ async fn workspace_definition(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::find_definition(&ws, q.path.trim(), q.line, q.column) {
+    let from_path = q.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    match workspace::find_definition(&ws, from_path, q.line, q.column) {
         Ok(hit) => Json(hit).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClassSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn workspace_classes(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<ClassSearchQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    if workspace::is_gradle_workspace(&ws) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    let query = q.q.unwrap_or_default();
+    let limit = q.limit.unwrap_or(50);
+    match workspace::search_classes(&ws, &query, limit) {
+        Ok(hits) => Json(hits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CompletionQuery {
+    path: String,
+    line: u32,
+    column: u32,
+    prefix: Option<String>,
+}
+
+async fn workspace_completions(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<CompletionQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let prefix = q.prefix.unwrap_or_default();
+    state.java_index_jobs.ensure_building(&name, &ws);
+    match workspace::java_completions(&ws, q.path.trim(), q.line, q.column, &prefix) {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DiagnosticsRequest {
+    path: String,
+    content: String,
+}
+
+async fn java_index_status(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    Json(state.java_index_jobs.status(&name)).into_response()
+}
+
+async fn workspace_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DiagnosticsRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::file_diagnostics(&ws, body.path.trim(), &body.content) {
+        Ok(items) => Json(items).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
