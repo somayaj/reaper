@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::cursor::{CursorBridge, SessionStore};
 use crate::settings::SettingsStore;
+use crate::workspace::JavaIndexJobs;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -10,6 +11,7 @@ pub struct AppState {
     pub settings: SettingsStore,
     pub cursor_bridge: Arc<CursorBridge>,
     pub cursor_sessions: Arc<SessionStore>,
+    pub java_index_jobs: Arc<JavaIndexJobs>,
 }
 
 impl AppState {
@@ -19,6 +21,7 @@ impl AppState {
             settings,
             cursor_bridge: Arc::new(CursorBridge::new()),
             cursor_sessions: Arc::new(SessionStore::default()),
+            java_index_jobs: Arc::new(JavaIndexJobs::new()),
         }
     }
 }
