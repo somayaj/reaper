@@ -59,6 +59,8 @@ const state = {
   agentLastToolPath: null,
   agentSeenPaths: new Set(),
   agentHadFileChanges: false,
+  cloneBusy: false,
+  currentBranch: '',
   editorReady: false,
   suppressEditorChange: false,
   autoSaveTimer: null,
@@ -121,13 +123,60 @@ function repoApi(name, suffix = '') {
   return `/api/repos/${encodeURIComponent(name)}${suffix}`;
 }
 
-function toast(msg, type = 'info') {
+function toast(msg, type = 'info', { duration } = {}) {
   const el = $('#toast');
   el.textContent = msg;
   el.className = `ij-toast ${type}`;
   el.classList.remove('hidden');
   clearTimeout(toast._timer);
-  toast._timer = setTimeout(() => el.classList.add('hidden'), 3500);
+  const ms = duration ?? (type === 'error' ? 9000 : 3500);
+  toast._timer = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+function setGlobalLoading(on, text = 'Loading…') {
+  const overlay = $('#loading-overlay');
+  const label = $('#loading-text');
+  if (label) label.textContent = text;
+  overlay?.classList.toggle('hidden', !on);
+  overlay?.classList.toggle('flex', on);
+}
+
+function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
+  const errEl = $('#clone-error');
+  const statusEl = $('#clone-status');
+  const statusText = $('#clone-status-text');
+  const cancelBtn = $('#clone-modal-cancel');
+  const submitBtn = $('#btn-clone-submit');
+  const overlay = $('#clone-modal-overlay');
+
+  if (errEl) {
+    errEl.textContent = error;
+    errEl.classList.toggle('hidden', !error);
+    if (error) errEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  if (statusEl) {
+    if (statusText) statusText.textContent = status || 'Cloning…';
+    statusEl.classList.toggle('hidden', !status);
+  }
+  if (overlay) overlay.classList.toggle('ij-clone-modal--busy', busy);
+  if (cancelBtn) cancelBtn.disabled = busy;
+  if (submitBtn) {
+    submitBtn.disabled = busy;
+    submitBtn.textContent = busy ? 'Cloning…' : 'Clone';
+  }
+  ['#clone-remote-url', '#clone-local-name'].forEach((sel) => {
+    const input = $(sel);
+    if (input) input.disabled = busy;
+  });
+  state.cloneBusy = busy;
+}
+
+function normalizeRemoteUrl(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (/^git@/i.test(trimmed)) return trimmed;
+  if (!trimmed.includes('://')) return `https://${trimmed}`;
+  return trimmed;
 }
 
 function deriveNameFromUrl(raw) {
@@ -878,7 +927,7 @@ function renderWelcome() {
 function updateStatusBar(status = null) {
   const branchEl = $('#status-branch');
   const changesEl = $('#status-changes');
-  const branch = status?.branch || $('#branch-select')?.value || '';
+  const branch = status?.branch || state.currentBranch || '';
   if (branchEl) branchEl.textContent = branch ? `⎇ ${branch}` : '';
   if (changesEl) {
     if (!status || status.clean) {
@@ -913,6 +962,7 @@ function updateMenuState() {
   setMenuDisabled('close-tab', !hasTab);
   setMenuDisabled('pull', !hasRepo);
   setMenuDisabled('push', !hasRepo);
+  setMenuDisabled('switch-branch', !hasRepo);
   setMenuDisabled('publish', !hasRepo);
   setMenuDisabled('repo-info', !hasRepo);
   setMenuDisabled('new-file', !hasRepo);
@@ -951,6 +1001,7 @@ function runMenuAction(action) {
     'toggle-dotfiles': () => setShowDotfiles(!getShowDotfiles()),
     'command-palette': showPalette,
     'goto-class': showGoToClass,
+    'switch-branch': showBranchPicker,
     settings: () => showSettingsModal('git'),
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
@@ -969,6 +1020,7 @@ const PALETTE_COMMANDS = [
   { id: 'settings-appearance', label: 'Editor font size', run: () => showSettingsModal('appearance') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
+  { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },
   { id: 'new-file', label: 'New file', kbd: '⌘N', run: showFileModal, needsRepo: true },
   { id: 'save', label: 'Save', kbd: '⌘S', run: saveFile, needsTab: true, needsDirty: true },
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
@@ -1080,6 +1132,170 @@ function hideGoToClass() {
     clearTimeout(gotoClassTimer);
     gotoClassTimer = null;
   }
+}
+
+let branchPickerIndex = 0;
+let branchPickerBranches = [];
+
+function setBranchLabel(branch) {
+  state.currentBranch = branch || '';
+  const el = $('#branch-picker-label');
+  if (el) el.textContent = branch || 'branch';
+}
+
+function filterBranchList(query) {
+  const q = query.trim();
+  if (!q) return [...state.branches].sort((a, b) => a.localeCompare(b));
+  return state.branches
+    .map((branch) => ({ branch, score: scoreBranchMatch(branch, q) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => b.score - a.score || a.branch.localeCompare(b.branch))
+    .map((x) => x.branch);
+}
+
+function scoreBranchMatch(branch, query) {
+  const b = branch.toLowerCase();
+  const q = query.trim().toLowerCase();
+  if (!q) return 0;
+  if (b === q) return 1000;
+  if (b.startsWith(q)) return 900 - b.length * 0.01;
+  const segment = b.split('/').find((part) => part.startsWith(q));
+  if (segment) return 700 - b.indexOf(segment);
+  const idx = b.indexOf(q);
+  if (idx >= 0) return 500 - idx;
+  let bi = 0;
+  let spread = 0;
+  for (const ch of q) {
+    const fi = b.indexOf(ch, bi);
+    if (fi < 0) return -1;
+    spread += fi;
+    bi = fi + 1;
+  }
+  return 300 - spread;
+}
+
+function highlightBranchName(name, query) {
+  const q = query.trim();
+  if (!q) return escapeHtml(name);
+  const nl = name.toLowerCase();
+  const ql = q.toLowerCase();
+  let idx = nl.indexOf(ql);
+  if (idx < 0) {
+    idx = nl.split('/').reduce((found, part, i, parts) => {
+      if (found >= 0) return found;
+      const off = parts.slice(0, i).join('/').length + (i > 0 ? 1 : 0);
+      const local = part.toLowerCase().indexOf(ql);
+      return local >= 0 ? off + local : -1;
+    }, -1);
+  }
+  if (idx < 0) return escapeHtml(name);
+  const before = escapeHtml(name.slice(0, idx));
+  const match = escapeHtml(name.slice(idx, idx + q.length));
+  const after = escapeHtml(name.slice(idx + q.length));
+  return `${before}<mark class="ij-branch-match">${match}</mark>${after}`;
+}
+
+function branchAutocompleteTarget(query, branches = branchPickerBranches) {
+  const q = query;
+  if (!q.trim() || !branches.length) return null;
+  const pick = branches[branchPickerIndex] ?? branches[0];
+  if (!pick) return null;
+  const ql = q.toLowerCase();
+  const pl = pick.toLowerCase();
+  if (pl.startsWith(ql)) return pick;
+  return null;
+}
+
+function updateBranchAutocompleteGhost(query) {
+  const ghost = $('#branch-picker-ghost');
+  const input = $('#branch-picker-input');
+  if (!ghost || !input) return;
+  const target = branchAutocompleteTarget(query);
+  if (!target || !query.trim()) {
+    ghost.innerHTML = '';
+    input.removeAttribute('aria-activedescendant');
+    return;
+  }
+  const ql = query.toLowerCase();
+  if (!target.toLowerCase().startsWith(ql)) {
+    ghost.innerHTML = '';
+    return;
+  }
+  ghost.innerHTML = `<span class="ij-branch-ghost-typed">${escapeHtml(query)}</span><span class="ij-branch-ghost-hint">${escapeHtml(target.slice(query.length))}</span>`;
+  const active = $(`#branch-picker-option-${branchPickerIndex}`);
+  input.setAttribute('aria-activedescendant', active?.id || '');
+}
+
+function acceptBranchAutocomplete() {
+  const input = $('#branch-picker-input');
+  if (!input) return false;
+  const target = branchAutocompleteTarget(input.value);
+  if (!target || target.toLowerCase() === input.value.trim().toLowerCase()) return false;
+  input.value = target;
+  branchPickerIndex = 0;
+  renderBranchPickerResults(target);
+  input.setSelectionRange(target.length, target.length);
+  return true;
+}
+
+function showBranchPicker() {
+  if (!state.repo) {
+    toast('Open a repository first', 'info');
+    return;
+  }
+  if (!state.branches.length) {
+    toast('No branches in this repository', 'info');
+    return;
+  }
+  closeAllMenus();
+  hidePalette();
+  branchPickerIndex = 0;
+  $('#branch-picker-overlay')?.classList.add('open');
+  const input = $('#branch-picker-input');
+  if (input) {
+    input.value = '';
+    renderBranchPickerResults('');
+    setTimeout(() => input.focus(), 30);
+  }
+}
+
+function hideBranchPicker() {
+  $('#branch-picker-overlay')?.classList.remove('open');
+  const ghost = $('#branch-picker-ghost');
+  if (ghost) ghost.innerHTML = '';
+}
+
+function renderBranchPickerResults(query) {
+  const results = $('#branch-picker-results');
+  if (!results) return;
+  branchPickerBranches = filterBranchList(query);
+  branchPickerIndex = Math.min(branchPickerIndex, Math.max(branchPickerBranches.length - 1, 0));
+  if (!branchPickerBranches.length) {
+    results.innerHTML = '<p class="ij-branch-picker-empty">No matching branches</p>';
+    updateBranchAutocompleteGhost(query);
+    return;
+  }
+  const current = state.currentBranch;
+  results.innerHTML = branchPickerBranches.map((b, i) => `
+    <button type="button" id="branch-picker-option-${i}" class="ij-branch-picker-item ij-palette-item${i === branchPickerIndex ? ' active' : ''}${b === current ? ' current' : ''}" data-branch-idx="${i}" role="option" aria-selected="${i === branchPickerIndex ? 'true' : 'false'}">
+      <span class="ij-branch-picker-name">⎇ ${highlightBranchName(b, query)}</span>
+      ${b === current ? '<span class="ij-branch-picker-tag">current</span>' : ''}
+    </button>`).join('');
+  results.querySelectorAll('[data-branch-idx]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      branchPickerIndex = Number(btn.dataset.branchIdx);
+      confirmBranchPickerSelection();
+    });
+  });
+  results.querySelector('.ij-branch-picker-item.active')?.scrollIntoView({ block: 'nearest' });
+  updateBranchAutocompleteGhost(query);
+}
+
+function confirmBranchPickerSelection() {
+  const branch = branchPickerBranches[branchPickerIndex];
+  if (!branch) return;
+  hideBranchPicker();
+  if (branch !== state.currentBranch) checkoutBranch(branch);
 }
 
 function scheduleGoToClassSearch(query) {
@@ -1263,6 +1479,52 @@ function bindGoToClass() {
   });
   $('#goto-class-overlay')?.addEventListener('click', (e) => {
     if (e.target === $('#goto-class-overlay')) hideGoToClass();
+  });
+}
+
+function bindBranchPicker() {
+  $('#branch-picker-input')?.addEventListener('input', (e) => {
+    branchPickerIndex = 0;
+    renderBranchPickerResults(e.target.value);
+  });
+  $('#branch-picker-input')?.addEventListener('keydown', (e) => {
+    if (!$('#branch-picker-overlay')?.classList.contains('open')) return;
+    const input = e.target;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideBranchPicker();
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (!acceptBranchAutocomplete()) confirmBranchPickerSelection();
+      return;
+    }
+    if (e.key === 'ArrowRight' && input.selectionStart === input.value.length && input.selectionEnd === input.value.length) {
+      if (acceptBranchAutocomplete()) {
+        e.preventDefault();
+        return;
+      }
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      branchPickerIndex = Math.min(branchPickerIndex + 1, Math.max(branchPickerBranches.length - 1, 0));
+      renderBranchPickerResults(input.value || '');
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      branchPickerIndex = Math.max(branchPickerIndex - 1, 0);
+      renderBranchPickerResults(input.value || '');
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      confirmBranchPickerSelection();
+    }
+  });
+  $('#branch-picker-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#branch-picker-overlay')) hideBranchPicker();
   });
 }
 
@@ -1832,7 +2094,8 @@ function resetUI() {
   state.repoDetail = null;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = true;
-  $('#branch-select').disabled = true;
+  $('#branch-picker-btn').disabled = true;
+  setBranchLabel('');
   ['#btn-sync', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
@@ -1846,7 +2109,7 @@ function resetUI() {
 }
 
 function enableControls() {
-  $('#branch-select').disabled = false;
+  $('#branch-picker-btn').disabled = false;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = false;
   ['#btn-sync', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
@@ -1855,14 +2118,8 @@ function enableControls() {
 }
 
 function updateBranchSelect() {
-  const sel = $('#branch-select');
-  sel.innerHTML = '';
-  state.branches.forEach((b) => {
-    const opt = document.createElement('option');
-    opt.value = b;
-    opt.textContent = b;
-    sel.appendChild(opt);
-  });
+  if (state.currentBranch && state.branches.includes(state.currentBranch)) return;
+  if (state.branches.length) setBranchLabel(state.branches[0]);
 }
 
 function updateRepoInfo(detail) {
@@ -1979,12 +2236,15 @@ async function createRepo(e) {
 }
 
 function showCloneModal() {
+  setCloneModalState({ busy: false, status: '', error: '' });
   $('#clone-modal-overlay')?.classList.remove('hidden');
   $('#clone-modal-overlay')?.classList.add('flex');
   $('#clone-remote-url')?.focus();
 }
 
 function hideCloneModal() {
+  if (state.cloneBusy) return;
+  setCloneModalState({ busy: false, status: '', error: '' });
   $('#clone-modal-overlay')?.classList.add('hidden');
   $('#clone-modal-overlay')?.classList.remove('flex');
 }
@@ -2010,26 +2270,54 @@ function hidePublishModal() {
 
 async function cloneRepo(e) {
   e.preventDefault();
-  const fd = new FormData(e.target);
-  const remoteUrl = String(fd.get('remote_url') || '').trim();
+  const form = e.target;
+  const fd = new FormData(form);
+  const remoteUrl = normalizeRemoteUrl(fd.get('remote_url'));
   const localName = String(fd.get('name') || '').trim();
+
+  setCloneModalState({ error: '', status: '' });
+
+  if (!remoteUrl) {
+    setCloneModalState({ error: 'Enter a remote URL (HTTPS), e.g. https://github.com/owner/repo.git' });
+    return;
+  }
+  if (/^git@/i.test(remoteUrl)) {
+    setCloneModalState({ error: 'SSH URLs are not supported. Use HTTPS, e.g. https://github.com/owner/repo.git' });
+    return;
+  }
+  if (localName && !/^[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)?$/.test(localName)) {
+    setCloneModalState({ error: 'Local name must look like owner/repo (letters, numbers, . _ - only).' });
+    return;
+  }
+
+  setCloneModalState({
+    busy: true,
+    status: 'Cloning from remote — large repos can take a minute or two…',
+  });
+
   try {
     const body = { remote_url: remoteUrl };
     if (localName) body.name = localName;
     const repo = await api('/api/repos/import', { method: 'POST', body: JSON.stringify(body) });
+    setCloneModalState({ busy: false });
     hideCloneModal();
-    e.target.reset();
+    form.reset();
     await loadRepos();
     $('#repo-select').value = repo.name;
     await selectRepo(repo.name);
     toast(`Cloned ${repo.name}`, 'success');
   } catch (err) {
+    const msg = err.message || String(err);
+    setCloneModalState({ busy: false, error: msg, status: '' });
+    terminalLog(`clone failed: ${msg}`);
     const host = hostFromUrl(remoteUrl);
-    if (host && /auth|401|403|credential|token|pat/i.test(err.message)) {
-      toast(`${err.message} — add a PAT in Settings → Git hosts`, 'error');
+    if (host && /auth|401|403|credential|token|pat/i.test(msg)) {
+      toast(`${msg} — add a PAT in Settings → Git hosts`, 'error', { duration: 12000 });
     } else {
-      toast(err.message, 'error');
+      toast(msg, 'error', { duration: 12000 });
     }
+  } finally {
+    if (state.cloneBusy) setCloneModalState({ busy: false });
   }
 }
 
@@ -2114,34 +2402,18 @@ async function prefetchTreeLevel(dirPath) {
   }
 }
 
-/** Load and expand the first N directory levels so files are visible on open. */
-async function expandTreeToDepth(maxDepth = 3) {
+async function loadTreeRoot() {
   treeState.expanded.clear();
   await loadTreeLevel('');
-  let frontier = (treeState.children.get('') || []).filter((n) => n.type === 'dir');
-  for (const n of frontier) treeState.expanded.add(n.path);
-
-  for (let depth = 1; depth < maxDepth; depth++) {
-    const next = [];
-    await Promise.all(frontier.map(async (n) => {
-      if (n.has_children === false) return;
-      await prefetchTreeLevel(n.path);
-      for (const c of treeState.children.get(n.path) || []) {
-        if (c.type === 'dir') {
-          treeState.expanded.add(c.path);
-          if (c.has_children !== false) next.push(c);
-        }
-      }
-    }));
-    frontier = next;
-  }
 }
 
 function renderTree(nodes, depth = 0, lazyMode = true) {
   return nodes.map((n) => {
     if (n.type === 'dir') {
-      const open = treeState.expanded.has(n.path);
       const isLeaf = n.has_children === false;
+      const open = lazyMode
+        ? treeState.expanded.has(n.path)
+        : !!(n.children?.length);
       let childrenHtml = '';
       if (lazyMode) {
         const loading = treeState.loading.has(n.path);
@@ -2158,7 +2430,8 @@ function renderTree(nodes, depth = 0, lazyMode = true) {
       }
       return `
         <details class="ij-tree-dir" data-dir="${escapeHtml(n.path)}" ${open ? 'open' : ''}${isLeaf ? ' data-leaf="1"' : ''}>
-          <summary class="ij-tree-row ij-tree-dir-row" style="--depth:${depth}">
+          <summary class="ij-tree-row ij-tree-dir-row" style="--depth:${depth}" aria-expanded="${open ? 'true' : 'false'}">
+            <span class="ij-tree-chevron" aria-hidden="true"></span>
             <span class="ij-tree-icon ij-tree-icon-folder">${treeIconSvg('folder')}${treeIconSvg('folderOpen')}</span>
             <span class="ij-tree-label">${escapeHtml(n.name)}</span>
           </summary>
@@ -2206,7 +2479,7 @@ async function refreshTree() {
     treeState.recursiveNodes = await api(repoApi(state.repo, '/workspace/tree?recursive=1'));
     lastTreeNodes = treeState.recursiveNodes;
   } else {
-    await expandTreeToDepth(3);
+    await loadTreeRoot();
     lastTreeNodes = treeState.children.get('') || [];
   }
   renderFilteredTree();
@@ -3014,7 +3287,7 @@ async function refreshGitStatus() {
       countEl.classList.remove('hidden');
     }
   }
-  $('#branch-select').value = status.branch;
+  setBranchLabel(status.branch);
   const badge = $('#git-badge');
   if (badge) {
     if (status.clean) {
@@ -3320,11 +3593,27 @@ async function suggestCommitMessage({ auto = false } = {}) {
 }
 
 async function syncPull() {
-  const out = await api(repoApi(state.repo, '/workspace/sync'), { method: 'POST' });
-  terminalLog(out.stdout || out.stderr || 'Synced');
-  await refreshTree();
-  await refreshGitStatus();
-  toast('Pulled latest', 'success');
+  if (!state.repo) {
+    toast('Select a repository first', 'info');
+    return;
+  }
+  const btn = $('#btn-sync');
+  if (btn) btn.disabled = true;
+  setGlobalLoading(true, `Pulling ${state.repo}…`);
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/sync'), { method: 'POST' });
+    terminalLog(out.stdout || out.stderr || 'Synced');
+    await refreshTree();
+    await refreshGitStatus();
+    toast('Pulled latest', 'success');
+  } catch (err) {
+    const msg = err.message || String(err);
+    terminalLog(`pull failed: ${msg}`);
+    toast(msg, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    setGlobalLoading(false);
+  }
 }
 
 async function checkoutBranch(branch) {
@@ -4073,7 +4362,7 @@ function bindEvents() {
   installFormClipboardShortcuts();
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
   $('#repo-select').addEventListener('change', (e) => selectRepo(e.target.value));
-  $('#branch-select').addEventListener('change', (e) => checkoutBranch(e.target.value));
+  $('#branch-picker-btn')?.addEventListener('click', showBranchPicker);
   $('#btn-new-repo').addEventListener('click', showModal);
   $('#btn-clone-repo')?.addEventListener('click', showCloneModal);
   $('#btn-open-agent').addEventListener('click', toggleAgent);
@@ -4220,9 +4509,20 @@ function bindEvents() {
         hideGoToClass();
         return;
       }
+      if ($('#branch-picker-overlay')?.classList.contains('open')) {
+        e.preventDefault();
+        hideBranchPicker();
+        return;
+      }
       if ($('#palette-overlay')?.classList.contains('open')) {
         hidePalette();
       }
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      if ($('#branch-picker-overlay')?.classList.contains('open')) hideBranchPicker();
+      else showBranchPicker();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'o' && !e.shiftKey && !e.altKey) {
@@ -4307,6 +4607,7 @@ async function init() {
   bindMenus();
   bindPalette();
   bindGoToClass();
+  bindBranchPicker();
   mountReaperIcons();
   initSidebarResize();
   applyAgentDock();

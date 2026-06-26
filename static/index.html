@@ -67,7 +67,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/intellij.css?v=36" />
+  <link rel="stylesheet" href="/intellij.css?v=42" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=5"></script>
@@ -122,6 +122,7 @@
             <button type="button" class="ij-menu-item" data-action="commit-panel">Commit…</button>
             <button type="button" class="ij-menu-item" data-action="pull" disabled>Pull</button>
             <button type="button" class="ij-menu-item" data-action="push" disabled>Push to remote</button>
+            <button type="button" class="ij-menu-item" data-action="switch-branch" disabled>Switch branch…<span class="ij-kbd">⌘⇧B</span></button>
             <button type="button" class="ij-menu-item" data-action="publish" disabled>Publish to GitHub…</button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="repo-info" disabled>Repository details…</button>
@@ -192,10 +193,10 @@
           <svg class="w-4 h-4 text-gray-500 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
         </div>
         <div class="relative">
-          <select id="branch-select" disabled class="appearance-none bg-surface-800/80 border border-surface-700 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-ring min-w-[100px] disabled:opacity-40 transition-colors">
-            <option value="">branch</option>
-          </select>
-          <svg class="w-4 h-4 text-gray-500 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          <button type="button" id="branch-picker-btn" disabled title="Switch branch (⌘⇧B)" class="ij-header-picker">
+            <span id="branch-picker-label">branch</span>
+            <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
         </div>
       </div>
 
@@ -535,20 +536,27 @@
           </div>
         </div>
       </div>
-      <form id="clone-repo-form" class="px-6 pb-2 space-y-4">
+      <form id="clone-repo-form" class="px-6 pb-2 space-y-4" novalidate>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
           <input id="clone-remote-url" name="remote_url" required placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
-          <input id="clone-local-name" name="name" pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <input id="clone-local-name" name="name" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <div id="clone-feedback" class="ij-clone-feedback">
+          <div id="clone-status" class="ij-clone-status hidden" aria-live="polite">
+            <span class="ij-clone-spinner" aria-hidden="true"></span>
+            <span id="clone-status-text">Cloning…</span>
+          </div>
+          <div id="clone-error" class="ij-clone-error hidden" role="alert"></div>
         </div>
         <p class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
       </form>
       <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
         <button type="button" id="clone-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Clone</button>
+        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Clone</button>
       </div>
     </div>
   </div>
@@ -758,6 +766,19 @@
     </div>
   </div>
 
+  <!-- Switch branch -->
+  <div id="branch-picker-overlay" class="ij-overlay">
+    <div class="ij-palette ij-branch-picker">
+      <div class="ij-goto-class-header">Switch branch</div>
+      <div class="ij-branch-picker-input-wrap">
+        <div id="branch-picker-ghost" class="ij-branch-autocomplete-ghost" aria-hidden="true"></div>
+        <input id="branch-picker-input" type="text" placeholder="Type to filter branches…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="branch-picker-results" />
+      </div>
+      <div id="branch-picker-results" class="max-h-80 overflow-auto panel-scroll py-1" role="listbox"></div>
+      <div class="ij-goto-class-hint">Tab autocomplete · ↑↓ navigate · Enter checkout · Esc close</div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
 
@@ -765,6 +786,6 @@
   <script src="/icons.js?v=1"></script>
   <script src="/monaco-languages.js?v=8"></script>
   <script src="/themes.js?v=8"></script>
-  <script src="/app.js?v=61"></script>
+  <script src="/app.js?v=66"></script>
 </body>
 </html>
