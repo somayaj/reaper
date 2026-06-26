@@ -14,6 +14,12 @@ const SKIP_DIRS: &[&str] = &[
     "out",
     ".idea",
     ".vscode",
+    "vendor",
+    "webapp",
+    "bower_components",
+    "tmp",
+    "log",
+    "storage",
 ];
 
 const SOURCE_EXTS: &[&str] = &[
@@ -30,6 +36,71 @@ pub struct SymbolLocation {
     pub column: u32,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+pub struct ClassSearchHit {
+    pub name: String,
+    pub qualified: String,
+    pub kind: String,
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+pub fn class_name_match_score(query: &str, name: &str, qualified: &str) -> Option<u32> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let q_lower = q.to_lowercase();
+    let name_lower = name.to_lowercase();
+    let qual_lower = qualified.to_lowercase();
+
+    if name_lower == q_lower {
+        return Some(1000);
+    }
+    if qual_lower == q_lower {
+        return Some(950);
+    }
+    if name_lower.starts_with(&q_lower) {
+        return Some(850);
+    }
+    if matches_initials(q, name) {
+        return Some(750);
+    }
+    if name_lower.contains(&q_lower) {
+        return Some(650);
+    }
+    if qual_lower.contains(&q_lower) {
+        return Some(500);
+    }
+    if q.contains('.') && qual_lower.ends_with(&q_lower) {
+        return Some(900);
+    }
+    None
+}
+
+fn matches_initials(query: &str, name: &str) -> bool {
+    let q: Vec<char> = query
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if q.is_empty() {
+        return false;
+    }
+    let mut qi = 0usize;
+    let mut prev_lower = true;
+    for ch in name.chars() {
+        if qi >= q.len() {
+            return true;
+        }
+        if ch.is_ascii_alphanumeric() && (prev_lower || qi == 0) && ch.eq_ignore_ascii_case(&q[qi]) {
+            qi += 1;
+        }
+        prev_lower = ch.is_ascii_lowercase();
+    }
+    qi >= q.len()
+}
+
 pub fn find_definition(
     ws: &Path,
     from_path: &str,
@@ -37,8 +108,13 @@ pub fn find_definition(
     column: u32,
     content: &str,
 ) -> Result<Option<SymbolLocation>> {
-    let symbol = match word_at(content, line, column) {
-        Some(s) if !s.is_empty() => s,
+    let symbol = match (
+        crate::workspace::ruby_nav::is_ruby_path(from_path)
+            .then(|| crate::workspace::ruby_nav::symbol_at(content, line, column))
+            .flatten(),
+        word_at(content, line, column),
+    ) {
+        (Some(s), _) | (_, Some(s)) if !s.is_empty() => s,
         _ => return Ok(None),
     };
 
@@ -46,17 +122,35 @@ pub fn find_definition(
         return Ok(None);
     }
 
+    if crate::workspace::ruby_nav::is_ruby_path(from_path) {
+        if let Some(hit) = crate::workspace::ruby_nav::find_rails_constant(ws, &symbol)? {
+            return Ok(Some(hit));
+        }
+    }
+
     let mut hits = Vec::new();
     if let Some(hit) = find_in_content(&symbol, from_path, content) {
         hits.push(hit);
     }
-    collect_definitions(ws, ws, &symbol, &mut hits)?;
+    collect_definitions(ws, ws, from_path, &symbol, &mut hits)?;
     Ok(best_definition(&hits, &symbol, from_path))
 }
 
-fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
+pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
     let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
     let col = column.saturating_sub(1) as usize;
+
+    if let Some(at) = line_text[..col.min(line_text.len())].rfind('@') {
+        let after = &line_text[at + 1..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+
     if col >= line_text.len() {
         return word_before(line_text, line_text.len());
     }
@@ -72,6 +166,81 @@ fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
         return Some(line_text[start..end].to_string());
     }
     word_before(line_text, col)
+}
+
+pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if trimmed.is_empty() || !trimmed.contains('(') {
+        return None;
+    }
+    if trimmed.starts_with("import ")
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with('@')
+        || trimmed.starts_with('*')
+    {
+        return None;
+    }
+    for pat in ["if (", "while (", "for (", "catch (", "switch (", "return ", "throw ", "new "] {
+        if trimmed.contains(pat) {
+            return None;
+        }
+    }
+
+    let paren = trimmed.find('(')?;
+    let before = trimmed[..paren].trim();
+    if before.is_empty() || before.contains('.') {
+        return None;
+    }
+
+    let name = before
+        .rsplit(|c: char| c.is_whitespace() || c == '<' || c == '>')
+        .next()?
+        .trim();
+    if name.is_empty() || is_keyword(name) {
+        return None;
+    }
+    const PRIMITIVES: &[&str] = &[
+        "void", "int", "long", "boolean", "char", "byte", "short", "float", "double",
+    ];
+    if PRIMITIVES.contains(&name) {
+        return None;
+    }
+
+    Some(name.to_string())
+}
+
+pub(crate) fn java_class_from_source_path(path: &str) -> Option<String> {
+    for prefix in ["src/main/java/", "src/test/java/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return rest
+                .strip_suffix(".java")
+                .map(|s| s.replace('\\', "/").replace('/', "."));
+        }
+    }
+    None
+}
+
+pub(crate) fn java_member_qualifier(content: &str, line: u32, column: u32, symbol: &str) -> Option<String> {
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let col = column.saturating_sub(1) as usize;
+    let needle = format!(".{symbol}");
+    let mut end = line_text.len();
+    while end > 0 {
+        let segment = &line_text[..end];
+        let pos = segment.rfind(&needle)?;
+        let sym_start = pos + 1;
+        let sym_end = sym_start + symbol.len();
+        if col >= sym_start && col <= sym_end {
+            let qual = line_text[..pos].trim();
+            let simple = qual.rsplit('.').next()?.trim();
+            if simple.is_empty() || is_keyword(simple) {
+                return None;
+            }
+            return Some(simple.to_string());
+        }
+        end = pos;
+    }
+    None
 }
 
 fn word_before(line: &str, col: usize) -> Option<String> {
@@ -94,7 +263,7 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-fn is_keyword(word: &str) -> bool {
+pub(crate) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
         "if" | "else"
@@ -106,6 +275,7 @@ fn is_keyword(word: &str) -> bool {
             | "new"
             | "true"
             | "false"
+            | "nil"
             | "null"
             | "this"
             | "super"
@@ -144,10 +314,32 @@ fn is_keyword(word: &str) -> bool {
             | "in"
             | "as"
             | "with"
+            | "module"
+            | "end"
+            | "elsif"
+            | "when"
+            | "then"
+            | "begin"
+            | "ensure"
+            | "raise"
+            | "unless"
+            | "until"
+            | "yield"
+            | "alias"
+            | "and"
+            | "or"
+            | "not"
+            | "redo"
+            | "retry"
+            | "undef"
+            | "defined"
+            | "require"
+            | "include"
+            | "extend"
     )
 }
 
-fn find_in_content(symbol: &str, path: &str, content: &str) -> Option<SymbolLocation> {
+pub(crate) fn find_in_content(symbol: &str, path: &str, content: &str) -> Option<SymbolLocation> {
     for (idx, line) in content.lines().enumerate() {
         if let Some(loc) = definition_on_line(line, symbol, path, idx as u32 + 1) {
             return Some(loc);
@@ -169,6 +361,7 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
 
     let prefixes = [
         ("class", "class"),
+        ("module", "module"),
         ("interface", "interface"),
         ("enum", "enum"),
         ("record", "record"),
@@ -195,6 +388,52 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
                 line: line_no,
                 column: col,
             });
+        }
+    }
+
+    if let Some(method) = java_method_name_on_line(line) {
+        if method == symbol {
+            let col = line
+                .find(&method)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            return Some(SymbolLocation {
+                name: symbol.to_string(),
+                kind: "method".into(),
+                path: path.to_string(),
+                line: line_no,
+                column: col,
+            });
+        }
+    }
+
+    if path.ends_with(".rb") {
+        if let Some(method) = crate::workspace::ruby_nav::ruby_method_on_line(line) {
+            if method == symbol {
+                let col = line.find(&method).map(|i| i as u32 + 1).unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "method".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
+        }
+        if let Some(method) = crate::workspace::ruby_nav::ruby_class_method_on_line(line) {
+            if method == symbol {
+                let col = line
+                    .find(&method)
+                    .map(|i| i as u32 + 1)
+                    .unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "method".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
         }
     }
 
@@ -238,6 +477,7 @@ fn best_definition(hits: &[SymbolLocation], symbol: &str, from_path: &str) -> Op
     }
 
     let from_dir = from_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let snake = crate::workspace::ruby_nav::camel_to_snake(symbol);
     let exact_names = [
         format!("{symbol}.java"),
         format!("{symbol}.kt"),
@@ -247,6 +487,11 @@ fn best_definition(hits: &[SymbolLocation], symbol: &str, from_path: &str) -> Op
         format!("{symbol}.py"),
         format!("{symbol}.go"),
         format!("{symbol}.cs"),
+        format!("{symbol}.rb"),
+        format!("{snake}.rb"),
+        format!("app/models/{snake}.rb"),
+        format!("app/controllers/{snake}.rb"),
+        format!("app/helpers/{snake}.rb"),
     ];
 
     let mut best: Option<(i32, SymbolLocation)> = None;
@@ -278,6 +523,7 @@ fn best_definition(hits: &[SymbolLocation], symbol: &str, from_path: &str) -> Op
 fn collect_definitions(
     ws: &Path,
     dir: &Path,
+    from_path: &str,
     symbol: &str,
     hits: &mut Vec<SymbolLocation>,
 ) -> Result<()> {
@@ -294,7 +540,7 @@ fn collect_definitions(
             if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            collect_definitions(ws, &path, symbol, hits)?;
+            collect_definitions(ws, &path, from_path, symbol, hits)?;
             continue;
         }
 
@@ -308,6 +554,10 @@ fn collect_definitions(
             .to_string_lossy()
             .replace('\\', "/");
 
+        if !should_scan_file(from_path, &rel) {
+            continue;
+        }
+
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
@@ -319,6 +569,43 @@ fn collect_definitions(
     }
 
     Ok(())
+}
+
+fn is_java_context(from_path: &str) -> bool {
+    let lower = from_path.to_lowercase();
+    lower.ends_with(".java")
+        || lower.ends_with(".kt")
+        || lower.ends_with(".kts")
+        || lower.ends_with(".groovy")
+}
+
+fn is_ruby_context(from_path: &str) -> bool {
+    from_path.to_lowercase().ends_with(".rb")
+}
+
+fn should_scan_file(from_path: &str, target_rel: &str) -> bool {
+    let lower = target_rel.to_lowercase();
+    if is_vendor_asset(&lower) {
+        return false;
+    }
+    if is_java_context(from_path) {
+        return lower.ends_with(".java")
+            || lower.ends_with(".kt")
+            || lower.ends_with(".kts")
+            || lower.ends_with(".groovy");
+    }
+    if is_ruby_context(from_path) {
+        return lower.ends_with(".rb");
+    }
+    true
+}
+
+fn is_vendor_asset(lower_path: &str) -> bool {
+    lower_path.contains("/vendor/")
+        || lower_path.contains("/webapp/")
+        || lower_path.contains("/node_modules/")
+        || lower_path.contains("jquery")
+        || lower_path.ends_with(".min.js")
 }
 
 fn is_source_file(name: &str) -> bool {
@@ -397,9 +684,204 @@ fn try_stdin_command(program: &str, args: &[&str], content: &str) -> Result<Stri
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+const TYPE_DEF_KEYWORDS: &[(&str, &str)] = &[
+    ("class", "class"),
+    ("module", "module"),
+    ("interface", "interface"),
+    ("enum", "enum"),
+    ("record", "record"),
+    ("struct", "struct"),
+    ("trait", "trait"),
+    ("object", "object"),
+];
+
+pub fn search_workspace_classes(
+    ws: &Path,
+    query: &str,
+    limit: usize,
+    skip_java: bool,
+) -> Result<Vec<ClassSearchHit>> {
+    let mut scored: Vec<(u32, ClassSearchHit)> = Vec::new();
+    collect_workspace_class_hits(ws, ws, query, skip_java, limit.saturating_mul(4), &mut scored)?;
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    Ok(dedupe_class_hits(scored, limit))
+}
+
+fn collect_workspace_class_hits(
+    ws: &Path,
+    dir: &Path,
+    query: &str,
+    skip_java: bool,
+    max_hits: usize,
+    scored: &mut Vec<(u32, ClassSearchHit)>,
+) -> Result<()> {
+    if scored.len() >= max_hits {
+        return Ok(());
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in entries {
+        if scored.len() >= max_hits {
+            return Ok(());
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_workspace_class_hits(ws, &path, query, skip_java, max_hits, scored)?;
+            continue;
+        }
+
+        if !is_source_file(&name) {
+            continue;
+        }
+        if skip_java && name.to_lowercase().ends_with(".java") {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(ws)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if query.trim().is_empty()
+            && !rel.starts_with("app/")
+            && !rel.contains("/src/")
+            && !rel.starts_with("lib/")
+        {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        index_types_in_content(&content, &rel, query, scored);
+    }
+
+    Ok(())
+}
+
+fn index_types_in_content(
+    content: &str,
+    rel_path: &str,
+    query: &str,
+    scored: &mut Vec<(u32, ClassSearchHit)>,
+) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        for (kind, keyword) in TYPE_DEF_KEYWORDS {
+            let pattern = format!("{keyword} ");
+            let Some(pos) = line.find(&pattern) else {
+                continue;
+            };
+            let rest = &line[pos + pattern.len()..];
+            let type_name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if type_name.is_empty() || !type_name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                continue;
+            }
+            let qualified = type_name.clone();
+            let Some(base) = class_name_match_score(query, &type_name, &qualified) else {
+                continue;
+            };
+            let col = line
+                .find(&type_name)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            let bonus = if rel_path.starts_with("app/") || rel_path.contains("/src/") {
+                300
+            } else {
+                100
+            };
+            scored.push((
+                base + bonus,
+                ClassSearchHit {
+                    name: type_name,
+                    qualified,
+                    kind: (*kind).to_string(),
+                    path: rel_path.to_string(),
+                    line: idx as u32 + 1,
+                    column: col,
+                },
+            ));
+        }
+    }
+}
+
+fn dedupe_class_hits(scored: Vec<(u32, ClassSearchHit)>, limit: usize) -> Vec<ClassSearchHit> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (_, hit) in scored {
+        let key = format!("{}:{}:{}", hit.path, hit.line, hit.name);
+        if seen.insert(key) {
+            out.push(hit);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_name_match_acronym() {
+        assert!(matches_initials("ACB", "ActionControllerBase"));
+        assert!(class_name_match_score("User", "User", "com.example.User").is_some());
+        assert!(class_name_match_score("ACB", "ActionControllerBase", "ActionControllerBase").is_some());
+    }
+
+    #[test]
+    fn rails_user_constant() {
+        let ws = std::env::temp_dir().join("reaper-rails-nav-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("app/models")).unwrap();
+        std::fs::write(
+            ws.join("app/models/user.rb"),
+            "class User < ApplicationRecord\nend\n",
+        )
+        .unwrap();
+        let hit = crate::workspace::ruby_nav::find_rails_constant(&ws, "User")
+            .expect("lookup ok")
+            .expect("should find User");
+        assert_eq!(hit.path, "app/models/user.rb");
+        assert_eq!(hit.name, "User");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn java_context_skips_jquery_for_string() {
+        assert!(!should_scan_file(
+            "src/main/java/com/example/App.java",
+            "src/main/webapp/js/jquery-1.7.2.js",
+        ));
+        assert!(should_scan_file(
+            "src/main/java/com/example/App.java",
+            "src/main/java/com/example/User.java",
+        ));
+    }
 
     #[test]
     fn rock_does_not_match_rock_analyzer() {
@@ -463,5 +945,27 @@ mod tests {
             .expect("should find Rock");
         assert_eq!(hit.path, "rocks/Rock.java");
         assert_eq!(hit.name, "Rock");
+    }
+
+    #[test]
+    fn parses_java_method_declaration() {
+        assert_eq!(
+            java_method_name_on_line("    public static void main(String[] args) {"),
+            Some("main".into())
+        );
+        assert_eq!(java_method_name_on_line("        SpringApplication.run(Application.class, args);"), None);
+    }
+
+    #[test]
+    fn parses_member_qualifier() {
+        let src = "        SpringApplication.run(Application.class, args);";
+        assert_eq!(
+            java_member_qualifier(src, 1, 27, "run"),
+            Some("SpringApplication".into())
+        );
+        assert_eq!(
+            java_member_qualifier(src, 1, 30, "run"),
+            Some("SpringApplication".into())
+        );
     }
 }

@@ -1,6 +1,6 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { Agent } from "@cursor/sdk";
+import { Agent, Cursor } from "@cursor/sdk";
 
 const PORT = Number(process.env.REAPER_CURSOR_BRIDGE_PORT || 8091);
 const sessions = new Map();
@@ -8,6 +8,16 @@ const sessions = new Map();
 function json(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+function normalizeSdkMode(mode) {
+  if (mode === "plan" || mode === "ask") return "plan";
+  return "agent";
+}
+
+function preparePrompt(prompt, mode) {
+  if (mode !== "ask") return prompt;
+  return `[Ask mode — answer questions about the codebase only. Do not edit, create, or delete files, and do not run commands that modify anything.]\n\n${prompt}`;
 }
 
 async function readBody(req) {
@@ -39,13 +49,22 @@ function emit(res, payload) {
 
 function describeToolCall(event) {
   const name = event.name || "tool";
+  const path = toolTargetPath(event.args);
   if (event.status === "running") {
-    const target = event.args?.path || event.args?.file || event.args?.command;
-    return target ? `→ ${name}: ${target}` : `→ ${name}…`;
+    return path ? `→ ${name}: ${path}` : `→ ${name}…`;
   }
-  if (event.status === "completed") return `✓ ${name}`;
+  if (event.status === "completed") return path ? `✓ ${name}: ${path}` : `✓ ${name}`;
   if (event.status === "error") return `✗ ${name} failed`;
   return null;
+}
+
+function toolTargetPath(args) {
+  if (!args || typeof args !== "object") return null;
+  return args.path || args.file || args.file_path || args.target || null;
+}
+
+function emitTool(res, text, extra = {}) {
+  emit(res, { type: "tool", text: `${text}\n`, ...extra });
 }
 
 function handleSdkMessage(res, event) {
@@ -54,7 +73,11 @@ function handleSdkMessage(res, event) {
       if (block.type === "text" && block.text) {
         emit(res, { type: "text", text: block.text });
       } else if (block.type === "tool_use" && block.name) {
-        emit(res, { type: "tool", text: `→ ${block.name}…\n` });
+        const path = toolTargetPath(block.input);
+        emitTool(res, path ? `→ ${block.name}: ${path}` : `→ ${block.name}…`, {
+          tool: block.name,
+          path,
+        });
       }
     }
     return;
@@ -62,17 +85,23 @@ function handleSdkMessage(res, event) {
 
   if (event.type === "tool_call") {
     const text = describeToolCall(event);
-    if (text) emit(res, { type: "tool", text: `${text}\n` });
+    if (text) {
+      emitTool(res, text, {
+        tool: event.name || null,
+        path: toolTargetPath(event.args),
+        status: event.status || null,
+      });
+    }
     return;
   }
 
   if (event.type === "task" && event.text) {
-    emit(res, { type: "tool", text: `${event.text}\n` });
+    emitTool(res, event.text);
     return;
   }
 
   if (event.type === "thinking" && event.text) {
-    emit(res, { type: "tool", text: `… ${event.text.slice(0, 120)}${event.text.length > 120 ? "…" : ""}\n` });
+    emitTool(res, `… ${event.text.slice(0, 120)}${event.text.length > 120 ? "…" : ""}`);
   }
 }
 
@@ -84,16 +113,34 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, sessions: sessions.size });
     }
 
+    if (req.method === "POST" && url.pathname === "/models") {
+      const body = await readBody(req);
+      const { apiKey } = body;
+      if (!apiKey) {
+        return json(res, 400, { error: "apiKey required" });
+      }
+      const models = await Cursor.models.list({ apiKey });
+      return json(res, 200, {
+        models: models.map((m) => ({
+          id: m.id,
+          label: m.displayName || m.id,
+          description: m.description || null,
+        })),
+      });
+    }
+
     if (req.method === "POST" && url.pathname === "/sessions") {
       const body = await readBody(req);
-      const { cwd, apiKey, model } = body;
+      const { cwd, apiKey, model, mode } = body;
       if (!cwd || !apiKey) {
         return json(res, 400, { error: "cwd and apiKey required" });
       }
 
+      const sdkMode = normalizeSdkMode(mode || "agent");
       const agent = await Agent.create({
         apiKey,
         model: { id: model || "composer-2.5" },
+        mode: sdkMode,
         local: { cwd, settingSources: [] },
       });
 
@@ -111,9 +158,16 @@ const server = http.createServer(async (req, res) => {
       }
 
       const body = await readBody(req);
-      const prompt = body.prompt?.trim();
-      if (!prompt) {
+      const rawPrompt = body.prompt?.trim();
+      if (!rawPrompt) {
         return json(res, 400, { error: "prompt required" });
+      }
+      const mode = body.mode || "agent";
+      const prompt = preparePrompt(rawPrompt, mode);
+      const sdkMode = normalizeSdkMode(mode);
+      const sendOptions = { mode: sdkMode };
+      if (body.model) {
+        sendOptions.model = { id: body.model };
       }
 
       res.writeHead(200, {
@@ -122,7 +176,7 @@ const server = http.createServer(async (req, res) => {
         Connection: "keep-alive",
       });
 
-      const run = await session.agent.send(prompt);
+      const run = await session.agent.send(prompt, sendOptions);
       for await (const event of run.stream()) {
         handleSdkMessage(res, event);
       }
