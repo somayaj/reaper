@@ -8,6 +8,13 @@ use crate::git::GitOutput;
 use super::exec::run_command;
 use super::safe_join;
 
+#[derive(Debug, Clone)]
+pub struct GradleCommand {
+    pub program: PathBuf,
+    pub cwd: PathBuf,
+    pub project_args: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GradleProjectInfo {
     pub is_gradle: bool,
@@ -71,16 +78,23 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     let root = find_gradle_root(ws, rel_path)?
         .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
 
-    ensure_gradlew_executable(&root)?;
-
-    let (program, extra_args) = gradle_program(&root);
-    let mut args: Vec<&str> = extra_args;
-    args.extend(["--no-daemon", "--console=plain", task]);
+    let cmd = resolve_gradle_command(&root)?;
+    let mut args = cmd.project_args.clone();
+    args.extend([
+        "--no-daemon".into(),
+        "--console=plain".into(),
+        task.into(),
+    ]);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut log = String::new();
-    log.push_str(&format!("$ cd {} && {} {}\n", rel_path_for(ws, &root)?, program, args.join(" ")));
+    log.push_str(&format!(
+        "$ {} {}\n",
+        cmd.program.display(),
+        arg_refs.join(" ")
+    ));
 
-    let out = run_command(&root, program, &args)?;
+    let out = run_gradle_with_command(&cmd, &arg_refs)?;
     log.push_str(&out.stdout);
     if !out.stderr.is_empty() {
         if !log.ends_with('\n') {
@@ -96,7 +110,144 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     })
 }
 
-fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
+pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<GitOutput> {
+    run_command(
+        &cmd.cwd,
+        cmd.program.to_str().with_context(|| {
+            format!("gradle program path is not valid UTF-8: {}", cmd.program.display())
+        })?,
+        args,
+    )
+}
+
+pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
+    let project_root = project_root
+        .canonicalize()
+        .with_context(|| format!("resolve gradle project root {}", project_root.display()))?;
+
+    #[cfg(windows)]
+    if project_root.join("gradlew.bat").is_file() {
+        return Ok(GradleCommand {
+            program: PathBuf::from("gradlew.bat"),
+            cwd: project_root,
+            project_args: Vec::new(),
+        });
+    }
+
+    #[cfg(not(windows))]
+    if project_root.join("gradlew").is_file() {
+        ensure_gradlew_executable(&project_root)?;
+        return Ok(GradleCommand {
+            program: PathBuf::from("./gradlew"),
+            cwd: project_root,
+            project_args: Vec::new(),
+        });
+    }
+
+    if let Some(bundled) = bundled_gradlew() {
+        return Ok(GradleCommand {
+            program: bundled.clone(),
+            cwd: bundled
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| bundled.clone()),
+            project_args: vec![
+                "-p".into(),
+                project_root.to_string_lossy().into_owned(),
+            ],
+        });
+    }
+
+    if let Some(gradle) = find_cached_gradle_distribution() {
+        return Ok(GradleCommand {
+            program: gradle,
+            cwd: project_root.clone(),
+            project_args: Vec::new(),
+        });
+    }
+
+    if let Ok(path) = which_gradle_on_path() {
+        return Ok(GradleCommand {
+            program: path,
+            cwd: project_root,
+            project_args: Vec::new(),
+        });
+    }
+
+    bail!(
+        "Gradle not found for {}. Add a Gradle wrapper (gradlew) to the project or install Gradle.",
+        project_root.display()
+    )
+}
+
+fn bundled_gradlew() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("REAPER_GRADLE_HOME") {
+        let gradlew = PathBuf::from(&dir).join("gradlew");
+        if gradlew.is_file() {
+            return Some(gradlew);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let bundled = mac_os.join("../Resources/gradlew");
+            if bundled.is_file() {
+                return Some(bundled.canonicalize().unwrap_or(bundled));
+            }
+        }
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gradlew");
+    if manifest.is_file() {
+        return Some(manifest);
+    }
+
+    None
+}
+
+fn find_cached_gradle_distribution() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let dists = PathBuf::from(home).join(".gradle/wrapper/dists");
+    let mut candidates = Vec::new();
+    collect_gradle_bins(&dists, &mut candidates);
+    candidates.sort();
+    candidates.pop()
+}
+
+fn collect_gradle_bins(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let bin = path.join("gradle").join("bin").join("gradle");
+            #[cfg(windows)]
+            let bin = path.join("gradle").join("bin").join("gradle.bat");
+            if bin.is_file() {
+                out.push(bin);
+            }
+            collect_gradle_bins(&path, out);
+        }
+    }
+}
+
+fn which_gradle_on_path() -> Result<PathBuf> {
+    let output = std::process::Command::new("which")
+        .arg("gradle")
+        .output()
+        .context("failed to run which gradle")?;
+    if !output.status.success() {
+        bail!("gradle not on PATH");
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        bail!("gradle not on PATH");
+    }
+    Ok(PathBuf::from(path))
+}
+
+pub fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
     let file_path = safe_join(ws, rel_path)?;
     let ws_canon = ws
         .canonicalize()
@@ -119,11 +270,7 @@ fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
             break;
         }
 
-        let has_settings = dir.join("settings.gradle").is_file()
-            || dir.join("settings.gradle.kts").is_file();
-        let has_build = dir.join("build.gradle").is_file() || dir.join("build.gradle.kts").is_file();
-
-        if has_settings || has_build {
+        if is_gradle_project_dir(&dir) {
             return Ok(Some(dir));
         }
 
@@ -133,7 +280,73 @@ fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
         dir = parent.to_path_buf();
     }
 
+    if rel_path == "." || rel_path.is_empty() {
+        return find_first_gradle_root(ws);
+    }
+
     Ok(None)
+}
+
+fn is_gradle_project_dir(dir: &Path) -> bool {
+    dir.join("settings.gradle").is_file()
+        || dir.join("settings.gradle.kts").is_file()
+        || dir.join("build.gradle").is_file()
+        || dir.join("build.gradle.kts").is_file()
+}
+
+/// Discover Gradle project roots under a workspace (supports nested layouts like `repo-1/`).
+pub fn find_all_gradle_roots(ws: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    collect_gradle_roots(ws, ws, 0, 8, &mut found)?;
+    found.sort_by(|a, b| a.display().to_string().cmp(&b.display().to_string()));
+    found.dedup();
+    Ok(found)
+}
+
+fn collect_gradle_roots(
+    ws: &Path,
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if depth > max_depth {
+        return Ok(());
+    }
+    let dir_canon = dir
+        .canonicalize()
+        .with_context(|| format!("resolve {}", dir.display()))?;
+    let ws_canon = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    if !dir_canon.starts_with(&ws_canon) {
+        return Ok(());
+    }
+
+    if is_gradle_project_dir(dir) {
+        out.push(dir_canon);
+        return Ok(());
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == ".git" || name == ".reaper" || name == "node_modules" || name == "build" {
+            continue;
+        }
+        collect_gradle_roots(ws, &path, depth + 1, max_depth, out)?;
+    }
+    Ok(())
+}
+
+fn find_first_gradle_root(ws: &Path) -> Result<Option<PathBuf>> {
+    Ok(find_all_gradle_roots(ws)?.into_iter().next())
 }
 
 fn rel_path_for(ws: &Path, path: &Path) -> Result<String> {
@@ -144,6 +357,12 @@ fn rel_path_for(ws: &Path, path: &Path) -> Result<String> {
         .with_context(|| "path outside workspace")?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+pub fn is_spring_boot_project(root: &Path) -> bool {
+    read_build_file(root)
+        .map(|content| content.contains("org.springframework.boot"))
+        .unwrap_or(false)
 }
 
 fn read_build_file(root: &Path) -> Option<String> {
@@ -200,23 +419,7 @@ fn parse_quoted_value(s: &str) -> Option<String> {
     None
 }
 
-fn gradle_program(root: &Path) -> (&'static str, Vec<&'static str>) {
-    #[cfg(windows)]
-    {
-        if root.join("gradlew.bat").is_file() {
-            return ("gradlew.bat", Vec::new());
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if root.join("gradlew").is_file() {
-            return ("./gradlew", Vec::new());
-        }
-    }
-    ("gradle", Vec::new())
-}
-
-fn ensure_gradlew_executable(root: &Path) -> Result<()> {
+pub fn ensure_gradlew_executable(root: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -231,4 +434,28 @@ fn ensure_gradlew_executable(root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_gradlew_exists_in_repo() {
+        let gradlew = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gradlew");
+        assert!(gradlew.is_file(), "bundled gradlew should exist at repo root");
+    }
+
+    #[test]
+    fn resolve_gradlew_from_relative_project_root() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data/workspaces/somayaj/repo-1");
+        if !root.join("gradlew").is_file() {
+            return;
+        }
+        let rel = PathBuf::from("./data/workspaces/somayaj/repo-1");
+        let cmd = resolve_gradle_command(&rel).expect("resolve gradle command");
+        assert_eq!(cmd.program, PathBuf::from("./gradlew"));
+        assert!(cmd.cwd.join("gradlew").is_file());
+    }
 }

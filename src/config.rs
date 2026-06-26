@@ -5,6 +5,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub data_dir: PathBuf,
+    pub static_dir: PathBuf,
     pub repos_dir: PathBuf,
     pub workspaces_dir: PathBuf,
     pub metadata_dir: PathBuf,
@@ -15,7 +16,8 @@ impl Config {
     pub fn from_env() -> Self {
         let data_dir = std::env::var("REAPER_DATA_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./data"));
+            .unwrap_or_else(|_| default_data_dir());
+        let static_dir = resolve_static_dir();
 
         Self {
             host: std::env::var("REAPER_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
@@ -28,6 +30,7 @@ impl Config {
             metadata_dir: data_dir.join("metadata"),
             settings_path: data_dir.join("settings.json"),
             data_dir,
+            static_dir,
         }
     }
 
@@ -67,6 +70,48 @@ impl Config {
     pub fn repo_exists(&self, name: &str) -> bool {
         is_bare_repo(&self.repo_path(name))
     }
+}
+
+fn default_data_dir() -> PathBuf {
+    if running_in_app_bundle() {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join("Library/Application Support/Reaper");
+        }
+    }
+    PathBuf::from("./data")
+}
+
+fn resolve_static_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("REAPER_STATIC_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let bundled = mac_os.join("../Resources/static");
+            if bundled.join("index.html").is_file() {
+                return bundled.canonicalize().unwrap_or(bundled);
+            }
+        }
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    if manifest.join("index.html").is_file() {
+        return manifest;
+    }
+
+    PathBuf::from("static")
+}
+
+pub fn running_in_app_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| {
+            p.to_string_lossy()
+                .contains(".app/Contents/MacOS/")
+        })
+        .unwrap_or(false)
 }
 
 fn valid_segment(s: &str) -> bool {
