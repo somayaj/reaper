@@ -59,6 +59,7 @@ const state = {
   agentLastToolPath: null,
   agentSeenPaths: new Set(),
   agentHadFileChanges: false,
+  cloneBusy: false,
   editorReady: false,
   suppressEditorChange: false,
   autoSaveTimer: null,
@@ -121,13 +122,60 @@ function repoApi(name, suffix = '') {
   return `/api/repos/${encodeURIComponent(name)}${suffix}`;
 }
 
-function toast(msg, type = 'info') {
+function toast(msg, type = 'info', { duration } = {}) {
   const el = $('#toast');
   el.textContent = msg;
   el.className = `ij-toast ${type}`;
   el.classList.remove('hidden');
   clearTimeout(toast._timer);
-  toast._timer = setTimeout(() => el.classList.add('hidden'), 3500);
+  const ms = duration ?? (type === 'error' ? 9000 : 3500);
+  toast._timer = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+function setGlobalLoading(on, text = 'Loading…') {
+  const overlay = $('#loading-overlay');
+  const label = $('#loading-text');
+  if (label) label.textContent = text;
+  overlay?.classList.toggle('hidden', !on);
+  overlay?.classList.toggle('flex', on);
+}
+
+function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
+  const errEl = $('#clone-error');
+  const statusEl = $('#clone-status');
+  const statusText = $('#clone-status-text');
+  const cancelBtn = $('#clone-modal-cancel');
+  const submitBtn = $('#btn-clone-submit');
+  const overlay = $('#clone-modal-overlay');
+
+  if (errEl) {
+    errEl.textContent = error;
+    errEl.classList.toggle('hidden', !error);
+    if (error) errEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  if (statusEl) {
+    if (statusText) statusText.textContent = status || 'Cloning…';
+    statusEl.classList.toggle('hidden', !status);
+  }
+  if (overlay) overlay.classList.toggle('ij-clone-modal--busy', busy);
+  if (cancelBtn) cancelBtn.disabled = busy;
+  if (submitBtn) {
+    submitBtn.disabled = busy;
+    submitBtn.textContent = busy ? 'Cloning…' : 'Clone';
+  }
+  ['#clone-remote-url', '#clone-local-name'].forEach((sel) => {
+    const input = $(sel);
+    if (input) input.disabled = busy;
+  });
+  state.cloneBusy = busy;
+}
+
+function normalizeRemoteUrl(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (/^git@/i.test(trimmed)) return trimmed;
+  if (!trimmed.includes('://')) return `https://${trimmed}`;
+  return trimmed;
 }
 
 function deriveNameFromUrl(raw) {
@@ -1979,12 +2027,15 @@ async function createRepo(e) {
 }
 
 function showCloneModal() {
+  setCloneModalState({ busy: false, status: '', error: '' });
   $('#clone-modal-overlay')?.classList.remove('hidden');
   $('#clone-modal-overlay')?.classList.add('flex');
   $('#clone-remote-url')?.focus();
 }
 
 function hideCloneModal() {
+  if (state.cloneBusy) return;
+  setCloneModalState({ busy: false, status: '', error: '' });
   $('#clone-modal-overlay')?.classList.add('hidden');
   $('#clone-modal-overlay')?.classList.remove('flex');
 }
@@ -2010,26 +2061,54 @@ function hidePublishModal() {
 
 async function cloneRepo(e) {
   e.preventDefault();
-  const fd = new FormData(e.target);
-  const remoteUrl = String(fd.get('remote_url') || '').trim();
+  const form = e.target;
+  const fd = new FormData(form);
+  const remoteUrl = normalizeRemoteUrl(fd.get('remote_url'));
   const localName = String(fd.get('name') || '').trim();
+
+  setCloneModalState({ error: '', status: '' });
+
+  if (!remoteUrl) {
+    setCloneModalState({ error: 'Enter a remote URL (HTTPS), e.g. https://github.com/owner/repo.git' });
+    return;
+  }
+  if (/^git@/i.test(remoteUrl)) {
+    setCloneModalState({ error: 'SSH URLs are not supported. Use HTTPS, e.g. https://github.com/owner/repo.git' });
+    return;
+  }
+  if (localName && !/^[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)?$/.test(localName)) {
+    setCloneModalState({ error: 'Local name must look like owner/repo (letters, numbers, . _ - only).' });
+    return;
+  }
+
+  setCloneModalState({
+    busy: true,
+    status: 'Cloning from remote — large repos can take a minute or two…',
+  });
+
   try {
     const body = { remote_url: remoteUrl };
     if (localName) body.name = localName;
     const repo = await api('/api/repos/import', { method: 'POST', body: JSON.stringify(body) });
+    setCloneModalState({ busy: false });
     hideCloneModal();
-    e.target.reset();
+    form.reset();
     await loadRepos();
     $('#repo-select').value = repo.name;
     await selectRepo(repo.name);
     toast(`Cloned ${repo.name}`, 'success');
   } catch (err) {
+    const msg = err.message || String(err);
+    setCloneModalState({ busy: false, error: msg, status: '' });
+    terminalLog(`clone failed: ${msg}`);
     const host = hostFromUrl(remoteUrl);
-    if (host && /auth|401|403|credential|token|pat/i.test(err.message)) {
-      toast(`${err.message} — add a PAT in Settings → Git hosts`, 'error');
+    if (host && /auth|401|403|credential|token|pat/i.test(msg)) {
+      toast(`${msg} — add a PAT in Settings → Git hosts`, 'error', { duration: 12000 });
     } else {
-      toast(err.message, 'error');
+      toast(msg, 'error', { duration: 12000 });
     }
+  } finally {
+    if (state.cloneBusy) setCloneModalState({ busy: false });
   }
 }
 
@@ -3320,11 +3399,27 @@ async function suggestCommitMessage({ auto = false } = {}) {
 }
 
 async function syncPull() {
-  const out = await api(repoApi(state.repo, '/workspace/sync'), { method: 'POST' });
-  terminalLog(out.stdout || out.stderr || 'Synced');
-  await refreshTree();
-  await refreshGitStatus();
-  toast('Pulled latest', 'success');
+  if (!state.repo) {
+    toast('Select a repository first', 'info');
+    return;
+  }
+  const btn = $('#btn-sync');
+  if (btn) btn.disabled = true;
+  setGlobalLoading(true, `Pulling ${state.repo}…`);
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/sync'), { method: 'POST' });
+    terminalLog(out.stdout || out.stderr || 'Synced');
+    await refreshTree();
+    await refreshGitStatus();
+    toast('Pulled latest', 'success');
+  } catch (err) {
+    const msg = err.message || String(err);
+    terminalLog(`pull failed: ${msg}`);
+    toast(msg, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    setGlobalLoading(false);
+  }
 }
 
 async function checkoutBranch(branch) {
