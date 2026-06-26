@@ -67,7 +67,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/intellij.css?v=42" />
+  <link rel="stylesheet" href="/intellij.css?v=45" />
+  <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=5"></script>
@@ -89,7 +90,7 @@
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
     <div class="flex flex-col items-center gap-4">
-      <img src="/logo.svg" alt="" class="w-14 h-14 logo-mark loading-dot" />
+      <span data-reaper-logo="xl" data-reaper-logo-pulse="true" class="logo-mark loading-dot"></span>
       <p id="loading-text" class="text-sm text-gray-500">Loading…</p>
     </div>
   </div>
@@ -98,7 +99,7 @@
   <header class="ij-menubar flex items-center justify-between px-2 shrink-0">
     <div class="flex items-center gap-1 min-w-0 flex-1">
       <a href="/" class="flex items-center gap-2 shrink-0 group px-1">
-        <img src="/logo.svg" alt="Reaper" class="w-7 h-7 logo-mark" />
+        <span data-reaper-logo="sm" class="logo-mark"></span>
         <span class="hidden lg:block text-sm font-semibold text-white tracking-tight">Reaper</span>
       </a>
 
@@ -292,7 +293,7 @@
       <div id="panel-explorer" class="panel flex-1 overflow-auto panel-scroll">
         <div id="file-tree" class="ij-file-tree">
           <div class="flex flex-col items-center justify-center py-12 px-4 text-center">
-            <img src="/logo.svg" alt="" class="w-10 h-10 opacity-30 mb-3 logo-mark" />
+            <span data-reaper-logo="lg" data-reaper-logo-opacity="opacity-30 mb-3" class="logo-mark"></span>
             <p class="text-xs text-gray-600">Select a repo to browse files</p>
           </div>
         </div>
@@ -529,7 +530,7 @@
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
         <div class="flex items-center gap-3 mb-1">
-          <img src="/logo.svg" alt="" class="w-9 h-9 logo-mark" />
+          <span data-reaper-logo="md" class="logo-mark"></span>
           <div>
             <h3 class="text-lg font-semibold text-white">Clone repository</h3>
             <p class="text-xs text-gray-500">Import from GitHub, GitLab, or any HTTPS remote</p>
@@ -595,7 +596,7 @@
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
         <div class="flex items-center gap-3 mb-1">
-          <img src="/logo.svg" alt="" class="w-9 h-9 logo-mark" />
+          <span data-reaper-logo="md" class="logo-mark"></span>
           <div>
             <h3 class="text-lg font-semibold text-white">New repository</h3>
             <p class="text-xs text-gray-500">Hosted locally · HTTP git remote</p>
@@ -783,9 +784,10 @@
   <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=1"></script>
   <script src="/monaco-languages.js?v=8"></script>
   <script src="/themes.js?v=8"></script>
-  <script src="/app.js?v=67"></script>
+  <script src="/app.js?v=69"></script>
 </body>
 </html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Reaper — animated harvest</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      background: #050505;
+      color: #aaa;
+      font-family: Consolas, "JetBrains Mono", Menlo, monospace;
+    }
+    h1 { font-size: 0.85rem; font-weight: 400; color: #666; letter-spacing: 0.06em; }
+    .stage {
+      width: min(90vw, 420px);
+      aspect-ratio: 1;
+      background: transparent;
+    }
+    svg { width: 100%; height: 100%; display: block; }
+
+    /* Static logo panel — fades out so animation is visible */
+    .panel-bg,
+    .field-bg,
+    .field-earth,
+    .intro-field {
+      animation: clearPanel 4s ease-in-out infinite;
+    }
+    @keyframes clearPanel {
+      0%, 10%   { opacity: 1; }
+      22%, 88%  { opacity: 0; }
+      96%, 100% { opacity: 1; }
+    }
+
+    /* Polyglot console — lines appear */
+    .console-line.line-1 { animation: line1 4s ease infinite; }
+    .console-line.line-2 { animation: line2 4s ease infinite; }
+    .console-line.line-3 { animation: line3 4s ease infinite; }
+    .console-line.line-4 { animation: line4 4s ease infinite; }
+    .console-line.line-5 { animation: line5 4s ease infinite; }
+
+    @keyframes line1 { 0%, 2% { opacity: 0; } 6%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
+    @keyframes line2 { 0%, 5% { opacity: 0; } 9%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
+    @keyframes line3 { 0%, 8% { opacity: 0; } 12%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
+    @keyframes line4 { 0%, 11% { opacity: 0; } 15%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
+    @keyframes line5 { 0%, 14% { opacity: 0; } 18%, 20% { opacity: 1; } 22%, 100% { opacity: 0; } }
+
+    /* Animated harvest — expands to fill canvas after console clears */
+    .anim-layer {
+      transform-box: view-box;
+      transform-origin: 32px 32px;
+      animation: showAnim 4s ease-in-out infinite;
+    }
+    @keyframes showAnim {
+      0%, 18%   { opacity: 0; transform: scale(0.72) translateY(10px); }
+      26%, 88%  { opacity: 1; transform: scale(1) translateY(0); }
+      96%, 100% { opacity: 0; transform: scale(0.72) translateY(10px); }
+    }
+
+    /* Conduit — code → field */
+    .conduit {
+      opacity: 0;
+      animation: conduitPulse 4s ease infinite;
+    }
+    @keyframes conduitPulse {
+      0%, 18%   { opacity: 0; }
+      22%, 38%  { opacity: 0.7; }
+      42%, 100% { opacity: 0; }
+    }
+
+    /* Code drops into field */
+    .code-drop {
+      opacity: 0;
+      animation: codeDrop 4s ease-in infinite;
+    }
+    .code-drop-1 { animation-delay: 0s; }
+    .code-drop-2 { animation-delay: 0.12s; }
+    .code-drop-3 { animation-delay: 0.24s; }
+    .code-drop-4 { animation-delay: 0.36s; }
+    .code-drop-5 { animation-delay: 0.48s; }
+    .code-drop-6 { animation-delay: 0.60s; }
+
+    @keyframes codeDrop {
+      0%, 20%   { opacity: 0; transform: translate(0, 0) scale(1); }
+      24%       { opacity: 1; }
+      36%       { opacity: 0.9; transform: translate(var(--dx, 0px), 22px) scale(0.9); }
+      40%, 100% { opacity: 0; transform: translate(var(--dx, 0px), 26px) scale(0.7); }
+    }
+
+    /* Crops grow after code lands */
+    .stalk {
+      transform-box: fill-box;
+      transform-origin: center bottom;
+      opacity: 0;
+      transform: scaleY(0);
+    }
+    .stalk-1 { animation: cropGrow1 4s ease-out infinite; }
+    .stalk-2 { animation: cropGrow2 4s ease-out infinite; }
+    .stalk-3 { animation: cropGrow3 4s ease-out infinite; }
+    .stalk-4 { animation: cropGrow4 4s ease-out infinite; }
+    .stalk-5 { animation: cropGrow5 4s ease-out infinite; }
+    .stalk-6 { animation: cropGrow6 4s ease-out infinite; }
+    .stalk-7 { animation: cropGrow7 4s ease-out infinite; }
+    .stalk-8 { animation: cropGrow8 4s ease-out infinite; }
+
+    @keyframes cropGrow1 { 0%, 36% { transform: scaleY(0); opacity: 0; } 44%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow2 { 0%, 38% { transform: scaleY(0); opacity: 0; } 46%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow3 { 0%, 40% { transform: scaleY(0); opacity: 0; } 48%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow4 { 0%, 42% { transform: scaleY(0); opacity: 0; } 50%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow5 { 0%, 44% { transform: scaleY(0); opacity: 0; } 52%, 54% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow6 { 0%, 46% { transform: scaleY(0); opacity: 0; } 54%, 56% { transform: scaleY(1); opacity: 1; } 60%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow7 { 0%, 48% { transform: scaleY(0); opacity: 0; } 56%, 58% { transform: scaleY(1); opacity: 1; } 62%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+    @keyframes cropGrow8 { 0%, 50% { transform: scaleY(0); opacity: 0; } 58%, 60% { transform: scaleY(1); opacity: 1; } 64%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
+
+    /* Slash reaps the field */
+    .reap-slash {
+      font-family: Consolas, "JetBrains Mono", Menlo, Monaco, monospace;
+      animation: reapSlash 4s ease-out infinite;
+    }
+    @keyframes reapSlash {
+      0%, 50%   { opacity: 0; transform: translate(0, 10px) scale(0.85); }
+      52%       { opacity: 1; transform: translate(0, 0) scale(1); }
+      54%, 58%  { opacity: 0.95; transform: translate(30px, -24px) scale(1.08); }
+      62%, 100% { opacity: 0; transform: translate(34px, -28px) scale(0.9); }
+    }
+
+    .reap-line { display: none; }
+
+    /* Harvest output — crops come out as 01 pile */
+    .harvest-pile {
+      opacity: 0;
+      animation: harvestOut 4s ease-out infinite;
+    }
+    @keyframes harvestOut {
+      0%, 58%   { opacity: 0; transform: translateY(6px) scale(0.7); }
+      64%, 78%  { opacity: 1; transform: translateY(0) scale(1); }
+      86%, 100% { opacity: 0; transform: translateY(-2px) scale(0.9); }
+    }
+
+    .harvest-bit {
+      opacity: 0;
+      animation: bitOut 4s ease-out infinite;
+    }
+    .harvest-bit-1 { animation-delay: 0s; }
+    .harvest-bit-2 { animation-delay: 0.08s; }
+    .harvest-bit-3 { animation-delay: 0.16s; }
+
+    @keyframes bitOut {
+      0%, 60%   { opacity: 0; transform: translate(var(--ox, 0px), 8px); }
+      66%, 80%  { opacity: 0.9; transform: translate(0, 0); }
+      88%, 100% { opacity: 0; transform: translate(0, -3px); }
+    }
+
+    .reap-flash { display: none; }
+
+    p.hint { font-size: 0.75rem; color: #444; max-width: 30rem; text-align: center; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h1>Reaper · code in → bit crops out</h1>
+  <div class="stage">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-label="Reaper animated harvest">
+      <!-- Static logo panel (clears during animation) -->
+      <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
+      <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
+      <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
+
+      <!-- Polyglot console + static field (intro) -->
+      <g class="intro-field" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+        <text x="14" y="51" fill="#629755" font-size="6">0</text>
+        <text x="20" y="51" fill="#589df6" font-size="6">1</text>
+        <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
+        <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
+        <text x="38" y="51" fill="#589df6" font-size="6">1</text><text x="38" y="47" fill="#589df6" font-size="6">1</text><text x="38" y="43" fill="#589df6" font-size="6">1</text>
+        <text x="44" y="51" fill="#c9a227" font-size="5.5">0</text><text x="44" y="47" fill="#c9a227" font-size="5.5">1</text><text x="44" y="43" fill="#c9a227" font-size="5.5">0</text><text x="44" y="39" fill="#c9a227" font-size="5.5">1</text>
+        <text x="50" y="51" fill="#629755" font-size="6">0</text><text x="50" y="47" fill="#629755" font-size="6">0</text><text x="50" y="43" fill="#629755" font-size="6">0</text><text x="50" y="39" fill="#629755" font-size="6">0</text>
+        <text x="56" y="51" fill="#589df6" font-size="6">1</text><text x="56" y="47" fill="#589df6" font-size="6">1</text><text x="56" y="43" fill="#589df6" font-size="6">1</text><text x="56" y="39" fill="#589df6" font-size="6">1</text><text x="56" y="35" fill="#589df6" font-size="6">1</text>
+        <text x="12" y="48" fill="#ffc66d" font-size="5" opacity="0.7">01</text>
+      </g>
+
+      <!-- Polyglot console lines -->
+      <text class="console-line line-1" x="10" y="12" fill="#629755" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5">$ git</text>
+      <text class="console-line line-2" x="10" y="19" fill="#589df6" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5">&gt; build</text>
+      <text class="console-line line-3" x="10" y="26" fill="#888888" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5">&gt; run</text>
+      <text class="console-line line-4" x="10" y="33" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5">
+        <tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan>
+      </text>
+      <text class="console-line line-5" x="10" y="40" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5">
+        <tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan>
+      </text>
+
+      <!-- Animated harvest — uses full canvas -->
+      <g class="anim-layer">
+      <line x1="6" y1="58" x2="58" y2="58" stroke="#2a2218" stroke-width="1.2" opacity="0.6"/>
+
+      <!-- Conduit: top → field -->
+      <g class="conduit">
+        <path d="M32 10 L32 22" stroke="#444" stroke-width="1" stroke-dasharray="2 2"/>
+        <polygon points="32,24 30,21 34,21" fill="#444"/>
+      </g>
+
+      <!-- Code streaming into field -->
+      <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6" font-weight="400">
+        <text class="code-drop code-drop-1" x="28" y="12" fill="#ed8b00" style="--dx:-4px">.java</text>
+        <text class="code-drop code-drop-2" x="34" y="12" fill="#dea584" style="--dx:2px">.rs</text>
+        <text class="code-drop code-drop-3" x="24" y="14" fill="#3776ab" style="--dx:-10px">.py</text>
+        <text class="code-drop code-drop-4" x="38" y="14" fill="#3178c6" style="--dx:8px">.ts</text>
+        <text class="code-drop code-drop-5" x="32" y="13" fill="#629755" style="--dx:0px">0</text>
+        <text class="code-drop code-drop-6" x="40" y="13" fill="#589df6" style="--dx:12px">1</text>
+      </g>
+
+      <text class="reap-slash" x="12" y="56" fill="#589df6" font-size="12" font-weight="400">/</text>
+      <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" font-size="7">
+        <g class="stalk stalk-1">
+          <line x1="14" y1="58" x2="14" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="14" y="57" fill="#629755">0</text>
+        </g>
+        <g class="stalk stalk-2">
+          <line x1="20" y1="58" x2="20" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="20" y="57" fill="#589df6">1</text>
+        </g>
+        <g class="stalk stalk-3">
+          <line x1="26" y1="58" x2="26" y2="50" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="26" y="57" fill="#c9a227" font-size="6.5">0</text>
+          <text x="26" y="52" fill="#c9a227" font-size="6.5">1</text>
+        </g>
+        <g class="stalk stalk-4">
+          <line x1="32" y1="58" x2="32" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="32" y="57" fill="#629755">0</text>
+          <text x="32" y="52" fill="#629755">0</text>
+          <text x="32" y="47" fill="#629755">0</text>
+        </g>
+        <g class="stalk stalk-5">
+          <line x1="38" y1="58" x2="38" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="38" y="57" fill="#589df6">1</text>
+          <text x="38" y="52" fill="#589df6">1</text>
+          <text x="38" y="47" fill="#589df6">1</text>
+        </g>
+        <g class="stalk stalk-6">
+          <line x1="44" y1="58" x2="44" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="44" y="57" fill="#c9a227" font-size="6.5">0</text>
+          <text x="44" y="52" fill="#c9a227" font-size="6.5">1</text>
+          <text x="44" y="47" fill="#c9a227" font-size="6.5">0</text>
+          <text x="44" y="42" fill="#c9a227" font-size="6.5">1</text>
+        </g>
+        <g class="stalk stalk-7">
+          <line x1="50" y1="58" x2="50" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="50" y="57" fill="#629755">0</text>
+          <text x="50" y="52" fill="#629755">0</text>
+          <text x="50" y="47" fill="#629755">0</text>
+          <text x="50" y="42" fill="#629755">0</text>
+        </g>
+        <g class="stalk stalk-8">
+          <line x1="56" y1="58" x2="56" y2="36" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>
+          <text x="56" y="57" fill="#589df6">1</text>
+          <text x="56" y="52" fill="#589df6">1</text>
+          <text x="56" y="47" fill="#589df6">1</text>
+          <text x="56" y="42" fill="#589df6">1</text>
+          <text x="56" y="37" fill="#589df6">1</text>
+        </g>
+      </g>
+
+      <!-- Harvest output -->
+      <g class="harvest-pile" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace">
+        <text class="harvest-bit harvest-bit-1" x="10" y="50" fill="#ffc66d" font-size="6" style="--ox:-6px">01</text>
+        <text class="harvest-bit harvest-bit-2" x="10" y="44" fill="#ffc66d" font-size="6" opacity="0.85" style="--ox:-4px">01</text>
+        <text class="harvest-bit harvest-bit-3" x="14" y="47" fill="#c9a227" font-size="5.5" opacity="0.7" style="--ox:4px">01</text>
+      </g>
+
+      <!-- 0/1 crops — full-height field -->
+      </g>
+    </svg>
+  </div>
+  <p class="hint">Polyglot console + static logo → panel clears → code in → crops grow → / slash reaps → 01 out. Loop ~4s.</p>
+</body>
+</html>
