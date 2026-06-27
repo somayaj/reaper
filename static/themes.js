@@ -14,20 +14,20 @@
 
   // IntelliJ Darcula: thin red underline only — no text wash-out (alpha on squiggle, not on spans).
   const DIAG_EDITOR_COLORS = {
-    'editorError.foreground': '#BC3F3C70',
-    'editorError.border': '#BC3F3C50',
+    'editorError.foreground': '#F87171',
+    'editorError.border': '#F87171',
     'editorError.background': '#00000000',
-    'editorWarning.foreground': '#BE911760',
-    'editorWarning.border': '#BE911745',
+    'editorWarning.foreground': '#FBBF24',
+    'editorWarning.border': '#FBBF24',
     'editorWarning.background': '#00000000',
-    'editorInfo.foreground': '#6897BB55',
-    'editorInfo.border': '#6897BB40',
+    'editorInfo.foreground': '#60A5FA',
+    'editorInfo.border': '#60A5FA',
     'editorInfo.background': '#00000000',
-    'minimap.errorHighlight': '#BC3F3C40',
-    'minimap.warningHighlight': '#BE911740',
-    'overviewRuler.errorForeground': '#BC3F3C60',
-    'overviewRuler.warningForeground': '#BE911750',
-    'overviewRuler.infoForeground': '#6897BB45',
+    'minimap.errorHighlight': '#F8717188',
+    'minimap.warningHighlight': '#FBBF2488',
+    'overviewRuler.errorForeground': '#F87171',
+    'overviewRuler.warningForeground': '#FBBF24',
+    'overviewRuler.infoForeground': '#60A5FA',
   };
 
   const MONACO_THEMES = {

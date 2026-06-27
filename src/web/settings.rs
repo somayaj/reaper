@@ -220,7 +220,14 @@ async fn set_cursor_mode(
 }
 
 async fn get_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.settings.jdk_view()).into_response()
+    let settings = state.settings.clone();
+    let view = tokio::task::spawn_blocking(move || settings.jdk_view())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("jdk_view task failed: {e:#}");
+            crate::jdk::JdkSettingsView::default()
+        });
+    Json(view).into_response()
 }
 
 #[derive(Deserialize)]

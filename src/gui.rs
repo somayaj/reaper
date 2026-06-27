@@ -59,35 +59,114 @@ fn install_macos_menu() -> muda::Menu {
 }
 
 #[cfg(target_os = "macos")]
+enum UserEvent {
+    OpenWindow(String),
+}
+
+#[cfg(target_os = "macos")]
+fn window_title_from_url(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(repo) = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "repo")
+            .map(|(_, value)| value.into_owned())
+            .filter(|name| !name.is_empty())
+        {
+            return format!("Reaper — {repo}");
+        }
+    }
+    "Reaper".to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_ipc_open_url(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("type")?.as_str()? != "open-repo-window" {
+        return None;
+    }
+    let url = value.get("url")?.as_str()?.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn create_window(
+    url: &str,
+    event_loop: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
+    use tao::window::WindowBuilder;
+    use wry::{http::Request, WebViewBuilder};
+
+    let title = window_title_from_url(url);
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
+        .build(event_loop)?;
+
+    let ipc_proxy = proxy.clone();
+    let popup_proxy = proxy.clone();
+    let webview = WebViewBuilder::new()
+        .with_url(url)
+        .with_ipc_handler(move |req: Request<String>| {
+            if let Some(next_url) = parse_ipc_open_url(req.body()) {
+                let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
+            }
+        })
+        .with_new_window_req_handler(move |target_url| {
+            let _ = popup_proxy.send_event(UserEvent::OpenWindow(target_url));
+            false
+        })
+        .build(&window)?;
+
+    Ok((window, webview))
+}
+
+#[cfg(target_os = "macos")]
 pub fn run(url: &str) -> anyhow::Result<()> {
-    use tao::platform::run_return::EventLoopExtRunReturn;
+    use std::collections::HashMap;
+
     use tao::{
         event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoopBuilder},
-        window::WindowBuilder,
+        window::WindowId,
     };
-    use wry::WebViewBuilder;
 
     let _menu = install_macos_menu();
 
-    let mut event_loop = EventLoopBuilder::new().build();
-    let window = WindowBuilder::new()
-        .with_title("Reaper")
-        .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
-        .build(&event_loop)?;
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    let mut webviews: HashMap<WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
 
-    let _webview = WebViewBuilder::new()
-        .with_url(url)
-        .build(&window)?;
+    let (window, webview) = create_window(url, &event_loop, proxy.clone())?;
+    webviews.insert(window.id(), (window, webview));
 
-    event_loop.run_return(move |event, _, control_flow| {
+    event_loop.run(move |event, event_loop, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
+
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                window_id,
+                ..
+            } => {
+                webviews.remove(&window_id);
+                if webviews.is_empty() {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(UserEvent::OpenWindow(next_url)) => {
+                match create_window(&next_url, event_loop, proxy.clone()) {
+                    Ok((window, webview)) => {
+                        webviews.insert(window.id(), (window, webview));
+                    }
+                    Err(e) => tracing::error!("Failed to open Reaper window: {e:#}"),
+                }
+            }
+            _ => {}
         }
     });
 

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 
 use super::classpath;
 use super::diagnostics::Diagnostic;
-use super::exec::run_command;
+use super::exec::run_java_command;
 use super::gradle::find_gradle_root;
 use super::{safe_join};
 
@@ -33,13 +33,13 @@ fn check_gradle_java(
     rel_path: &str,
     content: &str,
 ) -> Result<Vec<Diagnostic>> {
-    let jars = classpath::compile_classpath_jars(gradle_root).unwrap_or_default();
-    if jars.is_empty() {
+    let jars = classpath::cached_classpath_jars(gradle_root);
+    let classpath_ready = !jars.is_empty();
+    if !classpath_ready {
         tracing::debug!(
-            "Skipping Java diagnostics for {} — compile classpath not resolved yet",
+            "Gradle classpath not resolved yet for {} — running syntax-only javac",
             rel_path
         );
-        return Ok(Vec::new());
     }
 
     let overlay_root = ws.join(DIAG_ROOT).join("overlay");
@@ -89,18 +89,17 @@ fn check_gradle_java(
                 .join(if cfg!(windows) { ";" } else { ":" }),
         );
     }
-    args.push("--release".to_string());
-    args.push(detect_java_release(gradle_root));
+    append_javac_release_args(&mut args, gradle_root);
     args.push(overlay_file.to_string_lossy().into_owned());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_command(ws, "javac", &arg_refs)?;
+    let out = run_java_command(ws, "javac", &arg_refs)?;
 
     let mut diags = parse_compiler_output(&out.stderr, ws, rel_path, content);
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    Ok(filter_false_positives(content, &diags))
+    Ok(filter_compiler_diagnostics(diags, classpath_ready))
 }
 
 fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -119,7 +118,7 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
         .to_string_lossy()
         .replace('\\', "/");
 
-    let out = run_command(
+    let out = run_java_command(
         ws,
         "javac",
         &[
@@ -135,7 +134,34 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    Ok(filter_false_positives(content, &diags))
+    Ok(filter_compiler_diagnostics(diags, false))
+}
+
+fn append_javac_release_args(args: &mut Vec<String>, gradle_root: &Path) {
+    let release = javac_release_flag(gradle_root);
+    let use_legacy = crate::jdk::effective_java_home()
+        .ok()
+        .and_then(|home| crate::jdk::java_major_version(&home))
+        .is_some_and(|major| major <= 8);
+    if use_legacy {
+        args.push("-source".into());
+        args.push(release.clone());
+        args.push("-target".into());
+        args.push(release);
+    } else {
+        args.push("--release".into());
+        args.push(release);
+    }
+}
+
+fn javac_release_flag(gradle_root: &Path) -> String {
+    let project = detect_java_release(gradle_root);
+    if let Ok(home) = crate::jdk::effective_java_home() {
+        if crate::jdk::java_major_version(&home).is_some_and(|major| major <= 8) {
+            return "8".into();
+        }
+    }
+    project
 }
 
 fn detect_java_release(gradle_root: &Path) -> String {
@@ -220,7 +246,10 @@ fn parse_compiler_output(text: &str, ws: &Path, focus_path: &str, _content: &str
                 }
                 i += 1;
             }
-            if diag.path.replace('\\', "/") == focus || focus.ends_with(&diag.path) {
+            if diag.path.replace('\\', "/") == focus
+                || focus.ends_with(&diag.path)
+                || diag.path.ends_with(&focus)
+            {
                 diags.push(Diagnostic {
                     message,
                     ..diag
@@ -303,64 +332,55 @@ fn strip_diag_overlay_prefix(path: &str) -> String {
         .to_string()
 }
 
-/// Drop javac noise common in Spring/Lombok projects when compiling a single file.
-fn filter_false_positives(content: &str, diags: &[Diagnostic]) -> Vec<Diagnostic> {
-    let lines: Vec<&str> = content.lines().collect();
+/// Single-file javac floods imports with missing-symbol noise; show real compiler errors.
+fn filter_compiler_diagnostics(diags: Vec<Diagnostic>, classpath_ready: bool) -> Vec<Diagnostic> {
     diags
-        .iter()
-        .filter(|d| !is_false_positive_java_diag(&lines, d))
-        .cloned()
+        .into_iter()
+        .filter(|d| should_show_java_diag(d, classpath_ready))
         .collect()
 }
 
-fn is_false_positive_java_diag(lines: &[&str], diag: &Diagnostic) -> bool {
+fn should_show_java_diag(diag: &Diagnostic, classpath_ready: bool) -> bool {
     let msg = diag.message.to_lowercase();
-    if !msg.contains("cannot find symbol") && !msg.contains("package") && !msg.contains("does not exist")
-    {
+
+    if diag.severity == "warning" {
+        return true;
+    }
+
+    if is_javac_syntax_error(&msg) {
+        return true;
+    }
+
+    if is_dependency_resolution_error(&msg) {
         return false;
     }
-    let Some(line_text) = lines.get(diag.line.saturating_sub(1) as usize) else {
-        return false;
-    };
-    let trimmed = line_text.split("//").next().unwrap_or(line_text).trim();
 
-    // Imports fail when classpath is incomplete — hide until Gradle resolves deps.
-    if trimmed.starts_with("import ") {
-        return true;
-    }
+    classpath_ready
+}
 
-    // Lombok-generated members are invisible to plain javac.
-    if trimmed.contains('@')
-        && (trimmed.contains("lombok")
-            || trimmed.contains("@Data")
-            || trimmed.contains("@Getter")
-            || trimmed.contains("@Setter")
-            || trimmed.contains("@Builder")
-            || trimmed.contains("@Slf4j")
-            || trimmed.contains("@RequiredArgsConstructor")
-            || trimmed.contains("@AllArgsConstructor")
-            || trimmed.contains("@NoArgsConstructor")
-            || trimmed.contains("@Value"))
-    {
-        return true;
-    }
+fn is_javac_syntax_error(msg: &str) -> bool {
+    msg.contains("';' expected")
+        || msg.contains("')' expected")
+        || msg.contains("'(' expected")
+        || msg.contains("'{' expected")
+        || msg.contains("'}' expected")
+        || msg.contains("'[' expected")
+        || msg.contains("']' expected")
+        || msg.contains("illegal start of expression")
+        || msg.contains("illegal start of type")
+        || msg.contains("class, interface, enum, or record expected")
+        || msg.contains("reached end of file while parsing")
+        || msg.contains("not a statement")
+        || msg.contains("orphaned")
+        || msg.contains("<identifier> expected")
+}
 
-    // Spring stereotype annotations on the class line — classpath usually covers these;
-    // keep any other errors on the same line.
-    if trimmed.starts_with('@')
-        && (trimmed.contains("RestController")
-            || trimmed.contains("Controller")
-            || trimmed.contains("Service")
-            || trimmed.contains("Component")
-            || trimmed.contains("Repository")
-            || trimmed.contains("Configuration")
-            || trimmed.contains("SpringBootApplication"))
-        && msg.contains("cannot find symbol")
-    {
-        return true;
-    }
-
-    false
+fn is_dependency_resolution_error(msg: &str) -> bool {
+    msg.contains("cannot find symbol")
+        || msg.contains("does not exist")
+        || msg.contains("cannot access")
+        || msg.contains("package")
+        || msg.contains("cannot infer type arguments")
 }
 
 #[cfg(test)]
@@ -395,8 +415,7 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     }
 
     #[test]
-    fn filters_import_symbol_errors() {
-        let content = "import org.springframework.stereotype.Service;\npublic class App {}\n";
+    fn hides_import_symbol_noise_without_classpath() {
         let diags = vec![Diagnostic {
             path: "App.java".into(),
             line: 1,
@@ -406,6 +425,34 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
             message: "cannot find symbol".into(),
             severity: "error".into(),
         }];
-        assert!(filter_false_positives(content, &diags).is_empty());
+        assert!(filter_compiler_diagnostics(diags, false).is_empty());
+    }
+
+    #[test]
+    fn keeps_syntax_errors() {
+        let diags = vec![Diagnostic {
+            path: "App.java".into(),
+            line: 1,
+            column: 24,
+            end_line: None,
+            end_column: None,
+            message: "';' expected".into(),
+            severity: "error".into(),
+        }];
+        assert_eq!(filter_compiler_diagnostics(diags, false).len(), 1);
+    }
+
+    #[test]
+    fn keeps_semantic_errors_when_classpath_ready() {
+        let diags = vec![Diagnostic {
+            path: "App.java".into(),
+            line: 5,
+            column: 9,
+            end_line: None,
+            end_column: None,
+            message: "incompatible types: int cannot be converted to java.lang.String".into(),
+            severity: "error".into(),
+        }];
+        assert_eq!(filter_compiler_diagnostics(diags, true).len(), 1);
     }
 }

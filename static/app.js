@@ -1,14 +1,62 @@
 const AGENT_DOCK_KEY = 'reaper-agent-dock';
 const TERMINAL_DOCK_KEY = 'reaper-terminal-dock';
+const TERMINAL_BOTTOM_HEIGHT_KEY = 'reaper-terminal-bottom-height';
 const EDITOR_FONT_SIZE_KEY = 'reaper-editor-font-size';
+const EDITOR_FONT_FAMILY_KEY = 'reaper-editor-font-family';
 const AUTO_SAVE_KEY = 'reaper-auto-save';
 const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
+const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
 const AUTO_SAVE_DELAY_MS = 800;
 const DIAG_DELAY_MS = 1200;
-const JAVA_INDEX_POLL_MS = 2000;
+const PROJECT_INDEX_POLL_MS = 2000;
 const DEFAULT_EDITOR_FONT_SIZE = 13;
 const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 28;
+
+/** Editor typefaces — Reaper defaults, not an IDE font clone list. */
+const DEFAULT_EDITOR_FONT_ID = 'system-mono';
+const EDITOR_FONTS = [
+  {
+    id: 'system-mono',
+    label: 'System mono',
+    family: "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
+  },
+  {
+    id: 'plex-mono',
+    label: 'IBM Plex Mono',
+    family: "'IBM Plex Mono', Consolas, monospace",
+    google: 'IBM+Plex+Mono:wght@400;500',
+  },
+  {
+    id: 'source-code-pro',
+    label: 'Source Code Pro',
+    family: "'Source Code Pro', Consolas, monospace",
+    google: 'Source+Code+Pro:wght@400;500',
+  },
+  {
+    id: 'fira-code',
+    label: 'Fira Code',
+    family: "'Fira Code', Consolas, monospace",
+    google: 'Fira+Code:wght@400;500',
+  },
+  {
+    id: 'roboto-mono',
+    label: 'Roboto Mono',
+    family: "'Roboto Mono', Consolas, monospace",
+    google: 'Roboto+Mono:wght@400;500',
+  },
+  {
+    id: 'inconsolata',
+    label: 'Inconsolata',
+    family: "'Inconsolata', Consolas, monospace",
+    google: 'Inconsolata:wght@400;500',
+  },
+  {
+    id: 'courier',
+    label: 'Courier',
+    family: "'Courier New', Courier, monospace",
+  },
+];
 
 const GEMINI_MODELS = [
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (default)' },
@@ -40,9 +88,8 @@ const state = {
   agentDock: localStorage.getItem(AGENT_DOCK_KEY) || 'left',
   terminalDock: localStorage.getItem(TERMINAL_DOCK_KEY) || 'bottom',
   terminalOpen: false,
-  terminalCwd: '',
-  terminalHistory: [],
-  terminalHistoryIndex: -1,
+  terminals: [],
+  activeTerminalId: null,
   agentOpen: true,
   cursorConfigured: false,
   cursorBridgeOk: false,
@@ -54,6 +101,9 @@ const state = {
   cursorModels: [],
   agentBusy: false,
   agentMessageQueue: [],
+  agentAbortController: null,
+  agentStopRequested: false,
+  agentLastRevertibleTurn: null,
   agentLiveFollow: false,
   agentLiveDiffPath: null,
   agentLastToolPath: null,
@@ -66,13 +116,17 @@ const state = {
   autoSaveTimer: null,
   gradleInfo: null,
   repoDetail: null,
-  javaIndexPoll: null,
-  javaIndexNotified: false,
-  javaIndexRunning: false,
-  javaIndexReady: false,
+  projectIndexPoll: null,
+  projectIndexNotified: false,
+  projectIndexRunning: false,
+  projectIndexReady: false,
+  projectIndexStartedAt: 0,
+  projectProfile: null,
   treeNavAnchor: null,
   mergeState: null,
   conflictDecorationIds: [],
+  testRunWidgets: [],
+  testMethodsByLine: new Map(),
   conflictFiles: new Set(),
   selectedCommitHash: null,
   mainView: 'editor',
@@ -82,6 +136,10 @@ const state = {
   pendingCommitSuggest: false,
   commitSuggestInFlight: false,
   commitSuggestSkipOnce: false,
+  commitSelectedPaths: new Set(),
+  commitKnownPaths: new Set(),
+  lastGitStatusFiles: [],
+  mergeBlockedCommit: false,
 };
 
 let diagTimer = null;
@@ -221,6 +279,20 @@ function getEditorFontSize() {
   return DEFAULT_EDITOR_FONT_SIZE;
 }
 
+function getEditorFontSpec() {
+  const id = localStorage.getItem(EDITOR_FONT_FAMILY_KEY) || DEFAULT_EDITOR_FONT_ID;
+  return EDITOR_FONTS.find((f) => f.id === id) || EDITOR_FONTS[0];
+}
+
+function ensureEditorFontLoaded(spec) {
+  if (!spec?.google || document.getElementById(`reaper-font-${spec.id}`)) return;
+  const link = document.createElement('link');
+  link.id = `reaper-font-${spec.id}`;
+  link.rel = 'stylesheet';
+  link.href = `https://fonts.googleapis.com/css2?family=${spec.google}&display=swap`;
+  document.head.appendChild(link);
+}
+
 function getAutoSaveEnabled() {
   const stored = localStorage.getItem(AUTO_SAVE_KEY);
   if (stored === null) return true;
@@ -247,6 +319,69 @@ function setShowDotfiles(show) {
   localStorage.setItem(SHOW_DOTFILES_KEY, show ? '1' : '0');
   syncDotfilesControls(show);
   renderFilteredTree();
+}
+
+function getNewWindowOnRepoChange() {
+  const stored = localStorage.getItem(NEW_WINDOW_ON_REPO_KEY);
+  return stored === '1' || stored === 'true';
+}
+
+function setNewWindowOnRepoChange(enabled) {
+  localStorage.setItem(NEW_WINDOW_ON_REPO_KEY, enabled ? '1' : '0');
+  const checkbox = $('#settings-new-window-on-repo');
+  if (checkbox) checkbox.checked = enabled;
+}
+
+function buildRepoWindowUrl(repoName) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('repo', repoName);
+  return url.toString();
+}
+
+function openRepoInNewWindow(repoName) {
+  const url = buildRepoWindowUrl(repoName);
+  if (window.ipc?.postMessage) {
+    window.ipc.postMessage(JSON.stringify({ type: 'open-repo-window', url }));
+    return true;
+  }
+  const popup = window.open(url, '_blank', 'noopener');
+  if (!popup) {
+    toast('Could not open a new window. Allow popups or turn off the setting in Settings → Appearance.', 'error');
+    return false;
+  }
+  return true;
+}
+
+function shouldOpenRepoInNewWindow(repoName) {
+  return !!(
+    repoName
+    && state.repo
+    && repoName !== state.repo
+    && getNewWindowOnRepoChange()
+  );
+}
+
+function requestRepoSelection(repoName, { revertSelect = true } = {}) {
+  if (shouldOpenRepoInNewWindow(repoName)) {
+    if (revertSelect) {
+      const sel = $('#repo-select');
+      if (sel) sel.value = state.repo || '';
+    }
+    openRepoInNewWindow(repoName);
+    return;
+  }
+  const sel = $('#repo-select');
+  if (sel) sel.value = repoName || '';
+  void selectRepo(repoName);
+}
+
+function updateWindowTitle() {
+  document.title = state.repo ? `Reaper — ${state.repo}` : 'Reaper';
+}
+
+function getInitialRepoFromUrl() {
+  const repo = new URLSearchParams(window.location.search).get('repo')?.trim();
+  return repo || null;
 }
 
 function syncDockMenuControls() {
@@ -299,6 +434,25 @@ function populateFontSizeSelects() {
   });
 }
 
+function populateFontFamilySelects() {
+  const select = document.getElementById('settings-editor-font-family');
+  if (!select || select.dataset.populated) return;
+  select.dataset.populated = '1';
+  EDITOR_FONTS.forEach((font) => {
+    const opt = document.createElement('option');
+    opt.value = font.id;
+    opt.textContent = font.label;
+    select.appendChild(opt);
+  });
+  select.value = getEditorFontSpec().id;
+  select.addEventListener('change', onEditorFontFamilyChange);
+}
+
+function syncFontFamilyControls(fontId) {
+  const el = document.getElementById('settings-editor-font-family');
+  if (el && el.value !== fontId) el.value = fontId;
+}
+
 function syncFontSizeControls(size) {
   const value = String(size);
   ['settings-editor-font-size', 'editor-font-size-menu', 'editor-font-size-status'].forEach((id) => {
@@ -327,9 +481,37 @@ function onEditorFontSizeChange(e) {
   document.querySelectorAll('.ij-menu-root.open').forEach((m) => m.classList.remove('open'));
 }
 
+function applyEditorFontFamily(fontId) {
+  const spec = EDITOR_FONTS.find((f) => f.id === fontId) || EDITOR_FONTS[0];
+  localStorage.setItem(EDITOR_FONT_FAMILY_KEY, spec.id);
+  ensureEditorFontLoaded(spec);
+  if (state.editor) {
+    state.editor.updateOptions({ fontFamily: spec.family });
+  }
+  syncFontFamilyControls(spec.id);
+  updateEditorFontPreview(spec);
+  return spec;
+}
+
+function updateEditorFontPreview(spec = getEditorFontSpec()) {
+  const preview = $('#settings-editor-font-preview');
+  if (!preview) return;
+  ensureEditorFontLoaded(spec);
+  preview.style.fontFamily = spec.family;
+  preview.textContent = 'fn harvest() {\n  return "reaper";\n}';
+}
+
+function onEditorFontFamilyChange(e) {
+  applyEditorFontFamily(e.target.value);
+  document.querySelectorAll('.ij-menu-root.open').forEach((m) => m.classList.remove('open'));
+}
+
 function loadAppearanceSettingsSection() {
   populateFontSizeSelects();
+  populateFontFamilySelects();
   syncFontSizeControls(getEditorFontSize());
+  syncFontFamilyControls(getEditorFontSpec().id);
+  updateEditorFontPreview();
   const autoSave = $('#settings-auto-save');
   if (autoSave) {
     autoSave.checked = getAutoSaveEnabled();
@@ -347,6 +529,14 @@ function loadAppearanceSettingsSection() {
     }
   }
   syncDotfilesControls(getShowDotfiles());
+  const newWindowOnRepo = $('#settings-new-window-on-repo');
+  if (newWindowOnRepo) {
+    newWindowOnRepo.checked = getNewWindowOnRepoChange();
+    if (!newWindowOnRepo.dataset.bound) {
+      newWindowOnRepo.dataset.bound = '1';
+      newWindowOnRepo.addEventListener('change', (e) => setNewWindowOnRepoChange(e.target.checked));
+    }
+  }
 }
 
 function switchSettingsTab(tab) {
@@ -456,8 +646,83 @@ async function loadCursorSettingsSection() {
   updateAgentUi();
 }
 
+async function loadJdkSettingsSection() {
+  const statusEl = $('#settings-jdk-status');
+  const selectEl = $('#settings-jdk-select');
+  const homeEl = $('#settings-jdk-home');
+  if (!statusEl) return;
+  try {
+    const cfg = await api('/api/settings/jdk');
+    const installed = cfg.installed || [];
+    if (selectEl) {
+      const current = cfg.java_home || cfg.effective_home || '';
+      selectEl.innerHTML = [
+        '<option value="">— select installed JDK —</option>',
+        ...installed.map((j) => `<option value="${escapeHtml(j.path)}">${escapeHtml(j.label || j.path)}</option>`),
+      ].join('');
+      if (current && installed.some((j) => j.path === current)) {
+        selectEl.value = current;
+      }
+      if (!selectEl.dataset.bound) {
+        selectEl.dataset.bound = '1';
+        selectEl.addEventListener('change', () => {
+          if (homeEl && selectEl.value) homeEl.value = selectEl.value;
+        });
+      }
+    }
+    if (homeEl) homeEl.value = cfg.java_home || '';
+    const configuredLine = cfg.configured
+      ? `<div><strong>Saved:</strong> ${escapeHtml(cfg.java_home || '')}${cfg.version ? ` (${escapeHtml(cfg.version)})` : ''}${cfg.source ? ` · ${escapeHtml(cfg.source)}` : ''}</div>`
+      : '<div><strong>Saved:</strong> none (using system default)</div>';
+    const effectiveLine = cfg.effective_home
+      ? `<div class="mt-2"><strong>Run Java with:</strong> ${escapeHtml(cfg.effective_home)}${cfg.effective_version ? ` (${escapeHtml(cfg.effective_version)})` : ''}</div>`
+      : '';
+    const gradleLine = cfg.gradle_home
+      ? `<div class="mt-1"><strong>Gradle uses:</strong> ${escapeHtml(cfg.gradle_home)}${cfg.gradle_version ? ` (${escapeHtml(cfg.gradle_version)})` : ''}${cfg.java_home && cfg.gradle_home !== cfg.effective_home ? ' <span class="text-gray-500">(newer JVM for Gradle 8+)</span>' : ''}</div>`
+      : '';
+    statusEl.innerHTML = configuredLine + effectiveLine + gradleLine;
+    const clearBtn = $('#settings-jdk-clear');
+    if (clearBtn) clearBtn.disabled = !cfg.configured || cfg.source?.startsWith('env:');
+    if (clearBtn && cfg.source?.startsWith('env:')) {
+      clearBtn.title = `JAVA_HOME is set via ${cfg.source}; unset REAPER_JAVA_HOME to change`;
+    }
+  } catch (err) {
+    statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+  }
+}
+
+async function saveJdkFromSettings(e) {
+  e?.preventDefault();
+  const home = $('#settings-jdk-home')?.value.trim();
+  if (!home) {
+    toast('Enter a JAVA_HOME path or pick an installed JDK', 'error');
+    $('#settings-jdk-home')?.focus();
+    return;
+  }
+  try {
+    await api('/api/settings/jdk', {
+      method: 'PATCH',
+      body: JSON.stringify({ java_home: home }),
+    });
+    await loadJdkSettingsSection();
+    toast('JAVA_HOME saved — Run Java uses this JDK; Gradle keeps a newer JVM when needed', 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to save JAVA_HOME', 'error');
+  }
+}
+
+async function clearJdkFromSettings() {
+  try {
+    await api('/api/settings/jdk', { method: 'DELETE' });
+    await loadJdkSettingsSection();
+    toast('Using system default JAVA_HOME', 'success');
+  } catch (err) {
+    toast(err.message || 'Failed to clear JAVA_HOME', 'error');
+  }
+}
+
 async function loadSettingsModal() {
-  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection()]);
+  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadJdkSettingsSection()]);
   loadAppearanceSettingsSection();
   switchSettingsTab(settingsTab);
 }
@@ -466,14 +731,15 @@ async function showSettingsModal(tab = 'git') {
   settingsTab = tab;
   closeAllMenus();
   hidePalette();
-  await loadSettingsModal();
   const overlay = $('#settings-modal-overlay');
   overlay?.classList.remove('hidden');
   overlay?.classList.add('flex');
+  void loadSettingsModal();
   setTimeout(() => {
     if (tab === 'cursor') $('#settings-cursor-key')?.focus();
     else if (tab === 'ai') $('#settings-gemini-key')?.focus();
     else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
+    else if (tab === 'java') $('#settings-jdk-select')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
 }
@@ -808,57 +1074,88 @@ function setStatusMessage(msg) {
   if (el) el.textContent = msg;
 }
 
-function stopJavaIndexPolling() {
-  if (state.javaIndexPoll) {
-    clearInterval(state.javaIndexPoll);
-    state.javaIndexPoll = null;
+function stopProjectIndexPolling() {
+  if (state.projectIndexPoll) {
+    clearInterval(state.projectIndexPoll);
+    state.projectIndexPoll = null;
   }
   $('#java-index-banner')?.classList.add('hidden');
 }
 
-function startJavaIndexPolling() {
-  stopJavaIndexPolling();
-  state.javaIndexNotified = false;
-  pollJavaIndexStatus();
-  state.javaIndexPoll = setInterval(pollJavaIndexStatus, JAVA_INDEX_POLL_MS);
+function startProjectIndexPolling() {
+  stopProjectIndexPolling();
+  state.projectIndexNotified = false;
+  state.projectIndexStartedAt = Date.now();
+  pollProjectIndexStatus();
+  state.projectIndexPoll = setInterval(pollProjectIndexStatus, PROJECT_INDEX_POLL_MS);
 }
 
-function updateJavaIndexUi(status) {
+function updateProjectIndexUi(status) {
   const banner = $('#java-index-banner');
+  const bannerText = $('#java-index-banner-text');
   banner?.classList.add('hidden');
 
-  state.javaIndexRunning = status?.state === 'running';
-  state.javaIndexReady = status?.state === 'ready' && (status?.dependency_jars || 0) > 0;
+  state.projectIndexRunning = status?.state === 'running';
+  const javaReady = status?.java?.state === 'ready' && (status?.java?.dependency_jars || 0) > 0;
+  state.projectIndexReady = status?.state === 'ready' && (javaReady || (status?.workspace_symbols || 0) > 0);
+  state.projectProfile = status?.profile || null;
 
   if (status?.state === 'running') {
-    if (status.symbol_count > 0) {
-      setStatusMessage(`Updating Java index (${Number(status.symbol_count).toLocaleString()} symbols ready)…`);
-    } else {
-      setStatusMessage('Indexing Java sources…');
+    const label = status.label || 'project';
+    const parts = [];
+    if (status.java?.symbol_count > 0) {
+      parts.push(`${Number(status.java.symbol_count).toLocaleString()} Java symbols`);
     }
+    if (status.workspace_symbols > 0) {
+      parts.push(`${Number(status.workspace_symbols).toLocaleString()} workspace symbols`);
+    }
+    const detail = parts.length ? ` (${parts.join(', ')})` : '';
+    setStatusMessage(`Indexing ${label}${detail}…`);
+    if (bannerText) bannerText.textContent = `Indexing ${label}…`;
+    banner?.classList.remove('hidden');
     return;
   }
 
-  if (status?.state === 'ready' && !state.javaIndexNotified) {
-    state.javaIndexNotified = true;
-    const n = status.symbol_count?.toLocaleString?.() ?? status.symbol_count ?? 0;
-    const detail = status.cached ? 'from cache' : 'rebuilt';
-    toast(`Java index ready — ${n} symbols (${detail})`, 'success');
-    terminalLog(`Java index ready: ${n} symbols`);
+  if (status?.state === 'ready' && !state.projectIndexNotified) {
+    state.projectIndexNotified = true;
+    const label = status.label || 'Project';
+    const javaN = status.java?.symbol_count ?? 0;
+    const wsN = status.workspace_symbols ?? 0;
+    const springN = status.java?.spring_symbols ?? 0;
+    const jdkN = status.java?.jdk_symbols ?? 0;
+    const total = javaN + wsN;
+    const langs = (status.profile?.languages || []).join(', ') || label.toLowerCase();
+    const detail = [
+      springN ? `${springN.toLocaleString()} Spring` : '',
+      jdkN ? `${jdkN.toLocaleString()} JDK` : '',
+    ].filter(Boolean).join(', ');
+    toast(
+      `${label} index ready — ${total.toLocaleString()} symbols${detail ? ` (${detail})` : ''} [${langs}]`,
+      springN > 0 || !status.profile?.frameworks?.includes('spring-boot') ? 'success' : 'warning',
+    );
+    terminalLog(`${label} index ready: ${total.toLocaleString()} symbols`);
     if (state.activeTab?.endsWith('.java')) scheduleDiagnostics();
-  } else if (status?.state === 'error' && !state.javaIndexNotified) {
-    state.javaIndexNotified = true;
-    toast(`Java indexing failed: ${status.error || 'unknown error'}`, 'error');
+  } else if (status?.state === 'error' && !state.projectIndexNotified) {
+    state.projectIndexNotified = true;
+    toast(`Project indexing failed: ${status.error || status.java?.error || 'unknown error'}`, 'error');
   }
 }
 
-async function pollJavaIndexStatus() {
+async function pollProjectIndexStatus() {
   if (!state.repo) return;
   try {
-    const status = await api(repoApi(state.repo, '/workspace/java/index-status'));
-    updateJavaIndexUi(status);
+    const status = await api(repoApi(state.repo, '/workspace/project/index-status'));
+    updateProjectIndexUi(status);
+    const elapsed = Date.now() - (state.projectIndexStartedAt || Date.now());
+    const timedOut = status?.state === 'running' && elapsed > 5 * 60 * 1000;
+    if (timedOut && !state.projectIndexNotified) {
+      state.projectIndexNotified = true;
+      toast('Indexing is taking longer than expected — you can keep working; check Settings → Java if Gradle is stuck', 'warning', { duration: 12000 });
+      stopProjectIndexPolling();
+      return;
+    }
     if (status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') {
-      stopJavaIndexPolling();
+      stopProjectIndexPolling();
     }
   } catch {
     /* ignore transient poll errors */
@@ -915,8 +1212,7 @@ function bindWelcomeActions(root = document) {
   root.querySelector('[data-welcome="agent"]')?.addEventListener('click', toggleAgent);
   root.querySelectorAll('.ij-recent-item').forEach((btn) => {
     btn.addEventListener('click', () => {
-      $('#repo-select').value = btn.dataset.recent;
-      selectRepo(btn.dataset.recent);
+      requestRepoSelection(btn.dataset.recent);
     });
   });
 }
@@ -972,6 +1268,19 @@ function updateMenuState() {
   setMenuDisabled('repo-info', !hasRepo);
   setMenuDisabled('new-file', !hasRepo);
   setMenuDisabled('run', !canRun);
+  const navPush = $('#btn-nav-push');
+  if (navPush) navPush.disabled = !hasRepo;
+}
+
+function updateGitNavUi(status = {}) {
+  const ahead = status.ahead || 0;
+  const navPush = $('#btn-nav-push');
+  if (navPush) {
+    navPush.classList.toggle('ij-header-btn-pending', ahead > 0);
+    navPush.title = ahead > 0
+      ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote`
+      : 'Push to remote';
+  }
 }
 
 function closeAllMenus() {
@@ -995,6 +1304,7 @@ function runMenuAction(action) {
     'panel-git': () => switchPanel('git'),
     'panel-history': () => switchPanel('history'),
     'panel-terminal': () => showTerminal(),
+    'terminal-new': () => newTerminal(),
     'panel-agent': () => { switchPanel('agent'); if (state.agentDock !== 'left') toggleAgent(); },
     'terminal-dock-left': () => setTerminalDock('left'),
     'terminal-dock-right': () => setTerminalDock('right'),
@@ -1011,6 +1321,7 @@ function runMenuAction(action) {
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
     'settings-appearance': () => showSettingsModal('appearance'),
+    'settings-java': () => showSettingsModal('java'),
     run: runActive,
   };
   map[action]?.();
@@ -1022,7 +1333,8 @@ const PALETTE_COMMANDS = [
   { id: 'settings', label: 'Settings', kbd: '⌘,', run: () => showSettingsModal('git') },
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
-  { id: 'settings-appearance', label: 'Editor font size', run: () => showSettingsModal('appearance') },
+  { id: 'settings-appearance', label: 'Editor appearance', run: () => showSettingsModal('appearance') },
+  { id: 'settings-java', label: 'Java (JAVA_HOME)', run: () => showSettingsModal('java') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },
@@ -1038,6 +1350,7 @@ const PALETTE_COMMANDS = [
   { id: 'explorer', label: 'Show Project', kbd: 'Alt+1', run: () => switchPanel('explorer') },
   { id: 'git-panel', label: 'Show Commit', kbd: 'Alt+9', run: () => switchPanel('git') },
   { id: 'terminal', label: 'Show Terminal', run: () => showTerminal() },
+  { id: 'terminal-new', label: 'New Terminal', kbd: '⌘⇧`', run: () => newTerminal(), needsRepo: true },
   { id: 'agent', label: 'Show Agent', run: toggleAgent },
   { id: 'sidebar', label: 'Toggle sidebar', run: () => toggleSidebar() },
 ];
@@ -1555,7 +1868,7 @@ function bindMenus() {
     if (e.target.closest('.ij-menu-root')) return;
     closeAllMenus();
   });
-  ['#theme-select', '#theme-select-menu', '#settings-editor-font-size', '#editor-font-size-menu', '#editor-font-size-status'].forEach((sel) => {
+  ['#theme-select', '#theme-select-menu', '#settings-editor-font-size', '#settings-editor-font-family', '#editor-font-size-menu', '#editor-font-size-status'].forEach((sel) => {
     $(sel)?.addEventListener('mousedown', (e) => e.stopPropagation());
   });
 }
@@ -1736,6 +2049,250 @@ function parseConflictMarkers(text) {
     });
   }
   return conflicts;
+}
+
+function isJavaTestFilePath(path) {
+  if (!path?.endsWith('.java')) return false;
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/src/test/java/')
+    || normalized.includes('/test/java/')
+    || normalized.endsWith('test.java')
+    || normalized.endsWith('tests.java')
+    || normalized.endsWith('it.java');
+}
+
+function javaFqcnFromSource(path, content) {
+  const simple = path.split('/').pop()?.replace(/\.java$/i, '');
+  if (!simple) return null;
+  const pkg = content.match(/^\s*package\s+([\w.]+)\s*;/m)?.[1];
+  if (pkg) return `${pkg}.${simple}`;
+  const normalized = path.replace(/\\/g, '/');
+  for (const marker of ['/src/test/java/', '/src/main/java/', '/test/java/', '/main/java/']) {
+    const idx = normalized.indexOf(marker);
+    if (idx >= 0) {
+      const suffix = normalized.slice(idx + marker.length);
+      if (suffix.endsWith('.java')) {
+        return suffix.slice(0, -5).replace(/\//g, '.');
+      }
+    }
+  }
+  return simple;
+}
+
+function lineHasTestAnnotation(lines, idx) {
+  let i = idx;
+  while (i > 0 && !lines[i].trim()) i -= 1;
+  let scan = i;
+  for (;;) {
+    const trimmed = lines[scan].trim();
+    if (trimmed.startsWith('@')
+      && (trimmed.includes('@Test')
+        || trimmed.includes('@ParameterizedTest')
+        || trimmed.includes('@RepeatedTest')
+        || trimmed.includes('@TestFactory')
+        || trimmed.includes('@TestTemplate'))) {
+      return true;
+    }
+    if (!trimmed.startsWith('@') && trimmed) return false;
+    if (scan === 0) return false;
+    scan -= 1;
+  }
+}
+
+function stripLeadingJavaAnnotations(line) {
+  let rest = line.trim();
+  while (rest.startsWith('@')) {
+    const open = rest.indexOf('(');
+    if (open < 0) {
+      const sp = rest.search(/\s/);
+      rest = (sp >= 0 ? rest.slice(sp) : '').trimStart();
+      continue;
+    }
+    let depth = 0;
+    let end = open;
+    for (let j = open; j < rest.length; j += 1) {
+      if (rest[j] === '(') depth += 1;
+      else if (rest[j] === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          end = j + 1;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) break;
+    rest = rest.slice(end).trimStart();
+  }
+  return rest;
+}
+
+function findJavaMethodSignatureIndex(lines, start) {
+  for (let i = start; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    const code = stripLeadingJavaAnnotations(trimmed);
+    if (code.startsWith('@')) continue;
+    if (parseJavaMethodName(code)) return i;
+  }
+  return -1;
+}
+
+function parseJavaMethodName(line) {
+  const before = line.trim().split('(')[0];
+  const token = before.split(/\s+/).filter((t) => !['public', 'protected', 'private', 'static', 'final', 'synchronized'].includes(t) && !t.endsWith('<')).pop();
+  if (!token || token === 'void' || token === 'class') return null;
+  if (!/^[A-Za-z_]\w*$/.test(token)) return null;
+  return token;
+}
+
+function javaMethodBlockEnd(lines, signatureIdx) {
+  let depth = 0;
+  let started = false;
+  for (let i = signatureIdx; i < lines.length; i += 1) {
+    for (const ch of lines[i]) {
+      if (ch === '{') {
+        depth += 1;
+        started = true;
+      } else if (ch === '}' && started) {
+        depth -= 1;
+        if (depth === 0) return i;
+      }
+    }
+  }
+  return lines.length - 1;
+}
+
+function findTestAnnotationLineIndex(lines, start, sigIdx) {
+  for (let i = sigIdx; i >= 0; i -= 1) {
+    const t = lines[i].trim();
+    if (!t || t.startsWith('//')) continue;
+    if (/@Test|@ParameterizedTest|@RepeatedTest|@TestFactory|@TestTemplate/.test(t)) return i;
+    if (t.startsWith('@')) continue;
+    if (t.includes('(') && !t.endsWith(';') && !t.startsWith('class ')) continue;
+    break;
+  }
+  return start;
+}
+
+function findJavaTestClassLine(lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const t = lines[i].trim();
+    if (/^(public\s+|protected\s+|private\s+)?(abstract\s+|static\s+)?class\s+[A-Za-z_]\w*/.test(t) && !t.includes('(')) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function listJavaTestMethods(path, content) {
+  if (!path?.endsWith('.java')) return [];
+  const hasTestAnno = /@Test|@ParameterizedTest|@RepeatedTest|@TestFactory|@TestTemplate/.test(content);
+  if (!isJavaTestFilePath(path) && !hasTestAnno) return [];
+  const className = javaFqcnFromSource(path, content);
+  if (!className) return [];
+  const lines = content.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (!lineHasTestAnnotation(lines, i)) {
+      i += 1;
+      continue;
+    }
+    const sigIdx = findJavaMethodSignatureIndex(lines, i);
+    if (sigIdx < 0) {
+      i += 1;
+      continue;
+    }
+    const name = parseJavaMethodName(lines[sigIdx]);
+    if (!name) {
+      i = sigIdx + 1;
+      continue;
+    }
+    const end = javaMethodBlockEnd(lines, sigIdx);
+    const glyphIdx = findTestAnnotationLineIndex(lines, i, sigIdx);
+    out.push({
+      name,
+      line: sigIdx + 1,
+      glyphLine: glyphIdx + 1,
+      end_line: end + 1,
+      filter: `${className}.${name}`,
+      isClass: false,
+    });
+    i = end + 1;
+  }
+
+  const classLine = findJavaTestClassLine(lines);
+  if (classLine >= 0 && (out.length > 0 || isJavaTestFilePath(path))) {
+    out.unshift({
+      name: className.split('.').pop(),
+      line: classLine + 1,
+      glyphLine: classLine + 1,
+      end_line: classLine + 1,
+      filter: className,
+      isClass: true,
+    });
+  }
+
+  return out;
+}
+
+function clearTestRunWidgets() {
+  if (!state.editor || !state.testRunWidgets?.length) return;
+  for (const widget of state.testRunWidgets) {
+    try {
+      state.editor.removeGlyphMarginWidget(widget);
+    } catch {
+      /* ignore stale widgets */
+    }
+  }
+  state.testRunWidgets = [];
+}
+
+function createTestRunWidget(method) {
+  const domNode = document.createElement('button');
+  domNode.type = 'button';
+  domNode.className = 'ij-test-run-widget';
+  const label = method.isClass ? `Run all tests in ${method.filter}` : `Run ${method.filter}`;
+  domNode.title = label;
+  domNode.setAttribute('aria-label', label);
+  domNode.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  domNode.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    runGradleTest(method.filter);
+  });
+  const lane = monaco.editor.GlyphMarginLane?.Right ?? 2;
+  return {
+    getId: () => (method.isClass ? `ij-test-run-class-${method.filter}` : `ij-test-run-${method.filter}`),
+    getDomNode: () => domNode,
+    getPosition: () => ({
+      range: new monaco.Range(method.glyphLine, 1, method.glyphLine, 1),
+      lane,
+    }),
+  };
+}
+
+function applyTestRunDecorations() {
+  if (!state.editor || !window.monaco) return;
+  clearTestRunWidgets();
+  state.testMethodsByLine = new Map();
+  if (!state.activeTab?.endsWith('.java')) return;
+  const paint = () => {
+    const content = state.editor.getModel()?.getValue() ?? '';
+    const methods = listJavaTestMethods(state.activeTab, content);
+    if (!methods.length || typeof state.editor.addGlyphMarginWidget !== 'function') return;
+    clearTestRunWidgets();
+    state.testRunWidgets = methods.map((method) => {
+      const widget = createTestRunWidget(method);
+      state.editor.addGlyphMarginWidget(widget);
+      state.testMethodsByLine.set(method.glyphLine, method);
+      return widget;
+    });
+  };
+  requestAnimationFrame(() => requestAnimationFrame(paint));
 }
 
 function applyConflictDecorations() {
@@ -1957,6 +2514,7 @@ function setEditorContent(path, content) {
   state.editor.setValue(content ?? '');
   monaco.editor.setModelLanguage(state.editor.getModel(), langForPath(path));
   state.suppressEditorChange = false;
+  applyTestRunDecorations();
 }
 
 function syncEditorFromActiveTab() {
@@ -1976,11 +2534,13 @@ function initEditor() {
   require(['vs/editor/editor.main'], () => {
     window.ReaperThemes?.defineMonacoThemes();
     const fontSize = getEditorFontSize();
+    const fontSpec = getEditorFontSpec();
+    ensureEditorFontLoaded(fontSpec);
     state.editor = monaco.editor.create($('#editor'), {
       value: '',
       language: 'plaintext',
       theme: window.ReaperThemes?.getMonacoThemeId() || 'reaper-navy',
-      fontFamily: 'JetBrains Mono, Consolas, monospace',
+      fontFamily: fontSpec.family,
       fontSize,
       lineHeight: editorLineHeightFor(fontSize),
       lineNumbers: 'on',
@@ -2021,6 +2581,7 @@ function initEditor() {
       scheduleAutoSave();
       scheduleDiagnostics();
       updateConflictUi();
+      applyTestRunDecorations();
     });
     state.editor.onDidChangeCursorPosition((e) => updateEditorStatus(e.position));
     window.ReaperLang?.setupEditorFeatures(state.editor, {
@@ -2030,6 +2591,7 @@ function initEditor() {
       getActivePath: () => state.activeTab,
       getEditor: () => state.editor,
       openFileAt,
+      isFileDirty: (path) => state.dirty.has(path),
       toast,
       setLanguageStatus: (label) => {
         const el = $('#status-language');
@@ -2059,14 +2621,16 @@ async function selectRepo(name) {
   if (!name) {
     state.repo = null;
     resetUI();
+    updateWindowTitle();
     return;
   }
   state.repo = name;
-  state.terminalCwd = '';
+  resetTerminalCwds();
   updateTerminalCwdUi();
   const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
-  if (opened?.java_indexing) {
-    startJavaIndexPolling();
+  state.projectProfile = opened?.profile || null;
+  if (opened?.indexing) {
+    startProjectIndexPolling();
   }
   const detail = await api(repoApi(name));
   state.branches = detail.branches;
@@ -2085,23 +2649,28 @@ async function selectRepo(name) {
   terminalLog(`Opened workspace: ${name}`);
   $('#empty-state')?.classList.add('hidden');
   updateMenuState();
+  updateWindowTitle();
 }
 
 function resetUI() {
   state.treeNavAnchor = null;
-  state.terminalCwd = '';
+  resetTerminalCwds();
   updateTerminalCwdUi();
   updateTreeBackButton();
-  stopJavaIndexPolling();
+  stopProjectIndexPolling();
   $('#file-tree').innerHTML = '<p class="px-2 py-4 text-center text-gray-600 text-xs">Open a repository to browse files</p>';
   $('#git-status-list').innerHTML = '';
   $('#commit-history').innerHTML = '';
+  state.commitSelectedPaths = new Set();
+  state.commitKnownPaths = new Set();
+  state.lastGitStatusFiles = [];
+  state.mergeBlockedCommit = false;
   state.repoDetail = null;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = true;
   $('#branch-picker-btn').disabled = true;
   setBranchLabel('');
-  ['#btn-sync', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   closeAllTabs();
@@ -2117,7 +2686,7 @@ function enableControls() {
   $('#branch-picker-btn').disabled = false;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = false;
-  ['#btn-sync', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
   updateRunButtons();
   updateMenuState();
 }
@@ -2368,13 +2937,116 @@ async function publishToGitHub(e) {
 }
 
 async function pushRemote() {
+  await showPushModal();
+}
+
+function hidePushModal() {
+  const overlay = $('#push-modal-overlay');
+  overlay?.classList.add('hidden');
+  overlay?.classList.remove('flex');
+}
+
+function renderPushPreview(preview) {
+  const subtitle = $('#push-modal-subtitle');
+  const aheadBadge = $('#push-modal-ahead');
+  const body = $('#push-modal-body');
+  const confirm = $('#push-modal-confirm');
+  if (!body || !confirm) return;
+
+  const branch = preview.branch || 'branch';
+  const remote = preview.remote || 'origin';
+  const target = preview.upstream || `${remote}/${branch}`;
+  if (subtitle) {
+    const url = preview.remote_url ? ` · ${preview.remote_url}` : '';
+    subtitle.textContent = `${branch} → ${target}${url}`;
+  }
+
+  if (aheadBadge) {
+    if (preview.ahead > 0) {
+      aheadBadge.textContent = `${preview.ahead} commit${preview.ahead === 1 ? '' : 's'}`;
+      aheadBadge.classList.remove('hidden');
+    } else {
+      aheadBadge.classList.add('hidden');
+    }
+  }
+
+  confirm.disabled = !preview.can_push;
+  confirm.textContent = preview.can_push ? 'Push' : 'Nothing to push';
+
+  if (!preview.can_push) {
+    body.innerHTML = `
+      <p class="ij-push-empty">${escapeHtml(preview.note || 'Nothing to push')}</p>
+    `;
+    return;
+  }
+
+  const note = preview.note
+    ? `<p class="ij-push-note">${escapeHtml(preview.note)}</p>`
+    : '';
+  const commits = (preview.commits || []).map((c) => {
+    const hash = (c.hash || '').slice(0, 7);
+    return `<li><code class="ij-push-commit-hash">${escapeHtml(hash)}</code><span class="ij-push-commit-subject">${escapeHtml(c.subject || '')}</span></li>`;
+  }).join('');
+  const files = (preview.files || []).map((f) => `<li title="${escapeHtml(f)}">${escapeHtml(f)}</li>`).join('');
+
+  body.innerHTML = `
+    ${note}
+    <div>
+      <h4 class="ij-push-section-title">Commits</h4>
+      <ul class="ij-push-commit-list panel-scroll">${commits || '<li class="ij-push-empty">No commits</li>'}</ul>
+    </div>
+    <div>
+      <h4 class="ij-push-section-title">Files (${(preview.files || []).length})</h4>
+      <ul class="ij-push-file-list panel-scroll">${files || '<li class="ij-push-empty">No file changes</li>'}</ul>
+    </div>
+  `;
+}
+
+async function showPushModal() {
+  if (!state.repo) {
+    toast('Select a repository first', 'info');
+    return;
+  }
+  const overlay = $('#push-modal-overlay');
+  const body = $('#push-modal-body');
+  const confirm = $('#push-modal-confirm');
+  overlay?.classList.remove('hidden');
+  overlay?.classList.add('flex');
+  if (body) body.innerHTML = '<p class="text-sm text-gray-500">Loading push preview…</p>';
+  if (confirm) {
+    confirm.disabled = true;
+    confirm.textContent = 'Push';
+  }
+  $('#push-modal-ahead')?.classList.add('hidden');
+  try {
+    const preview = await api(repoApi(state.repo, '/remote/push/preview'));
+    renderPushPreview(preview);
+  } catch (err) {
+    hidePushModal();
+    toast(err.message, 'error');
+  }
+}
+
+async function executePush() {
   if (!state.repo) return;
+  const confirm = $('#push-modal-confirm');
+  if (confirm) confirm.disabled = true;
+  setGlobalLoading(true, 'Pushing…');
   try {
     const out = await api(repoApi(state.repo, '/remote/push'), { method: 'POST' });
     terminalLog(out.stdout || out.stderr || 'Pushed');
-    toast(out.exit_code === 0 ? 'Pushed to remote' : `Push failed (exit ${out.exit_code})`, out.exit_code === 0 ? 'success' : 'error');
+    hidePushModal();
+    setStatusMessage(`Pushed ${state.currentBranch || 'branch'} to remote`);
+    toast(
+      out.exit_code === 0 ? 'Pushed to remote' : `Push failed (exit ${out.exit_code})`,
+      out.exit_code === 0 ? 'success' : 'error',
+    );
+    await refreshGitStatus();
   } catch (err) {
     toast(err.message, 'error');
+  } finally {
+    if (confirm) confirm.disabled = false;
+    setGlobalLoading(false);
   }
 }
 
@@ -2823,10 +3495,6 @@ function scheduleDiagnostics() {
     clearDiagnostics();
     return;
   }
-  if (state.activeTab?.endsWith('.java') && state.javaIndexRunning) {
-    clearDiagnostics();
-    return;
-  }
   diagTimer = setTimeout(runDiagnostics, DIAG_DELAY_MS);
 }
 
@@ -3036,7 +3704,11 @@ function updateRunButtons() {
 async function openFileAt(path, line = 1, column = 1) {
   if (state.activeTab !== path) {
     rememberTreeAnchorCursor();
-    await openFile(path);
+    if (state.tabs.includes(path)) {
+      activateTab(path);
+    } else {
+      await openFile(path);
+    }
   } else {
     activateTab(path);
   }
@@ -3193,18 +3865,49 @@ async function runGradle() {
   if (!state.repo || !state.activeTab || !state.gradleInfo?.is_gradle) return;
   if (state.dirty.has(state.activeTab)) await saveFile();
   showTerminal();
+  const term = getActiveTerminal();
   const task = $('#gradle-task')?.value || state.gradleInfo.default_task;
-  terminalLog(`▶ gradle ${task}  (${state.gradleInfo.project_root})`);
+  const label = `▶ gradle ${task}  (${state.gradleInfo.project_root})`;
   try {
-    const out = await api(repoApi(state.repo, '/workspace/gradle/run'), {
-      method: 'POST',
-      body: JSON.stringify({ path: state.activeTab, task }),
-    });
-    if (out.stdout) terminalLog(out.stdout.trimEnd());
-    if (out.stderr) terminalLog(out.stderr.trimEnd());
-    if (out.exit_code !== 0) terminalLog(`exit ${out.exit_code}`);
+    const exitCode = await runWorkspaceCommandStream(
+      '/workspace/gradle/run',
+      { path: state.activeTab, task },
+      { label, terminalId: term.id },
+    );
+    const output = term.lines.filter((e) => typeof e === 'string').pop() || '';
+    if (exitCode !== 0 && /Unsupported class file major version/i.test(output)) {
+      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
+    }
   } catch (e) {
     terminalLog(`error: ${e.message}`);
+    if (/Unsupported class file major version/i.test(e.message || '')) {
+      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
+    }
+  }
+}
+
+async function runGradleTest(testFilter) {
+  if (!state.repo || !state.activeTab || !testFilter) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const task = `test --tests ${testFilter}`;
+  const label = `▶ gradle ${task}  (${state.activeTab})`;
+  try {
+    const exitCode = await runWorkspaceCommandStream(
+      '/workspace/gradle/run',
+      { path: state.activeTab, task },
+      { label, terminalId: term.id },
+    );
+    const output = term.lines.filter((e) => typeof e === 'string').pop() || '';
+    if (exitCode !== 0 && /Unsupported class file major version/i.test(output)) {
+      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
+    }
+  } catch (e) {
+    terminalLog(`error: ${e.message}`);
+    if (/Unsupported class file major version/i.test(e.message || '')) {
+      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
+    }
   }
 }
 
@@ -3216,16 +3919,14 @@ async function runJavaMain() {
   if (!state.repo || !state.activeTab?.endsWith('.java')) return;
   if (state.dirty.has(state.activeTab)) await saveFile();
   showTerminal();
+  const term = getActiveTerminal();
   const name = state.javaRunTarget || state.activeTab;
-  terminalLog(`▶ java ${name}`);
   try {
-    const out = await api(repoApi(state.repo, '/workspace/java/run'), {
-      method: 'POST',
-      body: JSON.stringify({ path: state.activeTab }),
-    });
-    if (out.stdout) terminalLog(out.stdout.trimEnd());
-    if (out.stderr) terminalLog(out.stderr.trimEnd());
-    if (out.exit_code !== 0) terminalLog(`exit ${out.exit_code}`);
+    await runWorkspaceCommandStream(
+      '/workspace/java/run',
+      { path: state.activeTab },
+      { label: `▶ java ${name}`, terminalId: term.id },
+    );
   } catch (e) {
     terminalLog(`error: ${e.message}`);
   }
@@ -3263,7 +3964,7 @@ async function showFileDiff(path, staged = false) {
 }
 
 function highlightGitStatusFile(path) {
-  $$('#git-status-list button').forEach((btn) => {
+  $$('#git-status-list .ij-git-item').forEach((btn) => {
     btn.classList.toggle('selected', btn.dataset.statusPath === path);
   });
 }
@@ -3273,29 +3974,111 @@ function formatActivityBadgeCount(n) {
   return String(n);
 }
 
+function groupStatusFilesByPath(files) {
+  const map = new Map();
+  for (const f of files || []) {
+    const existing = map.get(f.path);
+    if (!existing) {
+      map.set(f.path, {
+        path: f.path,
+        status: f.status,
+        staged: f.staged,
+        conflict: f.status === 'conflict',
+      });
+      continue;
+    }
+    if (f.status === 'conflict') existing.conflict = true;
+    existing.staged = existing.staged || f.staged;
+    if (f.status === 'deleted' || f.status === 'conflict') existing.status = f.status;
+  }
+  return [...map.values()];
+}
+
+function committablePathsFromFiles(files) {
+  return groupStatusFilesByPath(files)
+    .filter((f) => !f.conflict)
+    .map((f) => f.path);
+}
+
+function syncCommitSelection(files) {
+  const paths = committablePathsFromFiles(files);
+  for (const p of [...state.commitSelectedPaths]) {
+    if (!paths.includes(p)) state.commitSelectedPaths.delete(p);
+  }
+  for (const p of paths) {
+    if (!state.commitKnownPaths.has(p)) {
+      state.commitSelectedPaths.add(p);
+      state.commitKnownPaths.add(p);
+    }
+  }
+  for (const p of [...state.commitKnownPaths]) {
+    if (!paths.includes(p)) state.commitKnownPaths.delete(p);
+  }
+}
+
+function getSelectedCommitPaths() {
+  return [...state.commitSelectedPaths];
+}
+
+function setCommitPathSelected(path, selected) {
+  if (!path) return;
+  if (selected) state.commitSelectedPaths.add(path);
+  else state.commitSelectedPaths.delete(path);
+}
+
+function updateCommitSelectionUi(files, { mergeBlocked = false } = {}) {
+  const rows = groupStatusFilesByPath(files);
+  const committable = rows.filter((f) => !f.conflict);
+  const committablePaths = committable.map((f) => f.path);
+  const selected = getSelectedCommitPaths().filter((p) => committablePaths.includes(p));
+  const selectedCount = selected.length;
+
+  const selectAll = $('#commit-select-all');
+  if (selectAll) {
+    selectAll.disabled = committablePaths.length === 0;
+    selectAll.checked = committablePaths.length > 0 && selectedCount === committablePaths.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < committablePaths.length;
+  }
+
+  const countEl = $('#commit-file-count');
+  if (countEl) {
+    if (!rows.length) {
+      countEl.textContent = '';
+      countEl.classList.add('hidden');
+    } else {
+      const total = rows.length;
+      countEl.textContent = selectedCount === committablePaths.length && committablePaths.length === total
+        ? `${total} file${total === 1 ? '' : 's'}`
+        : `${selectedCount} of ${committablePaths.length} selected`;
+      countEl.classList.remove('hidden');
+    }
+  }
+
+  const commitDisabled = rows.length === 0 || mergeBlocked || selectedCount === 0;
+  const commitOnlyBtn = $('#btn-commit-only');
+  const commitPushBtn = $('#btn-commit-push');
+  const suggestBtn = $('#btn-suggest-commit');
+  if (commitOnlyBtn) commitOnlyBtn.disabled = commitDisabled;
+  if (commitPushBtn) commitPushBtn.disabled = commitDisabled;
+  if (suggestBtn) suggestBtn.disabled = commitDisabled;
+}
+
 async function refreshGitStatus() {
-  if (!state.repo) return { clean: true, files: [], branch: '' };
+  if (!state.repo) {
+    updateGitNavUi({ ahead: 0 });
+    return { clean: true, files: [], branch: '', ahead: 0 };
+  }
   const status = await api(repoApi(state.repo, '/workspace/status'));
   state.conflictFiles = new Set(
     (status.files || []).filter((f) => f.status === 'conflict').map((f) => f.path),
   );
   updateMergeBanner(status);
-  const commitBtn = $('#btn-commit');
-  const suggestBtn = $('#btn-suggest-commit');
   const mergeBlocked = !!(status.merge?.active && (status.conflict_count || 0) > 0);
-  if (commitBtn) commitBtn.disabled = status.clean || mergeBlocked;
-  if (suggestBtn) suggestBtn.disabled = status.clean || mergeBlocked;
-  const countEl = $('#commit-file-count');
-  if (countEl) {
-    if (status.clean) {
-      countEl.textContent = '';
-      countEl.classList.add('hidden');
-    } else {
-      const n = status.files?.length || 0;
-      countEl.textContent = `${n} file${n === 1 ? '' : 's'}`;
-      countEl.classList.remove('hidden');
-    }
-  }
+  state.mergeBlockedCommit = mergeBlocked;
+  state.lastGitStatusFiles = status.files || [];
+  syncCommitSelection(status.files || []);
+  updateCommitSelectionUi(status.files || [], { mergeBlocked });
+  updateGitNavUi(status);
   setBranchLabel(status.branch);
   const badge = $('#git-badge');
   if (badge) {
@@ -3315,17 +4098,34 @@ async function refreshGitStatus() {
   const list = $('#git-status-list');
   if (status.clean) {
     list.innerHTML = '<div class="ij-empty-state"><div class="ij-empty-icon">✓</div><p>Nothing to commit — working tree clean</p></div>';
+    updateCommitSelectionUi([], { mergeBlocked });
     updateStatusBar(status);
     updateConflictUi();
-    return { clean: true, files: [], branch: status.branch };
+    return { clean: true, files: [], branch: status.branch, ahead: status.ahead || 0 };
   }
-  list.innerHTML = status.files.map((f) => `
-    <button type="button" data-status-path="${escapeHtml(f.path)}" data-staged="${f.staged}" data-status="${f.status}" class="ij-git-item${f.status === 'conflict' ? ' conflict-item' : ''}" title="${escapeHtml(statusLabel(f.status))} — click to preview diff">
-      <span class="ij-git-badge ${f.status}" title="${escapeHtml(statusLabel(f.status))}">${statusIcon(f.status)}</span>
-      <span class="ij-git-path">${escapeHtml(f.path)}</span>
-    </button>
-  `).join('');
-  list.querySelectorAll('button').forEach((btn) => {
+  const grouped = groupStatusFilesByPath(status.files);
+  list.innerHTML = grouped.map((f) => {
+    const checked = !f.conflict && state.commitSelectedPaths.has(f.path);
+    const disabled = f.conflict ? ' disabled' : '';
+    const checkedAttr = checked ? ' checked' : '';
+    return `
+    <div class="ij-git-row${f.conflict ? ' conflict-item' : ''}">
+      <label class="ij-git-check" title="${f.conflict ? 'Resolve conflicts before committing' : 'Include in commit'}">
+        <input type="checkbox" class="ij-git-stage-check" data-path="${escapeHtml(f.path)}"${checkedAttr}${disabled}>
+      </label>
+      <button type="button" data-status-path="${escapeHtml(f.path)}" data-staged="${f.staged}" data-status="${f.status}" class="ij-git-item" title="${escapeHtml(statusLabel(f.status))} — click to preview diff">
+        <span class="ij-git-badge ${f.status}" title="${escapeHtml(statusLabel(f.status))}">${statusIcon(f.status)}</span>
+        <span class="ij-git-path">${escapeHtml(f.path)}</span>
+      </button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.ij-git-stage-check').forEach((input) => {
+    input.addEventListener('change', () => {
+      setCommitPathSelected(input.dataset.path, input.checked);
+      updateCommitSelectionUi(status.files || [], { mergeBlocked });
+    });
+  });
+  list.querySelectorAll('.ij-git-item').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (btn.dataset.status === 'conflict') {
         openConflictFile(btn.dataset.statusPath);
@@ -3335,7 +4135,7 @@ async function refreshGitStatus() {
     });
   });
   if (state.agentLiveDiffPath) {
-    $$('#git-status-list button').forEach((btn) => {
+    $$('#git-status-list .ij-git-item').forEach((btn) => {
       btn.classList.toggle('selected', btn.dataset.statusPath === state.agentLiveDiffPath);
     });
   }
@@ -3521,19 +4321,35 @@ function scheduleAgentWorkspaceRefresh(hintPath) {
   }, 120);
 }
 
-async function commit() {
+async function runCommit({ push = false } = {}) {
   const message = $('#commit-message').value.trim();
   if (!message) { toast('Enter a commit message', 'error'); return; }
+  const paths = getSelectedCommitPaths();
+  if (!paths.length) { toast('Select at least one file to commit', 'error'); return; }
   const out = await api(repoApi(state.repo, '/workspace/commit'), {
     method: 'POST',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, paths, push }),
   });
-  terminalLog(out.stdout || out.stderr || 'Committed');
+  if (out.exit_code !== 0) {
+    terminalLog(out.stderr || out.stdout || 'Commit failed');
+    toast(out.stderr?.trim() || out.stdout?.trim() || 'Commit failed', 'error');
+    return;
+  }
+  terminalLog(out.stdout || out.stderr || (push ? 'Committed and pushed' : 'Committed'));
   $('#commit-message').value = '';
+  state.commitKnownPaths.clear();
   await refreshGitStatus();
   await refreshHistory();
   await refreshTree();
-  toast('Committed & pushed', 'success');
+  toast(push ? 'Committed & pushed' : 'Committed locally — use Push when ready', push ? 'success' : 'success');
+}
+
+function commitOnly() {
+  return runCommit({ push: false });
+}
+
+function commitAndPush() {
+  return runCommit({ push: true });
 }
 
 async function maybeAutoSuggestCommit(status) {
@@ -3633,97 +4449,412 @@ async function checkoutBranch(branch) {
   terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
   await refreshTree();
   await refreshGitStatus();
+  startProjectIndexPolling();
 }
 
 // --- Terminal ---
-function terminalPrompt() {
+let terminalNextNum = 1;
+
+function createTerminalSession(name) {
+  const num = terminalNextNum++;
+  return {
+    id: `term-${num}`,
+    name: name || String(num),
+    cwd: '',
+    history: [],
+    historyIndex: -1,
+    lines: [],
+  };
+}
+
+function ensureTerminals() {
+  if (state.terminals.length) return;
+  const term = createTerminalSession();
+  state.terminals.push(term);
+  state.activeTerminalId = term.id;
+}
+
+function getActiveTerminal() {
+  ensureTerminals();
+  return state.terminals.find((t) => t.id === state.activeTerminalId) || state.terminals[0];
+}
+
+function resetTerminalCwds() {
+  state.terminals.forEach((t) => {
+    t.cwd = '';
+  });
+}
+
+function clearTerminalSession(term) {
+  term.lines = [];
+  term.cwd = '';
+  term.history = [];
+  term.historyIndex = -1;
+}
+
+function appendTerminalLine(text, container = $('#terminal-output')) {
+  if (!container) return;
+  const line = document.createElement('div');
+  line.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
+  line.textContent = text;
+  container.appendChild(line);
+  container.scrollTop = container.scrollHeight;
+}
+
+function appendTerminalEntry(entry, container = $('#terminal-output')) {
+  if (!container) return;
+  if (typeof entry === 'string') {
+    appendTerminalLine(entry, container);
+    return;
+  }
+  if (entry?.kind === 'cmd-start') {
+    const head = document.createElement('div');
+    head.className = 'ij-terminal-cmd-head';
+    head.textContent = entry.label;
+    container.appendChild(head);
+  } else if (entry?.kind === 'cmd-end') {
+    const foot = document.createElement('div');
+    foot.className = 'ij-terminal-cmd-foot';
+    if (entry.exitCode != null && entry.exitCode !== 0) {
+      foot.classList.add('ij-terminal-cmd-foot--failed');
+      const label = document.createElement('span');
+      label.className = 'ij-terminal-cmd-foot-label';
+      label.textContent = `exit ${entry.exitCode}`;
+      foot.appendChild(label);
+    }
+    container.appendChild(foot);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderTerminalOutput() {
+  const out = $('#terminal-output');
+  const term = getActiveTerminal();
+  if (!out || !term) return;
+  out.replaceChildren();
+  term.lines.forEach((entry) => appendTerminalEntry(entry, out));
+}
+
+function renderTerminalTabs() {
+  const bar = $('#terminal-tabs');
+  if (!bar) return;
+  ensureTerminals();
+  bar.replaceChildren();
+  state.terminals.forEach((term) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = 'ij-terminal-tab';
+    tab.dataset.terminalId = term.id;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', term.id === state.activeTerminalId ? 'true' : 'false');
+    tab.title = `Terminal ${term.name}`;
+    if (term.id === state.activeTerminalId) tab.classList.add('active');
+
+    const label = document.createElement('span');
+    label.className = 'ij-terminal-tab-label';
+    label.textContent = term.name;
+    tab.appendChild(label);
+
+    const close = document.createElement('span');
+    close.className = 'ij-terminal-tab-close';
+    close.setAttribute('aria-label', `Close terminal ${term.name}`);
+    close.textContent = '×';
+    tab.appendChild(close);
+
+    bar.appendChild(tab);
+  });
+}
+
+function switchTerminal(id) {
+  if (!state.terminals.some((t) => t.id === id)) return;
+  state.activeTerminalId = id;
+  renderTerminalTabs();
+  renderTerminalOutput();
+  updateTerminalCwdUi();
+  setTimeout(() => $('#terminal-input')?.focus(), 30);
+}
+
+function newTerminal({ focus = true } = {}) {
+  ensureTerminals();
+  const term = createTerminalSession();
+  state.terminals.push(term);
+  state.activeTerminalId = term.id;
+  renderTerminalTabs();
+  renderTerminalOutput();
+  updateTerminalCwdUi();
+  if (focus) {
+    showTerminal();
+    setTimeout(() => $('#terminal-input')?.focus(), 50);
+  }
+}
+
+function closeTerminal(id) {
+  ensureTerminals();
+  const term = state.terminals.find((t) => t.id === id);
+  if (!term) return;
+  if (state.terminals.length <= 1) {
+    clearTerminalSession(term);
+    renderTerminalOutput();
+    updateTerminalCwdUi();
+    return;
+  }
+  const idx = state.terminals.findIndex((t) => t.id === id);
+  state.terminals.splice(idx, 1);
+  if (state.activeTerminalId === id) {
+    const next = state.terminals[Math.max(0, idx - 1)];
+    state.activeTerminalId = next.id;
+  }
+  renderTerminalTabs();
+  renderTerminalOutput();
+  updateTerminalCwdUi();
+}
+
+function terminalPromptFor(term = getActiveTerminal()) {
   const repo = state.repo || 'repo';
-  const cwd = state.terminalCwd ? `${repo}/${state.terminalCwd}` : repo;
+  const cwd = term?.cwd ? `${repo}/${term.cwd}` : repo;
   return `${cwd} ❯`;
 }
 
 function updateTerminalCwdUi() {
   const el = $('#terminal-cwd');
-  if (el) el.textContent = terminalPrompt();
+  if (el) el.textContent = terminalPromptFor();
 }
 
-function terminalLog(text) {
+function terminalLog(text, terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term) return;
+  term.streamLine = null;
+  term.lines.push(text);
+  if (term.id === state.activeTerminalId) {
+    appendTerminalLine(text);
+  }
+}
+
+function terminalCommandBegin(label, terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term) return;
+  const entry = {
+    kind: 'cmd-start',
+    label: String(label || '').trim() || 'command',
+  };
+  term.lines.push(entry);
+  if (term.id === state.activeTerminalId) {
+    appendTerminalEntry(entry);
+  }
+}
+
+function terminalCommandEnd(exitCode, terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term) return;
+  const entry = {
+    kind: 'cmd-end',
+    exitCode: typeof exitCode === 'number' ? exitCode : null,
+  };
+  term.lines.push(entry);
+  if (term.id === state.activeTerminalId) {
+    appendTerminalEntry(entry);
+  }
+}
+
+function beginTerminalStream(terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term) return;
+  term.streamLine = '';
+  term.lines.push('');
+}
+
+function terminalStreamChunk(text, terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term || term.streamLine == null) return;
+  term.streamLine += text;
+  term.lines[term.lines.length - 1] = term.streamLine;
+  if (term.id === state.activeTerminalId) {
+    updateTerminalStreamLine(term);
+  }
+}
+
+function finalizeTerminalStream(terminalId) {
+  const term = terminalId
+    ? state.terminals.find((t) => t.id === terminalId)
+    : getActiveTerminal();
+  if (!term) return;
+  term.streamLine = null;
   const out = $('#terminal-output');
-  const line = document.createElement('div');
-  line.className = 'mb-1 whitespace-pre-wrap';
-  line.textContent = text;
-  out.appendChild(line);
+  const last = out?.lastElementChild;
+  if (last?.dataset?.streaming) delete last.dataset.streaming;
+}
+
+function updateTerminalStreamLine(term) {
+  const out = $('#terminal-output');
+  if (!out) return;
+  let el = out.lastElementChild;
+  if (!el?.dataset?.streaming) {
+    el = document.createElement('div');
+    el.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
+    el.dataset.streaming = '1';
+    out.appendChild(el);
+  }
+  el.textContent = term.streamLine || '';
   out.scrollTop = out.scrollHeight;
 }
 
 async function handleTerminalCd(cmd) {
+  const term = getActiveTerminal();
   const target = cmd.trim() === 'cd' ? '' : cmd.trim().slice(2).trim();
   try {
     const body = { target };
-    if (state.terminalCwd) body.cwd = state.terminalCwd;
+    if (term.cwd) body.cwd = term.cwd;
     const res = await api(repoApi(state.repo, '/workspace/shell/cd'), {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    state.terminalCwd = res.cwd || '';
+    term.cwd = res.cwd || '';
     updateTerminalCwdUi();
+    return true;
   } catch (e) {
     terminalLog(`cd: ${e.message}`);
+    return false;
+  }
+}
+
+async function consumeWorkspaceExecStream(res, terminalId) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = '';
+  let exitCode = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+    const parts = sseBuffer.split('\n\n');
+    sseBuffer = parts.pop() || '';
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data: '));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      if (event.text) terminalStreamChunk(event.text, terminalId);
+      if (event.t === 'exit' && event.code != null) exitCode = event.code;
+      if (event.t === 'error' && event.text) terminalStreamChunk(event.text, terminalId);
+    }
+  }
+
+  return exitCode;
+}
+
+async function postWorkspaceExecStream(path, body, terminalId) {
+  beginTerminalStream(terminalId);
+  const res = await fetch(repoApi(state.repo, path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let errMsg = res.statusText;
+    try {
+      const err = await res.json();
+      errMsg = err.error || errMsg;
+    } catch { /* ignore */ }
+    throw new Error(errMsg);
+  }
+  return consumeWorkspaceExecStream(res, terminalId);
+}
+
+async function runWorkspaceCommandStream(path, body, { label, terminalId } = {}) {
+  const termId = terminalId ?? getActiveTerminal()?.id;
+  if (label && termId) terminalCommandBegin(label, termId);
+  try {
+    const exitCode = await postWorkspaceExecStream(path, body, termId);
+    finalizeTerminalStream(termId);
+    if (termId) terminalCommandEnd(exitCode, termId);
+    return exitCode;
+  } catch (e) {
+    finalizeTerminalStream(termId);
+    if (termId) terminalCommandEnd(-1, termId);
+    throw e;
   }
 }
 
 async function runTerminalCommand(raw) {
   if (!state.repo) return;
+  const term = getActiveTerminal();
   const trimmed = raw.trim();
   if (!trimmed) return;
 
-  if (!state.terminalHistory.length || state.terminalHistory[0] !== trimmed) {
-    state.terminalHistory.unshift(trimmed);
-    if (state.terminalHistory.length > 100) state.terminalHistory.pop();
+  if (!term.history.length || term.history[0] !== trimmed) {
+    term.history.unshift(trimmed);
+    if (term.history.length > 100) term.history.pop();
   }
-  state.terminalHistoryIndex = -1;
+  term.historyIndex = -1;
 
-  terminalLog(`${terminalPrompt()} ${trimmed}`);
+  const label = `${terminalPromptFor(term)} ${trimmed}`;
 
   if (trimmed === 'cd' || trimmed.startsWith('cd ') || trimmed.startsWith('cd\t')) {
-    await handleTerminalCd(trimmed);
+    terminalCommandBegin(label, term.id);
+    const ok = await handleTerminalCd(trimmed);
+    terminalCommandEnd(ok ? 0 : 1, term.id);
     return;
   }
 
   try {
     const body = { command: trimmed };
-    if (state.terminalCwd) body.cwd = state.terminalCwd;
-    const out = await api(repoApi(state.repo, '/workspace/shell'), {
-      method: 'POST',
-      body: JSON.stringify(body),
+    if (term.cwd) body.cwd = term.cwd;
+    const exitCode = await runWorkspaceCommandStream('/workspace/shell', body, {
+      label,
+      terminalId: term.id,
     });
-    if (out.stdout) terminalLog(out.stdout);
-    if (out.stderr) terminalLog(out.stderr);
-    if (out.exit_code !== 0) terminalLog(`exit ${out.exit_code}`);
     if (/^git\b/.test(trimmed)) {
       await refreshGitStatus();
       await refreshHistory();
     }
+    return exitCode;
   } catch (e) {
-    terminalLog(`error: ${e.message}`);
+    terminalLog(`error: ${e.message}`, term.id);
   }
 }
 
 function terminalHistoryUp(input) {
-  if (!state.terminalHistory.length) return;
-  state.terminalHistoryIndex = Math.min(
-    state.terminalHistoryIndex + 1,
-    state.terminalHistory.length - 1,
+  const term = getActiveTerminal();
+  if (!term.history.length) return;
+  term.historyIndex = Math.min(
+    term.historyIndex + 1,
+    term.history.length - 1,
   );
-  input.value = state.terminalHistory[state.terminalHistoryIndex] || '';
+  input.value = term.history[term.historyIndex] || '';
 }
 
 function terminalHistoryDown(input) {
-  if (!state.terminalHistory.length) return;
-  state.terminalHistoryIndex = Math.max(state.terminalHistoryIndex - 1, -1);
-  input.value = state.terminalHistoryIndex < 0
+  const term = getActiveTerminal();
+  if (!term.history.length) return;
+  term.historyIndex = Math.max(term.historyIndex - 1, -1);
+  input.value = term.historyIndex < 0
     ? ''
-    : state.terminalHistory[state.terminalHistoryIndex] || '';
+    : term.history[term.historyIndex] || '';
+}
+
+function bindTerminalTabs() {
+  $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
+  $('#terminal-tabs')?.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('.ij-terminal-tab-close');
+    const tab = e.target.closest('.ij-terminal-tab');
+    if (!tab) return;
+    if (closeBtn) {
+      e.stopPropagation();
+      closeTerminal(tab.dataset.terminalId);
+      return;
+    }
+    switchTerminal(tab.dataset.terminalId);
+  });
 }
 
 // --- Cursor Agent ---
@@ -3788,7 +4919,91 @@ function appendAgentMessage(role, text) {
   if (role === 'assistant' && text && text !== '…' && window.ReaperAgentMarkdown) {
     void window.ReaperAgentMarkdown.renderAgentContent(content, text);
   }
-  return content;
+  return { wrap, content };
+}
+
+async function snapshotAgentWorkspacePaths() {
+  if (!state.repo) return new Set();
+  try {
+    const status = await api(repoApi(state.repo, '/workspace/status'));
+    return new Set((status.files || []).map((f) => f.path));
+  } catch {
+    return new Set();
+  }
+}
+
+async function collectAgentRevertPaths(beforePaths, afterStatus, seenPaths) {
+  const paths = new Set(seenPaths || []);
+  for (const f of afterStatus?.files || []) {
+    if (!beforePaths.has(f.path)) paths.add(f.path);
+  }
+  return [...paths];
+}
+
+async function restoreAgentWorkspacePaths(paths) {
+  if (!state.repo || !paths?.length) return;
+  const tracked = [];
+  const untracked = [];
+  const status = await api(repoApi(state.repo, '/workspace/status'));
+  const statusByPath = new Map((status.files || []).map((f) => [f.path, f]));
+  for (const path of paths) {
+    const entry = statusByPath.get(path);
+    if (entry?.status === 'untracked') untracked.push(path);
+    else tracked.push(path);
+  }
+  if (tracked.length) {
+    await api(repoApi(state.repo, '/workspace/git'), {
+      method: 'POST',
+      body: JSON.stringify({ args: ['restore', '--staged', '--worktree', '--', ...tracked] }),
+    });
+  }
+  if (untracked.length) {
+    await api(repoApi(state.repo, '/workspace/git'), {
+      method: 'POST',
+      body: JSON.stringify({ args: ['clean', '-fd', '--', ...untracked] }),
+    });
+  }
+}
+
+function removeAgentMessageWrap(wrap) {
+  wrap?.remove();
+  const box = $('#agent-messages');
+  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
+    box.innerHTML = '<div class="agent-msg-system text-center py-4 px-2">Ask the Cursor agent to edit files, run git commands, or explain the codebase.</div>';
+  }
+}
+
+async function stopAgentChat() {
+  if (!state.agentBusy || !state.repo) return;
+  state.agentStopRequested = true;
+  state.agentMessageQueue = [];
+  state.agentAbortController?.abort();
+  try {
+    await api(repoApi(state.repo, '/cursor/stop'), { method: 'POST' });
+  } catch {
+    /* stream abort still stops the UI */
+  }
+  updateAgentUi();
+}
+
+async function revertAgentMessage() {
+  const turn = state.agentLastRevertibleTurn;
+  if (!turn || state.agentBusy || !state.repo) return;
+  if (!confirm('Revert the last agent message and undo its file changes?')) return;
+
+  try {
+    if (turn.paths?.length) {
+      await restoreAgentWorkspacePaths(turn.paths);
+    }
+    removeAgentMessageWrap(turn.assistantWrap);
+    removeAgentMessageWrap(turn.userWrap);
+    state.agentLastRevertibleTurn = null;
+    await refreshAfterAgent({ final: false });
+    toast('Reverted last agent message', 'success');
+  } catch (e) {
+    toast(e.message || 'Could not revert agent changes', 'error');
+  }
+  updateAgentUi();
 }
 
 function updateAgentUi() {
@@ -3814,6 +5029,22 @@ function updateAgentUi() {
   $('#btn-agent-retry')?.classList.toggle('hidden', state.cursorBridgeOk || !state.cursorConfigured);
   $('#agent-config-banner')?.classList.toggle('hidden', state.cursorConfigured);
 
+  const workBar = $('#agent-work-status');
+  const workText = $('#agent-work-status-text');
+  if (workBar && workText) {
+    const queued = state.agentMessageQueue.length;
+    const showWorkBar = state.agentBusy || queued > 0;
+    workBar.classList.toggle('hidden', !showWorkBar);
+    workBar.classList.toggle('is-working', state.agentBusy);
+    if (state.agentBusy && queued > 0) {
+      workText.textContent = `Working… · ${queued} queued`;
+    } else if (state.agentBusy) {
+      workText.textContent = 'Working…';
+    } else if (queued > 0) {
+      workText.textContent = `${queued} queued…`;
+    }
+  }
+
   const hint = !state.cursorConfigured ? 'Configure Cursor in Settings (⌘,)' :
     !state.repo ? 'Select a repo to chat' :
     !state.cursorBridgeOk ? (state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper') :
@@ -3831,6 +5062,11 @@ function updateAgentUi() {
 
   const agentBadge = $('#agent-badge');
   agentBadge?.classList.toggle('hidden', !state.agentBusy);
+
+  const stopBtn = $('#btn-agent-stop');
+  if (stopBtn) stopBtn.disabled = !canChat || !state.agentBusy;
+  const revertBtn = $('#btn-agent-revert');
+  if (revertBtn) revertBtn.disabled = !canChat || state.agentBusy || !state.agentLastRevertibleTurn;
 }
 
 function populateAgentModelSelect(models, selectedId) {
@@ -3948,6 +5184,61 @@ async function restartBridge() {
   } catch (err) {
     toast(err.message, 'error');
   }
+}
+
+function terminalBottomHeightLimits() {
+  const max = Math.min(Math.round(window.innerHeight * 0.7), 720);
+  return { min: 220, max: Math.max(220, max) };
+}
+
+function applyTerminalBottomHeight(px) {
+  const dock = $('#terminal-dock-bottom');
+  if (!dock || !Number.isFinite(px)) return;
+  const { min, max } = terminalBottomHeightLimits();
+  const clamped = Math.min(max, Math.max(min, Math.round(px)));
+  dock.style.setProperty('--ij-terminal-bottom-h', `${clamped}px`);
+  return clamped;
+}
+
+function initTerminalBottomResize() {
+  const saved = parseInt(localStorage.getItem(TERMINAL_BOTTOM_HEIGHT_KEY), 10);
+  if (Number.isFinite(saved)) applyTerminalBottomHeight(saved);
+
+  const handle = $('#terminal-bottom-resize');
+  if (!handle) return;
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+
+  const stopDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    const h = applyTerminalBottomHeight($('#terminal-dock-bottom')?.getBoundingClientRect().height);
+    if (h) localStorage.setItem(TERMINAL_BOTTOM_HEIGHT_KEY, String(h));
+  };
+
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startY = e.clientY;
+    startH = $('#terminal-dock-bottom')?.getBoundingClientRect().height || 0;
+    handle.classList.add('active');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    applyTerminalBottomHeight(startH + (startY - e.clientY));
+  });
+
+  window.addEventListener('mouseup', stopDrag);
+  window.addEventListener('blur', stopDrag);
 }
 
 function setTerminalDock(dock) {
@@ -4124,6 +5415,7 @@ async function clearAgentSession() {
   }
   $('#agent-messages').innerHTML = '<div class="agent-msg-system text-center py-6 px-2">New conversation started.</div>';
   state.agentMessageQueue = [];
+  state.agentLastRevertibleTurn = null;
   updateAgentUi();
 }
 
@@ -4157,20 +5449,27 @@ async function runAgentChat(prompt, opts = {}) {
     return;
   }
 
-  if (!opts.skipUserBubble) appendAgentMessage('user', prompt);
+  let userWrap = null;
+  if (!opts.skipUserBubble) {
+    ({ wrap: userWrap } = appendAgentMessage('user', prompt));
+  }
   state.agentBusy = true;
+  state.agentStopRequested = false;
+  state.agentAbortController = new AbortController();
   state.agentLiveFollow = state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
   state.agentLastToolPath = null;
   state.agentSeenPaths = new Set();
   state.agentHadFileChanges = false;
+  const pathsBefore = await snapshotAgentWorkspacePaths();
   updateAgentUi();
   if (state.agentLiveFollow) showAgentDiffPlaceholder();
 
-  const assistantEl = appendAgentMessage('assistant', '…');
+  const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…');
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
+  let cancelled = false;
 
   try {
     const res = await fetch(repoApi(state.repo, '/cursor/chat'), {
@@ -4181,6 +5480,7 @@ async function runAgentChat(prompt, opts = {}) {
         model: state.cursorModel,
         mode: state.cursorMode,
       }),
+      signal: state.agentAbortController.signal,
     });
 
     if (!res.ok) {
@@ -4221,7 +5521,11 @@ async function runAgentChat(prompt, opts = {}) {
           throw new Error(data.error);
         } else if (data.type === 'done') {
           doneSummary = data.summary || null;
-          if (!buffer && data.status === 'finished') {
+          if (data.status === 'cancelled') {
+            cancelled = true;
+            buffer = buffer || 'Stopped.';
+            textBuffer = textBuffer || buffer;
+          } else if (!buffer && data.status === 'finished') {
             buffer = 'Done — check Source Control for file changes, or reopen files in the editor.';
             textBuffer = buffer;
           } else if (!buffer && data.status === 'error') {
@@ -4233,20 +5537,44 @@ async function runAgentChat(prompt, opts = {}) {
 
     clearTimeout(agentRefreshTimer);
     clearTimeout(agentMarkdownTimer);
-    await finalizeAgentMessage(assistantEl, { textBuffer, buffer, summary: doneSummary });
-    await refreshAfterAgent({ fromAgent: true, final: true });
-  } catch (e) {
-    const msg = e.message || String(e);
-    if (/invalid api key/i.test(msg)) {
-      showAgentKeyForm();
-      toast('Invalid API key — paste a new one from Cursor → Integrations', 'error');
+    if (cancelled || state.agentStopRequested) {
+      assistantWrap.classList.add('text-gray-500');
+      window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer || 'Stopped.');
     } else {
-      toast(msg, 'error');
+      await finalizeAgentMessage(assistantEl, { textBuffer, buffer, summary: doneSummary });
     }
-    assistantEl.classList.add('text-red-400');
-    window.ReaperAgentMarkdown?.renderPlain(assistantEl, msg);
+    const postStatus = await api(repoApi(state.repo, '/workspace/status'));
+    const revertPaths = await collectAgentRevertPaths(pathsBefore, postStatus, state.agentSeenPaths);
+    if (revertPaths.length || userWrap || assistantWrap) {
+      state.agentLastRevertibleTurn = {
+        userWrap,
+        assistantWrap,
+        paths: revertPaths,
+      };
+    }
+    await refreshAfterAgent({
+      fromAgent: true,
+      final: !cancelled && !state.agentStopRequested,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError' || state.agentStopRequested) {
+      assistantWrap.classList.add('text-gray-500');
+      window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer || 'Stopped.');
+    } else {
+      const msg = e.message || String(e);
+      if (/invalid api key/i.test(msg)) {
+        showAgentKeyForm();
+        toast('Invalid API key — paste a new one from Cursor → Integrations', 'error');
+      } else {
+        toast(msg, 'error');
+      }
+      assistantWrap.classList.add('text-red-400');
+      window.ReaperAgentMarkdown?.renderPlain(assistantEl, msg);
+    }
   } finally {
     state.agentBusy = false;
+    state.agentStopRequested = false;
+    state.agentAbortController = null;
     setAgentDiffLive(false);
     updateAgentUi();
     drainAgentMessageQueue();
@@ -4370,7 +5698,15 @@ function installFormClipboardShortcuts() {
 function bindEvents() {
   installFormClipboardShortcuts();
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
-  $('#repo-select').addEventListener('change', (e) => selectRepo(e.target.value));
+  $('#repo-select').addEventListener('change', (e) => {
+    const name = e.target.value;
+    if (shouldOpenRepoInNewWindow(name)) {
+      e.target.value = state.repo || '';
+      openRepoInNewWindow(name);
+      return;
+    }
+    selectRepo(name);
+  });
   $('#branch-picker-btn')?.addEventListener('click', showBranchPicker);
   $('#btn-new-repo').addEventListener('click', showModal);
   $('#btn-clone-repo')?.addEventListener('click', showCloneModal);
@@ -4380,6 +5716,8 @@ function bindEvents() {
   $('#modal-cancel').addEventListener('click', hideModal);
   $('#clone-modal-cancel')?.addEventListener('click', hideCloneModal);
   $('#publish-modal-cancel')?.addEventListener('click', hidePublishModal);
+  $('#push-modal-cancel')?.addEventListener('click', hidePushModal);
+  $('#push-modal-confirm')?.addEventListener('click', executePush);
   $('#settings-modal-close')?.addEventListener('click', hideSettingsModal);
   $('#settings-modal-overlay')?.addEventListener('click', (e) => {
     if (e.target === $('#settings-modal-overlay')) hideSettingsModal();
@@ -4388,6 +5726,8 @@ function bindEvents() {
   $('#settings-cursor-form')?.addEventListener('submit', saveCursorKeyFromSettings);
   $('#settings-cursor-clear')?.addEventListener('click', clearCursorKeyFromSettings);
   $('#settings-cursor-restart')?.addEventListener('click', restartBridge);
+  $('#settings-jdk-form')?.addEventListener('submit', saveJdkFromSettings);
+  $('#settings-jdk-clear')?.addEventListener('click', clearJdkFromSettings);
   $$('.ij-settings-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.settingsTab));
   });
@@ -4410,20 +5750,37 @@ function bindEvents() {
   $('#tb-format')?.addEventListener('click', formatDocument);
   $('#tb-run')?.addEventListener('click', runActive);
   $('#gradle-task')?.addEventListener('change', () => updateRunButtons());
-  $('#btn-commit').addEventListener('click', commit);
+  $('#btn-commit-only')?.addEventListener('click', commitOnly);
+  $('#btn-commit-push')?.addEventListener('click', commitAndPush);
   $('#btn-suggest-commit')?.addEventListener('click', () => suggestCommitMessage());
+  $('#commit-select-all')?.addEventListener('change', (e) => {
+    const checked = e.target.checked;
+    e.target.indeterminate = false;
+    $$('#git-status-list .ij-git-stage-check:not(:disabled)').forEach((input) => {
+      input.checked = checked;
+      setCommitPathSelected(input.dataset.path, checked);
+    });
+    updateCommitSelectionUi(state.lastGitStatusFiles, { mergeBlocked: state.mergeBlockedCommit });
+  });
   $('#settings-gemini-form')?.addEventListener('submit', saveGeminiKeyFromSettings);
   $('#settings-gemini-clear')?.addEventListener('click', clearGeminiKeyFromSettings);
   $('#settings-gemini-change-key')?.addEventListener('click', showGeminiKeyForm);
   populateGeminiModelSelect();
   $('#settings-gemini-model')?.addEventListener('change', saveGeminiModelFromSettings);
   $('#btn-sync').addEventListener('click', syncPull);
+  $('#btn-nav-commit')?.addEventListener('click', () => {
+    switchPanel('git');
+    setTimeout(() => $('#commit-message')?.focus(), 50);
+  });
+  $('#btn-nav-push')?.addEventListener('click', pushRemote);
   $('#btn-repo-info')?.addEventListener('click', showRepoInfoModal);
   $('#repo-info-close')?.addEventListener('click', hideRepoInfoModal);
   $('#repo-info-overlay')?.addEventListener('click', (e) => {
     if (e.target === $('#repo-info-overlay')) hideRepoInfoModal();
   });
   $('#btn-agent-send').addEventListener('click', sendAgentMessage);
+  $('#btn-agent-stop')?.addEventListener('click', stopAgentChat);
+  $('#btn-agent-revert')?.addEventListener('click', revertAgentMessage);
   $('#btn-agent-settings').addEventListener('click', showAgentKeyForm);
   $('#btn-agent-clear').addEventListener('click', clearAgentSession);
   $$('[data-agent-mode]').forEach((btn) => {
@@ -4450,6 +5807,7 @@ function bindEvents() {
   $$('[data-terminal-dock]').forEach((btn) => {
     btn.addEventListener('click', () => setTerminalDock(btn.dataset.terminalDock));
   });
+  bindTerminalTabs();
 
   $('#agent-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -4504,7 +5862,8 @@ function bindEvents() {
     }
     if ((e.metaKey || e.ctrlKey) && e.key === '`') {
       e.preventDefault();
-      toggleTerminal();
+      if (e.shiftKey) newTerminal();
+      else toggleTerminal();
       return;
     }
     if (e.key === 'Escape') {
@@ -4588,6 +5947,10 @@ function bindEvents() {
     if (e.target === $('#publish-modal-overlay')) hidePublishModal();
   });
 
+  $('#push-modal-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#push-modal-overlay')) hidePushModal();
+  });
+
   $('#clone-remote-url')?.addEventListener('input', (e) => {
     const nameInput = $('#clone-local-name');
     if (!nameInput || nameInput.dataset.userEdited === '1') return;
@@ -4609,7 +5972,12 @@ async function init() {
     console.error('[Reaper] Agent markdown not ready — tables/diagrams will show as plain text until scripts load.');
   }
   populateFontSizeSelects();
+  populateFontFamilySelects();
   syncFontSizeControls(getEditorFontSize());
+  ensureEditorFontLoaded(getEditorFontSpec());
+  ensureTerminals();
+  renderTerminalTabs();
+  renderTerminalOutput();
   syncDotfilesControls(getShowDotfiles());
   initEditor();
   bindEvents();
@@ -4619,12 +5987,25 @@ async function init() {
   bindBranchPicker();
   mountReaperIcons();
   initSidebarResize();
+  initTerminalBottomResize();
   applyAgentDock();
   applyTerminalDock();
   switchPanel('explorer');
-  await loadCursorStatus();
-  await loadGeminiSettingsSection();
-  await loadRepos();
+  void loadCursorStatus();
+  void loadGeminiSettingsSection();
+  try {
+    await loadRepos();
+  } catch (err) {
+    toast(`Could not reach Reaper backend: ${err.message}. Quit other Reaper copies and relaunch.`, 'error', { duration: 15000 });
+  }
+  const initialRepo = getInitialRepoFromUrl();
+  if (initialRepo) {
+    const sel = $('#repo-select');
+    if (sel && [...sel.options].some((o) => o.value === initialRepo)) {
+      sel.value = initialRepo;
+      await selectRepo(initialRepo);
+    }
+  }
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {
       await loadCursorStatus();

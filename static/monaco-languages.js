@@ -210,6 +210,72 @@
     return Array.isArray(items) ? items : [];
   }
 
+  const definitionCache = new Map();
+  const DEF_CACHE_MAX = 512;
+
+  function definitionCacheKey(repo, path, line, column, content) {
+    let hash = 2166136261;
+    const text = content || '';
+    const sample = text.length > 8192 ? text.slice(0, 4096) + text.slice(-4096) : text;
+    for (let i = 0; i < sample.length; i += 1) {
+      hash ^= sample.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${repo}:${path}:${line}:${column}:${text.length}:${hash >>> 0}`;
+  }
+
+  async function lookupDefinition(helpers, model, position) {
+    if (!helpers.repoApi || !helpers.getRepo || !helpers.openFileAt) return null;
+    const repo = helpers.getRepo();
+    if (!repo) return null;
+    const path = helpers.getActivePath?.() || '';
+    if (!path) return null;
+
+    const line = position.lineNumber;
+    const column = position.column;
+    const dirty = helpers.isFileDirty?.(path);
+    const content = dirty ? model.getValue() : undefined;
+    const cacheKey = definitionCacheKey(repo, path, line, column, content ?? model.getValue());
+    const cached = definitionCache.get(cacheKey);
+    if (cached) {
+      return navigateToDefinition(helpers, cached);
+    }
+
+    try {
+      const url = helpers.repoApi(repo, '/workspace/definition');
+      const hit = dirty
+        ? await helpers.api(url, {
+            method: 'POST',
+            body: JSON.stringify({ path, line, column, content }),
+          })
+        : await helpers.api(`${url}?${new URLSearchParams({
+            path,
+            line: String(line),
+            column: String(column),
+          })}`);
+      if (!hit?.path) return null;
+      if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
+      definitionCache.set(cacheKey, hit);
+      return navigateToDefinition(helpers, hit);
+    } catch {
+      return null;
+    }
+  }
+
+  async function navigateToDefinition(helpers, hit) {
+    await helpers.openFileAt(hit.path, hit.line || 1, hit.column || 1);
+    const editor = helpers.getEditor?.();
+    const activeModel = editor?.getModel();
+    if (!activeModel) return null;
+    const nameLen = (hit.name || 'symbol').length;
+    const line = Math.max(1, hit.line || 1);
+    const col = Math.max(1, hit.column || 1);
+    return {
+      uri: activeModel.uri,
+      range: new monaco.Range(line, col, line, col + nameLen),
+    };
+  }
+
   function setupEditorFeatures(editor, helpers) {
     registerGroovy();
 
@@ -232,34 +298,8 @@
     });
 
     monaco.languages.registerDefinitionProvider(Array.from(langs), {
-      async provideDefinition(model, position) {
-        if (!helpers.repoApi || !helpers.getRepo || !helpers.openFileAt) return null;
-        const repo = helpers.getRepo();
-        if (!repo) return null;
-        const path = helpers.getActivePath?.() || '';
-        if (!path) return null;
-        try {
-          const q = new URLSearchParams({
-            path,
-            line: String(position.lineNumber),
-            column: String(position.column),
-          });
-          const hit = await helpers.api(`${helpers.repoApi(repo, '/workspace/definition')}?${q}`);
-          if (!hit?.path) return null;
-          await helpers.openFileAt(hit.path, hit.line, hit.column);
-          const editor = helpers.getEditor?.();
-          const activeModel = editor?.getModel();
-          if (!activeModel) return null;
-          const nameLen = (hit.name || 'symbol').length;
-          const line = Math.max(1, hit.line || 1);
-          const col = Math.max(1, hit.column || 1);
-          return {
-            uri: activeModel.uri,
-            range: new monaco.Range(line, col, line, col + nameLen),
-          };
-        } catch {
-          return null;
-        }
+      provideDefinition(model, position) {
+        return lookupDefinition(helpers, model, position);
       },
     });
 

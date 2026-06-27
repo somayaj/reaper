@@ -27,6 +27,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/cursor/models", axum::routing::get(cursor_models))
         .route("/api/cursor/bridge/restart", axum::routing::post(restart_bridge))
         .route("/api/repos/{name}/cursor/chat", axum::routing::post(cursor_chat))
+        .route("/api/repos/{name}/cursor/stop", axum::routing::post(cursor_stop))
         .route(
             "/api/repos/{name}/cursor/session",
             axum::routing::delete(clear_cursor_session),
@@ -197,6 +198,20 @@ async fn cursor_chat(
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn cursor_stop(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let Some(session_id) = state.cursor_sessions.get(&name) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    match state.cursor_bridge.stop_chat(&session_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 async fn clear_cursor_session(

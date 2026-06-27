@@ -57,6 +57,7 @@ pub async fn run_git_agent(
             kind: None,
         },
         conflict_count: 0,
+        ahead: 0,
     });
 
     let context = format!(

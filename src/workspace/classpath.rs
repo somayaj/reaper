@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -12,7 +14,27 @@ use super::symbols::{ClassSearchHit, SymbolLocation, class_name_match_score};
 
 const INDEX_PATH: &str = "java-index.json";
 /// Bump when index shape/rules change so stale caches rebuild once.
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 5;
+
+/// JDK module directories inside extracted `src.zip` (Java 9+ layout).
+const JDK_SOURCE_MODULES: &[&str] = &[
+    "java.base/",
+    "java.sql/",
+    "java.logging/",
+    "java.net.http/",
+    "java.xml/",
+    "java.naming/",
+    "java.management/",
+    "java.instrument/",
+    "java.compiler/",
+    "java.desktop/",
+    "java.datatransfer/",
+    "java.prefs/",
+    "java.rmi/",
+    "java.scripting/",
+    "java.security.jgss/",
+    "java.transaction.xa/",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JavaIndex {
@@ -125,12 +147,134 @@ struct CachedLookup {
 static LOOKUP_CACHE: LazyLock<Mutex<HashMap<String, CachedLookup>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static GRADLE_ROOT_CACHE: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static IMPORTS_CACHE: LazyLock<Mutex<HashMap<String, ImportMap>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static DEFINITION_CACHE: LazyLock<Mutex<HashMap<String, Option<SymbolLocation>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static JDK_LOCATION_CACHE: LazyLock<Mutex<HashMap<String, SymbolLocation>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static LIBRARY_SOURCE_DIRS_CACHE: LazyLock<Mutex<HashMap<String, Vec<PathBuf>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const DEFINITION_CACHE_MAX: usize = 4096;
+
 fn invalidate_lookup_cache(gradle_root: &Path) {
     if let Ok(key) = gradle_root.canonicalize() {
+        let key_str = key.display().to_string();
         if let Ok(mut guard) = LOOKUP_CACHE.lock() {
-            guard.remove(&key.display().to_string());
+            guard.remove(&key_str);
+        }
+        if let Ok(mut guard) = GRADLE_ROOT_CACHE.lock() {
+            guard.retain(|k, _| !k.starts_with(&format!("{key_str}:")));
+        }
+        if let Ok(mut guard) = IMPORTS_CACHE.lock() {
+            guard.retain(|k, _| !k.starts_with(&format!("{key_str}:")));
+        }
+        if let Ok(mut guard) = DEFINITION_CACHE.lock() {
+            guard.retain(|k, _| !k.starts_with(&format!("{key_str}:")));
+        }
+        if let Ok(mut guard) = JDK_LOCATION_CACHE.lock() {
+            guard.retain(|k, _| !k.starts_with(&format!("{key_str}:")));
+        }
+        if let Ok(mut guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
+            guard.remove(&key_str);
         }
     }
+}
+
+fn cached_gradle_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
+    let ws_key = ws
+        .canonicalize()
+        .unwrap_or_else(|_| ws.to_path_buf())
+        .display()
+        .to_string();
+    let cache_key = format!("{ws_key}:{from_path}");
+    if let Ok(guard) = GRADLE_ROOT_CACHE.lock() {
+        if let Some(root) = guard.get(&cache_key) {
+            return Ok(Some(root.clone()));
+        }
+    }
+    let root = find_gradle_root(ws, from_path)?;
+    if let Some(ref root) = root {
+        if let Ok(mut guard) = GRADLE_ROOT_CACHE.lock() {
+            guard.insert(cache_key, root.clone());
+        }
+    }
+    Ok(root)
+}
+
+fn definition_cache_key(
+    gradle_root: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> String {
+    let index_mtime = reaper_dir(gradle_root)
+        .join("java-index.json")
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}:{}:{}:{}:{}:{index_mtime}",
+        gradle_root.display(),
+        from_path,
+        line,
+        column,
+        content_fingerprint(content)
+    )
+}
+
+fn content_fingerprint(content: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cache_definition(key: String, hit: Option<SymbolLocation>) {
+    if hit.is_none() {
+        return;
+    }
+    let Ok(mut guard) = DEFINITION_CACHE.lock() else {
+        return;
+    };
+    if guard.len() >= DEFINITION_CACHE_MAX {
+        guard.clear();
+    }
+    guard.insert(key, hit);
+}
+
+fn cached_definition(key: &str) -> Option<Option<SymbolLocation>> {
+    DEFINITION_CACHE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(key).cloned())
+}
+
+fn parse_imports_cached(gradle_root: &Path, from_path: &str, content: &str) -> ImportMap {
+    let fp = content_fingerprint(content);
+    let key = format!("{}:{}:{fp}", gradle_root.display(), from_path);
+    if let Ok(guard) = IMPORTS_CACHE.lock() {
+        if let Some(imports) = guard.get(&key) {
+            return imports.clone();
+        }
+    }
+    let imports = parse_imports(content);
+    if let Ok(mut guard) = IMPORTS_CACHE.lock() {
+        if guard.len() >= DEFINITION_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(key, imports.clone());
+    }
+    imports
 }
 
 fn get_lookup(ws: &Path, gradle_root: &Path) -> Result<Arc<IndexLookup>> {
@@ -141,23 +285,26 @@ fn get_lookup(ws: &Path, gradle_root: &Path) -> Result<Arc<IndexLookup>> {
         .to_string();
 
     let cache_path = reaper_dir(gradle_root).join("java-index.json");
-    let (mtime, stamp) = if cache_path.is_file() {
-        (
-            std::fs::metadata(&cache_path)?.modified()?,
-            std::fs::read_to_string(reaper_dir(gradle_root).join("classpath.stamp"))
-                .unwrap_or_default(),
-        )
+    let index_mtime = if cache_path.is_file() {
+        std::fs::metadata(&cache_path)?.modified()?
     } else {
-        (SystemTime::UNIX_EPOCH, String::new())
+        SystemTime::UNIX_EPOCH
     };
 
     if let Ok(guard) = LOOKUP_CACHE.lock() {
         if let Some(entry) = guard.get(&key) {
-            if entry.mtime == mtime && entry.stamp == stamp {
+            if entry.mtime == index_mtime {
                 return Ok(Arc::clone(&entry.lookup));
             }
         }
     }
+
+    let stamp = if cache_path.is_file() {
+        std::fs::read_to_string(reaper_dir(gradle_root).join("classpath.stamp")).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mtime = index_mtime;
 
     let index = try_load_index(ws, gradle_root)?.unwrap_or_else(|| {
         empty_index(ws, gradle_root)
@@ -197,6 +344,8 @@ pub struct WarmIndexStatus {
     pub dependency_jars: usize,
     pub source_jars: usize,
     pub jdk_sources: bool,
+    pub spring_symbols: usize,
+    pub jdk_symbols: usize,
 }
 
 pub fn is_gradle_workspace(ws: &Path) -> bool {
@@ -205,12 +354,52 @@ pub fn is_gradle_workspace(ws: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Drop cached Java indexes so the next warm_index rebuilds (e.g. after branch checkout).
+pub fn invalidate_caches(ws: &Path) -> Result<()> {
+    for root in super::gradle::find_all_gradle_roots(ws)? {
+        invalidate_lookup_cache(&root);
+        let stamp = reaper_dir(&root).join("classpath.stamp");
+        let _ = std::fs::remove_file(stamp);
+    }
+    Ok(())
+}
+
 fn reaper_dir(gradle_root: &Path) -> PathBuf {
     gradle_root.join(".reaper")
 }
 
 /// Resolved compile/runtime JAR paths for javac (Spring, JDK libs, etc.).
+const CLASSPATH_JARS_CACHE: &str = "classpath-jars.json";
+
+/// Cached dependency JARs from the last successful index — never runs Gradle.
+pub fn cached_classpath_jars(gradle_root: &Path) -> Vec<PathBuf> {
+    let path = reaper_dir(gradle_root).join(CLASSPATH_JARS_CACHE);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+fn save_classpath_jars_cache(gradle_root: &Path, jars: &[PathBuf]) -> Result<()> {
+    std::fs::create_dir_all(reaper_dir(gradle_root))?;
+    let paths: Vec<String> = jars.iter().map(|p| p.display().to_string()).collect();
+    std::fs::write(
+        reaper_dir(gradle_root).join(CLASSPATH_JARS_CACHE),
+        serde_json::to_string(&paths)?,
+    )?;
+    Ok(())
+}
+
 pub fn compile_classpath_jars(gradle_root: &Path) -> Result<Vec<PathBuf>> {
+    let cached = cached_classpath_jars(gradle_root);
+    if !cached.is_empty() {
+        return Ok(cached);
+    }
     Ok(resolve_gradle_classpath(gradle_root)?.jars)
 }
 
@@ -228,6 +417,8 @@ pub fn warm_index(ws: &Path) -> Result<WarmIndexStatus> {
         dependency_jars: 0,
         source_jars: 0,
         jdk_sources: false,
+        spring_symbols: 0,
+        jdk_symbols: 0,
     };
 
     for root in roots {
@@ -245,6 +436,8 @@ pub fn warm_index(ws: &Path) -> Result<WarmIndexStatus> {
         combined.dependency_jars += meta.dependency_jars;
         combined.source_jars += meta.source_jars;
         combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
+        combined.spring_symbols += meta.spring_symbols;
+        combined.jdk_symbols += meta.jdk_symbols;
     }
 
     Ok(combined)
@@ -265,6 +458,8 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
         dependency_jars: 0,
         source_jars: 0,
         jdk_sources: false,
+        spring_symbols: 0,
+        jdk_symbols: 0,
     };
 
     for root in roots {
@@ -278,6 +473,8 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
             combined.dependency_jars += meta.dependency_jars;
             combined.source_jars += meta.source_jars;
             combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
+            combined.spring_symbols += meta.spring_symbols;
+            combined.jdk_symbols += meta.jdk_symbols;
         }
     }
 
@@ -299,9 +496,7 @@ pub fn search_indexed_classes(ws: &Path, query: &str, limit: usize) -> Result<Ve
             }
             let loc = to_location(ws, &root, sym);
             let path_norm = loc.path.replace('\\', "/");
-            if query.trim().is_empty()
-                && (path_norm.contains(".reaper/") || path_norm.contains("/org/springframework/"))
-            {
+            if query.trim().is_empty() && skip_indexed_class_on_empty_browse(&path_norm, &sym.qualified) {
                 continue;
             }
             let Some(base) = class_name_match_score(query, &sym.name, &sym.qualified) else {
@@ -326,16 +521,29 @@ pub fn search_indexed_classes(ws: &Path, query: &str, limit: usize) -> Result<Ve
     Ok(dedupe_indexed_classes(scored, limit))
 }
 
+fn skip_indexed_class_on_empty_browse(path_norm: &str, qualified: &str) -> bool {
+    if path_norm.contains(".reaper/java-sources/jdk/") {
+        return true;
+    }
+    if path_norm.contains("/org/springframework/") {
+        return false;
+    }
+    if path_norm.contains(".reaper/") {
+        return true;
+    }
+    qualified.starts_with("java.") || qualified.starts_with("jdk.")
+}
+
 fn indexed_class_priority(path: &str, qualified: &str) -> u32 {
     let path = path.replace('\\', "/");
-    if path.contains(".reaper/")
-        || path.contains("/org/springframework/")
-        || qualified.starts_with("java.")
-        || qualified.starts_with("jdk.")
-    {
+    if path.contains(".reaper/java-sources/jdk/") || qualified.starts_with("java.") || qualified.starts_with("jdk.") {
         0
+    } else if path.contains("/org/springframework/") || qualified.starts_with("org.springframework.") {
+        120
     } else if path.contains("/src/") || !qualified.contains('.') {
         300
+    } else if path.contains(".reaper/") {
+        30
     } else {
         50
     }
@@ -365,6 +573,8 @@ fn empty_warm_status() -> WarmIndexStatus {
         dependency_jars: 0,
         source_jars: 0,
         jdk_sources: false,
+        spring_symbols: 0,
+        jdk_symbols: 0,
     }
 }
 
@@ -379,36 +589,71 @@ pub fn find_external_definition(
         return Ok(None);
     }
 
-    let Some(root) = find_gradle_root(ws, from_path)? else {
+    let Some(root) = cached_gradle_root(ws, from_path)? else {
         return Ok(None);
     };
 
-    let lookup = get_lookup(ws, &root)?;
+    let cache_key = definition_cache_key(&root, from_path, line, column, content);
+    if let Some(cached) = cached_definition(&cache_key) {
+        return Ok(cached);
+    }
+
+    let hit = find_external_definition_inner(ws, &root, from_path, line, column, content)?;
+    cache_definition(cache_key, hit.clone());
+    Ok(hit)
+}
+
+fn find_external_definition_inner(
+    ws: &Path,
+    root: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<SymbolLocation>> {
+    let lookup = get_lookup(ws, root)?;
     let symbol = match super::symbols::word_at(content, line, column) {
         Some(s) if !s.is_empty() && !super::symbols::is_keyword(&s) => s,
         _ => return Ok(None),
     };
 
-    let imports = parse_imports(content);
+    let imports = parse_imports_cached(root, from_path, content);
 
     if let Some(type_name) =
         super::symbols::java_member_qualifier(content, line, column, &symbol)
     {
         if let Some(fqcn) = resolve_type_fqcn(&lookup, &type_name, &imports) {
             if let Some(hit) = find_method_in_index(&lookup, &fqcn, &symbol) {
-                return Ok(Some(to_location(ws, &root, hit)));
+                return Ok(Some(to_location(ws, root, hit)));
             }
         }
     }
 
     if let Some(fqcn) = super::symbols::java_class_from_source_path(from_path) {
         if let Some(hit) = find_method_in_index(&lookup, &fqcn, &symbol) {
-            return Ok(Some(to_location(ws, &root, hit)));
+            return Ok(Some(to_location(ws, root, hit)));
         }
     }
 
-    if let Some(hit) = lookup_imported_symbol(&lookup, &symbol, &imports) {
-        return Ok(Some(to_location(ws, &root, hit)));
+    if let Some(loc) = resolve_imported_type(ws, root, &lookup, &symbol, &imports) {
+        return Ok(Some(loc));
+    }
+
+    if let Some(fqcn) = resolve_type_fqcn(&lookup, &symbol, &imports) {
+        if is_library_fqcn(&fqcn) {
+            if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
+                return Ok(Some(loc));
+            }
+        }
+    }
+
+    if symbol.chars().next().is_some_and(|c| c.is_uppercase()) {
+        if let Some(loc) = fast_java_lang_location(ws, root, &symbol, &imports)? {
+            return Ok(Some(loc));
+        }
+        if let Some(loc) = resolve_jdk_type_location(ws, root, &symbol, &imports)? {
+            return Ok(Some(loc));
+        }
     }
 
     let mut candidates: Vec<&IndexedSymbol> = lookup.types_named(&symbol).collect();
@@ -419,15 +664,19 @@ pub fn find_external_definition(
             return Ok(None);
         }
         methods.sort_by_key(|s| spring_priority(&s.qualified));
-        return Ok(Some(to_location(ws, &root, methods[0])));
+        return Ok(Some(to_location(ws, root, methods[0])));
     }
 
     if candidates.len() == 1 {
-        return Ok(Some(to_location(ws, &root, candidates[0])));
+        return Ok(Some(to_location(ws, root, candidates[0])));
     }
 
-    candidates.sort_by_key(|s| spring_priority(&s.qualified));
-    Ok(Some(to_location(ws, &root, candidates[0])))
+    candidates.sort_by(|a, b| {
+        import_match_priority(&a.qualified, &imports)
+            .cmp(&import_match_priority(&b.qualified, &imports))
+            .then_with(|| spring_priority(&a.qualified).cmp(&spring_priority(&b.qualified)))
+    });
+    Ok(Some(to_location(ws, root, candidates[0])))
 }
 
 pub fn java_completions(
@@ -489,7 +738,13 @@ pub fn java_completions(
         }
     }
 
-    items.sort_by(|a, b| a.label.len().cmp(&b.label.len()).then_with(|| a.label.cmp(&b.label)));
+    items.sort_by(|a, b| {
+        let pa = spring_priority(a.detail.as_deref().unwrap_or(""));
+        let pb = spring_priority(b.detail.as_deref().unwrap_or(""));
+        pa.cmp(&pb)
+            .then_with(|| a.label.len().cmp(&b.label.len()))
+            .then_with(|| a.label.cmp(&b.label))
+    });
     Ok(items)
 }
 
@@ -556,9 +811,6 @@ fn index_fresh(ws: &Path, gradle_root: &Path, index: &JavaIndex) -> Result<bool>
         if meta.dependency_jars == 0 {
             return Ok(false);
         }
-        if !super::spring_props::has_cached_properties(gradle_root) {
-            return Ok(false);
-        }
     }
 
     if index_meta(gradle_root).index_version < INDEX_VERSION {
@@ -587,7 +839,7 @@ fn classpath_stamp(gradle_root: &Path) -> Result<String> {
             ));
         }
     }
-    if let Ok(jdk) = java_home() {
+    if let Ok(jdk) = toolchain_java_home() {
         parts.push(format!("jdk:{}", jdk.display()));
     }
     Ok(parts.join("|"))
@@ -598,6 +850,8 @@ struct IndexMeta {
     dependency_jars: usize,
     source_jars: usize,
     jdk_sources: bool,
+    spring_symbols: usize,
+    jdk_symbols: usize,
     #[serde(default)]
     index_version: u32,
 }
@@ -661,7 +915,23 @@ fn build_index(ws: &Path, gradle_root: &Path) -> Result<JavaIndex> {
         }
     }
 
+    index_jar_classpath_fallback(ws, gradle_root, &classpath.jars, &source_dirs, &mut symbols)?;
+
     symbols.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+
+    let spring_symbols = symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("org.springframework.")
+                || s.path.contains("/org/springframework/")
+        })
+        .count();
+    let jdk_symbols = symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("java.") || s.path.contains(".reaper/java-sources/jdk/")
+        })
+        .count();
 
     let index = JavaIndex {
         project_root,
@@ -669,6 +939,7 @@ fn build_index(ws: &Path, gradle_root: &Path) -> Result<JavaIndex> {
     };
 
     std::fs::create_dir_all(reaper_dir(gradle_root))?;
+    save_classpath_jars_cache(gradle_root, &classpath.jars)?;
     std::fs::write(
         reaper_dir(gradle_root).join("java-index.json"),
         serde_json::to_string(&index)?,
@@ -683,9 +954,24 @@ fn build_index(ws: &Path, gradle_root: &Path) -> Result<JavaIndex> {
             dependency_jars: classpath.jars.len(),
             source_jars: classpath.source_jars.len(),
             jdk_sources,
+            spring_symbols,
+            jdk_symbols,
             index_version: INDEX_VERSION,
         },
     )?;
+
+    if spring_symbols == 0 && super::gradle::is_spring_boot_project(gradle_root) {
+        tracing::warn!(
+            "Spring Boot project at {} indexed with 0 Spring symbols — run ./gradlew compileJava or check Gradle/network",
+            gradle_root.display()
+        );
+    }
+    if !jdk_sources {
+        tracing::warn!(
+            "JDK sources not found for {} — install a full JDK (not JRE) for java.* navigation",
+            gradle_root.display()
+        );
+    }
 
     invalidate_lookup_cache(gradle_root);
 
@@ -782,8 +1068,20 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
 
     let mut args = cmd.project_args.clone();
     args.extend([
+        "--no-daemon".into(),
         "-I".into(),
         init_str.to_string(),
+    ]);
+
+    // Resolve/download dependency JARs before printing classpath.
+    let warm_args: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .chain(["compileJava", "-q", "--console=plain"].iter().copied())
+        .collect();
+    let _ = run_gradle_with_command(&cmd, &warm_args);
+
+    args.extend([
         "reaperPrintClasspath".into(),
         "-q".into(),
         "--console=plain".into(),
@@ -902,7 +1200,7 @@ fn materialize_jdk_sources(dest: &Path) -> Result<Option<PathBuf>> {
 
 fn find_jdk_src_zip() -> Result<Option<PathBuf>> {
     for home in jdk_home_candidates()? {
-        for candidate in [home.join("lib/src.zip"), home.join("src.zip")] {
+        for candidate in jdk_src_zip_candidates(&home) {
             if candidate.is_file() {
                 return Ok(Some(candidate));
             }
@@ -911,9 +1209,23 @@ fn find_jdk_src_zip() -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+fn jdk_src_zip_candidates(home: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![home.join("lib/src.zip"), home.join("src.zip")];
+    if home.file_name().and_then(|n| n.to_str()) == Some("jre") {
+        if let Some(parent) = home.parent() {
+            candidates.push(parent.join("lib/src.zip"));
+            candidates.push(parent.join("src.zip"));
+        }
+    }
+    candidates
+}
+
 fn jdk_home_candidates() -> Result<Vec<PathBuf>> {
     let mut homes = Vec::new();
 
+    if let Ok(home) = crate::jdk::toolchain_java_home() {
+        homes.push(home);
+    }
     if let Ok(home) = crate::jdk::effective_java_home() {
         homes.push(home);
     }
@@ -971,8 +1283,8 @@ fn java_home_from_java_cmd() -> Result<PathBuf> {
     bail!("java.home not found in java settings output")
 }
 
-fn java_home() -> Result<PathBuf> {
-    crate::jdk::effective_java_home()
+fn toolchain_java_home() -> Result<PathBuf> {
+    crate::jdk::toolchain_java_home()
 }
 
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
@@ -993,6 +1305,361 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
         bail!("unzip failed for {}", zip_path.display());
     }
     Ok(())
+}
+
+fn index_jar_classpath_fallback(
+    ws: &Path,
+    gradle_root: &Path,
+    jars: &[PathBuf],
+    source_dirs: &[PathBuf],
+    symbols: &mut Vec<IndexedSymbol>,
+) -> Result<()> {
+    let mut known: HashSet<String> = symbols.iter().map(|s| s.qualified.clone()).collect();
+    let mut added = 0usize;
+
+    for jar in jars {
+        if !jar.is_file() {
+            continue;
+        }
+        let entries = list_jar_class_entries(jar)?;
+        for (fqcn, kind) in entries {
+            if known.contains(&fqcn) {
+                continue;
+            }
+            if !should_index_jar_class(&fqcn) {
+                continue;
+            }
+            let name = fqcn.rsplit('.').next().unwrap_or(&fqcn).to_string();
+            let Some(source_path) = find_java_source_for_fqcn(ws, gradle_root, source_dirs, &fqcn) else {
+                continue;
+            };
+            if let Ok(content) = std::fs::read_to_string(&source_path) {
+                let rel = rel_path_for(ws, &source_path).unwrap_or_else(|_| {
+                    source_path
+                        .strip_prefix(ws)
+                        .unwrap_or(&source_path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                });
+                let before = symbols.len();
+                index_java_content(&content, &rel, should_index_methods(&rel), symbols);
+                for sym in &symbols[before..] {
+                    known.insert(sym.qualified.clone());
+                }
+                added += symbols.len().saturating_sub(before);
+                continue;
+            }
+            symbols.push(IndexedSymbol {
+                name,
+                qualified: fqcn.clone(),
+                kind,
+                path: rel_path_for(ws, &source_path).unwrap_or_else(|_| {
+                    source_path
+                        .strip_prefix(ws)
+                        .unwrap_or(&source_path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                }),
+                line: 1,
+                column: 1,
+            });
+            known.insert(fqcn);
+            added += 1;
+        }
+    }
+
+    if added > 0 {
+        tracing::info!("Indexed {added} additional Java symbols from classpath JAR fallback");
+    }
+    Ok(())
+}
+
+fn should_index_jar_class(fqcn: &str) -> bool {
+    fqcn.starts_with("org.springframework.")
+        || fqcn.starts_with("jakarta.")
+        || fqcn.starts_with("javax.")
+        || fqcn.starts_with("java.")
+        || fqcn.starts_with("kotlin.")
+        || fqcn.starts_with("org.junit.")
+}
+
+fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
+    let out = Command::new("jar")
+        .arg("tf")
+        .arg(jar)
+        .output()
+        .with_context(|| format!("failed to run jar tf on {}", jar.display()))?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if !line.ends_with(".class") || line.contains('$') {
+            continue;
+        }
+        let fqcn = line.trim_end_matches(".class").replace('/', ".");
+        let kind = if fqcn.contains(".") {
+            let simple = fqcn.rsplit('.').next().unwrap_or("");
+            if simple.ends_with("Exception") || simple.ends_with("Error") {
+                "class".to_string()
+            } else {
+                "class".to_string()
+            }
+        } else {
+            continue;
+        };
+        entries.push((fqcn, kind));
+    }
+    Ok(entries)
+}
+
+fn find_java_source_for_fqcn(
+    ws: &Path,
+    gradle_root: &Path,
+    source_dirs: &[PathBuf],
+    fqcn: &str,
+) -> Option<PathBuf> {
+    let rel = format!("{}.java", fqcn.replace('.', "/"));
+    for dir in source_dirs {
+        let direct = dir.join(&rel);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        for module in JDK_SOURCE_MODULES {
+            let module_dir = module.trim_end_matches('/');
+            let modular = dir.join(module_dir).join(&rel);
+            if modular.is_file() {
+                return Some(modular);
+            }
+        }
+    }
+    let file_name = rel.rsplit('/').next()?;
+    for dir in source_dirs {
+        if let Some(found) = find_file_by_name(dir, file_name) {
+            if let Ok(content) = std::fs::read_to_string(&found) {
+                if source_matches_fqcn(&content, fqcn) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    let reaper_sources = reaper_dir(gradle_root).join("java-sources");
+    if reaper_sources.is_dir() {
+        if let Some(found) = find_file_by_name(&reaper_sources, file_name) {
+            if let Ok(content) = std::fs::read_to_string(&found) {
+                if source_matches_fqcn(&content, fqcn) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    let _ = ws;
+    None
+}
+
+fn jdk_source_exists(jdk_dir: &Path, fqcn: &str) -> bool {
+    let rel = format!("{}.java", fqcn.replace('.', "/"));
+    if jdk_dir.join(&rel).is_file() {
+        return true;
+    }
+    for module in JDK_SOURCE_MODULES {
+        let module_dir = module.trim_end_matches('/');
+        if jdk_dir.join(module_dir).join(&rel).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn ensure_jdk_sources_materialized(gradle_root: &Path) -> Result<bool> {
+    let jdk_dest = reaper_dir(gradle_root).join("java-sources/jdk");
+    if jdk_dest.join(".extracted").is_file() {
+        return Ok(true);
+    }
+    std::fs::create_dir_all(reaper_dir(gradle_root).join("java-sources"))?;
+    Ok(materialize_jdk_sources(&jdk_dest)?.is_some())
+}
+
+fn resolve_fqcn_from_jdk_files(
+    gradle_root: &Path,
+    symbol: &str,
+    imports: &ImportMap,
+) -> Option<String> {
+    ensure_jdk_sources_materialized(gradle_root).ok()?;
+    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    let mut candidates = Vec::new();
+    if let Some(fqcn) = imports.explicit.get(symbol) {
+        candidates.push(fqcn.clone());
+    }
+    for prefix in &imports.wildcards {
+        candidates.push(format!("{prefix}.{symbol}"));
+    }
+    candidates.push(format!("java.lang.{symbol}"));
+    candidates.into_iter().find(|fqcn| jdk_source_exists(&jdk, fqcn))
+}
+
+fn resolve_jdk_type_location(
+    ws: &Path,
+    gradle_root: &Path,
+    symbol: &str,
+    imports: &ImportMap,
+) -> Result<Option<SymbolLocation>> {
+    let Some(fqcn) = resolve_fqcn_from_jdk_files(gradle_root, symbol, imports) else {
+        return Ok(None);
+    };
+    let cache_key = format!("{}:{}", gradle_root.display(), fqcn);
+    if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
+        if let Some(loc) = guard.get(&cache_key) {
+            return Ok(Some(loc.clone()));
+        }
+    }
+
+    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    let Some(source_path) = find_java_source_for_fqcn(ws, gradle_root, &[jdk], &fqcn) else {
+        return Ok(None);
+    };
+    let rel = rel_path_for(ws, &source_path)
+        .map(|p| normalize_index_path(ws, gradle_root, &p))
+        .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
+    let simple = fqcn.rsplit('.').next().unwrap_or(symbol);
+    let (line, column) = read_type_line_in_java_source(&source_path, simple);
+    let loc = SymbolLocation {
+        name: symbol.to_string(),
+        kind: "class".into(),
+        path: rel,
+        line,
+        column,
+    };
+    if let Ok(mut guard) = JDK_LOCATION_CACHE.lock() {
+        if guard.len() >= DEFINITION_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(cache_key, loc.clone());
+    }
+    Ok(Some(loc))
+}
+
+fn fast_java_lang_location(
+    ws: &Path,
+    gradle_root: &Path,
+    symbol: &str,
+    imports: &ImportMap,
+) -> Result<Option<SymbolLocation>> {
+    if imports.explicit.contains_key(symbol) {
+        return Ok(None);
+    }
+    for prefix in &imports.wildcards {
+        let fqcn = format!("{prefix}.{symbol}");
+        if fqcn.starts_with("java.lang.") {
+            continue;
+        }
+        let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+        if jdk_source_exists(&jdk, &fqcn) {
+            return Ok(None);
+        }
+    }
+
+    let fqcn = format!("java.lang.{symbol}");
+    let cache_key = format!("{}:{}", gradle_root.display(), fqcn);
+    if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
+        if let Some(loc) = guard.get(&cache_key) {
+            return Ok(Some(loc.clone()));
+        }
+    }
+
+    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    if !jdk.join(".extracted").is_file() {
+        return Ok(None);
+    }
+    let rel = format!("java/lang/{symbol}.java");
+    let source_path = ["java.base", ""]
+        .into_iter()
+        .filter_map(|module| {
+            let path = if module.is_empty() {
+                jdk.join(&rel)
+            } else {
+                jdk.join(module).join(&rel)
+            };
+            path.is_file().then_some(path)
+        })
+        .next();
+    let Some(source_path) = source_path else {
+        return Ok(None);
+    };
+
+    let rel_path = rel_path_for(ws, &source_path)
+        .map(|p| normalize_index_path(ws, gradle_root, &p))
+        .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
+    let (line, column) = read_type_line_in_java_source(&source_path, symbol);
+    let loc = SymbolLocation {
+        name: symbol.to_string(),
+        kind: "class".into(),
+        path: rel_path,
+        line,
+        column,
+    };
+    if let Ok(mut guard) = JDK_LOCATION_CACHE.lock() {
+        guard.insert(cache_key, loc.clone());
+    }
+    Ok(Some(loc))
+}
+
+fn read_type_line_in_java_source(path: &Path, simple: &str) -> (u32, u32) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (1, 1);
+    };
+    let reader = BufReader::new(file);
+    for (idx, line) in reader.lines().map_while(Result::ok).take(160).enumerate() {
+        for keyword in ["class", "interface", "enum", "@interface"] {
+            if java_type_on_line(&line, keyword).as_deref() == Some(simple) {
+                let col = line.find(simple).map(|i| i as u32 + 1).unwrap_or(1);
+                return (idx as u32 + 1, col);
+            }
+        }
+    }
+    (1, 1)
+}
+
+fn source_matches_fqcn(content: &str, fqcn: &str) -> bool {
+    let Some(pkg) = fqcn.rsplit_once('.') else {
+        return true;
+    };
+    let (pkg, class_name) = pkg;
+    find_package(content).is_some_and(|p| p == pkg)
+        && content.lines().any(|line| {
+            line.contains("class ")
+                && line.contains(class_name)
+                || line.contains("interface ")
+                    && line.contains(class_name)
+                || line.contains("@interface ")
+                    && line.contains(class_name)
+                || line.contains("enum ")
+                    && line.contains(class_name)
+        })
+}
+
+fn find_file_by_name(dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(current) = stack.pop() {
+        if seen > 50_000 {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if entry.file_name().to_string_lossy() == file_name {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn index_java_dir(ws: &Path, dir: &Path, symbols: &mut Vec<IndexedSymbol>) -> Result<()> {
@@ -1036,13 +1703,25 @@ fn index_java_dir_inner(
     Ok(())
 }
 
-/// Skip heavy JDK modules (desktop, swing, etc.) — java.base covers String, Object, etc.
+/// Skip heavy JDK modules (desktop, swing, etc.) — keep common API surface for navigation.
 fn should_index_file(rel_path: &str) -> bool {
     let rel = rel_path.replace('\\', "/");
     if !rel.contains(".reaper/java-sources/jdk/") {
         return true;
     }
-    rel.contains(".reaper/java-sources/jdk/java.base/")
+    if JDK_SOURCE_MODULES
+        .iter()
+        .any(|module| rel.contains(&format!(".reaper/java-sources/jdk/{module}")))
+    {
+        return true;
+    }
+    // JDK 8 flat layout: .../jdk/java/lang/String.java
+    for prefix in ["/java/", "/javax/"] {
+        if rel.contains(prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Methods are indexed for project code and Spring Framework only (not the full JDK).
@@ -1182,6 +1861,7 @@ fn parse_imports(content: &str) -> ImportMap {
     ImportMap { explicit, wildcards }
 }
 
+#[derive(Clone)]
 struct ImportMap {
     explicit: HashMap<String, String>,
     wildcards: Vec<String>,
@@ -1193,6 +1873,146 @@ fn lookup_imported_symbol<'a>(
     imports: &ImportMap,
 ) -> Option<&'a IndexedSymbol> {
     resolve_type_fqcn(lookup, symbol, imports).and_then(|fqcn| lookup.type_by_qualified(&fqcn))
+}
+
+fn import_fqcns(symbol: &str, imports: &ImportMap) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(fqcn) = imports.explicit.get(symbol) {
+        out.push(fqcn.clone());
+    }
+    for prefix in &imports.wildcards {
+        out.push(format!("{prefix}.{symbol}"));
+    }
+    out
+}
+
+fn is_library_fqcn(fqcn: &str) -> bool {
+    fqcn.starts_with("org.springframework.")
+        || fqcn.starts_with("jakarta.")
+        || fqcn.starts_with("javax.")
+}
+
+fn import_match_priority(fqcn: &str, imports: &ImportMap) -> u8 {
+    if imports.explicit.values().any(|v| v == fqcn) {
+        return 0;
+    }
+    if imports
+        .wildcards
+        .iter()
+        .any(|prefix| fqcn.starts_with(&format!("{prefix}.")))
+    {
+        return 1;
+    }
+    4
+}
+
+fn library_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
+    let key = gradle_root
+        .canonicalize()
+        .unwrap_or_else(|_| gradle_root.to_path_buf())
+        .display()
+        .to_string();
+    if let Ok(guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
+        if let Some(dirs) = guard.get(&key) {
+            return dirs.clone();
+        }
+    }
+
+    let sources = reaper_dir(gradle_root).join("java-sources");
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&sources) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && entry.file_name() != "jdk" {
+                dirs.push(path);
+            }
+        }
+    }
+
+    if let Ok(mut guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
+        guard.insert(key, dirs.clone());
+    }
+    dirs
+}
+
+fn cache_fqcn_location(cache_key: &str, loc: &SymbolLocation) {
+    let Ok(mut guard) = JDK_LOCATION_CACHE.lock() else {
+        return;
+    };
+    if guard.len() >= DEFINITION_CACHE_MAX {
+        guard.clear();
+    }
+    guard.insert(cache_key.to_string(), loc.clone());
+}
+
+fn resolve_type_by_fqcn(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    fqcn: &str,
+    symbol: &str,
+) -> Option<SymbolLocation> {
+    let cache_key = format!("{}:{}", root.display(), fqcn);
+    if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
+        if let Some(loc) = guard.get(&cache_key) {
+            return Some(loc.clone());
+        }
+    }
+
+    if let Some(hit) = lookup.type_by_qualified(fqcn) {
+        let loc = to_location(ws, root, hit);
+        cache_fqcn_location(&cache_key, &loc);
+        return Some(loc);
+    }
+
+    if is_library_fqcn(fqcn) {
+        if let Some(loc) = resolve_library_type_location(ws, root, fqcn, symbol) {
+            cache_fqcn_location(&cache_key, &loc);
+            return Some(loc);
+        }
+    }
+
+    None
+}
+
+fn resolve_imported_type(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    symbol: &str,
+    imports: &ImportMap,
+) -> Option<SymbolLocation> {
+    for fqcn in import_fqcns(symbol, imports) {
+        if let Some(loc) = resolve_type_by_fqcn(ws, root, lookup, &fqcn, symbol) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn resolve_library_type_location(
+    ws: &Path,
+    gradle_root: &Path,
+    fqcn: &str,
+    symbol: &str,
+) -> Option<SymbolLocation> {
+    let dirs = library_source_dirs(gradle_root);
+    if dirs.is_empty() {
+        return None;
+    }
+    let source_path = find_java_source_for_fqcn(ws, gradle_root, &dirs, fqcn)?;
+    let rel = rel_path_for(ws, &source_path)
+        .map(|p| normalize_index_path(ws, gradle_root, &p))
+        .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
+    let simple = fqcn.rsplit('.').next().unwrap_or(symbol);
+    let (line, column) = read_type_line_in_java_source(&source_path, simple);
+    Some(SymbolLocation {
+        name: symbol.to_string(),
+        kind: "class".into(),
+        path: rel,
+        line,
+        column,
+    })
 }
 
 fn resolve_type_fqcn(lookup: &IndexLookup, symbol: &str, imports: &ImportMap) -> Option<String> {
@@ -1207,9 +2027,22 @@ fn resolve_type_fqcn(lookup: &IndexLookup, symbol: &str, imports: &ImportMap) ->
 
     for prefix in &imports.wildcards {
         let fqcn = format!("{prefix}.{symbol}");
-        if lookup.type_by_qualified(&fqcn).is_some() {
+        if lookup.type_by_qualified(&fqcn).is_some() || is_library_fqcn(&fqcn) {
             return Some(fqcn);
         }
+    }
+
+    let mut candidates: Vec<String> = lookup
+        .types_named(symbol)
+        .map(|sym| sym.qualified.clone())
+        .collect();
+    if !candidates.is_empty() {
+        candidates.sort_by(|a, b| {
+            import_match_priority(a, imports)
+                .cmp(&import_match_priority(b, imports))
+                .then_with(|| spring_priority(a).cmp(&spring_priority(b)))
+        });
+        return Some(candidates[0].clone());
     }
 
     None
@@ -1353,5 +2186,106 @@ mod tests {
             "expected workspace-relative path, got {normalized}"
         );
         assert!(normalized.contains("repo-1/.reaper/java-sources"));
+    }
+
+    #[test]
+    fn indexes_jdk_flat_and_modular_layouts() {
+        assert!(should_index_file(
+            "repo/.reaper/java-sources/jdk/java.base/java/lang/String.java"
+        ));
+        assert!(should_index_file(
+            "repo/.reaper/java-sources/jdk/java/lang/String.java"
+        ));
+        assert!(!should_index_file(
+            "repo/.reaper/java-sources/jdk/jdk.internal/misc/Unsafe.java"
+        ));
+    }
+
+    #[test]
+    fn resolves_jdk_type_from_materialized_sources() {
+        let ws = std::env::temp_dir().join("reaper-jdk-nav-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.base/java/lang/String.java"),
+            "package java.lang;\n\npublic final class String {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let imports = parse_imports("package com.example;\n");
+        let loc = resolve_jdk_type_location(&ws, &ws, "String", &imports)
+            .expect("lookup ok")
+            .expect("String location");
+        assert!(loc.path.contains("String.java"));
+        assert_eq!(loc.line, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_spring_type_from_dependency_sources() {
+        let ws = std::env::temp_dir().join("reaper-spring-nav-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(
+            ws.join(".reaper/java-sources/deps/spring_web/org/springframework/web/bind/annotation"),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/spring_web/org/springframework/web/bind/annotation/RestController.java"),
+            "package org.springframework.web.bind.annotation;\n\npublic @interface RestController {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/App.java"),
+            "package com.example;\n\nimport org.springframework.web.bind.annotation.RestController;\n\n@RestController\npublic class App {\n}\n",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(ws.join("src/main/java/com/example/App.java")).unwrap();
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 5, 2, &content)
+            .expect("lookup ok")
+            .expect("RestController location");
+        assert!(hit.path.contains("RestController.java"));
+        assert_eq!(hit.line, 3);
+
+        let again = find_external_definition(&ws, "src/main/java/com/example/App.java", 5, 2, &content)
+            .expect("cached lookup ok")
+            .expect("cached RestController");
+        assert_eq!(hit.path, again.path);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn definition_lookup_is_cached() {
+        let ws = std::env::temp_dir().join("reaper-jdk-def-cache");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.base/java/lang/String.java"),
+            "package java.lang;\n\npublic final class String {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/App.java"),
+            "package app;\n\nclass App {\n  String name;\n}\n",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(ws.join("src/main/java/App.java")).unwrap();
+        let first = find_external_definition(&ws, "src/main/java/App.java", 4, 5, &content)
+            .expect("lookup ok")
+            .expect("String location");
+        let second = find_external_definition(&ws, "src/main/java/App.java", 4, 5, &content)
+            .expect("lookup ok")
+            .expect("cached String location");
+        assert_eq!(first.path, second.path);
+        assert_eq!(first.line, second.line);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

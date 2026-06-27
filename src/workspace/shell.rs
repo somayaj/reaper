@@ -64,7 +64,7 @@ pub fn change_directory(ws: &Path, cwd_rel: Option<&str>, target: &str) -> Resul
     rel_from_workspace(&ws_canon, &resolved)
 }
 
-fn resolve_work_dir(ws: &Path, cwd_rel: Option<&str>) -> Result<PathBuf> {
+pub fn resolve_work_dir(ws: &Path, cwd_rel: Option<&str>) -> Result<PathBuf> {
     match cwd_rel.filter(|s| !s.is_empty()) {
         Some(rel) => {
             let dir = ws.join(rel);

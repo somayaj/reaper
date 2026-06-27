@@ -1,6 +1,7 @@
 pub mod conflict;
 mod diagnostics;
 mod exec;
+pub mod exec_stream;
 mod ruby_nav;
 mod shell;
 mod solargraph;
@@ -9,6 +10,10 @@ mod gradle;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod java_ecosystem;
+mod languages;
+mod project_jobs;
+mod project_profile;
 mod spring_props;
 mod symbols;
 
@@ -184,7 +189,7 @@ pub fn delete_path(ws: &Path, rel_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
+pub fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     if rel.contains("..") || rel.starts_with('/') {
         bail!("invalid path");
     }
@@ -222,6 +227,7 @@ pub struct WorkspaceStatus {
     pub stdout: String,
     pub merge: conflict::MergeState,
     pub conflict_count: usize,
+    pub ahead: usize,
 }
 
 pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
@@ -275,7 +281,17 @@ pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
         stdout: out.stdout,
         merge,
         conflict_count,
+        ahead: unpushed_commit_count(ws),
     })
+}
+
+fn unpushed_commit_count(ws: &Path) -> usize {
+    if let Ok(out) = git::run_git(Some(ws), &["rev-list", "--count", "@{u}..HEAD"]) {
+        if out.success() {
+            return out.stdout.trim().parse().unwrap_or(0);
+        }
+    }
+    0
 }
 
 fn status_label(c: char) -> String {
@@ -327,7 +343,12 @@ pub fn commit_diff(ws: &Path, hash: &str) -> Result<String> {
     Ok(out.stdout)
 }
 
-pub fn commit_and_push(ws: &Path, message: &str, paths: Option<&[String]>) -> Result<GitOutput> {
+pub fn commit_changes(
+    ws: &Path,
+    message: &str,
+    paths: Option<&[String]>,
+    push: bool,
+) -> Result<GitOutput> {
     if message.trim().is_empty() {
         bail!("commit message required");
     }
@@ -351,7 +372,15 @@ pub fn commit_and_push(ws: &Path, message: &str, paths: Option<&[String]>) -> Re
     if !commit.success() {
         return Ok(commit);
     }
-    git::run_git(Some(ws), &["push"])
+    if push {
+        git::run_git(Some(ws), &["push"])
+    } else {
+        Ok(commit)
+    }
+}
+
+pub fn commit_and_push(ws: &Path, message: &str, paths: Option<&[String]>) -> Result<GitOutput> {
+    commit_changes(ws, message, paths, true)
 }
 
 pub fn checkout_branch(ws: &Path, branch: &str) -> Result<GitOutput> {
@@ -365,6 +394,17 @@ pub fn run_workspace_git(ws: &Path, args: &[String]) -> Result<GitOutput> {
 pub fn run_workspace_shell(ws: &Path, cwd_rel: Option<&str>, command: &str) -> Result<GitOutput> {
     shell::run_shell(ws, cwd_rel, command)
 }
+
+pub fn stream_workspace_shell(
+    ws: &Path,
+    cwd_rel: Option<&str>,
+    command: &str,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    exec_stream::stream_shell(ws, cwd_rel, command, tx)
+}
+
+pub use exec_stream::ExecStreamEvent;
 
 pub fn change_workspace_directory(
     ws: &Path,
@@ -390,6 +430,41 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     gradle::run_gradle(ws, rel_path, task)
 }
 
+pub fn stream_workspace_gradle(
+    ws: &Path,
+    rel_path: &str,
+    task: &str,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    exec_stream::stream_gradle(ws, rel_path, task, tx)
+}
+
+pub fn stream_workspace_java_main(
+    ws: &Path,
+    rel_path: &str,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    exec_stream::stream_java_main(ws, rel_path, tx)
+}
+
+pub fn java_file_context(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    line: u32,
+) -> Result<java_ecosystem::JavaFileContext> {
+    java_ecosystem::detect_java_file_context(ws, rel_path, content, line)
+}
+
+pub fn java_test_methods(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Result<Vec<java_ecosystem::TestMethodMarker>> {
+    let _ = safe_join(ws, rel_path)?;
+    Ok(java_ecosystem::list_test_methods(rel_path, content))
+}
+
 pub fn is_gradle_workspace(ws: &Path) -> bool {
     classpath::is_gradle_workspace(ws)
 }
@@ -402,7 +477,13 @@ pub fn peek_java_index(ws: &Path) -> Result<classpath::WarmIndexStatus> {
     classpath::peek_index_status(ws)
 }
 
+pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfile> {
+    project_profile::detect(ws)
+}
+
 pub use index_jobs::{JavaIndexJobs, JavaIndexStatus};
+pub use project_jobs::{ProjectIndexJobs, ProjectIndexStatus};
+pub use project_profile::ProjectProfile;
 
 /// Go-to-definition from these paths uses the Gradle/Java index; Ruby and other languages do not.
 pub fn definition_uses_java_index(from_path: &str) -> bool {
@@ -429,10 +510,14 @@ pub fn search_classes(ws: &Path, query: &str, limit: usize) -> Result<Vec<symbol
 
 fn indexed_hit_score(hit: &symbols::ClassSearchHit) -> u32 {
     let path = hit.path.replace('\\', "/");
-    if path.contains(".reaper/") || path.contains("/org/springframework/") {
+    if path.contains(".reaper/java-sources/jdk/") || hit.qualified.starts_with("java.") || hit.qualified.starts_with("jdk.") {
         0
+    } else if path.contains("/org/springframework/") || hit.qualified.starts_with("org.springframework.") {
+        120
     } else if path.contains("/src/") || path.starts_with("app/") {
         300
+    } else if path.contains(".reaper/") {
+        30
     } else {
         50
     }
@@ -468,11 +553,26 @@ pub fn find_definition(
     line: u32,
     column: u32,
 ) -> Result<Option<symbols::SymbolLocation>> {
-    let content = read_file(ws, from_path)?;
+    find_definition_with_content(ws, from_path, line, column, None)
+}
+
+pub fn find_definition_with_content(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: Option<&str>,
+) -> Result<Option<symbols::SymbolLocation>> {
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => read_file(ws, from_path)?,
+    };
     // Java/Kotlin: indexed imports + JDK/dependency sources beat workspace-wide text search
     // (otherwise "String" in a .java file can jump to jquery.js).
     if classpath::is_java_like(from_path) {
-        if let Some(hit) = classpath::find_external_definition(ws, from_path, line, column, &content)? {
+        if let Some(hit) =
+            classpath::find_external_definition(ws, from_path, line, column, &content)?
+        {
             return Ok(Some(hit));
         }
     }

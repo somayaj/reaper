@@ -6,7 +6,7 @@ APP="$ROOT/dist/Reaper.app"
 BINARY="$ROOT/target/release/reaper"
 
 echo "Building release binary…"
-cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
+env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
 
 echo "Assembling Reaper.app…"
 rm -rf "$APP"
