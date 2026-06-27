@@ -189,23 +189,20 @@ pub fn stream_commit_and_push(
 }
 
 pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
-    use super::gradle::{resolve_gradle_command, find_gradle_root};
+    use super::gradle::{parse_gradle_task, resolve_gradle_command, find_gradle_root};
 
     let task = task.trim();
     if task.is_empty() {
         bail!("gradle task required");
     }
-    let parts: Vec<&str> = task.split_whitespace().collect();
-    if parts.iter().any(|p| p.contains('/') || p.contains('\\')) {
-        bail!("invalid gradle task");
-    }
+    let parts = parse_gradle_task(task)?;
     let root = find_gradle_root(ws, rel_path)?
         .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
     let cmd = resolve_gradle_command(&root)?;
     let mut args = cmd.project_args.clone();
     args.push("--no-daemon".into());
     args.push("--console=plain".into());
-    args.extend(parts.iter().map(|p| (*p).to_string()));
+    args.extend(parts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
