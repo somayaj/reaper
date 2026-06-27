@@ -114,13 +114,45 @@ else
   (cd "$(dirname "$DMG")" && shasum -a 256 "$DMG_NAME" > "$SUMS_FILE")
 fi
 
+DMG_SHA256="$(awk '{print $1}' "$SUMS_FILE")"
+
+append_checksum_to_notes() {
+  local notes="$1"
+  if grep -q '^SHA256:' "$notes"; then
+    return 0
+  fi
+  printf '\n\nSHA256: `%s`\n' "$DMG_SHA256" >>"$notes"
+}
+
+if [[ "${NOTES_TMP:-0}" == "1" ]]; then
+  append_checksum_to_notes "$NOTES_FILE"
+elif [[ -n "${REAPER_RELEASE_NOTES:-}" ]]; then
+  NOTES_WITH_SHA="$(mktemp -d)"
+  cp "$NOTES_FILE" "$NOTES_WITH_SHA/RELEASE_NOTES.md"
+  append_checksum_to_notes "$NOTES_WITH_SHA/RELEASE_NOTES.md"
+  NOTES_FILE="$NOTES_WITH_SHA/RELEASE_NOTES.md"
+  NOTES_TMP=1
+  NOTES_TMP_DIR="$NOTES_WITH_SHA"
+fi
+
+cleanup_stray_release_assets() {
+  while IFS= read -r asset_name; do
+    [[ -z "$asset_name" ]] && continue
+    if [[ "$asset_name" != "$DMG_NAME" ]]; then
+      echo "Removing stray release asset: ${asset_name}"
+      gh release delete-asset "$TAG" "$asset_name" --repo "$GH_REPO" --yes
+    fi
+  done < <(gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name')
+}
+
 if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-  echo "Uploading assets to existing release ${TAG} on ${GH_REPO}…"
-  gh release upload "$TAG" "$DMG" "$SUMS_FILE" --repo "$GH_REPO" --clobber
+  echo "Uploading DMG to existing release ${TAG} on ${GH_REPO}…"
+  gh release upload "$TAG" "$DMG" --repo "$GH_REPO" --clobber
   gh release edit "$TAG" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
+  cleanup_stray_release_assets
 else
   echo "Creating release ${TAG} on ${GH_REPO}…"
-  gh release create "$TAG" "$DMG" "$SUMS_FILE" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
+  gh release create "$TAG" "$DMG" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
 fi
 
 rm -rf "$SUMS_TMP_DIR"
@@ -131,4 +163,4 @@ fi
 echo ""
 echo "Published: $(gh release view "$TAG" --repo "$GH_REPO" --json url -q .url)"
 echo "  Asset: ${DMG_NAME}"
-echo "  SHA256: $(shasum -a 256 "$DMG" | awk '{print $1}')"
+echo "  SHA256: ${DMG_SHA256}"
