@@ -85,15 +85,68 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     })
 }
 
+/// Split a Gradle task string into argv, tolerating UI copy/paste noise and `/` in `--tests` filters.
+pub fn parse_gradle_task(task: &str) -> Result<Vec<String>> {
+    let task = task.trim();
+    if task.is_empty() {
+        bail!("gradle task required");
+    }
+
+    let mut raw: Vec<String> = Vec::new();
+    for word in task.split_whitespace() {
+        if word.starts_with('(') {
+            // Terminal UI suffix like (module/src/test/java/Foo.java)
+            break;
+        }
+        raw.push(word.to_string());
+    }
+
+    let mut args = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == "--tests" {
+            args.push("--tests".into());
+            i += 1;
+            let pattern = raw.get(i).ok_or_else(|| anyhow::anyhow!("--tests requires a pattern"))?;
+            args.push(normalize_test_pattern(pattern));
+            i += 1;
+        } else if let Some(rest) = raw[i].strip_prefix("--tests=") {
+            args.push(format!("--tests={}", normalize_test_pattern(rest)));
+            i += 1;
+        } else if raw[i].contains('/') || raw[i].contains('\\') {
+            bail!("invalid gradle task");
+        } else {
+            args.push(raw[i].clone());
+            i += 1;
+        }
+    }
+    Ok(args)
+}
+
+fn normalize_test_pattern(pattern: &str) -> String {
+    pattern.trim().replace('/', ".")
+}
+
+pub fn gradle_test_task_name(project_root: &str) -> String {
+    let root = project_root.trim().replace('\\', "/");
+    let root = root.strip_prefix("./").unwrap_or(&root);
+    if root.is_empty() || root == "." {
+        return "test".into();
+    }
+    let segments: Vec<&str> = root.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        "test".into()
+    } else {
+        format!(":{}:test", segments.join(":"))
+    }
+}
+
 pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     let task = task.trim();
     if task.is_empty() {
         bail!("gradle task required");
     }
-    let parts: Vec<&str> = task.split_whitespace().collect();
-    if parts.iter().any(|p| p.contains('/') || p.contains('\\')) {
-        bail!("invalid gradle task");
-    }
+    let parts = parse_gradle_task(task)?;
 
     let root = find_gradle_root(ws, rel_path)?
         .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
@@ -102,7 +155,7 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     let mut args = cmd.project_args.clone();
     args.push("--no-daemon".into());
     args.push("--console=plain".into());
-    args.extend(parts.iter().map(|p| (*p).to_string()));
+    args.extend(parts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut log = String::new();
@@ -495,5 +548,37 @@ mod tests {
         let cmd = resolve_gradle_command(&rel).expect("resolve gradle command");
         assert_eq!(cmd.program, PathBuf::from("./gradlew"));
         assert!(cmd.cwd.join("gradlew").is_file());
+    }
+
+    #[test]
+    fn parse_gradle_task_ignores_ui_path_suffix() {
+        let args = parse_gradle_task(
+            "test --tests org.springframework.boot.test.web.FooTests (spring-boot-project/spring-boot-test/src/test/java/org/springframework/boot/test/web/FooTests.java)",
+        )
+        .expect("parse task");
+        assert_eq!(
+            args,
+            vec![
+                "test".to_string(),
+                "--tests".to_string(),
+                "org.springframework.boot.test.web.FooTests".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_gradle_task_normalizes_slash_test_filters() {
+        let args = parse_gradle_task("test --tests org/springframework/boot/FooTests")
+            .expect("parse task");
+        assert_eq!(args[2], "org.springframework.boot.FooTests");
+    }
+
+    #[test]
+    fn gradle_test_task_name_for_nested_module() {
+        assert_eq!(
+            gradle_test_task_name("spring-boot-project/spring-boot-test"),
+            ":spring-boot-project:spring-boot-test:test"
+        );
+        assert_eq!(gradle_test_task_name("."), "test");
     }
 }

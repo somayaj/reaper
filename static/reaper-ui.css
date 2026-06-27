@@ -3357,27 +3357,48 @@ main { background: var(--ij-bg); }
   background: color-mix(in srgb, var(--ij-deleted) 10%, transparent) !important;
 }
 
-/* IntelliJ-style diagnostics: underline only — never fade syntax token colors */
+/* Diagnostics: wavy underline below text — no overlay wash-out */
+.monaco-editor .squiggly-error::before,
+.monaco-editor .squiggly-warning::before,
+.monaco-editor .squiggly-info::before {
+  display: none !important;
+}
+
 .monaco-editor .squiggly-error,
 .monaco-editor .squiggly-warning,
 .monaco-editor .squiggly-info,
 .monaco-editor .squiggly-hint {
   opacity: 1;
+  border-bottom: none !important;
+  text-decoration-line: underline;
+  text-underline-offset: 4px;
+  text-decoration-thickness: 1px;
 }
 
-.monaco-editor .margin-view-overlays .codicon-error {
-  color: #bc3f3c !important;
-  opacity: 0.65;
+.monaco-editor .squiggly-error {
+  text-decoration-style: wavy;
+  text-decoration-color: var(--vscode-editorError-foreground, #F87171);
 }
 
-.monaco-editor .margin-view-overlays .codicon-warning {
-  color: #be9117 !important;
-  opacity: 0.6;
+.monaco-editor .squiggly-warning {
+  text-decoration-style: wavy;
+  text-decoration-color: var(--vscode-editorWarning-foreground, #FBBF24);
 }
 
+.monaco-editor .squiggly-info {
+  text-decoration-style: wavy;
+  text-decoration-color: var(--vscode-editorInfo-foreground, #60A5FA);
+}
+
+.monaco-editor .squiggly-hint {
+  text-decoration-style: dotted;
+  text-decoration-color: var(--vscode-editorHint-foreground, #94A3B8);
+}
+
+.monaco-editor .margin-view-overlays .codicon-error,
+.monaco-editor .margin-view-overlays .codicon-warning,
 .monaco-editor .margin-view-overlays .codicon-info {
-  color: #6897bb !important;
-  opacity: 0.55;
+  display: none !important;
 }
 
 .monaco-editor .ij-test-run-widget {

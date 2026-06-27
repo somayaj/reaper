@@ -12,22 +12,22 @@
     { id: 'mono', label: 'Black & White', dark: true, monaco: 'reaper-mono' },
   ];
 
-  // IntelliJ Darcula: thin red underline only — no text wash-out (alpha on squiggle, not on spans).
+  // Darcula theme: thin red underline only — no gutter icons or scrollbar stripes.
   const DIAG_EDITOR_COLORS = {
     'editorError.foreground': '#F87171',
-    'editorError.border': '#F87171',
+    'editorError.border': '#00000000',
     'editorError.background': '#00000000',
     'editorWarning.foreground': '#FBBF24',
-    'editorWarning.border': '#FBBF24',
+    'editorWarning.border': '#00000000',
     'editorWarning.background': '#00000000',
     'editorInfo.foreground': '#60A5FA',
-    'editorInfo.border': '#60A5FA',
+    'editorInfo.border': '#00000000',
     'editorInfo.background': '#00000000',
-    'minimap.errorHighlight': '#F8717188',
-    'minimap.warningHighlight': '#FBBF2488',
-    'overviewRuler.errorForeground': '#F87171',
-    'overviewRuler.warningForeground': '#FBBF24',
-    'overviewRuler.infoForeground': '#60A5FA',
+    'minimap.errorHighlight': '#00000000',
+    'minimap.warningHighlight': '#00000000',
+    'overviewRuler.errorForeground': '#00000000',
+    'overviewRuler.warningForeground': '#00000000',
+    'overviewRuler.infoForeground': '#00000000',
   };
 
   const MONACO_THEMES = {
