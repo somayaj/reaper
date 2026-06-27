@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::repos::{
-    self, CreateRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishToGitHubRequest,
-    import_repo, link_remote, publish_to_github, push_preview, push_to_remote, sync_from_remote,
+    self, CreateRepoRequest, ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest,
+    PublishToGitHubRequest, import_local_repo, import_repo, link_remote, publish_to_github,
+    push_preview, push_to_remote, sync_from_remote,
 };
 use crate::agent as git_agent;
 use crate::state::AppState;
@@ -27,6 +28,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/repos", get(list_repos).post(create_repo))
         .route("/api/repos/import", post(import_repo_handler))
+        .route("/api/repos/import/local", post(import_local_repo_handler))
         .route("/api/repos/{name}/remote/push/preview", get(push_preview_handler))
         .route("/api/repos/{name}/remote/push", post(push_remote_handler))
         .route("/api/repos/{name}/remote/pull", post(pull_remote_handler))
@@ -98,6 +100,16 @@ async fn import_repo_handler(
     Json(body): Json<ImportRepoRequest>,
 ) -> impl IntoResponse {
     match import_repo(&state.config, &state.settings, body) {
+        Ok(repo) => (StatusCode::CREATED, Json(repo)).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn import_local_repo_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ImportLocalRepoRequest>,
+) -> impl IntoResponse {
+    match import_local_repo(&state.config, &state.settings, body) {
         Ok(repo) => (StatusCode::CREATED, Json(repo)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }

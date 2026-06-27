@@ -110,6 +110,7 @@ const state = {
   agentSeenPaths: new Set(),
   agentHadFileChanges: false,
   cloneBusy: false,
+  cloneSource: 'remote',
   currentBranch: '',
   editorReady: false,
   suppressEditorChange: false,
@@ -207,6 +208,9 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
   const cancelBtn = $('#clone-modal-cancel');
   const submitBtn = $('#btn-clone-submit');
   const overlay = $('#clone-modal-overlay');
+  const isLocal = state.cloneSource === 'local';
+  const busyLabel = isLocal ? 'Importing…' : 'Cloning…';
+  const idleLabel = isLocal ? 'Import' : 'Import';
 
   if (errEl) {
     errEl.textContent = error;
@@ -214,20 +218,55 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
     if (error) errEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
   if (statusEl) {
-    if (statusText) statusText.textContent = status || 'Cloning…';
+    if (statusText) statusText.textContent = status || busyLabel;
     statusEl.classList.toggle('hidden', !status);
   }
   if (overlay) overlay.classList.toggle('ij-clone-modal--busy', busy);
   if (cancelBtn) cancelBtn.disabled = busy;
   if (submitBtn) {
     submitBtn.disabled = busy;
-    submitBtn.textContent = busy ? 'Cloning…' : 'Clone';
+    submitBtn.textContent = busy ? busyLabel : idleLabel;
   }
-  ['#clone-remote-url', '#clone-local-name'].forEach((sel) => {
+  ['#clone-remote-url', '#clone-local-name', '#clone-local-path'].forEach((sel) => {
     const input = $(sel);
     if (input) input.disabled = busy;
   });
   state.cloneBusy = busy;
+}
+
+function setCloneModalTab(source) {
+  state.cloneSource = source === 'local' ? 'local' : 'remote';
+  const remoteTab = $('#clone-tab-remote');
+  const localTab = $('#clone-tab-local');
+  const remotePanel = $('#clone-remote-panel');
+  const localPanel = $('#clone-local-panel');
+  const remoteHint = $('#clone-remote-hint');
+  const isLocal = state.cloneSource === 'local';
+
+  remoteTab?.classList.toggle('active', !isLocal);
+  localTab?.classList.toggle('active', isLocal);
+  remoteTab?.setAttribute('aria-selected', String(!isLocal));
+  localTab?.setAttribute('aria-selected', String(isLocal));
+  remotePanel?.classList.toggle('hidden', isLocal);
+  localPanel?.classList.toggle('hidden', !isLocal);
+  remoteHint?.classList.toggle('hidden', isLocal);
+
+  if (isLocal) {
+    $('#clone-local-path')?.focus();
+  } else {
+    $('#clone-remote-url')?.focus();
+  }
+  setCloneModalState();
+}
+
+function deriveNameFromLocalPath(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  const base = trimmed.replace(/\/+$/, '').split('/').pop() || '';
+  const name = base.replace(/\.git$/i, '');
+  const sanitized = name.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  if (!sanitized || !/^[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)?$/.test(sanitized)) return '';
+  return sanitized;
 }
 
 function normalizeRemoteUrl(raw) {
@@ -1185,8 +1224,13 @@ function welcomeScreenHtml() {
       </button>
       <button type="button" class="ij-action-card" data-welcome="clone">
         <span class="ij-action-icon ij-action-icon--clone">${icons.clone || ''}</span>
-        <strong>Clone from URL</strong>
-        <span>Import from GitHub, GitLab, or HTTPS</span>
+        <strong>Import from URL</strong>
+        <span>GitHub, GitLab, or any HTTPS remote</span>
+      </button>
+      <button type="button" class="ij-action-card" data-welcome="import-local">
+        <span class="ij-action-icon ij-action-icon--clone">${icons.clone || ''}</span>
+        <strong>Import from local folder</strong>
+        <span>Open an existing git repo on this Mac</span>
       </button>
       <button type="button" class="ij-action-card" data-welcome="agent">
         <span class="ij-action-icon ij-action-icon--agent">${icons.agent || ''}</span>
@@ -1208,7 +1252,8 @@ function welcomeScreenHtml() {
 
 function bindWelcomeActions(root = document) {
   root.querySelector('[data-welcome="new"]')?.addEventListener('click', showModal);
-  root.querySelector('[data-welcome="clone"]')?.addEventListener('click', showCloneModal);
+  root.querySelector('[data-welcome="clone"]')?.addEventListener('click', () => showCloneModal('remote'));
+  root.querySelector('[data-welcome="import-local"]')?.addEventListener('click', () => showCloneModal('local'));
   root.querySelector('[data-welcome="agent"]')?.addEventListener('click', toggleAgent);
   root.querySelectorAll('.ij-recent-item').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1223,6 +1268,21 @@ function renderWelcome() {
   el.className = 'ij-welcome';
   el.innerHTML = welcomeScreenHtml();
   bindWelcomeActions(el);
+  syncWelcomeLayout();
+}
+
+function syncWelcomeLayout() {
+  const empty = $('#empty-state');
+  const welcomeVisible = empty && !empty.classList.contains('hidden');
+  const editor = $('#editor-container');
+  const toolbar = $('#editor-toolbar');
+  if (welcomeVisible) {
+    editor?.classList.add('hidden');
+    toolbar?.classList.add('hidden');
+    toolbar?.classList.remove('flex');
+  } else if (state.activeTab) {
+    editor?.classList.remove('hidden');
+  }
 }
 
 function updateStatusBar(status = null) {
@@ -1290,7 +1350,8 @@ function closeAllMenus() {
 function runMenuAction(action) {
   const map = {
     'new-repo': showModal,
-    clone: showCloneModal,
+    clone: () => showCloneModal('remote'),
+    'import-local': () => showCloneModal('local'),
     'new-file': showFileModal,
     save: saveFile,
     format: formatDocument,
@@ -1329,7 +1390,8 @@ function runMenuAction(action) {
 
 const PALETTE_COMMANDS = [
   { id: 'new-repo', label: 'New repository', kbd: '⌘⇧N', run: showModal },
-  { id: 'clone', label: 'Clone from URL', run: showCloneModal },
+  { id: 'clone', label: 'Import from URL', run: () => showCloneModal('remote') },
+  { id: 'import-local', label: 'Import from local folder', run: () => showCloneModal('local') },
   { id: 'settings', label: 'Settings', kbd: '⌘,', run: () => showSettingsModal('git') },
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
@@ -2614,7 +2676,11 @@ async function loadRepos() {
     opt.textContent = r.name;
     sel.appendChild(opt);
   });
-  if (!state.tabs.length) renderWelcome();
+  if (!state.tabs.length && !state.repo) {
+    renderWelcome();
+    $('#empty-state')?.classList.remove('hidden');
+    syncWelcomeLayout();
+  }
 }
 
 async function selectRepo(name) {
@@ -2648,8 +2714,22 @@ async function selectRepo(name) {
   }
   terminalLog(`Opened workspace: ${name}`);
   $('#empty-state')?.classList.add('hidden');
+  syncWelcomeLayout();
   updateMenuState();
   updateWindowTitle();
+}
+
+function showNoRepoFileTree() {
+  const treeEl = $('#file-tree');
+  if (!treeEl) return;
+  treeEl.innerHTML = `<div class="ij-tree-empty px-3 py-4 text-center text-xs space-y-2">
+    <p class="text-gray-600">No repository open</p>
+    <button type="button" class="ij-tree-import-btn" data-import="local">Import local folder…</button>
+    <button type="button" class="ij-tree-import-btn" data-import="remote">Import from URL…</button>
+  </div>`;
+  treeEl.querySelectorAll('[data-import]').forEach((btn) => {
+    btn.addEventListener('click', () => showCloneModal(btn.dataset.import === 'local' ? 'local' : 'remote'));
+  });
 }
 
 function resetUI() {
@@ -2658,7 +2738,7 @@ function resetUI() {
   updateTerminalCwdUi();
   updateTreeBackButton();
   stopProjectIndexPolling();
-  $('#file-tree').innerHTML = '<p class="px-2 py-4 text-center text-gray-600 text-xs">Open a repository to browse files</p>';
+  showNoRepoFileTree();
   $('#git-status-list').innerHTML = '';
   $('#commit-history').innerHTML = '';
   state.commitSelectedPaths = new Set();
@@ -2675,6 +2755,7 @@ function resetUI() {
   $('#editor-toolbar')?.classList.remove('flex');
   closeAllTabs();
   $('#empty-state')?.classList.remove('hidden');
+  syncWelcomeLayout();
   setMainView('editor');
   $('#editor-container')?.classList.add('hidden');
   updateAgentUi();
@@ -2809,11 +2890,13 @@ async function createRepo(e) {
   }
 }
 
-function showCloneModal() {
+function showCloneModal(source = 'remote') {
+  const nameInput = $('#clone-local-name');
+  if (nameInput) nameInput.dataset.userEdited = '';
+  setCloneModalTab(source);
   setCloneModalState({ busy: false, status: '', error: '' });
   $('#clone-modal-overlay')?.classList.remove('hidden');
   $('#clone-modal-overlay')?.classList.add('flex');
-  $('#clone-remote-url')?.focus();
 }
 
 function hideCloneModal() {
@@ -2844,6 +2927,9 @@ function hidePublishModal() {
 
 async function cloneRepo(e) {
   e.preventDefault();
+  if (state.cloneSource === 'local') {
+    return importLocalRepo();
+  }
   const form = e.target;
   const fd = new FormData(form);
   const remoteUrl = normalizeRemoteUrl(fd.get('remote_url'));
@@ -2890,6 +2976,47 @@ async function cloneRepo(e) {
     } else {
       toast(msg, 'error', { duration: 12000 });
     }
+  } finally {
+    if (state.cloneBusy) setCloneModalState({ busy: false });
+  }
+}
+
+async function importLocalRepo() {
+  const localPath = String($('#clone-local-path')?.value || '').trim();
+  const localName = String($('#clone-local-name')?.value || '').trim();
+
+  setCloneModalState({ error: '', status: '' });
+
+  if (!localPath) {
+    setCloneModalState({ error: 'Enter the absolute path to a local git repository' });
+    return;
+  }
+  if (localName && !/^[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)?$/.test(localName)) {
+    setCloneModalState({ error: 'Local name must look like owner/repo (letters, numbers, . _ - only).' });
+    return;
+  }
+
+  setCloneModalState({
+    busy: true,
+    status: 'Importing from local folder…',
+  });
+
+  try {
+    const body = { local_path: localPath };
+    if (localName) body.name = localName;
+    const repo = await api('/api/repos/import/local', { method: 'POST', body: JSON.stringify(body) });
+    setCloneModalState({ busy: false });
+    hideCloneModal();
+    $('#clone-repo-form')?.reset();
+    await loadRepos();
+    $('#repo-select').value = repo.name;
+    await selectRepo(repo.name);
+    toast(`Imported ${repo.name}`, 'success');
+  } catch (err) {
+    const msg = err.message || String(err);
+    setCloneModalState({ busy: false, error: msg, status: '' });
+    terminalLog(`local import failed: ${msg}`);
+    toast(msg, 'error', { duration: 12000 });
   } finally {
     if (state.cloneBusy) setCloneModalState({ busy: false });
   }
@@ -3731,14 +3858,17 @@ function closeAllTabs() {
   state.activeTab = null;
   state.dirty.clear();
   const list = $('#tab-list');
-  if (!list) return;
-  list.innerHTML = '';
-  const empty = document.createElement('div');
-  empty.id = 'empty-state';
-  list.appendChild(empty);
+  if (list) list.innerHTML = '';
+  let empty = $('#empty-state');
+  if (!empty) {
+    empty = document.createElement('div');
+    empty.id = 'empty-state';
+    $('#editor-stage')?.insertBefore(empty, $('#editor-container'));
+  }
   renderWelcome();
+  $('#empty-state')?.classList.remove('hidden');
+  syncWelcomeLayout();
   setMainView('editor');
-  $('#editor-container')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   updateBreadcrumbs(null);
@@ -5718,9 +5848,10 @@ function bindEvents() {
     selectRepo(name);
   });
   $('#branch-picker-btn')?.addEventListener('click', showBranchPicker);
-  $('#btn-new-repo').addEventListener('click', showModal);
-  $('#btn-clone-repo')?.addEventListener('click', showCloneModal);
   $('#btn-open-agent').addEventListener('click', toggleAgent);
+  $('#btn-new-repo')?.addEventListener('click', showModal);
+  $('#btn-clone-repo')?.addEventListener('click', () => showCloneModal('remote'));
+  $('#btn-import-local')?.addEventListener('click', () => showCloneModal('local'));
   $('#btn-new-repo-empty')?.addEventListener('click', showModal);
   $('#btn-new-file').addEventListener('click', showFileModal);
   $('#modal-cancel').addEventListener('click', hideModal);
@@ -5961,10 +6092,20 @@ function bindEvents() {
     if (e.target === $('#push-modal-overlay')) hidePushModal();
   });
 
+  $('#clone-tab-remote')?.addEventListener('click', () => setCloneModalTab('remote'));
+  $('#clone-tab-local')?.addEventListener('click', () => setCloneModalTab('local'));
+
   $('#clone-remote-url')?.addEventListener('input', (e) => {
     const nameInput = $('#clone-local-name');
     if (!nameInput || nameInput.dataset.userEdited === '1') return;
     const derived = deriveNameFromUrl(e.target.value);
+    if (derived) nameInput.value = derived;
+  });
+
+  $('#clone-local-path')?.addEventListener('input', (e) => {
+    const nameInput = $('#clone-local-name');
+    if (!nameInput || nameInput.dataset.userEdited === '1') return;
+    const derived = deriveNameFromLocalPath(e.target.value);
     if (derived) nameInput.value = derived;
   });
 
@@ -5996,11 +6137,17 @@ async function init() {
   bindGoToClass();
   bindBranchPicker();
   mountReaperIcons();
+  const build = document.querySelector('meta[name="reaper-ui-build"]')?.content;
+  const buildEl = $('#status-build');
+  if (buildEl && build) buildEl.textContent = `ui-${build}`;
   initSidebarResize();
   initTerminalBottomResize();
   applyAgentDock();
   applyTerminalDock();
   switchPanel('explorer');
+  renderWelcome();
+  $('#empty-state')?.classList.remove('hidden');
+  syncWelcomeLayout();
   void loadCursorStatus();
   void loadGeminiSettingsSection();
   try {
@@ -6009,6 +6156,9 @@ async function init() {
     toast(`Could not reach Reaper backend: ${err.message}. Quit other Reaper copies and relaunch.`, 'error', { duration: 15000 });
   }
   const initialRepo = getInitialRepoFromUrl();
+  if (!initialRepo && !state.repo) {
+    showNoRepoFileTree();
+  }
   if (initialRepo) {
     const sel = $('#repo-select');
     if (sel && [...sel.options].some((o) => o.value === initialRepo)) {
