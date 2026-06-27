@@ -3636,15 +3636,11 @@ async function refreshGradleInfo() {
     updateRunButtons();
     return;
   }
-  if (!isGradleFilePath(state.activeTab)) {
-    state.gradleInfo = null;
-    updateRunButtons();
-    return;
-  }
   try {
-    state.gradleInfo = await api(
+    const info = await api(
       `${repoApi(state.repo, '/workspace/gradle/info')}?path=${encodeURIComponent(state.activeTab)}`,
     );
+    state.gradleInfo = info?.is_gradle ? info : null;
   } catch {
     state.gradleInfo = null;
   }
@@ -3886,12 +3882,26 @@ async function runGradle() {
   }
 }
 
+function normalizeGradleTestFilter(testFilter) {
+  return String(testFilter || '')
+    .replace(/\s*\([^)]*\.java\)\s*$/, '')
+    .replace(/\//g, '.')
+    .trim();
+}
+
 async function runGradleTest(testFilter) {
   if (!state.repo || !state.activeTab || !testFilter) return;
   if (state.dirty.has(state.activeTab)) await saveFile();
+  await refreshGradleInfo();
+  if (!state.gradleInfo?.is_gradle) {
+    toast('Not inside a Gradle project', 'error');
+    return;
+  }
   showTerminal();
   const term = getActiveTerminal();
-  const task = `test --tests ${testFilter}`;
+  const filter = normalizeGradleTestFilter(testFilter);
+  if (!filter) return;
+  const task = `test --tests ${filter}`;
   const label = `▶ gradle ${task}  (${state.activeTab})`;
   try {
     const exitCode = await runWorkspaceCommandStream(

@@ -1,5 +1,5 @@
 /**
- * Shared UI icons — 24×24 stroke glyphs, currentColor, IntelliJ weight.
+ * Shared UI icons — 24×24 stroke glyphs, currentColor, medium stroke weight.
  */
 (function () {
   const base =
