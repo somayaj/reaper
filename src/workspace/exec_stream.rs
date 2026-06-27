@@ -1,0 +1,301 @@
+use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
+use tokio::sync::mpsc as async_mpsc;
+
+use crate::git::{self, GitOutput};
+use crate::jdk;
+
+use super::exec::run_shell_command;
+use super::shell;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecStreamEvent {
+    pub t: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+fn emit(tx: &async_mpsc::Sender<ExecStreamEvent>, event: ExecStreamEvent) -> bool {
+    tx.blocking_send(event).is_ok()
+}
+
+fn pump_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    stream: &'static str,
+    tx: mpsc::Sender<ExecStreamEvent>,
+) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                if tx
+                    .send(ExecStreamEvent {
+                        t: stream.into(),
+                        text: Some(text),
+                        code: None,
+                        step: None,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed to spawn process".to_string())?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (line_tx, line_rx) = mpsc::channel::<ExecStreamEvent>();
+
+    let mut pumps = Vec::new();
+    if let Some(out) = stdout {
+        let tx = line_tx.clone();
+        pumps.push(thread::spawn(move || pump_reader(out, "stdout", tx)));
+    }
+    if let Some(err) = stderr {
+        let tx = line_tx.clone();
+        pumps.push(thread::spawn(move || pump_reader(err, "stderr", tx)));
+    }
+    drop(line_tx);
+
+    let async_tx = tx.clone();
+    let relay = thread::spawn(move || {
+        while let Ok(event) = line_rx.recv() {
+            if !emit(&async_tx, event) {
+                break;
+            }
+        }
+    });
+
+    let status = child.wait().context("failed to wait on process")?;
+    for pump in pumps {
+        let _ = pump.join();
+    }
+    let _ = relay.join();
+
+    Ok(status.code().unwrap_or(-1))
+}
+
+pub fn stream_shell(ws: &Path, cwd_rel: Option<&str>, command: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    let command = command.trim();
+    if command.is_empty() {
+        bail!("command required");
+    }
+    let work_dir = shell::resolve_work_dir(ws, cwd_rel)?;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let mut cmd = Command::new(&shell);
+    cmd.args(["-lc", command]).current_dir(work_dir);
+    let code = stream_process(&mut cmd, &tx)?;
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: None,
+    });
+    Ok(code)
+}
+
+pub fn stream_git(ws: &Path, args: &[&str], step: Option<&str>, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(ws);
+    if let Some(step) = step {
+        let _ = emit(&tx, ExecStreamEvent {
+            t: "step".into(),
+            text: Some(step.into()),
+            code: None,
+            step: Some(step.into()),
+        });
+    }
+    let code = stream_process(&mut cmd, &tx)?;
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: step.map(str::to_string),
+    });
+    Ok(code)
+}
+
+pub fn stream_sync(ws: &Path, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    stream_git(ws, &["pull", "--ff-only"], Some("pull"), tx)
+}
+
+pub fn stream_push(ws: &Path, auth_url: &str, branch: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    stream_git(ws, &["push", auth_url, &refspec], Some("push"), tx)
+}
+
+pub fn stream_commit_and_push(
+    ws: &Path,
+    message: &str,
+    paths: Option<&[String]>,
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
+    if message.trim().is_empty() {
+        bail!("commit message required");
+    }
+
+    let add_args: Vec<String> = match paths {
+        Some(paths) if !paths.is_empty() => paths.iter().cloned().collect(),
+        _ => vec!["-A".into()],
+    };
+
+    if add_args.len() == 1 && add_args[0] == "-A" {
+        let code = stream_git(ws, &["add", "-A"], Some("add"), tx.clone())?;
+        if code != 0 {
+            return Ok(code);
+        }
+    } else {
+        for path in &add_args {
+            let code = stream_git(ws, &["add", path], Some("add"), tx.clone())?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
+    }
+
+    let code = stream_git(
+        ws,
+        &["commit", "-m", message],
+        Some("commit"),
+        tx.clone(),
+    )?;
+    if code != 0 {
+        return Ok(code);
+    }
+
+    stream_git(ws, &["push"], Some("push"), tx)
+}
+
+pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    use super::gradle::{resolve_gradle_command, find_gradle_root};
+
+    let task = task.trim();
+    if task.is_empty() {
+        bail!("gradle task required");
+    }
+    let parts: Vec<&str> = task.split_whitespace().collect();
+    if parts.iter().any(|p| p.contains('/') || p.contains('\\')) {
+        bail!("invalid gradle task");
+    }
+    let root = find_gradle_root(ws, rel_path)?
+        .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
+    let cmd = resolve_gradle_command(&root)?;
+    let mut args = cmd.project_args.clone();
+    args.push("--no-daemon".into());
+    args.push("--console=plain".into());
+    args.extend(parts.iter().map(|p| (*p).to_string()));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "stdout".into(),
+        text: Some(format!("{label}\n")),
+        code: None,
+        step: Some("gradle".into()),
+    });
+
+    let mut command = Command::new(&cmd.program);
+    command.args(&arg_refs).current_dir(&cmd.cwd);
+    jdk::apply_gradle_java_env(&mut command);
+    let code = stream_process(&mut command, &tx)?;
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: Some("gradle".into()),
+    });
+    Ok(code)
+}
+
+pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    use super::java::parse_java_main;
+    use super::{read_file, safe_join};
+
+    let file_path = safe_join(ws, rel_path)?;
+    if !file_path.is_file() {
+        bail!("not a file");
+    }
+    if !rel_path.ends_with(".java") {
+        bail!("not a Java file");
+    }
+
+    let source = read_file(ws, rel_path)?;
+    let info = parse_java_main(&source, &file_path)?;
+    let rel = rel_path.replace('\\', "/");
+
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "stdout".into(),
+        text: Some(format!("$ javac -d .reaper/java-out {rel}\n")),
+        code: None,
+        step: Some("javac".into()),
+    });
+
+    let mut javac = Command::new("javac");
+    javac
+        .current_dir(ws)
+        .args(["-d", ".reaper/java-out", "-encoding", "UTF-8", &rel]);
+    jdk::apply_java_env(&mut javac);
+    let compile_code = stream_process(&mut javac, &tx)?;
+    if compile_code != 0 {
+        let _ = emit(&tx, ExecStreamEvent {
+            t: "exit".into(),
+            text: None,
+            code: Some(compile_code),
+            step: Some("javac".into()),
+        });
+        return Ok(compile_code);
+    }
+
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "stdout".into(),
+        text: Some(format!("\n$ java -cp .reaper/java-out {}\n", info.qualified_name)),
+        code: None,
+        step: Some("java".into()),
+    });
+
+    let mut java = Command::new("java");
+    java.current_dir(ws)
+        .args(["-cp", ".reaper/java-out", &info.qualified_name]);
+    jdk::apply_java_env(&mut java);
+    let run_code = stream_process(&mut java, &tx)?;
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(run_code),
+        step: Some("java".into()),
+    });
+    Ok(run_code)
+}
+
+/// Fallback for tests — buffered shell (unchanged behavior).
+#[allow(dead_code)]
+pub fn run_shell_buffered(ws: &Path, cwd_rel: Option<&str>, command: &str) -> Result<GitOutput> {
+    let command = command.trim();
+    if command.is_empty() {
+        bail!("command required");
+    }
+    let work_dir = shell::resolve_work_dir(ws, cwd_rel)?;
+    run_shell_command(&work_dir, command)
+}

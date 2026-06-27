@@ -83,7 +83,17 @@ impl SettingsStore {
             .ok()
             .and_then(|g| g.jdk_home.clone())
             .filter(|h| !h.is_empty())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            .filter(|p| {
+                if crate::jdk::validate_java_home(p).is_ok() {
+                    return true;
+                }
+                tracing::warn!(
+                    "Ignoring invalid configured JAVA_HOME {} — clear it in Settings → Java",
+                    p.display()
+                );
+                false
+            });
         crate::jdk::set_configured_java_home(home);
     }
 

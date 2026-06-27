@@ -53,7 +53,7 @@
             },
           },
           fontFamily: {
-            mono: ['JetBrains Mono', 'Consolas', 'monospace'],
+            mono: ['ui-monospace', 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
             sans: ['Segoe UI', 'Inter', 'system-ui', 'sans-serif'],
           },
           boxShadow: {
@@ -66,8 +66,8 @@
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/intellij.css?v=45" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/intellij.css?v=56" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -80,7 +80,6 @@
     #agent-dock-right { width: 20rem; }
     #agent-dock-bottom { height: 16rem; }
     #terminal-dock-right { width: 20rem; }
-    #terminal-dock-bottom { height: 16rem; }
     @media (min-width: 1024px) { #agent-dock-right { width: 22rem; } #terminal-dock-right { width: 22rem; } }
     @media (min-width: 1280px) { #agent-dock-right { width: 24rem; } #terminal-dock-right { width: 24rem; } }
   </style>
@@ -120,13 +119,32 @@
         <div class="ij-menu-root" data-menu="git">
           <button type="button" class="ij-menu-trigger">Git</button>
           <div class="ij-menu-dropdown">
-            <button type="button" class="ij-menu-item" data-action="commit-panel">Commit…</button>
-            <button type="button" class="ij-menu-item" data-action="pull" disabled>Pull</button>
-            <button type="button" class="ij-menu-item" data-action="push" disabled>Push to remote</button>
-            <button type="button" class="ij-menu-item" data-action="switch-branch" disabled>Switch branch…<span class="ij-kbd">⌘⇧B</span></button>
-            <button type="button" class="ij-menu-item" data-action="publish" disabled>Publish to GitHub…</button>
+            <button type="button" class="ij-menu-item" data-action="commit-panel">
+              <span class="ij-menu-icon" data-icon="gitCommit"></span>
+              <span class="ij-menu-label">Commit…</span>
+            </button>
+            <button type="button" class="ij-menu-item" data-action="pull" disabled>
+              <span class="ij-menu-icon" data-icon="gitPull"></span>
+              <span class="ij-menu-label">Pull</span>
+            </button>
+            <button type="button" class="ij-menu-item" data-action="push" disabled>
+              <span class="ij-menu-icon" data-icon="gitPush"></span>
+              <span class="ij-menu-label">Push to remote</span>
+            </button>
+            <button type="button" class="ij-menu-item" data-action="switch-branch" disabled>
+              <span class="ij-menu-icon" data-icon="gitBranch"></span>
+              <span class="ij-menu-label">Switch branch…</span>
+              <span class="ij-kbd">⌘⇧B</span>
+            </button>
+            <button type="button" class="ij-menu-item" data-action="publish" disabled>
+              <span class="ij-menu-icon" data-icon="gitPublish"></span>
+              <span class="ij-menu-label">Publish to GitHub…</span>
+            </button>
             <div class="ij-menu-sep"></div>
-            <button type="button" class="ij-menu-item" data-action="repo-info" disabled>Repository details…</button>
+            <button type="button" class="ij-menu-item" data-action="repo-info" disabled>
+              <span class="ij-menu-icon" data-icon="gitRepo"></span>
+              <span class="ij-menu-label">Repository details…</span>
+            </button>
           </div>
         </div>
         <div class="ij-menu-root" data-menu="navigate">
@@ -142,6 +160,7 @@
             <button type="button" class="ij-menu-item" data-action="panel-git">Commit<span class="ij-kbd">Alt+9</span></button>
             <button type="button" class="ij-menu-item" data-action="panel-history">Git Log</button>
             <button type="button" class="ij-menu-item" data-action="panel-terminal">Terminal</button>
+            <button type="button" class="ij-menu-item" data-action="terminal-new">New Terminal<span class="ij-kbd">⌘⇧`</span></button>
             <button type="button" class="ij-menu-item" data-action="panel-agent">Agent</button>
             <div class="ij-menu-sep"></div>
             <div class="ij-menu-heading">Terminal position</div>
@@ -178,6 +197,7 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
             <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-java">Java (JAVA_HOME)…</button>
             <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
             <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
           </div>
@@ -199,6 +219,17 @@
             <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
           </button>
         </div>
+        <div id="git-nav-toolbar" class="ij-git-nav hidden md:flex items-center shrink-0" role="toolbar" aria-label="Git actions">
+          <button id="btn-sync" type="button" disabled title="Pull latest" class="ij-header-btn icon" aria-label="Pull">
+            <span class="ij-header-icon" data-icon="gitPull"></span>
+          </button>
+          <button id="btn-nav-commit" type="button" disabled title="Open commit panel" class="ij-header-btn icon" aria-label="Open commit panel">
+            <span class="ij-header-icon" data-icon="gitCommit"></span>
+          </button>
+          <button id="btn-nav-push" type="button" disabled title="Push to remote" class="ij-header-btn icon" aria-label="Push">
+            <span class="ij-header-icon" data-icon="gitPush"></span>
+          </button>
+        </div>
       </div>
 
       <div id="file-breadcrumb" class="hidden md:flex items-center gap-1.5 text-xs text-gray-600 truncate min-w-0">
@@ -208,11 +239,8 @@
     </div>
 
     <div class="flex items-center gap-1 shrink-0">
-      <button id="btn-sync" disabled title="Pull latest" class="ij-header-btn icon">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-      </button>
-      <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 9h6M9 13h6"/></svg>
+      <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon" aria-label="Repository details">
+        <span class="ij-header-icon" data-icon="gitRepo"></span>
       </button>
       <button id="btn-clone-repo" title="Clone from URL" class="ij-header-btn ghost hidden sm:inline-flex">
         <span class="ij-header-icon" data-icon="clone"></span>
@@ -261,11 +289,14 @@
           <span id="agent-badge" class="ij-activity-badge-dot hidden"></span>
         </span>
       </button>
-      <button data-panel="terminal" class="activity-btn mt-auto" title="Terminal">
-        <span class="ij-activity-glyph" aria-hidden="true">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3"/></svg>
-        </span>
-      </button>
+      <div class="ij-toolstrip-footer mt-auto">
+        <div class="ij-toolstrip-divider" role="presentation" aria-hidden="true"></div>
+        <button data-panel="terminal" class="activity-btn ij-terminal-activity-btn" title="Terminal — logs &amp; command output" aria-label="Terminal">
+          <span class="ij-activity-glyph" aria-hidden="true">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3"/></svg>
+          </span>
+        </button>
+      </div>
     </nav>
 
     <!-- Sidebar -->
@@ -310,9 +341,15 @@
         <div id="commit-panel-header" class="ij-commit-panel-header shrink-0">
           <div>
             <span class="ij-commit-panel-title">Changes</span>
-            <p class="ij-commit-panel-hint">Click a file to preview its diff in the editor</p>
+            <p class="ij-commit-panel-hint">Check files to include, then commit locally or push</p>
           </div>
-          <span id="commit-file-count" class="ij-commit-file-count hidden"></span>
+          <div class="ij-commit-panel-actions">
+            <label class="ij-commit-select-all" title="Select all changed files">
+              <input type="checkbox" id="commit-select-all" checked disabled>
+              <span>All</span>
+            </label>
+            <span id="commit-file-count" class="ij-commit-file-count hidden"></span>
+          </div>
         </div>
         <div id="git-status-list" class="ij-git-status-list flex-1 overflow-auto panel-scroll min-h-0"></div>
         <div class="ij-commit-compose shrink-0">
@@ -324,8 +361,11 @@
             </button>
           </div>
           <textarea id="commit-message" rows="3" placeholder="Describe what changed and why…" class="ij-commit-message"></textarea>
-          <button id="btn-commit" disabled class="ij-commit-submit">Commit &amp; Push</button>
-          <p class="ij-commit-footnote">Stages all changes, commits, and pushes to your remote.</p>
+          <div class="ij-commit-actions">
+            <button id="btn-commit-only" type="button" disabled class="ij-commit-btn ij-commit-btn-secondary">Commit</button>
+            <button id="btn-commit-push" type="button" disabled class="ij-commit-btn ij-commit-btn-primary">Commit &amp; Push</button>
+          </div>
+          <p class="ij-commit-footnote">Stages checked files only. Commit saves locally; Commit &amp; Push also sends to your remote.</p>
         </div>
       </div>
 
@@ -335,9 +375,12 @@
       </div>
 
       <div id="panel-terminal" class="panel hidden flex-1 flex flex-col min-h-0 bg-surface-950">
-        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2">
-          <span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Terminal</span>
-          <div class="flex items-center border border-surface-700 rounded-md overflow-hidden" title="Terminal position">
+        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2 min-w-0">
+          <div class="ij-terminal-tabs-wrap flex-1 min-w-0">
+            <div id="terminal-tabs" class="ij-terminal-tabs" role="tablist" aria-label="Terminal sessions"></div>
+            <button type="button" id="btn-terminal-new" class="ij-terminal-tab-add" title="New terminal (⌘⇧`)" aria-label="New terminal">+</button>
+          </div>
+          <div class="flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0" title="Terminal position">
             <button type="button" data-terminal-dock="left" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Dock left">Left</button>
             <button type="button" data-terminal-dock="right" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock right">Right</button>
             <button type="button" data-terminal-dock="bottom" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock bottom">Bottom</button>
@@ -385,6 +428,10 @@
           </div>
         </div>
 
+        <div id="agent-work-status" class="agent-work-status hidden shrink-0" aria-live="polite">
+          <span id="agent-work-status-text" class="agent-work-status-label">Working…</span>
+        </div>
+
         <div class="p-2 border-t border-surface-700/80 bg-surface-900 shrink-0 space-y-1.5">
           <div class="flex items-center gap-2 flex-wrap">
             <div class="flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0" title="Conversation mode">
@@ -399,7 +446,11 @@
           <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
           <div class="flex items-center justify-between gap-2">
             <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
-            <button id="btn-agent-send" disabled class="px-3 py-1 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-xs font-semibold disabled:opacity-30 transition-colors">Send</button>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button id="btn-agent-revert" type="button" disabled title="Revert last message and undo file changes" class="px-2.5 py-1 rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 text-xs disabled:opacity-30 transition-colors">Revert</button>
+              <button id="btn-agent-stop" type="button" disabled title="Stop the current agent run" class="px-2.5 py-1 rounded-lg border border-red-900/60 hover:bg-red-950/40 text-red-300 text-xs disabled:opacity-30 transition-colors">Stop</button>
+              <button id="btn-agent-send" disabled class="px-3 py-1 rounded-lg bg-accent hover:bg-accent-hover text-surface-950 text-xs font-semibold disabled:opacity-30 transition-colors">Send</button>
+            </div>
           </div>
         </div>
       </div>
@@ -429,7 +480,7 @@
       </div>
       <div id="java-index-banner" class="hidden ij-java-index-banner shrink-0">
         <span class="ij-java-index-spinner" aria-hidden="true"></span>
-        <span id="java-index-banner-text">Indexing Java sources…</span>
+        <span id="java-index-banner-text">Indexing project…</span>
       </div>
       <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
         <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto">
@@ -479,7 +530,9 @@
     <div id="agent-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0"></div>
 
     <!-- Terminal dock (bottom) -->
-    <div id="terminal-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0"></div>
+    <div id="terminal-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0">
+      <div id="terminal-bottom-resize" class="ij-dock-resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
+    </div>
   </div>
 
   <!-- Status bar (IntelliJ-style) -->
@@ -591,6 +644,28 @@
     </div>
   </div>
 
+  <!-- Push to remote -->
+  <div id="push-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="ij-push-modal glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[85vh]">
+      <div class="px-6 pt-6 pb-4 border-b border-surface-700/80 shrink-0">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-semibold text-white">Push to remote</h3>
+            <p id="push-modal-subtitle" class="text-xs text-gray-500 mt-1 font-mono"></p>
+          </div>
+          <span id="push-modal-ahead" class="ij-push-ahead-badge hidden"></span>
+        </div>
+      </div>
+      <div id="push-modal-body" class="ij-push-modal-body flex-1 overflow-auto panel-scroll px-6 py-4 min-h-0">
+        <p class="text-sm text-gray-500">Loading…</p>
+      </div>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50 shrink-0">
+        <button type="button" id="push-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="button" id="push-modal-confirm" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" disabled>Push</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal -->
   <div id="modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -653,6 +728,7 @@
         <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
           <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="java">Java</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
         </nav>
@@ -685,8 +761,16 @@
             </div>
             <div>
               <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-editor-font-size">Font size</label>
-              <select id="settings-editor-font-size" class="ij-theme-menu-select w-full max-w-xs" title="Editor font size"></select>
+              <select id="settings-editor-font-size" class="ij-settings-select w-full max-w-xs" title="Editor font size"></select>
               <p class="text-[11px] text-gray-600 mt-2">Applies to the code editor. Saved in this browser (10–28px).</p>
+            </div>
+            <div class="ij-editor-font-block">
+              <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-editor-font-family">Typeface</label>
+              <select id="settings-editor-font-family" class="ij-settings-select w-full max-w-sm" title="Editor typeface"></select>
+              <pre id="settings-editor-font-preview" class="ij-font-preview" aria-live="polite">fn harvest() {
+  return "reaper";
+}</pre>
+              <p class="text-[11px] text-gray-600 mt-2">Choose a monospace face for the editor. Preview updates as you pick.</p>
             </div>
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
@@ -702,6 +786,37 @@
               </label>
               <p class="text-[11px] text-gray-600 mt-2">Save open files automatically after you stop typing. Enabled by default.</p>
             </div>
+            <div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                <input id="settings-new-window-on-repo" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
+                Open a new window when switching repos
+              </label>
+              <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one.</p>
+            </div>
+          </section>
+          <section id="settings-panel-java" class="ij-settings-panel hidden space-y-4">
+            <div>
+              <h4 class="text-sm font-semibold text-white">Java (JAVA_HOME)</h4>
+              <p class="text-xs text-gray-500 mt-1">Used for Gradle, Java run, and diagnostics. If you see <code class="font-mono text-gray-400">Unsupported class file major version 70</code>, macOS is defaulting to Java&nbsp;26 — pick Java&nbsp;17 or 21 below. Java&nbsp;8 is fine to save here for legacy projects; Gradle 8+ still runs with Java&nbsp;17/21 automatically.</p>
+            </div>
+            <div id="settings-jdk-status" class="ij-settings-status"></div>
+            <form id="settings-jdk-form" class="space-y-3 border-t border-surface-700 pt-4">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-jdk-select">Installed JDKs</label>
+                <select id="settings-jdk-select" class="ij-settings-select w-full max-w-lg" title="Pick a JDK">
+                  <option value="">— select —</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-jdk-home">JAVA_HOME path</label>
+                <input id="settings-jdk-home" name="java_home" type="text" spellcheck="false" placeholder="/Library/Java/JavaVirtualMachines/…/Contents/Home" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+                <p class="text-[11px] text-gray-600 mt-2">Must contain <code class="font-mono">bin/java</code>. Saved in <code class="font-mono">data/settings.json</code> (or set <code class="font-mono">REAPER_JAVA_HOME</code> in the environment).</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save JAVA_HOME</button>
+                <button type="button" id="settings-jdk-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Use system default</button>
+              </div>
+            </form>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
@@ -785,9 +900,9 @@
 
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
   <script src="/logo.js?v=43"></script>
-  <script src="/icons.js?v=1"></script>
-  <script src="/monaco-languages.js?v=8"></script>
-  <script src="/themes.js?v=8"></script>
-  <script src="/app.js?v=69"></script>
+  <script src="/icons.js?v=2"></script>
+  <script src="/monaco-languages.js?v=9"></script>
+  <script src="/themes.js?v=9"></script>
+  <script src="/app.js?v=82"></script>
 </body>
 </html>

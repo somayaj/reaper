@@ -13,6 +13,8 @@ pub struct JavaIndexStatus {
     pub dependency_jars: usize,
     pub source_jars: usize,
     pub jdk_sources: bool,
+    pub spring_symbols: usize,
+    pub jdk_symbols: usize,
     pub cached: bool,
     pub error: Option<String>,
 }
@@ -142,6 +144,8 @@ fn status_from_warm(warm: &WarmIndexStatus, error: Option<String>) -> JavaIndexS
         dependency_jars: warm.dependency_jars,
         source_jars: warm.source_jars,
         jdk_sources: warm.jdk_sources,
+        spring_symbols: warm.spring_symbols,
+        jdk_symbols: warm.jdk_symbols,
         cached: warm.cached,
         error,
     }

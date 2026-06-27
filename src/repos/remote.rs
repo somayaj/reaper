@@ -277,3 +277,171 @@ pub fn push_to_remote(
     }
     git::push_url(&ws, &auth_url, &branch)
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct PushPreviewCommit {
+    pub hash: String,
+    pub subject: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PushPreview {
+    pub branch: String,
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub commits: Vec<PushPreviewCommit>,
+    pub files: Vec<String>,
+    pub can_push: bool,
+    pub note: Option<String>,
+}
+
+pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Result<PushPreview> {
+    let _ = settings;
+    let meta = metadata::load(config, name)?;
+    let remote_url = meta.remote_url.clone();
+    if remote_url.is_none() {
+        return Ok(PushPreview {
+            branch: String::new(),
+            remote: "origin".into(),
+            remote_url: None,
+            upstream: None,
+            ahead: 0,
+            commits: vec![],
+            files: vec![],
+            can_push: false,
+            note: Some("No remote linked — publish or link a remote first".into()),
+        });
+    }
+
+    let ws = workspace::ensure_workspace(config, name)?;
+    let branch = git::run_git(Some(&ws), &["branch", "--show-current"])?
+        .stdout
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        bail!("could not determine current branch");
+    }
+
+    let upstream = upstream_label(&ws);
+    let range = unpushed_commit_range(&ws, &branch)?;
+    let (commits, files, note) = match range.as_deref() {
+        Some(r) => {
+            let commits = commits_in_range(&ws, r)?;
+            let files = files_in_range(&ws, r)?;
+            let note = if commits.is_empty() {
+                Some("Already up to date with remote".into())
+            } else {
+                None
+            };
+            (commits, files, note)
+        }
+        None => {
+            let commits = commits_on_branch(&ws, &branch, 50)?;
+            let files = files_on_branch(&ws, &branch)?;
+            let note = Some(format!(
+                "First push — branch '{branch}' will be published to origin"
+            ));
+            (commits, files, note)
+        }
+    };
+
+    let ahead = commits.len();
+    Ok(PushPreview {
+        branch,
+        remote: "origin".into(),
+        remote_url,
+        upstream,
+        ahead,
+        can_push: ahead > 0,
+        commits,
+        files,
+        note,
+    })
+}
+
+fn upstream_label(ws: &std::path::Path) -> Option<String> {
+    let out = git::run_git(
+        Some(ws),
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()?;
+    if !out.success() {
+        return None;
+    }
+    let label = out.stdout.trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
+    }
+}
+
+fn unpushed_commit_range(ws: &std::path::Path, branch: &str) -> Result<Option<String>> {
+    if let Some(up) = upstream_label(ws) {
+        return Ok(Some(format!("{up}..HEAD")));
+    }
+    let origin_branch = format!("origin/{branch}");
+    if let Ok(verify) = git::run_git(Some(ws), &["rev-parse", "--verify", &origin_branch]) {
+        if verify.success() {
+            return Ok(Some(format!("{origin_branch}..HEAD")));
+        }
+    }
+    Ok(None)
+}
+
+fn commits_in_range(ws: &std::path::Path, range: &str) -> Result<Vec<PushPreviewCommit>> {
+    let out = git::run_git(
+        Some(ws),
+        &["log", range, "--format=%H%x1f%s", "-n", "100"],
+    )?;
+    Ok(parse_commit_lines(&out.stdout))
+}
+
+fn commits_on_branch(ws: &std::path::Path, branch: &str, limit: usize) -> Result<Vec<PushPreviewCommit>> {
+    let limit = limit.to_string();
+    let out = git::run_git(
+        Some(ws),
+        &["log", branch, &format!("-{limit}"), "--format=%H%x1f%s"],
+    )?;
+    Ok(parse_commit_lines(&out.stdout))
+}
+
+fn parse_commit_lines(stdout: &str) -> Vec<PushPreviewCommit> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\x1f');
+            Some(PushPreviewCommit {
+                hash: parts.next()?.to_string(),
+                subject: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+fn files_in_range(ws: &std::path::Path, range: &str) -> Result<Vec<String>> {
+    let out = git::run_git(Some(ws), &["diff", "--name-only", range])?;
+    Ok(unique_sorted_paths(&out.stdout))
+}
+
+fn files_on_branch(ws: &std::path::Path, branch: &str) -> Result<Vec<String>> {
+    let out = git::run_git(
+        Some(ws),
+        &["log", branch, "--name-only", "--format=", "-n", "100"],
+    )?;
+    Ok(unique_sorted_paths(&out.stdout))
+}
+
+fn unique_sorted_paths(stdout: &str) -> Vec<String> {
+    let mut paths: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}

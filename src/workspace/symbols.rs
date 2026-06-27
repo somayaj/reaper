@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -22,10 +22,7 @@ const SKIP_DIRS: &[&str] = &[
     "storage",
 ];
 
-const SOURCE_EXTS: &[&str] = &[
-    "java", "groovy", "gradle", "kt", "kts", "rs", "js", "mjs", "cjs", "ts", "tsx", "jsx",
-    "py", "go", "cs", "rb", "php", "swift", "c", "h", "cpp", "hpp", "cc", "sh",
-];
+const SOURCE_EXTS: &[&str] = super::languages::SOURCE_EXTENSIONS;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolLocation {
@@ -36,7 +33,7 @@ pub struct SymbolLocation {
     pub column: u32,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ClassSearchHit {
     pub name: String,
     pub qualified: String,
@@ -391,19 +388,25 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
         }
     }
 
-    if let Some(method) = java_method_name_on_line(line) {
-        if method == symbol {
-            let col = line
-                .find(&method)
-                .map(|i| i as u32 + 1)
-                .unwrap_or(1);
-            return Some(SymbolLocation {
-                name: symbol.to_string(),
-                kind: "method".into(),
-                path: path.to_string(),
-                line: line_no,
-                column: col,
-            });
+    if path.ends_with(".java")
+        || path.ends_with(".kt")
+        || path.ends_with(".kts")
+        || path.ends_with(".groovy")
+    {
+        if let Some(method) = java_method_name_on_line(line) {
+            if method == symbol {
+                let col = line
+                    .find(&method)
+                    .map(|i| i as u32 + 1)
+                    .unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "method".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
         }
     }
 
@@ -433,6 +436,73 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
                     line: line_no,
                     column: col,
                 });
+            }
+        }
+    }
+
+    if path.ends_with(".go") {
+        if let Some(rest) = trimmed.strip_prefix("func ") {
+            if let Some(method) = go_func_name_from_rest(rest) {
+                if method == symbol {
+                    let col = line.find(&method).map(|i| i as u32 + 1).unwrap_or(1);
+                    return Some(SymbolLocation {
+                        name: symbol.to_string(),
+                        kind: "method".into(),
+                        path: path.to_string(),
+                        line: line_no,
+                        column: col,
+                    });
+                }
+            }
+        }
+    }
+
+    if path.ends_with(".rs") {
+        if let Some(rest) = trimmed.strip_prefix("impl ") {
+            if let Some(type_name) = rust_impl_type_name(rest.trim_start_matches("pub ")) {
+                if type_name == symbol {
+                    let col = line.find(&type_name).map(|i| i as u32 + 1).unwrap_or(1);
+                    return Some(SymbolLocation {
+                        name: symbol.to_string(),
+                        kind: "impl".into(),
+                        path: path.to_string(),
+                        line: line_no,
+                        column: col,
+                    });
+                }
+            }
+        }
+    }
+
+    let lower_path = path.to_lowercase();
+    if lower_path.ends_with(".sh") || lower_path.ends_with(".bash") || lower_path.ends_with(".zsh") {
+        if let Some(name) = shell_function_name(trimmed) {
+            if name == symbol {
+                let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "function".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
+        }
+    }
+
+    if path.ends_with(".sql") {
+        for object_kw in ["TABLE", "VIEW", "INDEX", "FUNCTION", "PROCEDURE"] {
+            if let Some(name) = sql_create_object_name(line, object_kw) {
+                if name.eq_ignore_ascii_case(symbol) {
+                    let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
+                    return Some(SymbolLocation {
+                        name: symbol.to_string(),
+                        kind: object_kw.to_lowercase(),
+                        path: path.to_string(),
+                        line: line_no,
+                        column: col,
+                    });
+                }
             }
         }
     }
@@ -701,10 +771,513 @@ pub fn search_workspace_classes(
     limit: usize,
     skip_java: bool,
 ) -> Result<Vec<ClassSearchHit>> {
+    if query.trim().is_empty() {
+        if let Some(cached) = load_symbol_cache(ws) {
+            if !cached.is_empty() {
+                return Ok(dedupe_class_hits(
+                    cached
+                        .into_iter()
+                        .filter(|(_, hit)| !(skip_java && hit.path.to_lowercase().ends_with(".java")))
+                        .take(limit.saturating_mul(4))
+                        .collect(),
+                    limit,
+                ));
+            }
+        }
+    }
+
     let mut scored: Vec<(u32, ClassSearchHit)> = Vec::new();
     collect_workspace_class_hits(ws, ws, query, skip_java, limit.saturating_mul(4), &mut scored)?;
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     Ok(dedupe_class_hits(scored, limit))
+}
+
+const WORKSPACE_SYMBOLS_PATH: &str = ".reaper/workspace-symbols.json";
+
+pub fn invalidate_symbol_cache(ws: &Path) {
+    let _ = std::fs::remove_file(ws.join(WORKSPACE_SYMBOLS_PATH));
+}
+
+pub fn warm_symbol_cache(ws: &Path) -> Result<usize> {
+    let mut hits = Vec::new();
+    collect_all_workspace_symbols(ws, ws, &mut hits)?;
+    let count = hits.len();
+    std::fs::create_dir_all(ws.join(".reaper"))?;
+    std::fs::write(
+        ws.join(WORKSPACE_SYMBOLS_PATH),
+        serde_json::to_string_pretty(&WorkspaceSymbolCache {
+            version: WORKSPACE_SYMBOLS_VERSION,
+            symbol_count: count,
+            hits,
+        })?,
+    )?;
+    Ok(count)
+}
+
+fn load_symbol_cache(ws: &Path) -> Option<Vec<(u32, ClassSearchHit)>> {
+    let text = std::fs::read_to_string(ws.join(WORKSPACE_SYMBOLS_PATH)).ok()?;
+    let cache: WorkspaceSymbolCache = serde_json::from_str(&text).ok()?;
+    if cache.version != WORKSPACE_SYMBOLS_VERSION {
+        return None;
+    }
+    Some(
+        cache
+            .hits
+            .into_iter()
+            .map(|hit| (path_score_bonus(&hit.path), hit))
+            .collect(),
+    )
+}
+
+fn path_score_bonus(rel_path: &str) -> u32 {
+    if rel_path.starts_with("app/")
+        || rel_path.contains("/src/")
+        || rel_path.starts_with("cmd/")
+        || rel_path.starts_with("lib/")
+        || rel_path.contains("/db/migrate/")
+        || rel_path.starts_with("db/")
+        || rel_path.starts_with("scripts/")
+    {
+        300
+    } else {
+        100
+    }
+}
+
+const WORKSPACE_SYMBOLS_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceSymbolCache {
+    version: u32,
+    symbol_count: usize,
+    hits: Vec<ClassSearchHit>,
+}
+
+fn collect_all_workspace_symbols(
+    ws: &Path,
+    dir: &Path,
+    out: &mut Vec<ClassSearchHit>,
+) -> Result<()> {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_all_workspace_symbols(ws, &path, out)?;
+            continue;
+        }
+
+        if !is_source_file(&name) {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(ws)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if !super::languages::is_indexable_source_path(&rel) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        collect_symbols_in_content(&content, &rel, out);
+    }
+
+    Ok(())
+}
+
+fn collect_symbols_in_content(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    let lower = rel_path.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+
+    if matches!(
+        ext,
+        "java" | "kt" | "kts" | "groovy" | "gradle" | "rb" | "rs" | "cs" | "swift" | "php"
+            | "dart" | "scala"
+    ) || lower.ends_with(".gradle") {
+        collect_types_in_content(content, rel_path, out);
+    }
+    if ext == "rb" {
+        collect_keyword_symbols(content, rel_path, out, &[("def", "method"), ("module", "module")]);
+    }
+    if matches!(ext, "py" | "pyw") {
+        collect_keyword_symbols(content, rel_path, out, &[("class", "class"), ("def", "method")]);
+    }
+    if ext == "go" {
+        collect_go_symbols(content, rel_path, out);
+    }
+    if ext == "rs" {
+        collect_rust_symbols(content, rel_path, out);
+    }
+    if matches!(ext, "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx") {
+        collect_types_in_content(content, rel_path, out);
+        collect_keyword_symbols(content, rel_path, out, &[("function", "method")]);
+        if matches!(ext, "ts" | "tsx") {
+            collect_keyword_symbols(
+                content,
+                rel_path,
+                out,
+                &[("interface", "interface"), ("type", "class")],
+            );
+        }
+    }
+    if matches!(ext, "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh") {
+        collect_keyword_symbols(
+            content,
+            rel_path,
+            out,
+            &[("struct", "struct"), ("class", "class"), ("enum", "enum")],
+        );
+    }
+    if ext == "lua" {
+        collect_keyword_symbols(content, rel_path, out, &[("function", "method")]);
+    }
+    if ext == "sql" {
+        collect_sql_objects(content, rel_path, out);
+    }
+    if matches!(ext, "sh" | "bash" | "zsh") {
+        collect_shell_functions(content, rel_path, out);
+    }
+}
+
+fn collect_go_symbols(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("type ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() || !name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                continue;
+            }
+            push_symbol_hit(out, &name, &name, "class", rel_path, idx, line);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("func ") {
+            let Some(name) = go_func_name_from_rest(rest) else {
+                continue;
+            };
+            push_symbol_hit(out, &name, &name, "method", rel_path, idx, line);
+        }
+    }
+}
+
+fn go_func_name_from_rest(rest: &str) -> Option<String> {
+    let rest = rest.trim();
+    let rest = if rest.starts_with('(') {
+        let close = rest.find(')')?;
+        rest[close + 1..].trim()
+    } else {
+        rest
+    };
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn collect_rust_symbols(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(pos) = trimmed.find("fn ") {
+            let rest = trimmed[pos + 3..].trim();
+            let name: String = rest
+                .trim_start_matches("pub ")
+                .trim_start_matches("async ")
+                .trim_start_matches("const ")
+                .trim_start_matches("unsafe ")
+                .trim_start_matches("extern ")
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                push_symbol_hit(out, &name, &name, "method", rel_path, idx, line);
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("impl ") {
+            let rest = rest.trim_start_matches("pub ");
+            if let Some(type_name) = rust_impl_type_name(rest) {
+                push_symbol_hit(out, &type_name, &type_name, "impl", rel_path, idx, line);
+            }
+        }
+    }
+}
+
+fn rust_impl_type_name(rest: &str) -> Option<String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with('<') {
+        let end = rest.find('>')?;
+        let inner = &rest[1..end];
+        let type_name: String = inner
+            .split(',')
+            .next()?
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        return (!type_name.is_empty()).then_some(type_name);
+    }
+    let first: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if first.is_empty() {
+        return None;
+    }
+    if rest[first.len()..].trim_start().starts_with("for ") {
+        let after = rest[first.len()..].trim_start().strip_prefix("for ")?.trim();
+        let second: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        return (!second.is_empty()).then_some(second);
+    }
+    Some(first)
+}
+
+fn collect_shell_functions(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = shell_function_name(trimmed) {
+            push_symbol_hit(out, &name, &name, "function", rel_path, idx, line);
+        }
+    }
+}
+
+fn shell_function_name(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix("function ") {
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        return (!name.is_empty()).then_some(name);
+    }
+    let paren = trimmed.find("()")?;
+    let before = trimmed[..paren].trim();
+    if before.is_empty() || before.contains('$') {
+        return None;
+    }
+    let name = before.split_whitespace().next_back()?;
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn collect_sql_objects(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+        let upper = trimmed.to_uppercase();
+        if !upper.contains("CREATE") {
+            continue;
+        }
+        for (kind, object_kw) in [
+            ("table", "TABLE"),
+            ("view", "VIEW"),
+            ("index", "INDEX"),
+            ("function", "FUNCTION"),
+            ("procedure", "PROCEDURE"),
+        ] {
+            if let Some(name) = sql_create_object_name(trimmed, object_kw) {
+                push_symbol_hit(out, &name, &name, kind, rel_path, idx, line);
+            }
+        }
+    }
+}
+
+fn sql_create_object_name(line: &str, object_keyword: &str) -> Option<String> {
+    let upper = line.to_uppercase();
+    let kw_upper = object_keyword.to_uppercase();
+    let create_pos = upper.find("CREATE")?;
+    let after_create = &line[create_pos + "CREATE".len()..];
+    let after_upper = after_create.to_uppercase();
+    let or_replace = "OR REPLACE ";
+    let after_create = if after_upper.starts_with(or_replace) {
+        &after_create[or_replace.len()..]
+    } else {
+        after_create
+    };
+    let after_upper = after_create.to_uppercase();
+    let kw_pos = after_upper.find(&kw_upper)?;
+    let after_kw = &after_create[kw_pos + object_keyword.len()..];
+    let mut rest = after_kw.trim();
+    if rest.to_uppercase().starts_with("IF NOT EXISTS ") {
+        rest = rest["IF NOT EXISTS ".len()..].trim();
+    } else if rest.to_uppercase().starts_with("UNIQUE ") {
+        rest = rest["UNIQUE ".len()..].trim();
+    }
+    let name: String = rest
+        .trim_start_matches('"')
+        .trim_start_matches('`')
+        .trim_start_matches('[')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn push_symbol_hit(
+    out: &mut Vec<ClassSearchHit>,
+    name: &str,
+    qualified: &str,
+    kind: &str,
+    rel_path: &str,
+    line_idx: usize,
+    line: &str,
+) {
+    let col = line.find(name).map(|i| i as u32 + 1).unwrap_or(1);
+    out.push(ClassSearchHit {
+        name: name.to_string(),
+        qualified: qualified.to_string(),
+        kind: kind.to_string(),
+        path: rel_path.to_string(),
+        line: line_idx as u32 + 1,
+        column: col,
+    });
+}
+
+fn collect_keyword_symbols(
+    content: &str,
+    rel_path: &str,
+    out: &mut Vec<ClassSearchHit>,
+    keywords: &[(&str, &str)],
+) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("--")
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        for (keyword, kind) in keywords {
+            let pattern = format!("{keyword} ");
+            let Some(pos) = line.find(&pattern).or_else(|| {
+                if *keyword == "def" || *keyword == "func" {
+                    line.find(keyword)
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            let rest = &line[pos + keyword.len()..].trim_start();
+            let name: String = rest
+                .trim_start_matches("async ")
+                .trim_start_matches("pub ")
+                .trim_start_matches("export ")
+                .trim_start_matches("static ")
+                .trim_start_matches("local ")
+                .trim_start_matches("CREATE ")
+                .trim_start_matches("create ")
+                .trim_start_matches("TABLE ")
+                .trim_start_matches("table ")
+                .trim_start_matches("VIEW ")
+                .trim_start_matches("view ")
+                .trim_start_matches("IF NOT EXISTS ")
+                .trim_start_matches("if not exists ")
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            if kind == &"class" && !name.chars().next().is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
+            {
+                if !matches!(*keyword, "type" | "interface" | "struct" | "enum" | "table" | "view")
+                {
+                    continue;
+                }
+            }
+            let col = line
+                .find(&name)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            out.push(ClassSearchHit {
+                name: name.clone(),
+                qualified: name,
+                kind: (*kind).to_string(),
+                path: rel_path.to_string(),
+                line: idx as u32 + 1,
+                column: col,
+            });
+        }
+    }
+}
+
+fn collect_types_in_content(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        for (kind, keyword) in TYPE_DEF_KEYWORDS {
+            let pattern = format!("{keyword} ");
+            let Some(pos) = line.find(&pattern) else {
+                continue;
+            };
+            let rest = &line[pos + pattern.len()..];
+            let type_name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if type_name.is_empty() || !type_name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                continue;
+            }
+            let col = line
+                .find(&type_name)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            out.push(ClassSearchHit {
+                name: type_name.clone(),
+                qualified: type_name,
+                kind: (*kind).to_string(),
+                path: rel_path.to_string(),
+                line: idx as u32 + 1,
+                column: col,
+            });
+        }
+    }
 }
 
 fn collect_workspace_class_hits(
@@ -752,11 +1325,7 @@ fn collect_workspace_class_hits(
             .to_string_lossy()
             .replace('\\', "/");
 
-        if query.trim().is_empty()
-            && !rel.starts_with("app/")
-            && !rel.contains("/src/")
-            && !rel.starts_with("lib/")
-        {
+        if query.trim().is_empty() && !super::languages::is_indexable_source_path(&rel) {
             continue;
         }
 
@@ -777,53 +1346,14 @@ fn index_types_in_content(
     query: &str,
     scored: &mut Vec<(u32, ClassSearchHit)>,
 ) {
-    for (idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('*')
-        {
+    let mut hits = Vec::new();
+    collect_symbols_in_content(content, rel_path, &mut hits);
+    let bonus = path_score_bonus(rel_path);
+    for hit in hits {
+        let Some(base) = class_name_match_score(query, &hit.name, &hit.qualified) else {
             continue;
-        }
-        for (kind, keyword) in TYPE_DEF_KEYWORDS {
-            let pattern = format!("{keyword} ");
-            let Some(pos) = line.find(&pattern) else {
-                continue;
-            };
-            let rest = &line[pos + pattern.len()..];
-            let type_name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if type_name.is_empty() || !type_name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                continue;
-            }
-            let qualified = type_name.clone();
-            let Some(base) = class_name_match_score(query, &type_name, &qualified) else {
-                continue;
-            };
-            let col = line
-                .find(&type_name)
-                .map(|i| i as u32 + 1)
-                .unwrap_or(1);
-            let bonus = if rel_path.starts_with("app/") || rel_path.contains("/src/") {
-                300
-            } else {
-                100
-            };
-            scored.push((
-                base + bonus,
-                ClassSearchHit {
-                    name: type_name,
-                    qualified,
-                    kind: (*kind).to_string(),
-                    path: rel_path.to_string(),
-                    line: idx as u32 + 1,
-                    column: col,
-                },
-            ));
-        }
+        };
+        scored.push((base + bonus, hit));
     }
 }
 
@@ -954,6 +1484,92 @@ mod tests {
             Some("main".into())
         );
         assert_eq!(java_method_name_on_line("        SpringApplication.run(Application.class, args);"), None);
+    }
+
+    #[test]
+    fn indexes_go_rust_sql_and_shell_symbols() {
+        let ws = std::env::temp_dir().join("reaper-multi-lang-symbols");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("cmd")).unwrap();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(ws.join("db/migrate")).unwrap();
+        std::fs::create_dir_all(ws.join("scripts")).unwrap();
+        std::fs::write(
+            ws.join("cmd/main.go"),
+            "package main\n\ntype Server struct {}\n\nfunc (s *Server) Run() {}\n\nfunc main() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("src/lib.rs"),
+            "pub struct Widget;\n\npub fn build() {}\n\nimpl Widget {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("db/migrate/001_users.sql"),
+            "CREATE TABLE IF NOT EXISTS users (id INT);\nCREATE VIEW active_users AS SELECT 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("scripts/deploy.sh"),
+            "#!/bin/bash\nfunction deploy() { echo ok; }\nrestart() { echo ok; }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("app/models")).unwrap();
+        std::fs::write(
+            ws.join("app/models/order.rb"),
+            "class Order\n  def total\n  end\nend\n",
+        )
+        .unwrap();
+
+        let mut hits = Vec::new();
+        collect_all_workspace_symbols(&ws, &ws, &mut hits).unwrap();
+        let names: Vec<_> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"Server"));
+        assert!(names.contains(&"Run"));
+        assert!(names.contains(&"Widget"));
+        assert!(names.contains(&"build"));
+        assert!(names.contains(&"users"));
+        assert!(names.contains(&"active_users"));
+        assert!(names.contains(&"deploy"));
+        assert!(names.contains(&"restart"));
+        assert!(names.contains(&"Order"));
+        assert!(names.contains(&"total"));
+
+        let go_hits = search_workspace_classes(&ws, "Server", 10, false).unwrap();
+        assert!(go_hits.iter().any(|h| h.name == "Server"));
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn go_receiver_method_definition() {
+        let hit = definition_on_line(
+            "func (s *Server) Run() error {",
+            "Run",
+            "cmd/main.go",
+            3,
+        )
+        .expect("Run method");
+        assert_eq!(hit.kind, "method");
+    }
+
+    #[test]
+    fn shell_function_definition() {
+        let hit = definition_on_line("deploy() {", "deploy", "scripts/deploy.sh", 2)
+            .expect("deploy function");
+        assert_eq!(hit.kind, "function");
+    }
+
+    #[test]
+    fn sql_table_definition() {
+        let hit = definition_on_line(
+            "CREATE TABLE IF NOT EXISTS users (id INT);",
+            "users",
+            "db/schema.sql",
+            1,
+        )
+        .expect("users table");
+        assert_eq!(hit.kind, "table");
     }
 
     #[test]
