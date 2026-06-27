@@ -90,8 +90,11 @@ if [[ -n "${REAPER_RELEASE_NOTES:-}" ]]; then
     echo "Release notes file not found: $NOTES_FILE" >&2
     exit 1
   fi
+  NOTES_TMP=0
 else
-  NOTES_FILE="$(mktemp)"
+  NOTES_TMP_DIR="$(mktemp -d)"
+  NOTES_FILE="$NOTES_TMP_DIR/RELEASE_NOTES.md"
+  NOTES_TMP=1
   cat >"$NOTES_FILE" <<EOF
 macOS ${ARCH} build.
 
@@ -103,7 +106,8 @@ Drag Reaper.app to Applications, then launch.
 EOF
 fi
 
-SUMS_FILE="$(mktemp)"
+SUMS_TMP_DIR="$(mktemp -d)"
+SUMS_FILE="$SUMS_TMP_DIR/SHA256SUMS"
 if [[ -n "${REAPER_RELEASES_DIR:-}" && -f "$REAPER_RELEASES_DIR/macos/${ARCH}/v${VERSION}/SHA256SUMS" ]]; then
   cp "$REAPER_RELEASES_DIR/macos/${ARCH}/v${VERSION}/SHA256SUMS" "$SUMS_FILE"
 else
@@ -119,9 +123,9 @@ else
   gh release create "$TAG" "$DMG" "$SUMS_FILE" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
 fi
 
-rm -f "$SUMS_FILE"
-if [[ -z "${REAPER_RELEASE_NOTES:-}" ]]; then
-  rm -f "$NOTES_FILE"
+rm -rf "$SUMS_TMP_DIR"
+if [[ "${NOTES_TMP:-0}" == "1" ]]; then
+  rm -rf "$NOTES_TMP_DIR"
 fi
 
 echo ""
