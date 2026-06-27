@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="89" />
+  <meta name="reaper-ui-build" content="94" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script>
@@ -68,7 +68,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=64" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=65" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -108,8 +108,7 @@
           <button type="button" class="ij-menu-trigger">File</button>
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="new-repo">New repository<span class="ij-kbd">⌘⇧N</span></button>
-            <button type="button" class="ij-menu-item" data-action="clone">Import from URL…</button>
-            <button type="button" class="ij-menu-item" data-action="import-local">Import from local folder…</button>
+            <button type="button" class="ij-menu-item" data-action="import-repo">Import repository…</button>
             <button type="button" class="ij-menu-item" data-action="new-file">New file<span class="ij-kbd">⌘N</span></button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="save" disabled>Save<span class="ij-kbd">⌘S</span></button>
@@ -205,18 +204,6 @@
           </div>
         </div>
       </nav>
-
-      <div class="ij-header-imports flex items-center gap-1 shrink-0">
-        <button id="btn-import-local" type="button" title="Import from local folder" class="ij-header-btn ghost inline-flex ij-header-import-btn">
-          <span>Local</span>
-        </button>
-        <button id="btn-clone-repo" title="Import from URL" class="ij-header-btn ghost inline-flex ij-header-import-btn">
-          <span>URL</span>
-        </button>
-        <button id="btn-new-repo" class="ij-header-btn primary inline-flex ij-header-import-btn">
-          <span>New</span>
-        </button>
-      </div>
 
       <div class="w-px h-5 bg-surface-700 hidden md:block mx-1"></div>
 
@@ -611,7 +598,10 @@
         <div id="clone-local-panel" class="space-y-4 hidden">
           <div>
             <label class="block text-xs font-medium text-gray-400 mb-1.5">Local path</label>
-            <input id="clone-local-path" name="local_path" placeholder="/Users/you/projects/my-app" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+            <div class="ij-clone-path-row">
+              <input id="clone-local-path" name="local_path" placeholder="/Users/you/projects/my-app" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+              <button type="button" id="clone-local-browse" class="ij-clone-browse-btn">Browse…</button>
+            </div>
           </div>
           <p class="text-[11px] text-gray-600">Absolute path to an existing git repository on this machine (normal or bare).</p>
         </div>
@@ -922,6 +912,6 @@
   <script src="/icons.js?v=2"></script>
   <script src="/monaco-languages.js?v=9"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=89"></script>
+  <script src="/app.js?v=94"></script>
 </body>
 </html>

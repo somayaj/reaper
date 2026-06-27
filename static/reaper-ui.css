@@ -495,16 +495,6 @@ html, body {
   overflow-y: visible;
 }
 
-.ij-header-imports {
-  margin-left: 2px;
-}
-
-.ij-header-import-btn {
-  height: 26px;
-  padding: 0 8px;
-  font-size: 11px;
-}
-
 .ij-menubar select {
   border-radius: var(--ij-radius);
   background: var(--ij-bg);
@@ -2410,6 +2400,39 @@ main { background: var(--ij-bg); }
   display: flex;
   gap: 6px;
   margin-bottom: 4px;
+}
+
+.ij-clone-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.ij-clone-path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ij-clone-browse-btn {
+  flex-shrink: 0;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-panel);
+  color: var(--ij-text-bright);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ij-clone-browse-btn:hover:not(:disabled) {
+  border-color: var(--ij-accent);
+  background: var(--ij-toolwindow-active);
+}
+
+.ij-clone-browse-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .ij-clone-tab {
