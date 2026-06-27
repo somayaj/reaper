@@ -62,6 +62,40 @@ pub fn clone_bare(auth_url: &str, dest: &Path) -> Result<GitOutput> {
     )
 }
 
+pub fn clone_bare_local(src: &Path, dest: &Path) -> Result<GitOutput> {
+    if dest.exists() {
+        bail!("destination already exists");
+    }
+    let src = src
+        .canonicalize()
+        .with_context(|| format!("resolve source path {}", src.display()))?;
+    if !is_git_repo(&src) {
+        bail!("not a git repository: {}", src.display());
+    }
+    run_git(
+        None,
+        &[
+            "clone",
+            "--bare",
+            src.to_str().context("invalid source path")?,
+            dest.to_str().context("invalid dest path")?,
+        ],
+    )
+}
+
+pub fn is_git_repo(path: &Path) -> bool {
+    run_git(Some(path), &["rev-parse", "--git-dir"])
+        .map(|o| o.success())
+        .unwrap_or(false)
+}
+
+pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
+    let out = run_git(Some(repo), &["remote", "get-url", name]).ok();
+    out.filter(|o| o.success())
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|u| !u.is_empty())
+}
+
 pub fn set_remote_url(repo: &Path, name: &str, url: &str) -> Result<()> {
     let existing = run_git(Some(repo), &["remote", "get-url", name])?;
     if existing.success() {

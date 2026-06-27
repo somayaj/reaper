@@ -491,6 +491,18 @@ html, body {
   height: var(--ij-header-h);
   min-height: var(--ij-header-h);
   z-index: 40;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.ij-header-imports {
+  margin-left: 2px;
+}
+
+.ij-header-import-btn {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 
 .ij-menubar select {
@@ -509,14 +521,38 @@ html, body {
 }
 
 .ij-menu-nav {
-  display: none;
+  display: flex;
   align-items: stretch;
   height: 100%;
   margin-left: 4px;
 }
 
-@media (min-width: 768px) {
-  .ij-menu-nav { display: flex; }
+.ij-tree-import-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-panel);
+  color: var(--ij-accent);
+  font-size: 11px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.ij-tree-import-btn:hover {
+  border-color: var(--ij-accent);
+  background: var(--ij-toolwindow-active);
+}
+
+.ij-editor-stage #empty-state.ij-welcome {
+  flex: 1;
+  min-height: 0;
+  z-index: 2;
+}
+
+.ij-editor-stage #empty-state.ij-welcome:not(.hidden) ~ #editor-container {
+  display: none !important;
 }
 
 .ij-menu-root {
@@ -2368,6 +2404,35 @@ main { background: var(--ij-bg); }
 
 #diff-panel {
   background: var(--ij-bg);
+}
+
+.ij-clone-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.ij-clone-tab {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-tab-inactive);
+  color: var(--ij-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.ij-clone-tab:hover {
+  color: var(--ij-text-bright);
+  background: color-mix(in srgb, var(--ij-accent) 6%, var(--ij-tab-inactive));
+}
+
+.ij-clone-tab.active {
+  color: var(--ij-text-bright);
+  background: var(--ij-tab-active);
+  border-color: color-mix(in srgb, var(--ij-tab-border-active) 55%, var(--ij-border));
 }
 
 .ij-clone-feedback {
