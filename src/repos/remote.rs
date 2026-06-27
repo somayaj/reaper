@@ -39,6 +39,97 @@ pub struct LinkRemoteRequest {
     pub remote_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ImportLocalRepoRequest {
+    pub local_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+pub fn import_local_repo(
+    config: &Config,
+    settings: &SettingsStore,
+    req: ImportLocalRepoRequest,
+) -> Result<repos::RepoSummary> {
+    let local_path = req.local_path.trim();
+    if local_path.is_empty() {
+        bail!("local path is required");
+    }
+    let src = std::path::Path::new(local_path);
+    if !src.exists() {
+        bail!("path does not exist: {}", local_path);
+    }
+
+    let name = match req.name.filter(|n| !n.trim().is_empty()) {
+        Some(n) => n.trim().to_string(),
+        None => derive_repo_name_from_local_path(src)?,
+    };
+    if !Config::is_valid_repo_name(&name) {
+        bail!("invalid repository name; use 'repo' or 'org/repo'");
+    }
+
+    let path = config.repo_path(&name);
+    if path.exists() {
+        bail!("repository already exists");
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let clone = git::clone_bare_local(src, &path)?;
+    if !clone.success() {
+        bail!("import failed: {}", clone.stderr.trim());
+    }
+
+    let src_canon = src
+        .canonicalize()
+        .with_context(|| format!("resolve source path {}", src.display()))?;
+    if let Some(origin) = git::remote_url(&src_canon, "origin") {
+        if let Ok(clean) = normalize_remote_url(&origin) {
+            if let Ok(host) = host_from_url(&clean) {
+                git::set_remote_url(&path, "origin", &clean)?;
+                metadata::set_remote(config, &name, &clean, &host)?;
+                return summarize_repo(config, settings, &name, &path);
+            }
+        }
+    }
+
+    let metadata = metadata::RepoMetadata {
+        remote_url: None,
+        remote_host: None,
+        imported: true,
+    };
+    metadata::save(config, &name, &metadata)?;
+
+    summarize_repo(config, settings, &name, &path)
+}
+
+fn derive_repo_name_from_local_path(path: &std::path::Path) -> Result<String> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("resolve path {}", path.display()))?;
+    let basename = canonical
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo");
+    let base = basename.strip_suffix(".git").unwrap_or(basename);
+    let sanitized: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches(|c| c == '-' || c == '.');
+    if sanitized.is_empty() || !Config::is_valid_repo_name(sanitized) {
+        bail!("could not derive a valid repo name from path; set name explicitly");
+    }
+    Ok(sanitized.to_string())
+}
+
 pub fn import_repo(
     config: &Config,
     settings: &SettingsStore,

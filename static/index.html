@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="reaper-ui-build" content="89" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script>
@@ -67,7 +68,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=59" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=64" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -107,7 +108,8 @@
           <button type="button" class="ij-menu-trigger">File</button>
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="new-repo">New repository<span class="ij-kbd">⌘⇧N</span></button>
-            <button type="button" class="ij-menu-item" data-action="clone">Clone from URL…</button>
+            <button type="button" class="ij-menu-item" data-action="clone">Import from URL…</button>
+            <button type="button" class="ij-menu-item" data-action="import-local">Import from local folder…</button>
             <button type="button" class="ij-menu-item" data-action="new-file">New file<span class="ij-kbd">⌘N</span></button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="save" disabled>Save<span class="ij-kbd">⌘S</span></button>
@@ -204,6 +206,18 @@
         </div>
       </nav>
 
+      <div class="ij-header-imports flex items-center gap-1 shrink-0">
+        <button id="btn-import-local" type="button" title="Import from local folder" class="ij-header-btn ghost inline-flex ij-header-import-btn">
+          <span>Local</span>
+        </button>
+        <button id="btn-clone-repo" title="Import from URL" class="ij-header-btn ghost inline-flex ij-header-import-btn">
+          <span>URL</span>
+        </button>
+        <button id="btn-new-repo" class="ij-header-btn primary inline-flex ij-header-import-btn">
+          <span>New</span>
+        </button>
+      </div>
+
       <div class="w-px h-5 bg-surface-700 hidden md:block mx-1"></div>
 
       <div class="flex items-center gap-2 min-w-0">
@@ -241,14 +255,6 @@
     <div class="flex items-center gap-1 shrink-0">
       <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon" aria-label="Repository details">
         <span class="ij-header-icon" data-icon="gitRepo"></span>
-      </button>
-      <button id="btn-clone-repo" title="Clone from URL" class="ij-header-btn ghost hidden sm:inline-flex">
-        <span class="ij-header-icon" data-icon="clone"></span>
-        <span>Clone</span>
-      </button>
-      <button id="btn-new-repo" class="ij-header-btn primary hidden sm:inline-flex">
-        <span class="ij-header-icon" data-icon="newRepo"></span>
-        <span>New</span>
       </button>
       <button id="btn-open-agent" title="Cursor Agent" class="ij-header-btn ghost text-accent border-accent/30">
         <span class="ij-header-icon" data-icon="agent"></span>
@@ -483,12 +489,11 @@
         <span id="java-index-banner-text">Indexing project…</span>
       </div>
       <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
-        <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto">
-          <div id="empty-state" class="ij-welcome"></div>
-        </div>
+        <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto"></div>
       </div>
       <div id="editor-breadcrumbs" class="ij-breadcrumbs hidden"></div>
       <div id="editor-stage" class="ij-editor-stage flex-1 flex flex-col min-h-0 min-w-0">
+        <div id="empty-state" class="ij-welcome"></div>
         <div id="editor-container" class="flex-1 min-h-0 relative">
           <div id="editor" class="h-full w-full"></div>
         </div>
@@ -538,6 +543,7 @@
   <!-- Status bar -->
   <footer class="ij-statusbar flex items-stretch shrink-0">
     <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
+      <span id="status-build" class="text-[10px] text-gray-600 font-mono" title="UI build"></span>
       <span id="status-message">Ready</span>
     </div>
     <div class="flex-1"></div>
@@ -578,39 +584,52 @@
     </div>
   </div>
 
-  <!-- Clone repository modal -->
+  <!-- Import repository modal -->
   <div id="clone-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
         <div class="flex items-center gap-3 mb-1">
           <span data-reaper-logo="md" class="logo-mark"></span>
           <div>
-            <h3 class="text-lg font-semibold text-white">Clone repository</h3>
-            <p class="text-xs text-gray-500">Import from GitHub, GitLab, or any HTTPS remote</p>
+            <h3 class="text-lg font-semibold text-white">Import repository</h3>
+            <p class="text-xs text-gray-500">Clone from a remote URL or import a local git folder</p>
           </div>
         </div>
       </div>
       <form id="clone-repo-form" class="px-6 pb-2 space-y-4" novalidate>
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
-          <input id="clone-remote-url" name="remote_url" required placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        <div class="ij-clone-tabs" role="tablist" aria-label="Import source">
+          <button type="button" id="clone-tab-remote" class="ij-clone-tab active" role="tab" aria-selected="true">Remote URL</button>
+          <button type="button" id="clone-tab-local" class="ij-clone-tab" role="tab" aria-selected="false">Local folder</button>
+        </div>
+        <div id="clone-remote-panel" class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
+            <input id="clone-remote-url" name="remote_url" placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          </div>
+          <p id="clone-remote-hint" class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
+        </div>
+        <div id="clone-local-panel" class="space-y-4 hidden">
+          <div>
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">Local path</label>
+            <input id="clone-local-path" name="local_path" placeholder="/Users/you/projects/my-app" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          </div>
+          <p class="text-[11px] text-gray-600">Absolute path to an existing git repository on this machine (normal or bare).</p>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
-          <input id="clone-local-name" name="name" placeholder="owner/repo — derived from URL if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <input id="clone-local-name" name="name" placeholder="owner/repo — derived automatically if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
         </div>
         <div id="clone-feedback" class="ij-clone-feedback">
           <div id="clone-status" class="ij-clone-status hidden" aria-live="polite">
             <span class="ij-clone-spinner" aria-hidden="true"></span>
-            <span id="clone-status-text">Cloning…</span>
+            <span id="clone-status-text">Importing…</span>
           </div>
           <div id="clone-error" class="ij-clone-error hidden" role="alert"></div>
         </div>
-        <p class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
       </form>
       <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
         <button type="button" id="clone-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Clone</button>
+        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Import</button>
       </div>
     </div>
   </div>
@@ -903,6 +922,6 @@
   <script src="/icons.js?v=2"></script>
   <script src="/monaco-languages.js?v=9"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=84"></script>
+  <script src="/app.js?v=89"></script>
 </body>
 </html>
