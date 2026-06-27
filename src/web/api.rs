@@ -29,6 +29,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos", get(list_repos).post(create_repo))
         .route("/api/repos/import", post(import_repo_handler))
         .route("/api/repos/import/local", post(import_local_repo_handler))
+        .route("/api/system/pick-folder", post(pick_folder_handler))
         .route("/api/repos/{name}/remote/push/preview", get(push_preview_handler))
         .route("/api/repos/{name}/remote/push", post(push_remote_handler))
         .route("/api/repos/{name}/remote/pull", post(pull_remote_handler))
@@ -112,6 +113,18 @@ async fn import_local_repo_handler(
     match import_local_repo(&state.config, &state.settings, body) {
         Ok(repo) => (StatusCode::CREATED, Json(repo)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Serialize)]
+struct PickFolderResponse {
+    path: Option<String>,
+}
+
+async fn pick_folder_handler() -> impl IntoResponse {
+    match crate::system::pick_folder("Select a git repository folder") {
+        Ok(path) => Json(PickFolderResponse { path }).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

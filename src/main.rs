@@ -8,6 +8,7 @@ mod jdk;
 mod repos;
 mod settings;
 mod state;
+mod system;
 mod web;
 mod workspace;
 
