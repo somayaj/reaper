@@ -24,7 +24,7 @@ pub struct JdkInstall {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct JdkSettingsView {
     pub configured: bool,
     pub java_home: Option<String>,
@@ -32,6 +32,8 @@ pub struct JdkSettingsView {
     pub source: Option<String>,
     pub effective_home: Option<String>,
     pub effective_version: Option<String>,
+    pub gradle_home: Option<String>,
+    pub gradle_version: Option<String>,
     pub installed: Vec<JdkInstall>,
 }
 
@@ -107,6 +109,8 @@ pub fn jdk_settings_view(configured: Option<&str>, source: Option<&str>) -> JdkS
     let effective_version = effective
         .as_ref()
         .and_then(|p| java_version_string(p).ok());
+    let gradle = gradle_java_home().ok();
+    let gradle_version = gradle.as_ref().and_then(|p| java_version_string(p).ok());
 
     JdkSettingsView {
         configured: configured.is_some(),
@@ -115,6 +119,8 @@ pub fn jdk_settings_view(configured: Option<&str>, source: Option<&str>) -> JdkS
         source: source.map(str::to_string),
         effective_home: effective.as_ref().map(|p| p.display().to_string()),
         effective_version,
+        gradle_home: gradle.as_ref().map(|p| p.display().to_string()),
+        gradle_version,
         installed,
     }
 }
@@ -135,6 +141,16 @@ pub fn effective_java_home() -> Result<PathBuf> {
     detect_java_home_auto()
 }
 
+/// JVM used to run Gradle (classpath resolution, tests, build). Gradle 8+ needs Java 17+.
+pub fn gradle_java_home() -> Result<PathBuf> {
+    if let Ok(home) = effective_java_home() {
+        if java_major_version(&home).is_some_and(|major| major >= 17) {
+            return Ok(home);
+        }
+    }
+    detect_gradle_java_home()
+}
+
 pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
     let java = home.join("bin/java");
     if !java.is_file() {
@@ -144,9 +160,22 @@ pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
 }
 
 fn detect_java_home_auto() -> Result<PathBuf> {
-    // Prefer LTS releases Gradle supports; avoid running Gradle on bleeding-edge JDKs.
+    // Use 1.8 for legacy JDK 8; macOS `java_home -v 8` often resolves to a newer JDK.
+    detect_java_home_for_versions(&["21", "17", "11", "25", "23", "24", "26", "1.8"])
+}
+
+/// JDK used for tooling (Gradle, indexing, JDK sources). Never a legacy Java 8 install.
+pub fn toolchain_java_home() -> Result<PathBuf> {
+    gradle_java_home()
+}
+
+fn detect_gradle_java_home() -> Result<PathBuf> {
+    detect_java_home_for_versions(&["21", "17", "11", "25", "23", "24", "26"])
+}
+
+fn detect_java_home_for_versions(versions: &[&str]) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
-    for version in ["21", "17", "11", "25", "23", "24", "26"] {
+    for version in versions {
         if let Ok(out) = Command::new("/usr/libexec/java_home")
             .arg("-v")
             .arg(version)
@@ -169,6 +198,14 @@ fn detect_java_home_auto() -> Result<PathBuf> {
     }
 
     java_home_from_java_cmd()
+}
+
+pub fn java_major_version(home: &Path) -> Option<u32> {
+    let version = java_version_string(home).ok()?;
+    if version.starts_with("1.8") || version.starts_with("1.7") || version.starts_with("1.6") {
+        return Some(8);
+    }
+    version.split('.').next()?.parse().ok()
 }
 
 fn java_home_from_java_cmd() -> Result<PathBuf> {
@@ -211,16 +248,26 @@ pub fn java_version_string(home: &Path) -> Result<String> {
 
 pub fn apply_java_env(cmd: &mut Command) {
     if let Ok(home) = effective_java_home() {
-        cmd.env("JAVA_HOME", &home);
-        let bin = home.join("bin");
-        if bin.is_dir() {
-            let path = std::env::var("PATH").unwrap_or_default();
-            let prefix = bin.to_string_lossy();
-            if path.is_empty() {
-                cmd.env("PATH", prefix.as_ref());
-            } else {
-                cmd.env("PATH", format!("{prefix}:{path}"));
-            }
+        apply_java_home(cmd, &home);
+    }
+}
+
+pub fn apply_gradle_java_env(cmd: &mut Command) {
+    if let Ok(home) = gradle_java_home() {
+        apply_java_home(cmd, &home);
+    }
+}
+
+fn apply_java_home(cmd: &mut Command, home: &Path) {
+    cmd.env("JAVA_HOME", home);
+    let bin = home.join("bin");
+    if bin.is_dir() {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let prefix = bin.to_string_lossy();
+        if path.is_empty() {
+            cmd.env("PATH", prefix.as_ref());
+        } else {
+            cmd.env("PATH", format!("{prefix}:{path}"));
         }
     }
 }

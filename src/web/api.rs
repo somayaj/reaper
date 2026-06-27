@@ -2,17 +2,20 @@ use std::sync::Arc;
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use bytes::Bytes;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::repos::{
     self, CreateRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishToGitHubRequest,
-    import_repo, link_remote, publish_to_github, push_to_remote, sync_from_remote,
+    import_repo, link_remote, publish_to_github, push_preview, push_to_remote, sync_from_remote,
 };
 use crate::agent as git_agent;
 use crate::state::AppState;
@@ -24,6 +27,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/repos", get(list_repos).post(create_repo))
         .route("/api/repos/import", post(import_repo_handler))
+        .route("/api/repos/{name}/remote/push/preview", get(push_preview_handler))
         .route("/api/repos/{name}/remote/push", post(push_remote_handler))
         .route("/api/repos/{name}/remote/pull", post(pull_remote_handler))
         .route("/api/repos/{name}/remote/publish", post(publish_github_handler))
@@ -56,12 +60,14 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/shell/cd", post(workspace_shell_cd))
         .route("/api/repos/{name}/workspace/java/info", get(java_main_info))
         .route("/api/repos/{name}/workspace/java/run", post(run_java_main_handler))
+        .route("/api/repos/{name}/workspace/java/test-methods", get(java_test_methods_handler).post(java_test_methods_post))
         .route("/api/repos/{name}/workspace/gradle/info", get(gradle_project_info_handler))
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
-        .route("/api/repos/{name}/workspace/definition", get(workspace_definition))
+        .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
         .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
         .route("/api/repos/{name}/workspace/completions", get(workspace_completions))
         .route("/api/repos/{name}/workspace/java/index-status", get(java_index_status))
+        .route("/api/repos/{name}/workspace/project/index-status", get(project_index_status))
         .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
         .route("/api/repos/{name}/workspace/format", post(workspace_format))
         .route(
@@ -138,6 +144,16 @@ async fn pull_remote_handler(
 ) -> impl IntoResponse {
     match sync_from_remote(&state.config, &state.settings, &name) {
         Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn push_preview_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match push_preview(&state.config, &state.settings, &name) {
+        Ok(preview) => Json(preview).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -231,13 +247,12 @@ async fn open_workspace(
 ) -> impl IntoResponse {
     match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => {
-            let java_indexing = workspace::is_gradle_workspace(&ws);
-            if java_indexing {
-                state.java_index_jobs.ensure_building(&name, &ws);
-            }
+            let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
+            state.project_index_jobs.on_open(&name, &ws);
             Json(serde_json::json!({
                 "path": ws.display().to_string(),
-                "java_indexing": java_indexing,
+                "profile": profile,
+                "indexing": !profile.indexers.is_empty(),
             }))
             .into_response()
         }
@@ -480,6 +495,12 @@ async fn conflict_continue_handler(
 struct CommitRequest {
     message: String,
     paths: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    push: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -510,7 +531,7 @@ async fn workspace_commit(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::commit_and_push(&ws, &body.message, body.paths.as_deref()) {
+    match workspace::commit_changes(&ws, &body.message, body.paths.as_deref(), body.push) {
         Ok(out) => git_response(out),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -531,7 +552,12 @@ async fn workspace_checkout(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     match workspace::checkout_branch(&ws, &body.branch) {
-        Ok(out) => git_response(out),
+        Ok(out) => {
+            if out.success() {
+                state.project_index_jobs.on_checkout(&name, &ws);
+            }
+            git_response(out)
+        }
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -572,15 +598,31 @@ async fn run_workspace_shell(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<ShellRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let ws = match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::run_workspace_shell(&ws, body.cwd.as_deref(), &body.command) {
-        Ok(out) => git_response(out),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+
+    let command = body.command.trim().to_string();
+    if command.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "command required");
     }
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    let cwd = body.cwd.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_shell(&ws, cwd.as_deref(), &command, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+
+    exec_stream_response(rx)
 }
 
 async fn workspace_shell_cd(
@@ -622,13 +664,75 @@ async fn run_java_main_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<JavaRunRequest>,
+) -> Response {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+
+    let path = body.path.trim().to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_java_main(&ws, &path, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+
+    exec_stream_response(rx)
+}
+
+#[derive(Deserialize)]
+struct JavaContentBody {
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn java_test_methods_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
 ) -> impl IntoResponse {
     let ws = match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::run_java_main(&ws, body.path.trim()) {
-        Ok(out) => git_response(out),
+    let path = q.path.trim();
+    let content = match workspace::read_file(&ws, path) {
+        Ok(c) => c,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::java_test_methods(&ws, path, &content) {
+        Ok(methods) => Json(methods).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn java_test_methods_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaContentBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim();
+    let content = if let Some(c) = body.content {
+        c
+    } else {
+        match workspace::read_file(&ws, path) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+        }
+    };
+    match workspace::java_test_methods(&ws, path, &content) {
+        Ok(methods) => Json(methods).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -659,7 +763,7 @@ async fn run_gradle_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<GradleRunRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let ws = match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
@@ -678,10 +782,21 @@ async fn run_gradle_handler(
     } else {
         body.task.trim().to_string()
     };
-    match workspace::run_gradle(&ws, body.path.trim(), &task) {
-        Ok(out) => git_response(out),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
-    }
+
+    let path = body.path.trim().to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_gradle(&ws, &path, &task, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+
+    exec_stream_response(rx)
 }
 
 #[derive(Deserialize)]
@@ -704,7 +819,41 @@ async fn workspace_definition(
     if workspace::definition_uses_java_index(from_path) {
         state.java_index_jobs.ensure_building(&name, &ws);
     }
-    match workspace::find_definition(&ws, from_path, q.line, q.column) {
+    match workspace::find_definition_with_content(&ws, from_path, q.line, q.column, None) {
+        Ok(hit) => Json(hit).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DefinitionBody {
+    path: String,
+    line: u32,
+    column: u32,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn workspace_definition_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DefinitionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let from_path = body.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    match workspace::find_definition_with_content(
+        &ws,
+        from_path,
+        body.line,
+        body.column,
+        body.content.as_deref(),
+    ) {
         Ok(hit) => Json(hit).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -774,6 +923,13 @@ async fn java_index_status(
     Json(state.java_index_jobs.status(&name)).into_response()
 }
 
+async fn project_index_status(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    Json(state.project_index_jobs.status(&name)).into_response()
+}
+
 async fn workspace_diagnostics(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -783,9 +939,12 @@ async fn workspace_diagnostics(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::file_diagnostics(&ws, body.path.trim(), &body.content) {
-        Ok(items) => Json(items).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let path = body.path.trim().to_string();
+    let content = body.content;
+    match tokio::task::spawn_blocking(move || workspace::file_diagnostics(&ws, &path, &content)).await {
+        Ok(Ok(items)) => Json(items).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("diagnostics task failed: {e:#}")),
     }
 }
 
@@ -822,6 +981,33 @@ fn git_response(out: git::GitOutput) -> axum::response::Response {
         exit_code: out.exit_code,
     })
     .into_response()
+}
+
+fn exec_stream_response(rx: tokio::sync::mpsc::Receiver<workspace::ExecStreamEvent>) -> Response {
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(event) => {
+                let payload = match serde_json::to_string(&event) {
+                    Ok(json) => format!("data: {json}\n\n"),
+                    Err(e) => format!(
+                        "data: {{\"t\":\"error\",\"text\":{},\"code\":-1}}\n\n",
+                        serde_json::to_string(&format!("stream encode failed: {e}"))
+                            .unwrap_or_else(|_| "\"error\"".into())
+                    ),
+                };
+                Some((Ok::<Bytes, std::io::Error>(Bytes::from(payload)), rx))
+            }
+            None => None,
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {

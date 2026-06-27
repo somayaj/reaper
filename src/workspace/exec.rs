@@ -12,6 +12,25 @@ pub fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run {program}"))?;
+
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
+/// Run java/javac with the configured JDK (Settings → Java), not system default.
+pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     jdk::apply_java_env(&mut cmd);
 
     let output = cmd

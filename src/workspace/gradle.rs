@@ -5,7 +5,6 @@ use serde::Serialize;
 
 use crate::git::GitOutput;
 
-use super::exec::run_command;
 use super::safe_join;
 
 #[derive(Debug, Clone)]
@@ -23,6 +22,11 @@ pub struct GradleProjectInfo {
     pub default_task: String,
     pub application_main: Option<String>,
     pub tasks: Vec<String>,
+    pub has_junit: bool,
+    pub has_spring_test: bool,
+    pub has_jacoco: bool,
+    pub has_lombok: bool,
+    pub has_slf4j: bool,
 }
 
 pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInfo> {
@@ -33,6 +37,11 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task: String::new(),
         application_main: None,
         tasks: Vec::new(),
+        has_junit: false,
+        has_spring_test: false,
+        has_jacoco: false,
+        has_lombok: false,
+        has_slf4j: false,
     };
 
     let _ = safe_join(ws, rel_path)?;
@@ -51,9 +60,14 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         "build".to_string()
     };
 
+    let markers = super::java_ecosystem::scan_gradle_project(&root);
+
     let mut tasks = vec!["build".to_string(), "test".to_string(), "clean".to_string()];
     if has_application {
         tasks.insert(0, "run".to_string());
+    }
+    if markers.jacoco {
+        tasks.push("jacocoTestReport".to_string());
     }
 
     Ok(GradleProjectInfo {
@@ -63,6 +77,11 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task,
         application_main,
         tasks,
+        has_junit: markers.junit,
+        has_spring_test: markers.spring_test,
+        has_jacoco: markers.jacoco,
+        has_lombok: markers.lombok,
+        has_slf4j: markers.slf4j,
     })
 }
 
@@ -71,7 +90,8 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     if task.is_empty() {
         bail!("gradle task required");
     }
-    if task.contains(char::is_whitespace) || task.contains('/') || task.contains('\\') {
+    let parts: Vec<&str> = task.split_whitespace().collect();
+    if parts.iter().any(|p| p.contains('/') || p.contains('\\')) {
         bail!("invalid gradle task");
     }
 
@@ -80,11 +100,9 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
 
     let cmd = resolve_gradle_command(&root)?;
     let mut args = cmd.project_args.clone();
-    args.extend([
-        "--no-daemon".into(),
-        "--console=plain".into(),
-        task.into(),
-    ]);
+    args.push("--no-daemon".into());
+    args.push("--console=plain".into());
+    args.extend(parts.iter().map(|p| (*p).to_string()));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut log = String::new();
@@ -111,13 +129,29 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
 }
 
 pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<GitOutput> {
-    run_command(
-        &cmd.cwd,
-        cmd.program.to_str().with_context(|| {
-            format!("gradle program path is not valid UTF-8: {}", cmd.program.display())
-        })?,
-        args,
-    )
+    use std::process::{Command, Stdio};
+
+    let mut process = Command::new(
+        cmd.program
+            .to_str()
+            .with_context(|| format!("gradle program path is not valid UTF-8: {}", cmd.program.display()))?,
+    );
+    process
+        .args(args)
+        .current_dir(&cmd.cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::jdk::apply_gradle_java_env(&mut process);
+
+    let output = process
+        .output()
+        .with_context(|| format!("failed to run {}", cmd.program.display()))?;
+
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
 }
 
 pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
@@ -349,7 +383,7 @@ fn find_first_gradle_root(ws: &Path) -> Result<Option<PathBuf>> {
     Ok(find_all_gradle_roots(ws)?.into_iter().next())
 }
 
-fn rel_path_for(ws: &Path, path: &Path) -> Result<String> {
+pub fn rel_path_for(ws: &Path, path: &Path) -> Result<String> {
     let ws_canon = ws.canonicalize()?;
     let path_canon = path.canonicalize()?;
     Ok(path_canon
@@ -363,6 +397,10 @@ pub fn is_spring_boot_project(root: &Path) -> bool {
     read_build_file(root)
         .map(|content| content.contains("org.springframework.boot"))
         .unwrap_or(false)
+}
+
+pub fn read_build_file_content(root: &Path) -> Option<String> {
+    read_build_file(root)
 }
 
 fn read_build_file(root: &Path) -> Option<String> {

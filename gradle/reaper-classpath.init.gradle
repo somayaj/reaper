@@ -4,6 +4,10 @@ allprojects { project ->
     project.tasks.register('reaperPrintClasspath') {
         group = 'reaper'
         description = 'Print classpath and source JARs for Reaper IDE indexing'
+        def compileJava = project.tasks.findByName('compileJava')
+        if (compileJava != null) {
+            dependsOn compileJava
+        }
         doLast {
             def names = ['compileClasspath', 'runtimeClasspath', 'testCompileClasspath']
             def seenJars = new LinkedHashSet<String>()
@@ -18,6 +22,22 @@ allprojects { project ->
                 conf.files.each { f ->
                     if (f.name.endsWith('.jar') && seenJars.add(f.absolutePath)) {
                         println 'JAR:' + f.absolutePath
+                    }
+                    if (!f.name.endsWith('.jar')) {
+                        return
+                    }
+                    def base = f.name.substring(0, f.name.length() - 4)
+                    def sibling = new File(f.parentFile, base + '-sources.jar')
+                    if (sibling.isFile() && seenSources.add(sibling.absolutePath)) {
+                        println 'SOURCES:' + sibling.absolutePath
+                    } else if (f.parentFile?.parentFile?.isDirectory()) {
+                        f.parentFile.parentFile.eachDir { versionDir ->
+                            versionDir.eachFile { vf ->
+                                if (vf.isFile() && vf.name == base + '-sources.jar' && seenSources.add(vf.absolutePath)) {
+                                    println 'SOURCES:' + vf.absolutePath
+                                }
+                            }
+                        }
                     }
                 }
 

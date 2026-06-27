@@ -145,8 +145,29 @@ const server = http.createServer(async (req, res) => {
       });
 
       const sessionId = randomUUID();
-      sessions.set(sessionId, { agent, cwd, createdAt: Date.now() });
+      sessions.set(sessionId, { agent, cwd, createdAt: Date.now(), activeChat: null });
       return json(res, 201, { sessionId });
+    }
+
+    const stopMatch = url.pathname.match(/^\/sessions\/([^/]+)\/stop$/);
+    if (req.method === "POST" && stopMatch) {
+      const sessionId = decodeURIComponent(stopMatch[1]);
+      const session = sessions.get(sessionId);
+      if (!session?.activeChat?.run) {
+        return json(res, 404, { error: "no active run" });
+      }
+      const { run, res: sseRes } = session.activeChat;
+      session.activeChat = null;
+      try {
+        await run.cancel();
+      } catch {
+        /* ignore */
+      }
+      if (sseRes && !sseRes.writableEnded) {
+        emit(sseRes, { type: "done", status: "cancelled" });
+        sseRes.end();
+      }
+      return json(res, 200, { ok: true });
     }
 
     const chatMatch = url.pathname.match(/^\/sessions\/([^/]+)\/chat$/);
@@ -155,6 +176,9 @@ const server = http.createServer(async (req, res) => {
       const session = sessions.get(sessionId);
       if (!session) {
         return json(res, 404, { error: "session not found" });
+      }
+      if (session.activeChat?.run) {
+        return json(res, 409, { error: "agent run already in progress" });
       }
 
       const body = await readBody(req);
@@ -176,19 +200,53 @@ const server = http.createServer(async (req, res) => {
         Connection: "keep-alive",
       });
 
-      const run = await session.agent.send(prompt, sendOptions);
-      for await (const event of run.stream()) {
-        handleSdkMessage(res, event);
+      let run;
+      try {
+        run = await session.agent.send(prompt, sendOptions);
+      } catch (err) {
+        emit(res, { type: "error", error: err instanceof Error ? err.message : String(err) });
+        res.end();
+        return;
       }
 
-      const result = await run.wait();
-      emit(res, {
-        type: "done",
-        status: result.status,
-        runId: result.id,
-        summary: result.result || null,
-      });
-      res.end();
+      session.activeChat = { run, res };
+
+      const onClose = () => {
+        if (session.activeChat?.run === run) {
+          session.activeChat = null;
+          run.cancel().catch(() => {});
+        }
+      };
+      req.on("close", onClose);
+      res.on("close", onClose);
+
+      try {
+        for await (const event of run.stream()) {
+          if (session.activeChat?.run !== run) break;
+          handleSdkMessage(res, event);
+        }
+
+        if (session.activeChat?.run === run) {
+          const result = await run.wait();
+          emit(res, {
+            type: "done",
+            status: result.status,
+            runId: result.id,
+            summary: result.result || null,
+          });
+        }
+      } catch (err) {
+        if (session.activeChat?.run === run) {
+          emit(res, { type: "error", error: err instanceof Error ? err.message : String(err) });
+        }
+      } finally {
+        if (session.activeChat?.run === run) {
+          session.activeChat = null;
+        }
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
       return;
     }
 

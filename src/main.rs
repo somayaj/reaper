@@ -116,35 +116,44 @@ async fn run_server_mode() -> anyhow::Result<()> {
 fn run_gui_mode() -> anyhow::Result<()> {
     init_tracing();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let result = rt.block_on(async {
+            let state = prepare_state().await?;
+            let config = state.config.clone();
+            let (listener, addr) = bind_listener(&config.host, config.port).await?;
+            let url = format!("http://{addr}");
 
-    let gui_result = rt.block_on(async {
-        let state = prepare_state().await?;
-        let config = state.config.clone();
+            tracing::info!("Reaper listening on {url}");
+            tracing::info!("Repositories stored in {}", config.repos_dir.display());
+            tracing::info!("Static assets from {}", config.static_dir.display());
 
-        let (listener, addr) = bind_listener(&config.host, config.port).await?;
-        let url = format!("http://{addr}");
+            tx.send(Ok(url.clone()))
+                .map_err(|_| anyhow::anyhow!("GUI exited before server started"))?;
 
-        tracing::info!("Reaper listening on {url}");
-        tracing::info!("Repositories stored in {}", config.repos_dir.display());
-        tracing::info!("Static assets from {}", config.static_dir.display());
-
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, web::router(state)).await {
-                tracing::error!("Server stopped: {e:#}");
-            }
+            axum::serve(listener, web::router(state)).await?;
+            Ok::<_, anyhow::Error>(())
         });
-
-        Ok::<_, anyhow::Error>(url)
+        if let Err(e) = result {
+            let _ = tx.send(Err(format!("{e:#}")));
+        }
     });
 
-    match gui_result {
-        Ok(url) => gui::run(&url),
-        Err(e) => {
-            gui::show_error(&format!("Reaper failed to start:\n\n{e:#}"));
-            Err(e)
+    let url = match rx.recv() {
+        Ok(Ok(url)) => url,
+        Ok(Err(msg)) => {
+            gui::show_error(&format!("Reaper failed to start:\n\n{msg}"));
+            anyhow::bail!(msg);
         }
-    }
+        Err(_) => {
+            gui::show_error("Reaper failed to start:\n\nserver thread exited unexpectedly");
+            anyhow::bail!("server thread exited unexpectedly");
+        }
+    };
+
+    gui::run(&url)
 }

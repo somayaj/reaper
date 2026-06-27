@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::git::GitOutput;
 
 use super::{read_file, safe_join};
-use super::exec::run_command;
+use super::exec::run_java_command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JavaMainInfo {
@@ -63,7 +63,7 @@ pub fn run_java_main(ws: &Path, rel_path: &str) -> Result<GitOutput> {
     let mut compile_log = String::new();
     compile_log.push_str(&format!("$ javac -d .reaper/java-out {rel}\n"));
 
-    let compile = run_command(
+    let compile = run_java_command(
         ws,
         "javac",
         &["-d", ".reaper/java-out", "-encoding", "UTF-8", &rel],
@@ -85,7 +85,7 @@ pub fn run_java_main(ws: &Path, rel_path: &str) -> Result<GitOutput> {
         info.qualified_name
     ));
 
-    let run = run_command(
+    let run = run_java_command(
         ws,
         "java",
         &["-cp", ".reaper/java-out", &info.qualified_name],
@@ -102,7 +102,7 @@ pub fn run_java_main(ws: &Path, rel_path: &str) -> Result<GitOutput> {
     })
 }
 
-fn parse_java_main(source: &str, file_path: &Path) -> Result<JavaMainInfo> {
+pub fn parse_java_main(source: &str, file_path: &Path) -> Result<JavaMainInfo> {
     if !has_static_main(source) {
         bail!("no public static void main method found");
     }

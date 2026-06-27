@@ -186,6 +186,27 @@ impl CursorBridge {
         resp.json().await.context("invalid models response")
     }
 
+    pub async fn stop_chat(&self, session_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/sessions/{session_id}/stop", self.base))
+            .send()
+            .await
+            .context("cursor bridge stop request failed")?;
+
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+
+        let err: serde_json::Value = resp.json().await.unwrap_or_default();
+        bail!(
+            "{}",
+            err.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("failed to stop cursor agent")
+        );
+    }
+
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let _ = self
             .client
