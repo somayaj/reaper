@@ -526,13 +526,15 @@ function applyAgentTypography() {
   const size = getAgentFontSize();
   const spec = getAgentFontSpec();
   ensureEditorFontLoaded(spec);
-  const root = document.documentElement;
-  root.style.setProperty('--ij-ui-font-size', `${size}px`);
-  root.style.setProperty('--ij-ui-font-family', spec.family);
-  root.style.setProperty('--ij-ui-line-height', String(20 / 13));
+  const panel = $('#panel-agent');
+  if (!panel) return;
+  panel.style.setProperty('--ij-ui-font-size', `${size}px`);
+  panel.style.setProperty('--ij-ui-font-family', spec.family);
+  panel.style.setProperty('--ij-ui-line-height', String(20 / 13));
 }
 
 function applyAgentFontSize(size) {
+  if (getAgentFontMatchEditor()) return getEditorFontSize();
   const clamped = Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)));
   localStorage.setItem(AGENT_FONT_SIZE_KEY, String(clamped));
   applyAgentTypography();
@@ -541,6 +543,7 @@ function applyAgentFontSize(size) {
 }
 
 function applyAgentFontFamily(fontId) {
+  if (getAgentFontMatchEditor()) return getEditorFontSpec();
   const spec = EDITOR_FONTS.find((f) => f.id === fontId) || EDITOR_FONTS[0];
   localStorage.setItem(AGENT_FONT_FAMILY_KEY, spec.id);
   ensureEditorFontLoaded(spec);
@@ -573,7 +576,9 @@ function applyEditorFontSize(size) {
       lineHeight: editorLineHeightFor(clamped),
     });
   }
-  applyAgentTypography();
+  if (getAgentFontMatchEditor()) {
+    applyAgentTypography();
+  }
   syncFontSizeControls(clamped);
   syncAgentFontControls();
   updateEditorFontPreview();
@@ -594,7 +599,9 @@ function applyEditorFontFamily(fontId) {
   if (state.editor) {
     state.editor.updateOptions({ fontFamily: spec.family });
   }
-  applyAgentTypography();
+  if (getAgentFontMatchEditor()) {
+    applyAgentTypography();
+  }
   syncFontFamilyControls(spec.id);
   syncAgentFontControls();
   updateEditorFontPreview(spec);
@@ -668,6 +675,8 @@ function syncAgentFontControls() {
     familyEl.disabled = match;
   }
 
+  $('#settings-agent-font-custom')?.classList.toggle('hidden', match);
+
   const summary = $('#settings-agent-font-summary');
   if (summary) {
     if (match) {
@@ -684,12 +693,14 @@ function syncAgentFontControls() {
 }
 
 function onAgentFontSizeChange(e) {
+  if (getAgentFontMatchEditor()) return;
   const size = parseInt(e.target.value, 10);
   if (!Number.isFinite(size)) return;
   applyAgentFontSize(size);
 }
 
 function onAgentFontFamilyChange(e) {
+  if (getAgentFontMatchEditor()) return;
   applyAgentFontFamily(e.target.value);
 }
 

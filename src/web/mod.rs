@@ -7,9 +7,11 @@ mod settings;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::http::header::{CACHE_CONTROL, HeaderValue};
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
 
@@ -26,6 +28,10 @@ pub fn router(state: AppState) -> Router {
             ServeFile::new(state.config.static_dir.join("index.html")),
         )
         .fallback_service(ServeDir::new(state.config.static_dir.clone()))
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::new(state))

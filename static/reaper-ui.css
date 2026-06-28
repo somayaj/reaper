@@ -451,12 +451,18 @@
 
 html, body {
   font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;
-  font-size: var(--ij-ui-font-size, 13px);
+  font-size: 13px;
   background: var(--ij-bg);
   color: var(--ij-text);
 }
 
 :root {
+  --ij-ui-font-size: 13px;
+  --ij-ui-font-family: ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --ij-ui-line-height: 1.538;
+}
+
+#panel-agent {
   --ij-ui-font-size: 13px;
   --ij-ui-font-family: ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   --ij-ui-line-height: 1.538;
