@@ -137,6 +137,35 @@ impl IndexLookup {
             })
     }
 
+    fn members_for_type<'a>(
+        &'a self,
+        type_fqcn: &str,
+        member_prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a IndexedSymbol> {
+        let qual_prefix = format!("{type_fqcn}.");
+        let member_prefix_lower = member_prefix.to_lowercase();
+        let mut items: Vec<&IndexedSymbol> = self
+            .symbols
+            .iter()
+            .filter(|sym| {
+                sym.qualified.starts_with(&qual_prefix)
+                    && sym.kind != "class"
+                    && (member_prefix.is_empty()
+                        || sym.name.to_lowercase().starts_with(&member_prefix_lower))
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            let rank = |k: &str| if k == "method" { 0 } else { 1 };
+            rank(&a.kind)
+                .cmp(&rank(&b.kind))
+                .then_with(|| a.name.len().cmp(&b.name.len()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        items.truncate(limit);
+        items
+    }
+
     fn methods_for_type<'a>(
         &'a self,
         type_fqcn: &str,
@@ -783,8 +812,16 @@ pub fn java_completions(
     }
 
     if let Some((qualifier, member_prefix)) = super::symbols::java_dot_qualifier(content, line, column) {
-        let member_items =
-            member_completions_for_qualifier(ws, &root, from_path, &lookup, &imports, &qualifier, &member_prefix)?;
+        let member_items = member_completions_for_qualifier(
+            ws,
+            &root,
+            from_path,
+            &lookup,
+            &imports,
+            content,
+            &qualifier,
+            &member_prefix,
+        )?;
         if !member_items.is_empty() {
             return Ok(member_items);
         }
@@ -903,27 +940,43 @@ fn member_completions_for_qualifier(
     from_path: &str,
     lookup: &IndexLookup,
     imports: &ImportMap,
+    content: &str,
     qualifier: &str,
     member_prefix: &str,
 ) -> Result<Vec<CompletionItem>> {
     let fqcn = if qualifier == "this" || qualifier == "super" {
         super::symbols::java_class_from_source_path(from_path)
+    } else if let Some(type_name) = super::symbols::infer_java_receiver_type(content, qualifier) {
+        resolve_type_fqcn(lookup, &type_name, imports)
     } else {
         resolve_type_fqcn(lookup, qualifier, imports)
     };
-    let Some(fqcn) = fqcn else {
-        return Ok(Vec::new());
-    };
 
-    let methods = lookup.methods_for_type(&fqcn, member_prefix, 80);
     let mut seen = HashSet::new();
     let mut items = Vec::new();
-    for sym in methods {
-        if !seen.insert(sym.name.clone()) {
-            continue;
+
+    if let Some(fqcn) = fqcn {
+        for sym in lookup.members_for_type(&fqcn, member_prefix, 80) {
+            if !seen.insert(sym.name.clone()) {
+                continue;
+            }
+            let mut item = symbol_to_completion_item(ws, root, sym, None);
+            if item.detail.is_none() {
+                item.detail = Some(fqcn.clone());
+            }
+            items.push(item);
         }
-        items.push(symbol_to_completion_item(ws, root, sym, None));
     }
+
+    for local in super::symbols::member_completions_from_content(content, qualifier, member_prefix, from_path) {
+        if seen.insert(local.label.clone()) {
+            items.push(local);
+        }
+        if items.len() >= 80 {
+            break;
+        }
+    }
+
     Ok(items)
 }
 
