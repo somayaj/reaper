@@ -9,6 +9,7 @@ mod repos;
 mod settings;
 mod state;
 mod system;
+mod toolchain;
 mod web;
 mod workspace;
 
@@ -106,6 +107,7 @@ async fn run_server_mode() -> anyhow::Result<()> {
     let (listener, addr) = bind_listener(&config.host, config.port).await?;
 
     tracing::info!("Reaper listening on http://{addr}");
+    tracing::info!("Data directory: {}", config.data_dir.display());
     tracing::info!("Repositories stored in {}", config.repos_dir.display());
     tracing::info!("Static assets from {}", config.static_dir.display());
 
@@ -130,6 +132,7 @@ fn run_gui_mode() -> anyhow::Result<()> {
             let url = format!("http://{addr}");
 
             tracing::info!("Reaper listening on {url}");
+            tracing::info!("Data directory: {}", config.data_dir.display());
             tracing::info!("Repositories stored in {}", config.repos_dir.display());
             tracing::info!("Static assets from {}", config.static_dir.display());
 

@@ -22,6 +22,8 @@ struct SettingsFile {
     cursor_mode: Option<String>,
     #[serde(default)]
     jdk_home: Option<String>,
+    #[serde(default)]
+    toolchain_paths: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -72,8 +74,33 @@ impl SettingsStore {
         })
         .map(|store| {
             store.sync_java_home_cache();
+            store.sync_toolchain_cache();
             store
         })
+    }
+
+    fn sync_toolchain_cache(&self) {
+        let mut map = HashMap::new();
+        if let Ok(guard) = self.inner.read() {
+            for (id, path) in &guard.toolchain_paths {
+                if path.is_empty() {
+                    continue;
+                }
+                match crate::toolchain::validate_tool_path(id, path) {
+                    Ok(p) => {
+                        map.insert(id.clone(), p);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ignoring invalid toolchain {}={}: {e:#}",
+                            id,
+                            path
+                        );
+                    }
+                }
+            }
+        }
+        crate::toolchain::set_configured_tools(map);
     }
 
     fn sync_java_home_cache(&self) {
@@ -154,6 +181,65 @@ impl SettingsStore {
         };
 
         crate::jdk::jdk_settings_view(java_home.as_deref(), source.as_deref())
+    }
+
+    pub fn toolchains_view(&self) -> crate::toolchain::ToolchainsView {
+        let from_env = std::env::var("REAPER_JAVA_HOME")
+            .ok()
+            .filter(|h| !h.is_empty());
+
+        let from_file = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.jdk_home.clone())
+            .filter(|h| !h.is_empty());
+
+        let (java_home, java_source) = if let Some(home) = from_file {
+            (Some(home), Some("settings".to_string()))
+        } else if let Some(home) = from_env {
+            (Some(home), Some("env:REAPER_JAVA_HOME".to_string()))
+        } else {
+            (None, None)
+        };
+
+        let configured = self
+            .inner
+            .read()
+            .ok()
+            .map(|g| g.toolchain_paths.clone())
+            .unwrap_or_default();
+
+        crate::toolchain::toolchains_view(&configured, java_home.as_deref(), java_source.as_deref())
+    }
+
+    pub fn set_toolchain_path(&self, id: &str, path: String) -> Result<()> {
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            anyhow::bail!("path required");
+        }
+        if id == "java" {
+            return self.set_java_home(path);
+        }
+        crate::toolchain::validate_tool_path(id, &path)?;
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.toolchain_paths.insert(id.to_string(), path);
+        self.save(&guard)?;
+        self.sync_toolchain_cache();
+        Ok(())
+    }
+
+    pub fn clear_toolchain_path(&self, id: &str) -> Result<bool> {
+        if id == "java" {
+            return self.clear_java_home();
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let removed = guard.toolchain_paths.remove(id).is_some();
+        if removed {
+            self.save(&guard)?;
+        }
+        self.sync_toolchain_cache();
+        Ok(removed)
     }
 
     fn save(&self, file: &SettingsFile) -> Result<()> {
