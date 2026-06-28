@@ -240,6 +240,96 @@ pub(crate) fn java_member_qualifier(content: &str, line: u32, column: u32, symbo
     None
 }
 
+fn split_java_param_list(params: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut angle_depth = 0u32;
+    for ch in params.chars() {
+        match ch {
+            '<' => {
+                angle_depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                angle_depth = angle_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if angle_depth == 0 => {
+                out.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
+fn normalize_java_type_token(ty: &str) -> String {
+    let mut t = ty.trim().replace('@', "");
+    const MODS: &[&str] = &["final", "volatile", "transient"];
+    loop {
+        let mut changed = false;
+        for m in MODS {
+            if let Some(rest) = t.strip_prefix(m) {
+                t = rest.trim_start().to_string();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    t
+}
+
+fn parse_java_parameter(param: &str) -> Option<(String, String)> {
+    let param = param.trim();
+    if param.is_empty() {
+        return None;
+    }
+    if let Some(idx) = param.find("...") {
+        let ty = param[..idx].trim();
+        let name = param[idx + 3..].trim();
+        if name.is_empty() || is_keyword(name) {
+            return None;
+        }
+        return Some((format!("{}[]", normalize_java_type_token(ty)), name.to_string()));
+    }
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.last()?.to_string();
+    if is_keyword(&name) {
+        return None;
+    }
+    let ty = parts[..parts.len() - 1].join(" ");
+    Some((normalize_java_type_token(&ty), name))
+}
+
+fn infer_java_parameter_type_on_line(line: &str, var_name: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if !trimmed.contains(var_name) || !trimmed.contains('(') {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let close = trimmed.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    for param in split_java_param_list(&trimmed[open + 1..close]) {
+        if let Some((ty, name)) = parse_java_parameter(&param) {
+            if name == var_name {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
 /// Qualifier and partial member name when the cursor is in a dotted expression (`foo.`, `foo.get`, `this.`).
 pub(crate) fn infer_java_receiver_type(content: &str, var_name: &str) -> Option<String> {
     if var_name.is_empty() || var_name == "this" || var_name == "super" {
@@ -327,6 +417,13 @@ pub(crate) fn infer_java_receiver_type(content: &str, var_name: &str) -> Option<
                 best = Some((pos, type_name));
             }
         }
+
+        if let Some(type_name) = infer_java_parameter_type_on_line(line, var_name) {
+            let pos = line_idx * 10_000 + trimmed.len();
+            if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                best = Some((pos, type_name));
+            }
+        }
     }
 
     best.map(|(_, t)| t)
@@ -351,7 +448,7 @@ fn simple_java_type_before_var(line: &str, var_name: &str) -> Option<String> {
         return None;
     }
     let type_token = before.split_whitespace().last()?;
-    let type_name = type_token.split('<').next()?.trim();
+    let type_name = type_token.split('<').next()?.trim().trim_end_matches("[]");
     if type_name.is_empty() || is_keyword(type_name) {
         return None;
     }
@@ -385,7 +482,16 @@ fn infer_type_from_new_assignment(line: &str, var_name: &str) -> Option<String> 
 pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Option<(String, String)> {
     let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
     let col = column.saturating_sub(1) as usize;
-    let before = &line_text[..col.min(line_text.len())];
+    let len = line_text.len();
+    let end = col.min(len);
+    let slice_end = if end < len && line_text.as_bytes().get(end) == Some(&b'.') {
+        end + 1
+    } else if end > 0 && line_text.as_bytes().get(end - 1) == Some(&b'.') {
+        end
+    } else {
+        end
+    };
+    let before = &line_text[..slice_end.min(len)];
     let trimmed_end = before.trim_end();
     if trimmed_end.is_empty() {
         return None;
@@ -393,7 +499,11 @@ pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Optio
     let dot_pos = trimmed_end.rfind('.')?;
     let qual_part = trimmed_end[..dot_pos].trim();
     let member_part = trimmed_end[dot_pos + 1..].trim().to_string();
-    let simple = qual_part.rsplit('.').next()?.trim();
+    let simple = if let Some(paren) = qual_part.rfind('(') {
+        qual_part[paren + 1..].trim().rsplit('.').next()?.trim()
+    } else {
+        qual_part.rsplit('.').next()?.trim()
+    };
     if simple.is_empty()
         || (is_keyword(simple) && simple != "this" && simple != "super")
     {
@@ -2135,6 +2245,19 @@ mod tests {
         assert_eq!(
             infer_java_receiver_type(src3, "app"),
             Some("SpringApplication".into())
+        );
+        let src4 = "public static void main(String[] args) {\n    while(args.";
+        assert_eq!(
+            infer_java_receiver_type(src4, "args"),
+            Some("String[]".into())
+        );
+    }
+
+    #[test]
+    fn parses_dot_qualifier_inside_while_paren() {
+        assert_eq!(
+            java_dot_qualifier("while(args.", 1, 11),
+            Some(("args".into(), "".into()))
         );
     }
 
