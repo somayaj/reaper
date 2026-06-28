@@ -459,7 +459,7 @@
     return { word, linePrefix, prefix, range };
   }
 
-  function mapIndexItemToSuggestion(item, range, seen) {
+  function mapIndexItemToSuggestion(item, range, seen, memberContext) {
     const label = item.label;
     if (!label || seen.has(label)) return null;
     if (!isCodeLikeCompletion(label, item.kind)) return null;
@@ -469,13 +469,17 @@
     if (!insertText) {
       insertText = kind === 'method' ? `${label}()` : label;
     }
+    const sortRank = memberContext ? '0' : '1';
+    const detail = item.detail
+      ? (memberContext && kind === 'method' ? `${item.detail} · method` : item.detail)
+      : undefined;
     return {
       label,
       kind: completionKind(item.kind),
-      detail: item.detail || undefined,
+      detail,
       insertText,
       range,
-      sortText: `1_${label}`,
+      sortText: `${sortRank}_${label}`,
     };
   }
 
@@ -1794,15 +1798,20 @@
 
         const { linePrefix, prefix, range, seen } = completionContext(model, position);
         const manual = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
+        const memberContext = dotQualifierFromLinePrefix(linePrefix);
         if (!shouldFetchIndexCompletions(linePrefix, prefix) && !manual) {
           return { suggestions: [] };
+        }
+
+        if (memberContext) {
+          void fetchCompletions(helpers, model, position, prefix || memberContext.memberPrefix || '');
         }
 
         try {
           const items = await fetchCompletions(helpers, model, position, prefix);
           const suggestions = [];
           for (const item of items) {
-            const mapped = mapIndexItemToSuggestion(item, range, seen);
+            const mapped = mapIndexItemToSuggestion(item, range, seen, memberContext);
             if (mapped) suggestions.push(mapped);
             if (suggestions.length >= 80) break;
           }
