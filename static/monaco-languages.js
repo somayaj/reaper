@@ -522,7 +522,10 @@
     const qualPart = trimmed.slice(0, dotPos).trim();
     const memberPart = trimmed.slice(dotPos + 1).replace(/[^\w$].*$/, '');
     if (!qualPart) return null;
-    const simple = qualPart.split('.').pop().trim();
+    const paren = qualPart.lastIndexOf('(');
+    const simple = paren >= 0
+      ? qualPart.slice(paren + 1).trim().split('.').pop().trim()
+      : qualPart.split('.').pop().trim();
     if (!simple) return null;
     const blockKw = ['if', 'for', 'while', 'return', 'import', 'package', 'new', 'else', 'catch'];
     if (blockKw.includes(simple) && simple !== 'this' && simple !== 'super' && simple !== 'self') {
@@ -626,10 +629,12 @@
   /** Prefer AI over local templates for statements and block bodies (all languages). */
   function isInsideControlParen(linePrefix) {
     const trimmed = String(linePrefix || '').trimEnd();
+    if (dotQualifierFromLinePrefix(trimmed)) return false;
     return /\b(for|if|while|switch)\s*\([^)]*$/i.test(trimmed);
   }
 
   function shouldPreferAiStatementInline(path, linePrefix, content, lineNumber) {
+    if (dotQualifierFromLinePrefix(linePrefix)) return false;
     const trimmed = linePrefix.trimEnd();
     if (hasCompleteControlKeyword(trimmed)) return true;
     if (isInsideControlParen(linePrefix)) return true;
