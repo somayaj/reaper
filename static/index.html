@@ -68,7 +68,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=75" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=76" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -445,7 +445,7 @@
               <option value="composer-2.5">Composer 2.5</option>
             </select>
           </div>
-          <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
+          <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
           <div class="flex items-center justify-between gap-2">
             <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
             <div class="flex items-center gap-1.5 shrink-0">
@@ -780,7 +780,7 @@
             <div>
               <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-editor-font-size">Font size</label>
               <select id="settings-editor-font-size" class="ij-settings-select w-full max-w-xs" title="Editor font size"></select>
-              <p class="text-[11px] text-gray-600 mt-2">Applies to the code editor. Saved in this browser (10–28px).</p>
+              <p class="text-[11px] text-gray-600 mt-2">Applies to the code editor and Cursor agent panel. Saved in this browser (10–28px).</p>
             </div>
             <div class="ij-editor-font-block">
               <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-editor-font-family">Typeface</label>
@@ -788,7 +788,7 @@
               <pre id="settings-editor-font-preview" class="ij-font-preview" aria-live="polite">fn harvest() {
   return "reaper";
 }</pre>
-              <p class="text-[11px] text-gray-600 mt-2">Choose a monospace face for the editor. Preview updates as you pick.</p>
+              <p class="text-[11px] text-gray-600 mt-2">Monospace face for the editor and Cursor agent. Preview updates as you pick.</p>
             </div>
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
@@ -907,6 +907,6 @@
   <script src="/icons.js?v=2"></script>
   <script src="/monaco-languages.js?v=13"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=106"></script>
+  <script src="/app.js?v=107"></script>
 </body>
 </html>

@@ -500,6 +500,16 @@ function syncFontSizeControls(size) {
   });
 }
 
+function applyEditorTypography() {
+  const size = getEditorFontSize();
+  const spec = getEditorFontSpec();
+  ensureEditorFontLoaded(spec);
+  const root = document.documentElement;
+  root.style.setProperty('--ij-ui-font-size', `${size}px`);
+  root.style.setProperty('--ij-ui-font-family', spec.family);
+  root.style.setProperty('--ij-ui-line-height', String(20 / 13));
+}
+
 function applyEditorFontSize(size) {
   const clamped = Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)));
   localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(clamped));
@@ -509,6 +519,7 @@ function applyEditorFontSize(size) {
       lineHeight: editorLineHeightFor(clamped),
     });
   }
+  applyEditorTypography();
   syncFontSizeControls(clamped);
   return clamped;
 }
@@ -527,6 +538,7 @@ function applyEditorFontFamily(fontId) {
   if (state.editor) {
     state.editor.updateOptions({ fontFamily: spec.family });
   }
+  applyEditorTypography();
   syncFontFamilyControls(spec.id);
   updateEditorFontPreview(spec);
   return spec;
@@ -536,7 +548,6 @@ function updateEditorFontPreview(spec = getEditorFontSpec()) {
   const preview = $('#settings-editor-font-preview');
   if (!preview) return;
   ensureEditorFontLoaded(spec);
-  preview.style.fontFamily = spec.family;
   preview.textContent = 'fn harvest() {\n  return "reaper";\n}';
 }
 
@@ -548,6 +559,7 @@ function onEditorFontFamilyChange(e) {
 function loadAppearanceSettingsSection() {
   populateFontSizeSelects();
   populateFontFamilySelects();
+  applyEditorTypography();
   syncFontSizeControls(getEditorFontSize());
   syncFontFamilyControls(getEditorFontSpec().id);
   updateEditorFontPreview();
@@ -5168,7 +5180,7 @@ function appendAgentMessage(role, text) {
   if (placeholder) box.innerHTML = '';
 
   const wrap = document.createElement('div');
-  wrap.className = `rounded-lg px-3 py-2 text-sm ${
+  wrap.className = `rounded-lg px-3 py-2 ${
     role === 'user' ? 'agent-msg-user text-gray-200' :
     role === 'assistant' ? 'agent-msg-assistant text-gray-300' :
     'agent-msg-system'
@@ -6259,6 +6271,7 @@ async function init() {
   populateFontFamilySelects();
   syncFontSizeControls(getEditorFontSize());
   ensureEditorFontLoaded(getEditorFontSpec());
+  applyEditorTypography();
   ensureTerminals();
   renderTerminalTabs();
   renderTerminalOutput();
