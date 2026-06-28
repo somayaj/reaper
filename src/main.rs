@@ -22,6 +22,7 @@ use settings::SettingsStore;
 use state::AppState;
 
 fn main() -> anyhow::Result<()> {
+    workspace::ensure_developer_path();
     if wants_gui() {
         run_gui_mode()
     } else {

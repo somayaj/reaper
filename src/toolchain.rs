@@ -169,6 +169,41 @@ pub const TOOLS: &[ToolDef] = &[
         defaults: &["bash", "sh", "zsh"],
         env_key: Some("REAPER_BASH"),
     },
+    ToolDef {
+        id: "yamllint",
+        label: "YAML (yamllint)",
+        kind: ToolKind::Binary,
+        defaults: &["yamllint"],
+        env_key: Some("REAPER_YAMLLINT"),
+    },
+    ToolDef {
+        id: "yamlfmt",
+        label: "YAML (yamlfmt)",
+        kind: ToolKind::Binary,
+        defaults: &["yamlfmt"],
+        env_key: Some("REAPER_YAMLFMT"),
+    },
+    ToolDef {
+        id: "prettier",
+        label: "Prettier",
+        kind: ToolKind::Binary,
+        defaults: &["prettier"],
+        env_key: Some("REAPER_PRETTIER"),
+    },
+    ToolDef {
+        id: "jsonlint",
+        label: "JSON (jsonlint)",
+        kind: ToolKind::Binary,
+        defaults: &["jsonlint"],
+        env_key: Some("REAPER_JSONLINT"),
+    },
+    ToolDef {
+        id: "ajv",
+        label: "JSON Schema (ajv)",
+        kind: ToolKind::Binary,
+        defaults: &["ajv"],
+        env_key: Some("REAPER_AJV"),
+    },
 ];
 
 pub fn tool_def(id: &str) -> Option<&'static ToolDef> {
@@ -277,6 +312,7 @@ pub struct CompilerEntryView {
     pub effective: Option<String>,
     pub version: Option<String>,
     pub source: Option<String>,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -325,6 +361,10 @@ pub fn compilers_view(
             effective: effective.as_ref().map(|p| p.display().to_string()),
             version,
             source,
+            extensions: crate::workspace::file_extensions_for_tool(def.id)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         });
     }
 

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::Deserialize;
 use serde::Serialize;
 
-use super::exec::{run_command, run_tool_command};
+use super::exec::{run_command, run_shell_argv, run_tool_command};
 use super::java_diagnostics;
 use super::safe_join;
 
@@ -42,7 +43,7 @@ pub fn check_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
         return check_go(ws, rel_path, content);
     }
     if matches!(ext, "json") {
-        return Ok(check_json(rel_path, content));
+        return check_json(ws, rel_path, content);
     }
     if matches!(ext, "js" | "mjs" | "cjs" | "jsx") {
         return check_javascript(ws, rel_path, content);
@@ -81,7 +82,7 @@ pub fn check_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
         return check_groovy(ws, rel_path, content);
     }
     if matches!(ext, "jsonc") {
-        return Ok(check_json(rel_path, &strip_jsonc_comments(content)));
+        return check_json(ws, rel_path, &strip_jsonc_comments(content));
     }
     if matches!(ext, "ini" | "properties") || lower.ends_with(".gradle.properties") {
         return Ok(check_ini(rel_path, content));
@@ -478,7 +479,21 @@ fn strip_overlay_prefix(path: &str) -> String {
         .to_string()
 }
 
-fn check_json(rel_path: &str, content: &str) -> Vec<Diagnostic> {
+fn check_json(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+    write_overlay(ws, rel_path, content)?;
+    let mut diags = Vec::new();
+    diags.extend(check_json_syntax(rel_path, content));
+    diags.extend(check_json_jsonlint(ws, rel_path));
+    if looks_like_json_schema(rel_path, content) {
+        diags.extend(check_json_ajv_schema(ws, rel_path));
+    }
+    Ok(diags)
+}
+
+fn check_json_syntax(rel_path: &str, content: &str) -> Vec<Diagnostic> {
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(_) => Vec::new(),
         Err(e) => {
@@ -487,6 +502,121 @@ fn check_json(rel_path: &str, content: &str) -> Vec<Diagnostic> {
             vec![diag(rel_path, line, column, e.to_string(), "error")]
         }
     }
+}
+
+fn looks_like_json_schema(rel_path: &str, content: &str) -> bool {
+    let path_lower = rel_path.replace('\\', "/").to_lowercase();
+    let lower = content.to_lowercase();
+    let has_schema_marker = lower.contains("\"$schema\"")
+        || lower.contains("\"$ref\"")
+        || path_lower.ends_with(".schema.json")
+        || path_lower.contains("/schemas/");
+    let has_schema_shape = lower.contains("\"properties\"")
+        || lower.contains("\"definitions\"")
+        || lower.contains("\"$defs\"");
+    has_schema_marker && has_schema_shape
+}
+
+fn check_json_jsonlint(ws: &Path, rel_path: &str) -> Vec<Diagnostic> {
+    let rel = overlay_rel(rel_path);
+    let out = run_tool_command(ws, "jsonlint", &[&rel])
+        .or_else(|_| run_shell_argv(ws, "jsonlint", &[&rel]));
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if out.exit_code == 0 {
+        return Vec::new();
+    }
+    parse_jsonlint_output(&format!("{}\n{}", out.stderr, out.stdout), rel_path)
+}
+
+fn parse_jsonlint_output(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('^') || line.chars().all(|c| c == '-') {
+            continue;
+        }
+        if let Some(d) = parse_location_colon_error(line, focus) {
+            diags.push(d);
+            continue;
+        }
+        if let Some(d) = parse_jsonlint_parse_error_line(line, focus) {
+            diags.push(d);
+        }
+    }
+    if diags.is_empty() {
+        if let Some(d) = parse_jsonlint_parse_error_block(text, focus) {
+            diags.push(d);
+        }
+    }
+    diags
+}
+
+fn parse_jsonlint_parse_error_line(line: &str, focus: &str) -> Option<Diagnostic> {
+    let line = line.strip_prefix("Error: ").unwrap_or(line);
+    const MARKER: &str = "Parse error on line ";
+    let idx = line.find(MARKER)?;
+    let head = line[..idx].trim();
+    let rest = &line[idx + MARKER.len()..];
+    let line_no: u32 = rest.split(':').next()?.trim().parse().ok()?;
+    if !head.is_empty() && !matches_focus(head.trim_end_matches(':'), focus) {
+        return None;
+    }
+    Some(diag(focus, line_no, 1, line.to_string(), "error"))
+}
+
+fn parse_jsonlint_parse_error_block(text: &str, focus: &str) -> Option<Diagnostic> {
+    for line in text.lines() {
+        if let Some(d) = parse_jsonlint_parse_error_line(line.trim(), focus) {
+            return Some(d);
+        }
+    }
+    let message = text
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with('^')
+                && !l.chars().all(|c| c == '-')
+                && !l.contains("Parse error on line ")
+        })
+        .unwrap_or("Invalid JSON");
+    Some(diag(focus, 1, 1, message, "error"))
+}
+
+fn check_json_ajv_schema(ws: &Path, rel_path: &str) -> Vec<Diagnostic> {
+    let rel = overlay_rel(rel_path);
+    let out = run_tool_command(ws, "ajv", &["compile", "-s", &rel])
+        .or_else(|_| run_shell_argv(ws, "ajv", &["compile", "-s", &rel]));
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if out.exit_code == 0 {
+        return Vec::new();
+    }
+    parse_ajv_compile_output(&format!("{}\n{}", out.stderr, out.stdout), rel_path)
+}
+
+fn parse_ajv_compile_output(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(d) = parse_location_colon_error(line, focus) {
+            diags.push(d);
+            continue;
+        }
+        let severity = if line.to_ascii_lowercase().contains("warning") {
+            "warning"
+        } else {
+            "error"
+        };
+        diags.push(diag(focus, 1, 1, format!("ajv: {line}"), severity));
+    }
+    diags
 }
 
 fn check_rust(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -883,37 +1013,220 @@ fn parse_location_colon_error(line: &str, focus: &str) -> Option<Diagnostic> {
 
 fn check_yaml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
-    let abs = ws.join(overlay_rel(rel_path));
-    let abs = abs.to_string_lossy();
-    let script = format!(
-        "import sys\n\
-         try:\n\
-             import yaml\n\
-         except ImportError:\n\
-             sys.exit(0)\n\
-         try:\n\
-             yaml.safe_load(open(sys.argv[1]))\n\
-         except yaml.YAMLError as e:\n\
-             print(e)\n\
-             sys.exit(1)\n"
-    );
-    let Ok(out) = run_tool_command(ws, "python", &["-c", &script, &abs]) else {
-        return Ok(Vec::new());
+    let mut diags = Vec::new();
+    diags.extend(check_yaml_syntax(rel_path, content));
+    diags.extend(check_yaml_yamllint(ws, rel_path));
+    if is_github_workflow(rel_path) {
+        diags.extend(check_yaml_actionlint(ws, rel_path));
+    }
+    if looks_like_k8s_manifest(content) {
+        diags.extend(check_yaml_kubeconform(ws, rel_path));
+    }
+    Ok(diags)
+}
+
+fn check_yaml_syntax(rel_path: &str, content: &str) -> Vec<Diagnostic> {
+    if content.trim().is_empty() {
+        return Vec::new();
+    }
+    match serde_yaml::from_str::<serde_yaml::Value>(content) {
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            let line = e
+                .location()
+                .map(|loc| loc.line().max(1) as u32)
+                .unwrap_or(1);
+            let column = e
+                .location()
+                .map(|loc| loc.column().max(1) as u32)
+                .unwrap_or(1);
+            vec![diag(rel_path, line, column, e.to_string(), "error")]
+        }
+    }
+}
+
+fn is_github_workflow(rel_path: &str) -> bool {
+    let p = rel_path.replace('\\', "/").to_lowercase();
+    p.contains(".github/workflows/") && (p.ends_with(".yml") || p.ends_with(".yaml"))
+}
+
+fn looks_like_k8s_manifest(content: &str) -> bool {
+    let mut has_api = false;
+    let mut has_kind = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("apiVersion:") {
+            has_api = true;
+        }
+        if t.starts_with("kind:") {
+            has_kind = true;
+        }
+        if has_api && has_kind {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_yaml_yamllint(ws: &Path, rel_path: &str) -> Vec<Diagnostic> {
+    let rel = overlay_rel(rel_path);
+    let out = run_tool_command(ws, "yamllint", &["-f", "parsable", &rel])
+        .or_else(|_| run_shell_argv(ws, "yamllint", &["-f", "parsable", &rel]));
+    let Ok(out) = out else {
+        return Vec::new();
     };
     if out.exit_code == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let msg = out.stdout.trim();
-    let line = msg
-        .lines()
-        .find_map(|l| {
-            l.split("line ")
-                .nth(1)
-                .and_then(|s| s.split(',').next())
-                .and_then(|s| s.trim().parse().ok())
-        })
-        .unwrap_or(1);
-    Ok(vec![diag(rel_path, line, 1, msg, "error")])
+    parse_yamllint_parsable(&format!("{}\n{}", out.stderr, out.stdout), rel_path)
+}
+
+fn parse_yamllint_parsable(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // path:line:col: [error|warning] message (rule)
+        let Some(colon_idx) = line.rfind(": [") else {
+            continue;
+        };
+        let head = &line[..colon_idx];
+        let tail = &line[colon_idx + 2..];
+        let severity = if tail.starts_with("[error]") {
+            "error"
+        } else if tail.starts_with("[warning]") {
+            "warning"
+        } else {
+            "error"
+        };
+        let message = tail
+            .strip_prefix("[error]")
+            .or_else(|| tail.strip_prefix("[warning]"))
+            .map(|s| s.trim())
+            .unwrap_or(tail);
+        // path:line:col — split numeric suffix from the right so paths stay intact.
+        let Some(col_sep) = head.rfind(':') else {
+            continue;
+        };
+        let col = head[col_sep + 1..].trim().parse().unwrap_or(1);
+        let rest = &head[..col_sep];
+        let Some(line_sep) = rest.rfind(':') else {
+            continue;
+        };
+        let line_no = rest[line_sep + 1..].trim().parse().unwrap_or(1);
+        let path = &rest[..line_sep];
+        if matches_focus(path, focus) {
+            diags.push(diag(
+                &strip_overlay_prefix(path),
+                line_no,
+                col,
+                message,
+                severity,
+            ));
+        }
+    }
+    diags
+}
+
+fn check_yaml_actionlint(ws: &Path, rel_path: &str) -> Vec<Diagnostic> {
+    let rel = overlay_rel(rel_path);
+    let format = "{{range $err := .}}{{json $err}}{{end}}";
+    let out = run_shell_argv(ws, "actionlint", &["-format", format, &rel]);
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if out.exit_code == 0 {
+        return Vec::new();
+    }
+    parse_actionlint_jsonlines(&format!("{}\n{}", out.stderr, out.stdout), rel_path)
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionlintError {
+    message: Option<String>,
+    line: Option<u64>,
+    column: Option<u64>,
+}
+
+fn parse_actionlint_jsonlines(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.starts_with('{') {
+            continue;
+        }
+        let Ok(err) = serde_json::from_str::<ActionlintError>(line) else {
+            continue;
+        };
+        let message = err.message.unwrap_or_else(|| "actionlint error".to_string());
+        let line_no = err.line.unwrap_or(1) as u32;
+        let col = err.column.unwrap_or(1) as u32;
+        diags.push(diag(focus, line_no, col, format!("actionlint: {message}"), "error"));
+    }
+    diags
+}
+
+fn check_yaml_kubeconform(ws: &Path, rel_path: &str) -> Vec<Diagnostic> {
+    let abs = ws.join(overlay_rel(rel_path));
+    let abs = abs.to_string_lossy().to_string();
+    let out = run_shell_argv(
+        ws,
+        "kubeconform",
+        &[
+            "-output",
+            "json",
+            "-ignore-missing-schemas",
+            "-summary",
+            &abs,
+        ],
+    );
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if out.exit_code == 0 {
+        return Vec::new();
+    }
+    parse_kubeconform_json(&format!("{}\n{}", out.stderr, out.stdout), rel_path)
+}
+
+#[derive(Debug, Deserialize)]
+struct KubeconformOutput {
+    resources: Option<Vec<KubeconformResource>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KubeconformResource {
+    status: String,
+    msg: Option<String>,
+    kind: Option<String>,
+}
+
+fn parse_kubeconform_json(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let json_start = text.find('{').unwrap_or(0);
+    let json_text = &text[json_start..];
+    let Ok(parsed) = serde_json::from_str::<KubeconformOutput>(json_text) else {
+        return Vec::new();
+    };
+    let mut diags = Vec::new();
+    for res in parsed.resources.unwrap_or_default() {
+        if res.status == "VALID" || res.status == "Skipped" {
+            continue;
+        }
+        let kind = res.kind.unwrap_or_else(|| "resource".to_string());
+        let msg = res
+            .msg
+            .unwrap_or_else(|| "schema validation failed".to_string());
+        diags.push(diag(
+            focus,
+            1,
+            1,
+            format!("kubeconform ({kind}): {msg}"),
+            "error",
+        ));
+    }
+    diags
 }
 
 fn check_xml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -1173,7 +1486,7 @@ mod tests {
 
     #[test]
     fn json_syntax_error_has_line() {
-        let diags = check_json("x.json", "{ invalid");
+        let diags = check_json_syntax("x.json", "{ invalid");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, "error");
         assert!(diags[0].line >= 1);
@@ -1181,7 +1494,23 @@ mod tests {
 
     #[test]
     fn valid_json_has_no_diagnostics() {
-        assert!(check_json("x.json", r#"{"ok": true}"#).is_empty());
+        assert!(check_json_syntax("x.json", r#"{"ok": true}"#).is_empty());
+    }
+
+    #[test]
+    fn jsonlint_parse_error_parsed() {
+        let text = "Error: Parse error on line 2:\n{ \"a\": }\n-------^\nExpecting 'STRING'";
+        let diags = parse_jsonlint_output(text, "x.json");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].severity, "error");
+    }
+
+    #[test]
+    fn json_schema_detected() {
+        let schema = r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"}}}"#;
+        assert!(looks_like_json_schema("models/user.schema.json", schema));
+        assert!(!looks_like_json_schema("package.json", r#"{"name":"demo"}"#));
     }
 
     #[test]
@@ -1199,5 +1528,64 @@ mod tests {
         let diags = parse_rustc_output(text, "lib.rs");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].line, 3);
+    }
+
+    #[test]
+    fn yaml_syntax_error_has_line() {
+        let diags = check_yaml_syntax("openapi.yaml", "foo: [bar\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, "error");
+        assert!(diags[0].line >= 1);
+    }
+
+    #[test]
+    fn yamllint_parsable_output_parsed() {
+        let text = ".reaper/diagnostics/overlay/deploy.yml:12:3: [error] trailing spaces (trailing-spaces)";
+        let diags = parse_yamllint_parsable(text, "deploy.yml");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].line, 12);
+        assert_eq!(diags[0].column, 3);
+        assert_eq!(diags[0].severity, "error");
+    }
+
+    #[test]
+    fn actionlint_jsonlines_parsed() {
+        let text = r#"{"message":"unknown key","line":9,"column":4,"filepath":".github/workflows/ci.yml"}"#;
+        let diags = parse_actionlint_jsonlines(text, ".github/workflows/ci.yml");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].line, 9);
+        assert_eq!(diags[0].column, 4);
+        assert!(diags[0].message.contains("actionlint"));
+    }
+
+    #[test]
+    fn kubeconform_json_parsed() {
+        let text = r#"{
+  "resources": [
+    {
+      "filename": "pod.yaml",
+      "kind": "Pod",
+      "status": "INVALID",
+      "msg": "Additional property foo is not allowed"
+    }
+  ]
+}"#;
+        let diags = parse_kubeconform_json(text, "pod.yaml");
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("kubeconform"));
+        assert!(diags[0].message.contains("Pod"));
+    }
+
+    #[test]
+    fn github_workflow_path_detected() {
+        assert!(is_github_workflow(".github/workflows/ci.yml"));
+        assert!(!is_github_workflow("k8s/deployment.yaml"));
+    }
+
+    #[test]
+    fn k8s_manifest_content_detected() {
+        let yaml = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: x";
+        assert!(looks_like_k8s_manifest(yaml));
+        assert!(!looks_like_k8s_manifest("on: push\njobs:\n  build:\n"));
     }
 }

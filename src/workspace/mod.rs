@@ -485,6 +485,11 @@ pub use index_jobs::{JavaIndexJobs, JavaIndexStatus};
 pub use project_jobs::{ProjectIndexJobs, ProjectIndexStatus};
 pub use project_profile::ProjectProfile;
 
+/// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
+pub fn ensure_developer_path() {
+    exec::ensure_developer_path();
+}
+
 /// Go-to-definition from these paths uses the Gradle/Java index; Ruby and other languages do not.
 pub fn definition_uses_java_index(from_path: &str) -> bool {
     classpath::is_java_like(from_path)
@@ -598,12 +603,34 @@ pub fn java_completions(
     if spring_props::is_spring_config_file(from_path) {
         return spring_props::completions(ws, from_path, line, column, &content, prefix);
     }
-    classpath::java_completions(ws, from_path, line, column, &content, prefix)
+
+    let mut items = if classpath::is_java_like(from_path) {
+        classpath::java_completions(ws, from_path, line, column, &content, prefix)?
+    } else {
+        Vec::new()
+    };
+
+    let sym_items = symbols::completions(ws, from_path, &content, prefix)?;
+    if items.is_empty() {
+        return Ok(sym_items);
+    }
+
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
+    for item in sym_items {
+        if seen.insert(item.label.clone()) {
+            items.push(item);
+        }
+        if items.len() >= 80 {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 pub fn format_file(ws: &Path, rel_path: &str, content: &str) -> Result<String> {
     let _path = safe_join(ws, rel_path)?;
-    symbols::format_content(rel_path, content)
+    symbols::format_content(ws, rel_path, content)
 }
 
 pub fn file_diagnostics(
@@ -612,6 +639,14 @@ pub fn file_diagnostics(
     content: &str,
 ) -> Result<Vec<diagnostics::Diagnostic>> {
     diagnostics::check_file(ws, rel_path, content)
+}
+
+pub fn compiler_tool_ids_for_path(path: &str) -> Vec<&'static str> {
+    languages::compiler_tool_ids_for_path(path)
+}
+
+pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
+    languages::file_extensions_for_tool(tool_id)
 }
 
 pub fn conflict_stages(ws: &Path, rel_path: &str) -> Result<conflict::ConflictStages> {
