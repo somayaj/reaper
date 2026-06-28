@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="113" />
+  <meta name="reaper-ui-build" content="185" />
+  <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script>
@@ -68,7 +69,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=77" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=185" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -208,11 +209,11 @@
       <div class="w-px h-5 bg-surface-700 hidden md:block mx-1"></div>
 
       <div class="flex items-center gap-2 min-w-0">
-        <div class="relative">
-          <select id="repo-select" class="appearance-none bg-surface-800/80 border border-surface-700 hover:border-surface-600 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-accent-ring min-w-[140px] max-w-[200px] truncate transition-colors">
-            <option value="">Select repo…</option>
-          </select>
-          <svg class="w-4 h-4 text-gray-500 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        <div class="ij-repo-picker-group flex items-center gap-1 min-w-0">
+          <button type="button" id="repo-picker-btn" title="Select repository" class="ij-header-picker ij-repo-picker-btn">
+            <span id="repo-picker-label">Select repo…</span>
+            <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
         </div>
         <div class="relative">
           <button type="button" id="branch-picker-btn" disabled title="Switch branch (⌘⇧B)" class="ij-header-picker">
@@ -220,6 +221,7 @@
             <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
           </button>
         </div>
+        <span id="repo-default-branch" class="hidden text-[11px] text-gray-500 font-mono shrink-0" title=""></span>
         <div id="git-nav-toolbar" class="ij-git-nav hidden md:flex items-center shrink-0" role="toolbar" aria-label="Git actions">
           <button id="btn-sync" type="button" disabled title="Pull latest" class="ij-header-btn icon" aria-label="Pull">
             <span class="ij-header-icon" data-icon="gitPull"></span>
@@ -473,12 +475,28 @@
         <button id="tb-format" disabled title="Reformat (⇧⌥F)" class="ij-toolbar-btn" type="button">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M4 6h16M4 12h10M4 18h7"/></svg>
         </button>
+        <button id="tb-rollback" disabled title="Rollback last change (⌘Z)" class="ij-toolbar-btn" type="button" aria-label="Rollback last change">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14L4 9m0 0l5-5M4 9h10.5a5.5 5.5 0 010 11H11"/></svg>
+        </button>
         <span id="gradle-toolbar-sep" class="ij-toolbar-sep hidden"></span>
         <select id="gradle-task" disabled title="Gradle task" class="hidden text-[11px] font-mono disabled:opacity-30">
           <option value="run">run</option>
           <option value="build">build</option>
         </select>
         <span id="toolbar-run-label" class="text-[11px] text-gray-500 ml-1 hidden"></span>
+        <span class="ij-toolbar-spacer flex-1 min-w-2"></span>
+        <div id="ai-bulb-dock" class="ij-ai-bulb-dock hidden" aria-hidden="true">
+          <button id="tb-ai-fix" type="button" class="ij-toolbar-btn ij-ai-bulb-btn" disabled title="AI quick fix (Ctrl+.)" aria-label="AI quick fix">
+            <svg class="ij-ai-bulb-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <g class="ij-ai-sparkles">
+                <path class="ij-ai-sparkle ij-ai-sparkle-a" fill="currentColor" d="M4.5 7.5l1-2 1 2-2 1 2 1-1 2-1-2-2-1z"/>
+                <path class="ij-ai-sparkle ij-ai-sparkle-b" fill="currentColor" d="M19.5 4l.75-1.5.75 1.5-1.5.75 1.5.75-.75 1.5-.75-1.5-1.5-.75z"/>
+                <path class="ij-ai-sparkle ij-ai-sparkle-c" fill="currentColor" d="M20 15l1-2 1 2-2 1 2 1-1 2-1-2-2-1z"/>
+              </g>
+              <path class="ij-ai-bulb-glass" fill="currentColor" fill-opacity="0.28" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 18h6M10 22h4M12 2a7 7 0 017 7c0 2.5-1.3 4.7-3.3 6H8.3A7 7 0 0112 2z"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div id="java-index-banner" class="hidden ij-java-index-banner shrink-0">
         <span class="ij-java-index-spinner" aria-hidden="true"></span>
@@ -539,14 +557,23 @@
   <!-- Status bar -->
   <footer class="ij-statusbar flex items-stretch shrink-0">
     <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
-      <span id="status-build" class="text-[10px] text-gray-600 font-mono" title="UI build"></span>
       <span id="status-message">Ready</span>
+      <span id="status-version" class="ij-status-version shrink-0" title="Reaper version"></span>
     </div>
     <div class="flex-1"></div>
     <div id="status-right" class="flex items-stretch shrink-0 h-full">
       <button id="status-diagnostics" type="button" class="ij-status-segment ij-status-diagnostics hidden" title="No problems">
         <svg class="ij-diag-flag" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5v11h1v-4h8.5L11 6.5 12.5 2.5H3z"/></svg>
         <span id="status-diag-count"></span>
+      </button>
+      <button id="status-ai-fix" type="button" class="ij-status-segment ij-status-ai-fix ij-ai-bulb-btn ij-ai-bulb-btn--compact hidden" title="AI quick fix (Ctrl+.)" aria-label="AI quick fix">
+        <svg class="ij-ai-bulb-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <g class="ij-ai-sparkles">
+            <path class="ij-ai-sparkle ij-ai-sparkle-a" fill="currentColor" d="M4.5 7.5l1-2 1 2-2 1 2 1-1 2-1-2-2-1z"/>
+            <path class="ij-ai-sparkle ij-ai-sparkle-b" fill="currentColor" d="M19.5 4l.75-1.5.75 1.5-1.5.75 1.5.75-.75 1.5-.75-1.5-1.5-.75z"/>
+          </g>
+          <path class="ij-ai-bulb-glass" fill="currentColor" fill-opacity="0.28" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 18h6M10 22h4M12 2a7 7 0 017 7c0 2.5-1.3 4.7-3.3 6H8.3A7 7 0 0112 2z"/>
+        </svg>
       </button>
       <span class="ij-status-segment ij-theme-picker" title="Color theme">
         <label for="theme-select">
@@ -568,6 +595,8 @@
       <span id="status-changes" class="ij-status-segment"></span>
     </div>
   </footer>
+
+  <div id="ai-quickfix-popover" class="ij-quickfix-popover hidden" role="menu" aria-label="AI quick fixes"></div>
 
   <!-- Repository info modal -->
   <div id="repo-info-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
@@ -863,10 +892,17 @@
           </section>
           <section id="settings-panel-ai" class="ij-settings-panel hidden space-y-4">
             <div>
-              <h4 class="text-sm font-semibold text-white">Gemini (commit messages)</h4>
+              <h4 class="text-sm font-semibold text-white">Gemini (commit messages & inline completions)</h4>
               <p class="text-xs text-gray-500 mt-1">Powers the <strong class="text-gray-400 font-normal">AI</strong> button in the Commit panel. Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="text-accent hover:underline">Google AI Studio</a>.</p>
             </div>
             <div id="settings-gemini-status" class="ij-settings-status"></div>
+            <div class="space-y-2 border-t border-surface-700 pt-4">
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                <input id="settings-ai-inline-complete" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
+                AI inline completions
+              </label>
+              <p class="text-[11px] text-gray-600">Ghost text (AI) as you type — <strong class="text-gray-500">Tab</strong> or <strong class="text-gray-500">Enter</strong> to accept. Member list after <strong class="text-gray-500">.</strong> or <strong class="text-gray-500">Ctrl+Space</strong> for full autocomplete.</p>
+            </div>
             <div class="space-y-2 border-t border-surface-700 pt-4">
               <label for="settings-gemini-model" class="block text-xs font-medium text-gray-400">Model</label>
               <select id="settings-gemini-model" class="ij-theme-menu-select w-full max-w-xs" title="Gemini model for commit messages"></select>
@@ -907,6 +943,15 @@
     </div>
   </div>
 
+  <!-- Repositories -->
+  <div id="repo-picker-overlay" class="ij-overlay">
+    <div class="ij-palette ij-repo-picker">
+      <div class="ij-goto-class-header">Repositories</div>
+      <div id="repo-picker-results" class="max-h-80 overflow-auto panel-scroll py-1" role="listbox"></div>
+      <div class="ij-goto-class-hint">Open a repo · × then Remove (files stay on disk) · Esc close</div>
+    </div>
+  </div>
+
   <!-- Switch branch -->
   <div id="branch-picker-overlay" class="ij-overlay">
     <div class="ij-palette ij-branch-picker">
@@ -926,8 +971,8 @@
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=2"></script>
-  <script src="/monaco-languages.js?v=13"></script>
+  <script src="/monaco-languages.js?v=185"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=113"></script>
+  <script src="/app.js?v=185"></script>
 </body>
 </html>

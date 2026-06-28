@@ -60,6 +60,12 @@ pub fn check_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
     if matches!(ext, "xml" | "html" | "htm") {
         return check_xml(ws, rel_path, content);
     }
+    if matches!(ext, "vue" | "svelte") {
+        return check_component_file(ws, rel_path, content);
+    }
+    if ext == "r" {
+        return check_r_lang(ws, rel_path, content);
+    }
     if ext == "toml" {
         return check_toml(ws, rel_path, content);
     }
@@ -622,7 +628,7 @@ fn parse_ajv_compile_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_rust(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_tool_command(
+    let Ok(out) = run_tool_command(
         ws,
         "rustc",
         &[
@@ -633,7 +639,9 @@ fn check_rust(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic
             "2021",
             &rel,
         ],
-    )?;
+    ) else {
+        return Ok(Vec::new());
+    };
     Ok(parse_rustc_output(&out.stderr, rel_path))
 }
 
@@ -745,7 +753,9 @@ fn check_go(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>>
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
     let null_out = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let out = run_tool_command(ws, "go", &["build", "-o", null_out, &rel])?;
+    let Ok(out) = run_tool_command(ws, "go", &["build", "-o", null_out, &rel]) else {
+        return Ok(Vec::new());
+    };
     Ok(parse_go_output(&format!("{}\n{}", out.stderr, out.stdout), rel_path))
 }
 
@@ -786,7 +796,9 @@ fn parse_go_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_javascript(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_tool_command(ws, "node", &["--check", &rel])?;
+    let Ok(out) = run_tool_command(ws, "node", &["--check", &rel]) else {
+        return Ok(Vec::new());
+    };
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }
@@ -1252,6 +1264,169 @@ fn check_xml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>
     Ok(vec![diag(rel_path, line, 1, message, "error")])
 }
 
+/// Vue / Svelte: syntax-check embedded `<script>` blocks and markup remainder.
+fn check_component_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+    let mut diags = Vec::new();
+    for (line_offset, script_body) in extract_script_blocks(content) {
+        let script_rel = overlay_script_path(rel_path);
+        write_overlay(ws, &script_rel, &script_body)?;
+        diags.extend(check_overlay_script_with_node(
+            ws,
+            &script_rel,
+            rel_path,
+            line_offset,
+        )?);
+    }
+
+    let markup = strip_component_blocks(content);
+    if markup.trim().len() > 3 {
+        write_overlay(ws, rel_path, &markup)?;
+        diags.extend(check_xml(ws, rel_path, &markup)?);
+    }
+
+    Ok(diags)
+}
+
+fn overlay_script_path(rel_path: &str) -> String {
+    if let Some((base, _)) = rel_path.rsplit_once('.') {
+        format!("{base}.reaper-script.js")
+    } else {
+        format!("{rel_path}.reaper-script.js")
+    }
+}
+
+fn extract_script_blocks(content: &str) -> Vec<(u32, String)> {
+    let lower = content.to_lowercase();
+    let mut blocks = Vec::new();
+    let mut search = 0usize;
+    while let Some(rel) = lower[search..].find("<script") {
+        let open = search + rel;
+        let tag_end = content[open..]
+            .find('>')
+            .map(|i| open + i + 1)
+            .unwrap_or(content.len());
+        let close_lower = lower[tag_end..].find("</script>");
+        if let Some(close_rel) = close_lower {
+            let close = tag_end + close_rel;
+            let body = content[tag_end..close].trim();
+            if !body.is_empty() {
+                let body_start_line = content[..tag_end].lines().count() as u32;
+                blocks.push((body_start_line.max(1), body.to_string()));
+            }
+            search = close + "</script>".len();
+        } else {
+            break;
+        }
+    }
+    blocks
+}
+
+fn strip_component_blocks(content: &str) -> String {
+    let lower = content.to_lowercase();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < content.len() {
+        let script = lower[i..].find("<script");
+        let style = lower[i..].find("<style");
+        let next = match (script, style) {
+            (Some(s), Some(st)) => Some(i + s.min(st)),
+            (Some(s), None) => Some(i + s),
+            (None, Some(st)) => Some(i + st),
+            (None, None) => None,
+        };
+        if let Some(start) = next {
+            out.push_str(&content[i..start]);
+            let is_script = lower[start..].starts_with("<script");
+            let close_tag = if is_script { "</script>" } else { "</style>" };
+            if let Some(close_rel) = lower[start..].find(close_tag) {
+                i = start + close_rel + close_tag.len();
+            } else {
+                break;
+            }
+        } else {
+            out.push_str(&content[i..]);
+            break;
+        }
+    }
+    out
+}
+
+fn check_overlay_script_with_node(
+    ws: &Path,
+    script_rel: &str,
+    focus_path: &str,
+    line_offset: u32,
+) -> Result<Vec<Diagnostic>> {
+    let rel = overlay_rel(script_rel);
+    let Ok(out) = run_tool_command(ws, "node", &["--check", &rel]) else {
+        return Ok(Vec::new());
+    };
+    if out.exit_code == 0 {
+        return Ok(Vec::new());
+    }
+    let mut diags = parse_node_output(
+        &format!("{}\n{}", out.stderr, out.stdout),
+        script_rel,
+    );
+    let shift = line_offset.saturating_sub(1);
+    for d in &mut diags {
+        d.path = focus_path.to_string();
+        d.line = d.line.saturating_add(shift);
+        if let Some(end_line) = d.end_line {
+            d.end_line = Some(end_line.saturating_add(shift));
+        }
+    }
+    Ok(diags)
+}
+
+fn check_r_lang(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+    write_overlay(ws, rel_path, content)?;
+    let abs = ws.join(overlay_rel(rel_path));
+    let path_arg = abs.to_string_lossy().replace('\\', "/").replace('\'', "\\'");
+    let expr = format!(
+        "tryCatch(parse(file='{path_arg}'), error=function(e) quit(status=1, conditionMessage(e)))"
+    );
+    for prog in ["Rscript", "R"] {
+        let out = run_command(ws, prog, &["--vanilla", "-e", &expr]);
+        if let Ok(out) = out {
+            if out.exit_code == 0 {
+                return Ok(Vec::new());
+            }
+            return Ok(parse_r_output(
+                &format!("{}\n{}", out.stderr, out.stdout),
+                rel_path,
+            ));
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn parse_r_output(text: &str, focus: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // bad.R:3:1: unexpected symbol
+        if let Some((head, message)) = line.rsplit_once(": ") {
+            let parts: Vec<&str> = head.rsplit(':').collect();
+            if parts.len() >= 2 {
+                if let Ok(line_no) = parts[parts.len() - 2].trim().parse::<u32>() {
+                    let col = parts[parts.len() - 1].trim().parse::<u32>().unwrap_or(1);
+                    diags.push(diag(focus, line_no, col, message, "error"));
+                    continue;
+                }
+            }
+        }
+        diags.push(diag(focus, 1, 1, line, "error"));
+    }
+    if diags.len() > 1 {
+        diags.truncate(1);
+    }
+    diags
+}
+
 fn check_toml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
@@ -1342,7 +1517,9 @@ fn parse_stylelint_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_ruby(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_tool_command(ws, "ruby", &["-c", &rel])?;
+    let Ok(out) = run_tool_command(ws, "ruby", &["-c", &rel]) else {
+        return Ok(Vec::new());
+    };
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }
@@ -1377,7 +1554,9 @@ fn parse_ruby_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_php(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_tool_command(ws, "php", &["-l", &rel])?;
+    let Ok(out) = run_tool_command(ws, "php", &["-l", &rel]) else {
+        return Ok(Vec::new());
+    };
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }
@@ -1587,5 +1766,75 @@ mod tests {
         let yaml = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: x";
         assert!(looks_like_k8s_manifest(yaml));
         assert!(!looks_like_k8s_manifest("on: push\njobs:\n  build:\n"));
+    }
+
+    #[test]
+    fn bad_ini_returns_error() {
+        let diags = check_ini("app.properties", "not_a_property\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, "error");
+    }
+
+    #[test]
+    fn vue_and_r_checkers_wired() {
+        let ws = std::env::temp_dir().join("reaper-diag-gap");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let blocks = extract_script_blocks("<script>\nconst x = \n</script><template></template>");
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].1.contains("const x"));
+
+        let r_diags = parse_r_output("bad.R:2:1: unexpected end of input", "bad.R");
+        assert_eq!(r_diags.len(), 1);
+        assert_eq!(r_diags[0].line, 2);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn integration_java_without_disk_file() {
+        let ws = std::env::temp_dir().join("reaper-diag-java-new");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let content = "public class RightName {\n}\n";
+        let diags = check_file(&ws, "WrongFile.java", content).unwrap();
+        assert!(
+            diags.iter().any(|d| d.message.contains("should be declared in a file named")),
+            "unsaved Java files should still get file/class diagnostics: {:?}",
+            diags
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn integration_bad_json_and_yaml_syntax() {
+        let ws = std::env::temp_dir().join("reaper-diag-smoke");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let json_diags = check_file(&ws, "bad.json", "{ invalid").unwrap();
+        assert!(!json_diags.is_empty(), "JSON syntax errors should surface");
+        assert_eq!(json_diags[0].severity, "error");
+
+        let yaml_diags = check_file(&ws, "bad.yaml", "foo: [bar\n").unwrap();
+        assert!(!yaml_diags.is_empty(), "YAML syntax errors should surface");
+        assert_eq!(yaml_diags[0].severity, "error");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn integration_java_file_class_mismatch() {
+        let ws = std::env::temp_dir().join("reaper-diag-java");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let content = "public class RightName {\n}\n";
+        std::fs::write(ws.join("WrongFile.java"), content).unwrap();
+        let diags = check_file(&ws, "WrongFile.java", content).unwrap();
+        assert!(
+            diags.iter().any(|d| d.message.contains("should be declared in a file named")),
+            "Java file/class mismatch should show in editor diagnostics: {:?}",
+            diags
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

@@ -24,6 +24,9 @@ struct SettingsFile {
     jdk_home: Option<String>,
     #[serde(default)]
     toolchain_paths: HashMap<String, String>,
+    /// Repos hidden from the IDE list (bare repo data is kept on disk).
+    #[serde(default)]
+    hidden_repos: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -282,6 +285,25 @@ impl SettingsStore {
 
     pub fn has_token_for_host(&self, host: &str) -> bool {
         self.token_for_host(host).is_some()
+    }
+
+    pub fn is_repo_hidden(&self, name: &str) -> bool {
+        self.inner
+            .read()
+            .expect("settings lock poisoned")
+            .hidden_repos
+            .iter()
+            .any(|n| n == name)
+    }
+
+    pub fn hide_repo(&self, name: &str) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        if guard.hidden_repos.iter().any(|n| n == name) {
+            return Ok(());
+        }
+        guard.hidden_repos.push(name.to_string());
+        self.save(&guard)?;
+        Ok(())
     }
 
     pub fn set_token(&self, host: &str, token: String) -> Result<()> {
