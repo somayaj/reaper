@@ -7,10 +7,11 @@ const AGENT_FONT_SIZE_KEY = 'reaper-agent-font-size';
 const AGENT_FONT_FAMILY_KEY = 'reaper-agent-font-family';
 const AGENT_FONT_MATCH_EDITOR_KEY = 'reaper-agent-font-match-editor';
 const AUTO_SAVE_KEY = 'reaper-auto-save';
+const AI_INLINE_COMPLETE_KEY = 'reaper-ai-inline-complete';
 const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
 const AUTO_SAVE_DELAY_MS = 800;
-const DIAG_DELAY_MS = 1200;
+const DIAG_DELAY_MS = 150;
 const PROJECT_INDEX_POLL_MS = 2000;
 const DEFAULT_EDITOR_FONT_SIZE = 13;
 const MIN_EDITOR_FONT_SIZE = 10;
@@ -115,6 +116,7 @@ const state = {
   cloneBusy: false,
   cloneSource: 'remote',
   currentBranch: '',
+  defaultBranch: '',
   editorReady: false,
   suppressEditorChange: false,
   autoSaveTimer: null,
@@ -126,9 +128,11 @@ const state = {
   projectIndexReady: false,
   projectIndexStartedAt: 0,
   projectProfile: null,
+  repoPickerUnregisterName: null,
   treeNavAnchor: null,
   mergeState: null,
   conflictDecorationIds: [],
+  diagDecorationIds: [],
   testRunWidgets: [],
   testMethodsByLine: new Map(),
   conflictFiles: new Set(),
@@ -136,6 +140,8 @@ const state = {
   mainView: 'editor',
   conflictPanelHidden: false,
   geminiConfigured: false,
+  javaLanguageLevel: 17,
+  languageContext: null,
   geminiModel: 'gemini-3.5-flash',
   pendingCommitSuggest: false,
   commitSuggestInFlight: false,
@@ -370,6 +376,84 @@ function setAutoSaveEnabled(enabled) {
   }
 }
 
+async function refreshJavaLanguageLevel() {
+  try {
+    const jdk = await api('/api/settings/jdk');
+    const ver = jdk?.effective_version || jdk?.version || '';
+    const m = String(ver).match(/(\d+)/);
+    state.javaLanguageLevel = m ? parseInt(m[1], 10) : 17;
+  } catch {
+    state.javaLanguageLevel = 17;
+  }
+}
+
+async function refreshLanguageContextForPath(path) {
+  if (!state.repo || !path) {
+    state.languageContext = null;
+    return refreshJavaLanguageLevel();
+  }
+  try {
+    const q = new URLSearchParams({ path });
+    const res = await api(repoApi(state.repo, `/workspace/language-context?${q}`));
+    if (res) {
+      state.languageContext = res;
+      if (res.java_level) state.javaLanguageLevel = res.java_level;
+      else if (path.endsWith('.java')) await refreshJavaLanguageLevel();
+      return;
+    }
+  } catch {
+    /* fall back */
+  }
+  if (path.endsWith('.java')) return refreshJavaLanguageLevelForPath(path);
+  state.languageContext = null;
+  return refreshJavaLanguageLevel();
+}
+
+async function refreshJavaLanguageLevelForPath(path) {
+  return refreshLanguageContextForPath(path);
+}
+
+async function initStatusFooter() {
+  const el = $('#status-version');
+  if (!el) return;
+  const metaBuild = document.querySelector('meta[name="reaper-ui-build"]')?.content;
+  let version = document.querySelector('meta[name="reaper-app-version"]')?.content;
+  const apply = (v, b) => {
+    const parts = [];
+    if (v) parts.push(`v${v}`);
+    if (b) parts.push(`build-${b}`);
+    el.textContent = parts.join(' · ');
+    el.title = parts.length ? `Reaper ${parts.join(' · ')}` : 'Reaper version';
+  };
+  apply(version, metaBuild);
+  try {
+    const info = await api('/api/version');
+    if (info) {
+      apply(info.version || version, info.build || metaBuild);
+    }
+  } catch {
+    /* server still starting */
+  }
+}
+
+function getAiInlineCompleteEnabled() {
+  const stored = localStorage.getItem(AI_INLINE_COMPLETE_KEY);
+  if (stored === null) return state.geminiConfigured;
+  return stored === '1';
+}
+
+function ensureAiInlineCompleteDefault(enabled) {
+  if (localStorage.getItem(AI_INLINE_COMPLETE_KEY) === null && enabled) {
+    setAiInlineCompleteEnabled(true);
+  }
+}
+
+function setAiInlineCompleteEnabled(enabled) {
+  localStorage.setItem(AI_INLINE_COMPLETE_KEY, enabled ? '1' : '0');
+  const checkbox = $('#settings-ai-inline-complete');
+  if (checkbox) checkbox.checked = enabled;
+}
+
 function getShowDotfiles() {
   const stored = localStorage.getItem(SHOW_DOTFILES_KEY);
   if (stored === null) return false;
@@ -425,14 +509,12 @@ function shouldOpenRepoInNewWindow(repoName) {
 function requestRepoSelection(repoName, { revertSelect = true } = {}) {
   if (shouldOpenRepoInNewWindow(repoName)) {
     if (revertSelect) {
-      const sel = $('#repo-select');
-      if (sel) sel.value = state.repo || '';
+      setRepoPickerLabel(state.repo || '');
     }
     openRepoInNewWindow(repoName);
     return;
   }
-  const sel = $('#repo-select');
-  if (sel) sel.value = repoName || '';
+  setRepoPickerLabel(repoName || '');
   void selectRepo(repoName);
 }
 
@@ -1002,6 +1084,7 @@ async function saveCompilerFromSettings(id) {
       body: JSON.stringify({ id, path }),
     });
     await loadCompilersSettingsSection();
+    void refreshJavaLanguageLevel();
     toast(`${id} compiler saved`, 'success');
   } catch (err) {
     toast(err.message || `Failed to save ${id}`, 'error');
@@ -1012,6 +1095,7 @@ async function clearCompilerFromSettings(id) {
   try {
     await api(`/api/settings/compilers/${encodeURIComponent(id)}`, { method: 'DELETE' });
     await loadCompilersSettingsSection();
+    void refreshJavaLanguageLevel();
     toast(`${id} using system default`, 'success');
   } catch (err) {
     toast(err.message || `Failed to clear ${id}`, 'error');
@@ -1130,6 +1214,7 @@ async function loadGeminiSettingsSection() {
   try {
     const cfg = await api('/api/settings/gemini');
     state.geminiConfigured = !!cfg.configured;
+    ensureAiInlineCompleteDefault(cfg.configured);
     syncGeminiModelSelect(cfg.model);
     if (cfg.configured) {
       statusEl.innerHTML = '<span class="ok">AI commit messages are enabled</span>';
@@ -1149,6 +1234,14 @@ async function loadGeminiSettingsSection() {
         : '';
     }
     updateSuggestCommitButton();
+    const aiInline = $('#settings-ai-inline-complete');
+    if (aiInline) {
+      aiInline.checked = getAiInlineCompleteEnabled();
+      if (!aiInline.dataset.bound) {
+        aiInline.dataset.bound = '1';
+        aiInline.addEventListener('change', (e) => setAiInlineCompleteEnabled(e.target.checked));
+      }
+    }
   } catch (err) {
     statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
     state.geminiConfigured = false;
@@ -1540,11 +1633,11 @@ function syncWelcomeLayout() {
   const welcomeVisible = empty && !empty.classList.contains('hidden');
   const editor = $('#editor-container');
   const toolbar = $('#editor-toolbar');
-  if (welcomeVisible) {
+  if (welcomeVisible || !state.activeTab) {
     editor?.classList.add('hidden');
     toolbar?.classList.add('hidden');
     toolbar?.classList.remove('flex');
-  } else if (state.activeTab) {
+  } else {
     editor?.classList.remove('hidden');
   }
 }
@@ -1786,6 +1879,22 @@ function setBranchLabel(branch) {
   state.currentBranch = branch || '';
   const el = $('#branch-picker-label');
   if (el) el.textContent = branch || 'branch';
+  updateDefaultBranchUi();
+}
+
+function updateDefaultBranchUi() {
+  const el = $('#repo-default-branch');
+  if (!el) return;
+  const def = state.defaultBranch;
+  if (!state.repo || !def) {
+    el.textContent = '';
+    el.classList.add('hidden');
+    el.title = '';
+    return;
+  }
+  el.textContent = `default ${def}`;
+  el.title = `Repository default branch: ${def}`;
+  el.classList.remove('hidden');
 }
 
 function filterBranchList(query) {
@@ -1910,6 +2019,78 @@ function hideBranchPicker() {
   if (ghost) ghost.innerHTML = '';
 }
 
+function setRepoPickerLabel(name) {
+  const el = $('#repo-picker-label');
+  if (el) el.textContent = name || 'Select repo…';
+}
+
+function showRepoPicker() {
+  closeAllMenus();
+  hidePalette();
+  hideBranchPicker();
+  state.repoPickerUnregisterName = null;
+  $('#repo-picker-overlay')?.classList.add('open');
+  renderRepoPickerResults();
+}
+
+function hideRepoPicker() {
+  state.repoPickerUnregisterName = null;
+  $('#repo-picker-overlay')?.classList.remove('open');
+}
+
+function renderRepoPickerResults() {
+  const results = $('#repo-picker-results');
+  if (!results) return;
+  if (!state.repos.length) {
+    results.innerHTML = '<p class="ij-repo-picker-empty">No repositories yet — import or create one from the welcome screen.</p>';
+    return;
+  }
+  const current = state.repo;
+  const pending = state.repoPickerUnregisterName;
+  results.innerHTML = state.repos.map((r) => {
+    const label = r.default_branch ? `${r.name} (${r.default_branch})` : r.name;
+    const isCurrent = r.name === current;
+    if (pending === r.name) {
+      return `
+      <div class="ij-repo-picker-row ij-repo-picker-row--confirm" role="option">
+        <span class="ij-repo-picker-confirm-text">Remove <strong>${escapeHtml(r.name)}</strong> from Reaper?</span>
+        <div class="ij-repo-picker-confirm-actions">
+          <button type="button" class="ij-repo-picker-confirm-btn" data-repo-unregister-confirm="${escapeHtml(r.name)}">Remove</button>
+          <button type="button" class="ij-repo-picker-confirm-btn ghost" data-repo-unregister-cancel>Cancel</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="ij-repo-picker-row${isCurrent ? ' current' : ''}" role="option" aria-selected="${isCurrent ? 'true' : 'false'}">
+      <button type="button" class="ij-repo-picker-item ij-palette-item" data-repo-open="${escapeHtml(r.name)}">
+        <span class="ij-repo-picker-name">${escapeHtml(label)}</span>
+        ${isCurrent ? '<span class="ij-repo-picker-tag">open</span>' : ''}
+      </button>
+      <button type="button" class="ij-repo-picker-remove" data-repo-remove="${escapeHtml(r.name)}" title="Remove from Reaper" aria-label="Remove ${escapeHtml(r.name)} from Reaper">×</button>
+    </div>`;
+  }).join('');
+}
+
+async function unregisterRepo(name) {
+  const repoName = name || state.repo;
+  if (!repoName) return;
+  try {
+    await api(repoApi(repoName, '/unregister'), { method: 'POST' });
+    toast(`Removed ${repoName} from Reaper`, 'success');
+    hideRepoInfoModal();
+    state.repoPickerUnregisterName = null;
+    if (state.repo === repoName) {
+      state.repo = null;
+      resetUI();
+      updateWindowTitle();
+    }
+    hideRepoPicker();
+    await loadRepos();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function renderBranchPickerResults(query) {
   const results = $('#branch-picker-results');
   if (!results) return;
@@ -1921,10 +2102,12 @@ function renderBranchPickerResults(query) {
     return;
   }
   const current = state.currentBranch;
+  const defaultBranch = state.defaultBranch;
   results.innerHTML = branchPickerBranches.map((b, i) => `
     <button type="button" id="branch-picker-option-${i}" class="ij-branch-picker-item ij-palette-item${i === branchPickerIndex ? ' active' : ''}${b === current ? ' current' : ''}" data-branch-idx="${i}" role="option" aria-selected="${i === branchPickerIndex ? 'true' : 'false'}">
       <span class="ij-branch-picker-name">⎇ ${highlightBranchName(b, query)}</span>
       ${b === current ? '<span class="ij-branch-picker-tag">current</span>' : ''}
+      ${b === defaultBranch && b !== current ? '<span class="ij-branch-picker-tag">default</span>' : ''}
     </button>`).join('');
   results.querySelectorAll('[data-branch-idx]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1955,6 +2138,7 @@ async function runGoToClassSearch(query) {
     const q = new URLSearchParams({ q: query.trim(), limit: '50' });
     gotoClassHits = await api(`${repoApi(state.repo, '/workspace/classes')}?${q}`);
     if (!Array.isArray(gotoClassHits)) gotoClassHits = [];
+    gotoClassHits = gotoClassHits.filter((hit) => !String(hit.path || '').toLowerCase().endsWith('.class'));
     gotoClassIndex = 0;
     renderGoToClassHits();
   } catch (e) {
@@ -2170,6 +2354,44 @@ function bindBranchPicker() {
   });
   $('#branch-picker-overlay')?.addEventListener('click', (e) => {
     if (e.target === $('#branch-picker-overlay')) hideBranchPicker();
+  });
+}
+
+function bindRepoPicker() {
+  $('#repo-picker-btn')?.addEventListener('click', () => showRepoPicker());
+  $('#repo-picker-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#repo-picker-overlay')) hideRepoPicker();
+  });
+  $('#repo-picker-results')?.addEventListener('click', (e) => {
+    const removeBtn = e.target.closest('[data-repo-remove]');
+    if (removeBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      state.repoPickerUnregisterName = removeBtn.dataset.repoRemove || null;
+      renderRepoPickerResults();
+      return;
+    }
+    const confirmBtn = e.target.closest('[data-repo-unregister-confirm]');
+    if (confirmBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      void unregisterRepo(confirmBtn.dataset.repoUnregisterConfirm);
+      return;
+    }
+    if (e.target.closest('[data-repo-unregister-cancel]')) {
+      e.preventDefault();
+      e.stopPropagation();
+      state.repoPickerUnregisterName = null;
+      renderRepoPickerResults();
+      return;
+    }
+    const openBtn = e.target.closest('[data-repo-open]');
+    if (openBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      hideRepoPicker();
+      requestRepoSelection(openBtn.dataset.repoOpen, { revertSelect: false });
+    }
   });
 }
 
@@ -2749,7 +2971,7 @@ function setMainView(mode) {
     diff?.classList.add('hidden');
     conflict?.classList.toggle('hidden', state.conflictPanelHidden);
   } else {
-    editor?.classList.remove('hidden');
+    editor?.classList.toggle('hidden', !state.activeTab);
     diff?.classList.add('hidden');
     conflict?.classList.add('hidden');
   }
@@ -2859,6 +3081,8 @@ function defaultReadmeContent(path) {
 function initEditor() {
   require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
   require(['vs/editor/editor.main'], () => {
+    ensureGeminiReady().finally(() => {
+    void refreshJavaLanguageLevel();
     window.ReaperThemes?.defineMonacoThemes();
     const fontSize = getEditorFontSize();
     const fontSpec = getEditorFontSpec();
@@ -2884,9 +3108,29 @@ function initEditor() {
       cursorStyle: 'line',
       smoothScrolling: true,
       links: true,
-      wordBasedSuggestions: 'currentDocument',
-      quickSuggestions: { other: true, strings: true, comments: false },
+      wordBasedSuggestions: getAiInlineCompleteEnabled() ? 'off' : 'currentDocument',
+      quickSuggestions: { other: true, strings: false, comments: false },
+      quickSuggestionsDelay: 200,
       suggestOnTriggerCharacters: true,
+      suggest: {
+        preview: false,
+        showIcons: true,
+        snippetsPreventQuickSuggestions: false,
+        filterGraceful: true,
+        localityBonus: true,
+        showStatusBar: false,
+      },
+      inlineSuggest: {
+        enabled: true,
+        showToolbar: false,
+        suppressSuggestions: getAiInlineCompleteEnabled(),
+      },
+      lightbulb: {
+        enabled: monaco.editor.ShowLightbulbIconMode?.On
+          ?? monaco.editor.ShowLightbulbIconMode?.OnCode
+          ?? 2,
+      },
+      tabCompletion: 'on',
       renderWhitespace: 'selection',
       renderValidationDecorations: 'on',
       unicodeHighlight: {
@@ -2911,6 +3155,7 @@ function initEditor() {
       applyTestRunDecorations();
     });
     state.editor.onDidChangeCursorPosition((e) => updateEditorStatus(e.position));
+    setupDiagnosticNavigation(state.editor);
     window.ReaperLang?.setupEditorFeatures(state.editor, {
       api,
       repoApi,
@@ -2919,7 +3164,25 @@ function initEditor() {
       getEditor: () => state.editor,
       openFileAt,
       isFileDirty: (path) => state.dirty.has(path),
+      getAiInlineComplete: () => getAiInlineCompleteEnabled(),
+      getGeminiConfigured: () => state.geminiConfigured,
+      getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
+      getLanguageContext: () => state.languageContext,
       toast,
+      showQuickFixMenu,
+      scheduleDiagnostics: () => scheduleDiagnostics(),
+      getDiagnosticsInRange: (model, range) => {
+        if (!model || !range || !fileDiags.length) return [];
+        return fileDiags.filter((d) => {
+          const span = diagnosticMarkerSpan(model, d);
+          if (range.endLineNumber < span.startLineNumber
+            || range.startLineNumber > span.endLineNumber) {
+            return false;
+          }
+          return true;
+        });
+      },
+      diagnosticSpan: (model, d) => diagnosticMarkerSpan(model, d),
       setLanguageStatus: (label) => {
         const el = $('#status-language');
         if (el) el.textContent = label;
@@ -2927,20 +3190,17 @@ function initEditor() {
     });
     state.editorReady = true;
     syncEditorFromActiveTab();
+    });
   });
 }
 
 // --- Repos ---
 async function loadRepos() {
   state.repos = await api('/api/repos');
-  const sel = $('#repo-select');
-  sel.innerHTML = '<option value="">Select repository…</option>';
-  state.repos.forEach((r) => {
-    const opt = document.createElement('option');
-    opt.value = r.name;
-    opt.textContent = r.name;
-    sel.appendChild(opt);
-  });
+  setRepoPickerLabel(state.repo);
+  if ($('#repo-picker-overlay')?.classList.contains('open')) {
+    renderRepoPickerResults();
+  }
   if (!state.tabs.length && !state.repo) {
     renderWelcome();
     $('#empty-state')?.classList.remove('hidden');
@@ -2953,6 +3213,7 @@ async function selectRepo(name) {
     state.repo = null;
     resetUI();
     updateWindowTitle();
+    setRepoPickerLabel('');
     return;
   }
 
@@ -2971,7 +3232,9 @@ async function selectRepo(name) {
   }
   const detail = await api(repoApi(name));
   state.branches = detail.branches;
+  state.defaultBranch = detail.default_branch || detail.summary?.default_branch || '';
   updateBranchSelect();
+  updateDefaultBranchUi();
   updateRepoInfo(detail);
   enableControls();
   updateAgentUi();
@@ -2984,10 +3247,15 @@ async function selectRepo(name) {
     /* no readme in repo */
   }
   terminalLog(`Opened workspace: ${name}`);
-  $('#empty-state')?.classList.add('hidden');
+  if (state.activeTab) {
+    $('#empty-state')?.classList.add('hidden');
+  } else {
+    $('#empty-state')?.classList.remove('hidden');
+  }
   syncWelcomeLayout();
   updateMenuState();
   updateWindowTitle();
+  setRepoPickerLabel(name);
 }
 
 function showNoRepoFileTree() {
@@ -3017,11 +3285,13 @@ function resetUI() {
   state.lastGitStatusFiles = [];
   state.mergeBlockedCommit = false;
   state.repoDetail = null;
+  state.defaultBranch = '';
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = true;
   $('#branch-picker-btn').disabled = true;
   setBranchLabel('');
-  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
+  updateDefaultBranchUi();
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-rollback', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   closeAllTabs();
@@ -3032,6 +3302,7 @@ function resetUI() {
   updateAgentUi();
   updateStatusBar();
   updateMenuState();
+  setRepoPickerLabel('');
 }
 
 function enableControls() {
@@ -3040,12 +3311,18 @@ function enableControls() {
   if (btnRepoInfo) btnRepoInfo.disabled = false;
   ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
   updateRunButtons();
+  updateRollbackButton();
   updateMenuState();
 }
 
 function updateBranchSelect() {
   if (state.currentBranch && state.branches.includes(state.currentBranch)) return;
-  if (state.branches.length) setBranchLabel(state.branches[0]);
+  const def = state.defaultBranch;
+  if (def && state.branches.includes(def)) {
+    setBranchLabel(def);
+  } else if (state.branches.length) {
+    setBranchLabel(state.branches[0]);
+  }
 }
 
 function updateRepoInfo(detail) {
@@ -3071,6 +3348,10 @@ function updateRepoInfo(detail) {
     <div class="flex flex-col gap-2">
       <button id="btn-publish-github" type="button" class="w-full py-2 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10">Publish to GitHub</button>
       ${s.remote_url ? '<button id="btn-push-remote" type="button" class="w-full py-2 text-xs rounded border border-surface-700 text-gray-300 hover:bg-surface-800">Push to remote</button>' : ''}
+    </div>
+    <div class="space-y-2">
+      <div class="text-xs text-gray-500">Default branch</div>
+      <div class="text-sm text-white font-mono">${s.default_branch || '—'}</div>
     </div>
     <div class="grid grid-cols-2 gap-3">
       <div class="bg-surface-950 rounded p-3 border border-surface-700">
@@ -3135,7 +3416,7 @@ async function deleteRepo() {
   hideRepoInfoModal();
   state.repo = null;
   state.repoDetail = null;
-  $('#repo-select').value = '';
+  setRepoPickerLabel('');
   resetUI();
   await loadRepos();
 }
@@ -3153,7 +3434,6 @@ async function createRepo(e) {
     hideModal();
     e.target.reset();
     await loadRepos();
-    $('#repo-select').value = repo.name;
     await selectRepo(repo.name);
     toast(`Created ${repo.name}`, 'success');
   } catch (err) {
@@ -3254,7 +3534,6 @@ async function cloneRepo(e) {
     hideCloneModal();
     form.reset();
     await loadRepos();
-    $('#repo-select').value = repo.name;
     await selectRepo(repo.name);
     toast(`Cloned ${repo.name}`, 'success');
   } catch (err) {
@@ -3300,7 +3579,6 @@ async function importLocalRepo() {
     hideCloneModal();
     $('#clone-repo-form')?.reset();
     await loadRepos();
-    $('#repo-select').value = repo.name;
     await selectRepo(repo.name);
     toast(`Imported ${repo.name}`, 'success');
   } catch (err) {
@@ -3602,6 +3880,15 @@ async function loadExpandedTreeGaps() {
   renderFilteredTree();
 }
 
+function isCompiledTreeEntry(n) {
+  const name = n.name || '';
+  const path = (n.path || '').replace(/\\/g, '/');
+  if (name.endsWith('.class')) return true;
+  if (n.type === 'dir' && (name === 'build' || name === 'target' || name === 'out' || name === 'bin')) return true;
+  if (path.includes('/build/classes/') || path.includes('/target/classes/')) return true;
+  return false;
+}
+
 function isHiddenTreeEntry(n) {
   const name = n.name || '';
   const path = (n.path || '').replace(/\\/g, '/');
@@ -3613,10 +3900,10 @@ function isHiddenTreeEntry(n) {
 }
 
 function filterHiddenTreeItems(nodes) {
-  if (getShowDotfiles()) return nodes;
   const out = [];
   for (const n of nodes) {
-    if (isHiddenTreeEntry(n)) continue;
+    if (isCompiledTreeEntry(n)) continue;
+    if (!getShowDotfiles() && isHiddenTreeEntry(n)) continue;
     if (n.type === 'dir') {
       out.push({ ...n, children: filterHiddenTreeItems(n.children || []) });
     } else {
@@ -3893,6 +4180,7 @@ function activateTabShell(path) {
   $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
   updateSaveButton();
   scheduleGradleInfoRefresh();
+  if (path) void refreshLanguageContextForPath(path);
   updateMenuState();
   setStatusMessage(path.split('/').pop() || path);
   fileDiags = [];
@@ -3914,30 +4202,115 @@ function isDiagnosablePath(path) {
 
 function scheduleDiagnostics() {
   if (diagTimer) clearTimeout(diagTimer);
+  if (!state.repo || !state.editor || !state.activeTab) return;
   if (!isDiagnosablePath(state.activeTab)) {
     clearDiagnostics();
     return;
   }
+  // Keep existing squiggles until the next compile finishes (no flicker while typing).
   diagTimer = setTimeout(runDiagnostics, DIAG_DELAY_MS);
+}
+
+function clearDiagDecorations() {
+  if (!state.editor || !window.monaco || !state.diagDecorationIds.length) return;
+  state.diagDecorationIds = state.editor.deltaDecorations(state.diagDecorationIds, []);
 }
 
 function clearDiagnostics() {
   fileDiags = [];
   diagJumpIndex = 0;
   updateDiagnosticsStatusBar(state.activeTab, []);
+  clearDiagDecorations();
   const model = state.editor?.getModel();
   if (model && window.monaco) {
     monaco.editor.setModelMarkers(model, 'reaper-diagnostics', []);
   }
 }
 
+function adjustDiagnosticPosition(model, d) {
+  let line = Math.max(1, d.line || 1);
+  let column = Math.max(1, d.column || 1);
+  const msg = String(d.message || '').toLowerCase();
+  const isSemicolonExpected = msg.includes("'") && msg.includes(';') && msg.includes('expected');
+  const isCloseParenExpected = msg.includes("'") && msg.includes(')') && msg.includes('expected');
+  const isNotStatement = msg.includes('not a statement');
+
+  if (line > 1 && (isSemicolonExpected || isCloseParenExpected || isNotStatement)) {
+    const reported = model.getLineContent(line).trim();
+    const looksLikeNextToken = !reported
+      || reported === '}'
+      || reported.startsWith('}')
+      || reported === ')'
+      || reported === ');'
+      || reported.startsWith(');')
+      || reported.startsWith(')')
+      || reported.startsWith('catch ')
+      || reported.startsWith('finally ')
+      || reported.startsWith('else');
+
+    if (looksLikeNextToken) {
+      const prevLine = line - 1;
+      const prev = model.getLineContent(prevLine);
+      if (prev.trim()) {
+        line = prevLine;
+        column = Math.max(1, prev.trimEnd().length);
+      }
+    } else if (isSemicolonExpected) {
+      // Javac often reports ';' expected on the NEXT statement after an incomplete line (e.g. orphan "a").
+      let scan = line - 1;
+      while (scan >= 1 && !model.getLineContent(scan).trim()) scan--;
+      if (scan >= 1 && scan < line) {
+        const prevText = model.getLineContent(scan);
+        const trimmed = prevText.trim();
+        if (trimmed && !trimmed.endsWith(';') && !trimmed.endsWith('{') && !trimmed.endsWith('}')) {
+          line = scan;
+          column = Math.max(1, prevText.trimEnd().length);
+        }
+      }
+    }
+  }
+
+  return { ...d, line, column };
+}
+
 function diagnosticMarkerSpan(model, d) {
-  const line = Math.max(1, d.line || 1);
-  const startCol = Math.max(1, d.column || 1);
+  const adjusted = adjustDiagnosticPosition(model, d);
+  const line = Math.max(1, adjusted.line || 1);
+  const lineText = model.getLineContent(line);
+  let startCol = Math.max(1, adjusted.column || 1);
+
+  const msg = String(d.message || '');
+  const msgLower = msg.toLowerCase();
+  if (msgLower.includes('cannot find symbol') || msgLower.includes('package') && msgLower.includes('does not exist')) {
+    const sym = msg.match(/symbol:\s*(?:class|interface|variable|method|package)?\s*([A-Za-z_][\w.]*)/i)
+      || msg.match(/package\s+([A-Za-z_][\w.]*)/i);
+    if (sym?.[1]) {
+      const idx = lineText.indexOf(sym[1]);
+      if (idx >= 0) {
+        startCol = idx + 1;
+        return {
+          startLineNumber: line,
+          startColumn: startCol,
+          endLineNumber: line,
+          endColumn: startCol + sym[1].length,
+        };
+      }
+    }
+  }
+
+  if (adjusted.line !== Math.max(1, d.line || 1)) {
+    const trimmed = lineText.trimEnd();
+    const lastToken = trimmed.match(/(\S+)$/);
+    if (lastToken) {
+      startCol = trimmed.length - lastToken[1].length + 1;
+    }
+  } else if (!d.column || d.column <= 1) {
+    const first = lineText.search(/\S/);
+    if (first >= 0) startCol = first + 1;
+  }
   const endLine = Math.max(line, d.end_line || d.line || line);
   let endCol = d.end_column || 0;
   if (!endCol || endCol <= startCol) {
-    const lineText = model.getLineContent(line);
     const rest = lineText.slice(startCol - 1);
     const token = rest.match(/^\S+/);
     endCol = token
@@ -3961,6 +4334,39 @@ function diagnosticMarkerSpan(model, d) {
   };
 }
 
+function updateAiFixControls(errors) {
+  const show = errors > 0;
+  const title = show
+    ? `AI quick fix for ${errors} error${errors === 1 ? '' : 's'} (Ctrl+.)`
+    : 'AI quick fix';
+  const dock = $('#ai-bulb-dock');
+  const tb = $('#tb-ai-fix');
+  const status = $('#status-ai-fix');
+  if (dock) {
+    dock.classList.toggle('hidden', !show);
+    dock.setAttribute('aria-hidden', show ? 'false' : 'true');
+  }
+  if (tb) {
+    tb.disabled = !show;
+    tb.classList.toggle('is-glowing', show);
+    tb.title = title;
+  }
+  if (status) {
+    status.classList.toggle('hidden', !show);
+    status.classList.toggle('is-glowing', show);
+    status.title = title;
+  }
+}
+
+function aiFixMenuAnchor() {
+  const dock = $('#ai-bulb-dock');
+  const tb = $('#tb-ai-fix');
+  if (dock && !dock.classList.contains('hidden') && tb) return tb;
+  const status = $('#status-ai-fix');
+  if (status && !status.classList.contains('hidden')) return status;
+  return tb || status;
+}
+
 function updateDiagnosticsStatusBar(path, diags) {
   const el = $('#status-diagnostics');
   const countEl = $('#status-diag-count');
@@ -3974,6 +4380,8 @@ function updateDiagnosticsStatusBar(path, diags) {
     el.classList.remove('has-errors', 'has-warnings');
     countEl.textContent = '';
     el.title = 'No problems';
+    updateAiFixControls(0);
+    hideQuickFixMenu();
     return;
   }
 
@@ -3988,6 +4396,80 @@ function updateDiagnosticsStatusBar(path, diags) {
 
   const name = path?.split('/').pop() || 'file';
   el.title = `${name}: ${parts.join(', ')} — click to go to next problem`;
+
+  updateAiFixControls(errors);
+}
+
+function hideQuickFixMenu() {
+  const pop = $('#ai-quickfix-popover');
+  if (pop) pop.classList.add('hidden');
+}
+
+function showQuickFixMenu(fixes, onPick) {
+  const pop = $('#ai-quickfix-popover');
+  const anchor = aiFixMenuAnchor();
+  if (!pop || !fixes?.length) return;
+  pop.innerHTML = fixes.map((f, i) => {
+    const title = String(f.title || 'Fix').replace(/</g, '&lt;');
+    return `<button type="button" class="ij-quickfix-item" data-idx="${i}">${title}</button>`;
+  }).join('');
+  pop.classList.remove('hidden');
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect();
+    pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 240))}px`;
+    if (rect.top < 72) {
+      pop.style.top = `${rect.bottom + 6}px`;
+    } else {
+      pop.style.top = `${rect.top - 8}px`;
+      requestAnimationFrame(() => {
+        const popRect = pop.getBoundingClientRect();
+        pop.style.top = `${Math.max(8, rect.top - popRect.height - 6)}px`;
+        if (parseFloat(pop.style.top) < 8) {
+          pop.style.top = `${rect.bottom + 6}px`;
+        }
+      });
+    }
+  }
+  pop.querySelectorAll('.ij-quickfix-item').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fix = fixes[Number(btn.dataset.idx)];
+      hideQuickFixMenu();
+      if (fix) onPick(fix);
+    });
+  });
+}
+
+function findDiagnosticNearLine(model, line) {
+  if (!fileDiags.length) return null;
+  const exact = fileDiags.find((d) => adjustDiagnosticPosition(model, d).line === line);
+  if (exact) return exact;
+  let best = null;
+  let bestDist = Infinity;
+  for (const d of fileDiags) {
+    const adj = adjustDiagnosticPosition(model, d);
+    const dist = Math.abs(adj.line - line);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = d;
+    }
+  }
+  return best;
+}
+
+function jumpToDiagnostic(d) {
+  const model = state.editor?.getModel();
+  if (!state.editor || !model || !d) return;
+  const span = diagnosticMarkerSpan(model, d);
+  state.editor.setPosition({ lineNumber: span.startLineNumber, column: span.startColumn });
+  state.editor.setSelection(new monaco.Range(
+    span.startLineNumber,
+    span.startColumn,
+    span.endLineNumber,
+    span.endColumn,
+  ));
+  state.editor.revealLineInCenter(span.startLineNumber);
+  state.editor.focus();
 }
 
 function jumpToNextDiagnostic() {
@@ -3997,11 +4479,54 @@ function jumpToNextDiagnostic() {
   );
   const d = sorted[diagJumpIndex % sorted.length];
   diagJumpIndex = (diagJumpIndex + 1) % sorted.length;
-  const line = Math.max(1, d.line || 1);
-  const column = Math.max(1, d.column || 1);
-  state.editor.setPosition({ lineNumber: line, column });
-  state.editor.revealLineInCenter(line);
-  state.editor.focus();
+  jumpToDiagnostic(d);
+}
+
+function lineFromEditorMouseEvent(editor, e) {
+  if (e.target.position?.lineNumber) {
+    return e.target.position.lineNumber;
+  }
+  const clientX = e.event.browserEvent.clientX;
+  const clientY = e.event.browserEvent.clientY;
+  const target = editor.getTargetAtClientPoint(clientX, clientY);
+  if (target?.position?.lineNumber) {
+    return target.position.lineNumber;
+  }
+  const model = editor.getModel();
+  if (!model) return null;
+  const dom = editor.getDomNode();
+  if (!dom) return null;
+  const layout = editor.getLayoutInfo();
+  const rect = dom.getBoundingClientRect();
+  const yInContent = clientY - rect.top - layout.contentTop + editor.getScrollTop();
+  const lineHeight = editor.getOption(monaco.editor.EditorOption.lineHeight);
+  if (!lineHeight) return null;
+  return Math.max(1, Math.min(Math.floor(yInContent / lineHeight) + 1, model.getLineCount()));
+}
+
+function setupDiagnosticNavigation(editor) {
+  if (!window.monaco) return;
+  const glyph = monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN;
+  const ruler = monaco.editor.MouseTargetType.OVERVIEW_RULER;
+  let lastNavAt = 0;
+
+  editor.onMouseUp((e) => {
+    if (!fileDiags.length) return;
+    const t = e.target.type;
+    if (t !== glyph && t !== ruler) return;
+    const now = Date.now();
+    if (now - lastNavAt < 250) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const line = lineFromEditorMouseEvent(editor, e);
+    if (!line) return;
+    const d = findDiagnosticNearLine(model, line);
+    if (!d) return;
+    lastNavAt = now;
+    jumpToDiagnostic(d);
+    e.event.preventDefault();
+    e.event.stopPropagation();
+  });
 }
 
 async function runDiagnostics() {
@@ -4040,6 +4565,7 @@ function applyDiagnostics(path, diags) {
   }));
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
   updateDiagnosticsStatusBar(path, diags);
+  state.editor?.prefetchAiQuickFixes?.(diags);
 }
 
 function isGradleFilePath(path) {
@@ -4118,6 +4644,7 @@ function updateRunButtons() {
   const tbSave = $('#tb-save');
   if (tbFormat) tbFormat.disabled = !state.activeTab;
   if (tbSave) tbSave.disabled = !state.activeTab || !state.dirty.has(state.activeTab);
+  updateRollbackButton();
 }
 
 async function openFileAt(path, line = 1, column = 1) {
@@ -4179,6 +4706,12 @@ function closeAllTabs() {
   state.tabContents.clear();
   state.activeTab = null;
   state.dirty.clear();
+  if (state.editor) {
+    state.suppressEditorChange = true;
+    state.editor.setValue('');
+    monaco.editor.setModelLanguage(state.editor.getModel(), 'plaintext');
+    state.suppressEditorChange = false;
+  }
   const list = $('#tab-list');
   if (list) list.innerHTML = '';
   let empty = $('#empty-state');
@@ -4189,8 +4722,8 @@ function closeAllTabs() {
   }
   renderWelcome();
   $('#empty-state')?.classList.remove('hidden');
-  syncWelcomeLayout();
   setMainView('editor');
+  syncWelcomeLayout();
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   updateBreadcrumbs(null);
@@ -4297,12 +4830,33 @@ function hideFileModal() {
   $('#file-modal-overlay').classList.remove('flex');
 }
 
+function updateRollbackButton() {
+  const btn = $('#tb-rollback');
+  if (!btn) return;
+  const model = state.editor?.getModel?.();
+  const canUndo = !!(model && !model.isDisposed() && model.canUndo());
+  btn.disabled = !state.activeTab || !canUndo;
+}
+
+function rollbackLastChange() {
+  if (!state.editor || !state.activeTab) return;
+  const model = state.editor.getModel();
+  if (!model?.canUndo()) {
+    toast('Nothing to roll back', 'info');
+    return;
+  }
+  state.editor.focus();
+  state.editor.trigger('keyboard', 'undo', null);
+  updateRollbackButton();
+}
+
 function updateSaveButton() {
   const dirty = !!(state.activeTab && state.dirty.has(state.activeTab));
   const btn = $('#btn-save');
   if (btn) btn.disabled = !dirty;
   const tbSave = $('#tb-save');
   if (tbSave) tbSave.disabled = !dirty;
+  updateRollbackButton();
   updateMenuState();
 }
 
@@ -6171,14 +6725,22 @@ function installFormClipboardShortcuts() {
 function bindEvents() {
   installFormClipboardShortcuts();
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
-  $('#repo-select').addEventListener('change', (e) => {
-    const name = e.target.value;
-    if (shouldOpenRepoInNewWindow(name)) {
-      e.target.value = state.repo || '';
-      openRepoInNewWindow(name);
-      return;
+  $('#status-ai-fix')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.editor?.runAiQuickFix?.();
+  });
+  $('#tb-ai-fix')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.editor?.runAiQuickFix?.();
+  });
+  document.addEventListener('click', (e) => {
+    if (
+      !e.target.closest('#ai-quickfix-popover')
+      && !e.target.closest('#status-ai-fix')
+      && !e.target.closest('#tb-ai-fix')
+    ) {
+      hideQuickFixMenu();
     }
-    selectRepo(name);
   });
   $('#branch-picker-btn')?.addEventListener('click', showBranchPicker);
   $('#btn-open-agent').addEventListener('click', toggleAgent);
@@ -6219,6 +6781,7 @@ function bindEvents() {
   $('#btn-save')?.addEventListener('click', saveFile);
   $('#tb-save')?.addEventListener('click', saveFile);
   $('#tb-format')?.addEventListener('click', formatDocument);
+  $('#tb-rollback')?.addEventListener('click', rollbackLastChange);
   $('#tb-run')?.addEventListener('click', runActive);
   $('#gradle-task')?.addEventListener('change', () => updateRunButtons());
   $('#btn-commit-only')?.addEventListener('click', commitOnly);
@@ -6348,6 +6911,11 @@ function bindEvents() {
         hideGoToClass();
         return;
       }
+      if ($('#repo-picker-overlay')?.classList.contains('open')) {
+        e.preventDefault();
+        hideRepoPicker();
+        return;
+      }
       if ($('#branch-picker-overlay')?.classList.contains('open')) {
         e.preventDefault();
         hideBranchPicker();
@@ -6465,16 +7033,16 @@ async function init() {
   renderTerminalTabs();
   renderTerminalOutput();
   syncDotfilesControls(getShowDotfiles());
+  await ensureGeminiReady();
   initEditor();
   bindEvents();
   bindMenus();
   bindPalette();
   bindGoToClass();
   bindBranchPicker();
+  bindRepoPicker();
   mountReaperIcons();
-  const build = document.querySelector('meta[name="reaper-ui-build"]')?.content;
-  const buildEl = $('#status-build');
-  if (buildEl && build) buildEl.textContent = `ui-${build}`;
+  void initStatusFooter();
   initSidebarResize();
   initTerminalBottomResize();
   applyAgentDock();
@@ -6487,6 +7055,7 @@ async function init() {
   void loadGeminiSettingsSection();
   try {
     await loadRepos();
+    void initStatusFooter();
   } catch (err) {
     toast(`Could not reach Reaper backend: ${err.message}. Quit other Reaper copies and relaunch.`, 'error', { duration: 15000 });
   }
@@ -6494,12 +7063,8 @@ async function init() {
   if (!initialRepo && !state.repo) {
     showNoRepoFileTree();
   }
-  if (initialRepo) {
-    const sel = $('#repo-select');
-    if (sel && [...sel.options].some((o) => o.value === initialRepo)) {
-      sel.value = initialRepo;
-      await selectRepo(initialRepo);
-    }
+  if (initialRepo && state.repos.some((r) => r.name === initialRepo)) {
+    await selectRepo(initialRepo);
   }
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {

@@ -346,13 +346,18 @@ pub fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| file_path.clone())
     } else {
-        file_path.clone()
+        file_path
+            .parent()
+            .filter(|p| p.exists())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| ws.to_path_buf())
     };
 
     loop {
-        let dir_canon = dir
-            .canonicalize()
-            .with_context(|| format!("resolve {}", dir.display()))?;
+        let dir_canon = match dir.canonicalize() {
+            Ok(c) => c,
+            Err(_) => break,
+        };
         if !dir_canon.starts_with(&ws_canon) {
             break;
         }
@@ -580,5 +585,16 @@ mod tests {
             ":spring-boot-project:spring-boot-test:test"
         );
         assert_eq!(gradle_test_task_name("."), "test");
+    }
+
+    #[test]
+    fn find_gradle_root_with_missing_file_uses_parent() {
+        let ws = std::env::temp_dir().join("reaper-gradle-missing-file");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = find_gradle_root(&ws, "NotYetSaved.java")
+            .expect("find gradle root should not error for unsaved paths");
+        assert!(root.is_none());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

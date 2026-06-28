@@ -20,11 +20,14 @@ pub fn check_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
 
     let _ = safe_join(ws, rel_path)?;
 
-    if let Some(gradle_root) = find_gradle_root(ws, rel_path)? {
-        return check_gradle_java(ws, &gradle_root, rel_path, content);
-    }
+    let javac_diags = if let Some(gradle_root) = find_gradle_root(ws, rel_path)? {
+        check_gradle_java(ws, &gradle_root, rel_path, content)?
+    } else {
+        check_plain_java(ws, rel_path, content)?
+    };
 
-    check_plain_java(ws, rel_path, content)
+    let local = local_file_class_name_diags(rel_path, content);
+    Ok(merge_file_name_diags(javac_diags, local))
 }
 
 fn check_gradle_java(
@@ -34,10 +37,9 @@ fn check_gradle_java(
     content: &str,
 ) -> Result<Vec<Diagnostic>> {
     let jars = classpath::cached_classpath_jars(gradle_root);
-    let classpath_ready = !jars.is_empty();
-    if !classpath_ready {
+    if jars.is_empty() {
         tracing::debug!(
-            "Gradle classpath not resolved yet for {} — running syntax-only javac",
+            "Gradle classpath not resolved yet for {} — javac may report dependency errors",
             rel_path
         );
     }
@@ -99,7 +101,7 @@ fn check_gradle_java(
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    Ok(filter_compiler_diagnostics(diags, classpath_ready))
+    Ok(diags)
 }
 
 fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -134,7 +136,7 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    Ok(filter_compiler_diagnostics(diags, false))
+    Ok(diags)
 }
 
 fn append_javac_release_args(args: &mut Vec<String>, gradle_root: &Path) {
@@ -174,6 +176,21 @@ fn detect_java_release(gradle_root: &Path) -> String {
         }
     }
     "17".into()
+}
+
+/// Effective Java source level for a file: min(selected JDK major, project sourceCompatibility).
+pub fn java_language_level(ws: &Path, path: &str) -> u32 {
+    let jdk_major = crate::jdk::effective_java_home()
+        .ok()
+        .and_then(|h| crate::jdk::java_major_version(&h))
+        .unwrap_or(17);
+    if let Ok(Some(gradle_root)) = super::gradle::find_gradle_root(ws, path) {
+        let project = detect_java_release(&gradle_root)
+            .parse()
+            .unwrap_or(jdk_major);
+        return jdk_major.min(project);
+    }
+    jdk_major
 }
 
 fn extract_release_version(text: &str) -> Option<String> {
@@ -228,17 +245,35 @@ fn parse_compiler_output(text: &str, ws: &Path, focus_path: &str, _content: &str
         let line = lines[i].trim();
         if let Some(diag) = parse_diagnostic_line(line, &ws_canon) {
             let mut message = diag.message;
+            let mut column = diag.column;
+            let mut end_column = diag.end_column;
             i += 1;
             while i < lines.len() {
-                let next = lines[i].trim();
-                if parse_diagnostic_line(next, &ws_canon).is_some() || next.is_empty() {
+                let raw = lines[i];
+                let next = raw.trim();
+                if parse_diagnostic_line(next, &ws_canon).is_some() {
                     break;
+                }
+                if next.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                if raw.contains('^') {
+                    if let Some(caret_idx) = raw.find('^') {
+                        column = caret_idx as u32 + 1;
+                    }
+                    i += 1;
+                    continue;
                 }
                 if next.starts_with("symbol:")
                     || next.starts_with("location:")
-                    || next.starts_with("^")
                     || next.starts_with("Note:")
                 {
+                    if next.starts_with("symbol:") {
+                        if let Some(name) = parse_javac_symbol_name(next) {
+                            end_column = Some(column + name.len() as u32);
+                        }
+                    }
                     if !message.is_empty() {
                         message.push(' ');
                     }
@@ -252,6 +287,8 @@ fn parse_compiler_output(text: &str, ws: &Path, focus_path: &str, _content: &str
             {
                 diags.push(Diagnostic {
                     message,
+                    column,
+                    end_column,
                     ..diag
                 });
             }
@@ -261,6 +298,15 @@ fn parse_compiler_output(text: &str, ws: &Path, focus_path: &str, _content: &str
     }
 
     diags
+}
+
+fn parse_javac_symbol_name(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("symbol:")?.trim();
+    let name = rest.split_whitespace().last()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn parse_diagnostic_line(line: &str, ws: &Path) -> Option<Diagnostic> {
@@ -332,55 +378,110 @@ fn strip_diag_overlay_prefix(path: &str) -> String {
         .to_string()
 }
 
-/// Single-file javac floods imports with missing-symbol noise; show real compiler errors.
-fn filter_compiler_diagnostics(diags: Vec<Diagnostic>, classpath_ready: bool) -> Vec<Diagnostic> {
-    diags
+#[derive(Debug, Clone)]
+struct PublicTypeDecl {
+    line: u32,
+    column: u32,
+    name: String,
+}
+
+/// Public top-level type name must match the `.java` file stem (javac rule).
+fn local_file_class_name_diags(rel_path: &str, content: &str) -> Vec<Diagnostic> {
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if stem.is_empty() {
+        return Vec::new();
+    }
+
+    find_public_top_level_declarations(content)
         .into_iter()
-        .filter(|d| should_show_java_diag(d, classpath_ready))
+        .filter(|decl| decl.name != stem)
+        .map(|decl| {
+            let end_col = decl.column + decl.name.len() as u32;
+            Diagnostic {
+                path: rel_path.to_string(),
+                line: decl.line,
+                column: decl.column,
+                end_line: Some(decl.line),
+                end_column: Some(end_col),
+                message: format!(
+                    "class {} is public, should be declared in a file named {}.java",
+                    decl.name, decl.name
+                ),
+                severity: "error".to_string(),
+            }
+        })
         .collect()
 }
 
-fn should_show_java_diag(diag: &Diagnostic, classpath_ready: bool) -> bool {
-    let msg = diag.message.to_lowercase();
+fn find_public_top_level_declarations(content: &str) -> Vec<PublicTypeDecl> {
+    let prefixes: &[&str] = &[
+        "public abstract class ",
+        "public final class ",
+        "public class ",
+        "public interface ",
+        "public enum ",
+        "public @interface ",
+        "public record ",
+    ];
 
-    if diag.severity == "warning" {
-        return true;
+    let mut decls = Vec::new();
+    let mut depth = 0usize;
+    for (idx, line) in content.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or(line);
+        if depth == 0 {
+            let trimmed = code.trim();
+            for prefix in prefixes {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let name: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        let column = line
+                            .find(&name)
+                            .map(|i| i as u32 + 1)
+                            .unwrap_or(1);
+                        decls.push(PublicTypeDecl {
+                            line: idx as u32 + 1,
+                            column,
+                            name,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+        for ch in code.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
     }
-
-    if is_javac_syntax_error(&msg) {
-        return true;
-    }
-
-    if is_dependency_resolution_error(&msg) {
-        return false;
-    }
-
-    classpath_ready
+    decls
 }
 
-fn is_javac_syntax_error(msg: &str) -> bool {
-    msg.contains("';' expected")
-        || msg.contains("')' expected")
-        || msg.contains("'(' expected")
-        || msg.contains("'{' expected")
-        || msg.contains("'}' expected")
-        || msg.contains("'[' expected")
-        || msg.contains("']' expected")
-        || msg.contains("illegal start of expression")
-        || msg.contains("illegal start of type")
-        || msg.contains("class, interface, enum, or record expected")
-        || msg.contains("reached end of file while parsing")
-        || msg.contains("not a statement")
-        || msg.contains("orphaned")
-        || msg.contains("<identifier> expected")
-}
-
-fn is_dependency_resolution_error(msg: &str) -> bool {
-    msg.contains("cannot find symbol")
-        || msg.contains("does not exist")
-        || msg.contains("cannot access")
-        || msg.contains("package")
-        || msg.contains("cannot infer type arguments")
+fn merge_file_name_diags(javac: Vec<Diagnostic>, local: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    if local.is_empty() {
+        return javac;
+    }
+    let mut out = javac;
+    for loc in local {
+        let existing = out.iter().position(|d| {
+            d.line == loc.line && d.message.contains("should be declared in a file named")
+        });
+        if let Some(i) = existing {
+            out[i] = loc;
+        } else {
+            out.push(loc);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -415,44 +516,40 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     }
 
     #[test]
-    fn hides_import_symbol_noise_without_classpath() {
-        let diags = vec![Diagnostic {
-            path: "App.java".into(),
-            line: 1,
-            column: 1,
-            end_line: None,
-            end_column: None,
-            message: "cannot find symbol".into(),
-            severity: "error".into(),
-        }];
-        assert!(filter_compiler_diagnostics(diags, false).is_empty());
+    fn parses_caret_column_from_javac_context() {
+        let ws = PathBuf::from("/repo");
+        let text = r#"src/App.java:5: error: cannot find symbol
+        List<String> s= Arrays.asList(args);
+                        ^
+  symbol:   variable Arrays
+  location: class HelloWorld"#;
+        let diags = parse_compiler_output(text, &ws, "src/App.java", "");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].line, 5);
+        assert_eq!(diags[0].column, 25);
+        assert!(diags[0].message.contains("Arrays"));
     }
 
     #[test]
-    fn keeps_syntax_errors() {
-        let diags = vec![Diagnostic {
-            path: "App.java".into(),
-            line: 1,
-            column: 24,
-            end_line: None,
-            end_column: None,
-            message: "';' expected".into(),
-            severity: "error".into(),
-        }];
-        assert_eq!(filter_compiler_diagnostics(diags, false).len(), 1);
+    fn local_file_class_name_mismatch_on_class_name() {
+        let content = "public class RightName {\n    public static void main(String[] args) {}\n}\n";
+        let diags = local_file_class_name_diags("WrongFile.java", content);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].line, 1);
+        assert_eq!(diags[0].column, 14);
+        assert_eq!(diags[0].end_column, Some(23));
+        assert!(diags[0].message.contains("RightName.java"));
     }
 
     #[test]
-    fn keeps_semantic_errors_when_classpath_ready() {
-        let diags = vec![Diagnostic {
-            path: "App.java".into(),
-            line: 5,
-            column: 9,
-            end_line: None,
-            end_column: None,
-            message: "incompatible types: int cannot be converted to java.lang.String".into(),
-            severity: "error".into(),
-        }];
-        assert_eq!(filter_compiler_diagnostics(diags, true).len(), 1);
+    fn local_file_class_name_ok_when_names_match() {
+        let content = "public class App {\n}\n";
+        assert!(local_file_class_name_diags("App.java", content).is_empty());
+    }
+
+    #[test]
+    fn ignores_inner_public_class_for_file_name() {
+        let content = "public class Outer {\n    public static class Inner {\n    }\n}\n";
+        assert!(local_file_class_name_diags("Outer.java", content).is_empty());
     }
 }
