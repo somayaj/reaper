@@ -2955,6 +2955,12 @@ async function selectRepo(name) {
     updateWindowTitle();
     return;
   }
+
+  const switching = state.repo !== name;
+  if (switching) {
+    closeWorkspaceTabs();
+  }
+
   state.repo = name;
   resetTerminalCwds();
   updateTerminalCwdUi();
@@ -4190,6 +4196,17 @@ function closeAllTabs() {
   updateBreadcrumbs(null);
   updateRunButtons();
   updateMenuState();
+}
+
+function closeWorkspaceTabs() {
+  state.treeNavAnchor = null;
+  updateTreeBackButton();
+  state.conflictFiles = new Set();
+  state.conflictPanelHidden = false;
+  state.gradleInfo = null;
+  state.javaRunTarget = null;
+  clearDiagnostics();
+  closeAllTabs();
 }
 
 async function saveFile(options = {}) {
