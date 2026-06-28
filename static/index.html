@@ -825,27 +825,15 @@
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
               <h4 class="text-sm font-semibold text-white">Cursor agent</h4>
-              <p class="text-xs text-gray-500 mt-1">Paste your User API key from <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noopener" class="text-accent hover:underline">Cursor → Integrations</a>.</p>
             </div>
-            <div id="settings-cursor-status" class="ij-settings-status"></div>
-            <form id="settings-cursor-form" class="space-y-3 border-t border-surface-700 pt-4">
-              <div>
-                <label class="block text-xs font-medium text-gray-400 mb-1.5">API key</label>
-                <input id="settings-cursor-key" name="api_key" type="password" autocomplete="off" placeholder="cursor_… or crsr_…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save key</button>
-                <button type="button" id="settings-cursor-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Remove key</button>
-                <button type="button" id="settings-cursor-restart" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Restart bridge</button>
-              </div>
-            </form>
-            <div class="border-t border-surface-700 pt-4 space-y-3">
+            <div class="space-y-3 pb-4 border-b border-surface-700">
               <h5 class="text-xs font-semibold text-gray-300">Agent typography</h5>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
                 <input id="settings-agent-font-match" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" checked />
                 Match editor font
               </label>
-              <div id="settings-agent-font-custom" class="hidden space-y-3">
+              <p id="settings-agent-font-summary" class="text-xs text-gray-500 hidden"></p>
+              <div id="settings-agent-font-custom" class="space-y-3">
                 <div>
                   <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-agent-font-size">Font size</label>
                   <select id="settings-agent-font-size" class="ij-settings-select w-full max-w-xs" title="Cursor agent font size"></select>
@@ -858,6 +846,21 @@
               </div>
               <p class="text-[11px] text-gray-600">Font for agent messages and the ask input. Saved in this browser.</p>
             </div>
+            <div>
+              <p class="text-xs text-gray-500">Paste your User API key from <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noopener" class="text-accent hover:underline">Cursor → Integrations</a>.</p>
+            </div>
+            <div id="settings-cursor-status" class="ij-settings-status"></div>
+            <form id="settings-cursor-form" class="space-y-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">API key</label>
+                <input id="settings-cursor-key" name="api_key" type="password" autocomplete="off" placeholder="cursor_… or crsr_…" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save key</button>
+                <button type="button" id="settings-cursor-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Remove key</button>
+                <button type="button" id="settings-cursor-restart" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Restart bridge</button>
+              </div>
+            </form>
           </section>
           <section id="settings-panel-ai" class="ij-settings-panel hidden space-y-4">
             <div>
@@ -926,6 +929,6 @@
   <script src="/icons.js?v=2"></script>
   <script src="/monaco-languages.js?v=13"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=108"></script>
+  <script src="/app.js?v=109"></script>
 </body>
 </html>
