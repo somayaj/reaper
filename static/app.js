@@ -705,6 +705,7 @@ function loadAgentFontSettingsSection() {
 function loadAppearanceSettingsSection() {
   populateFontSizeSelects();
   populateFontFamilySelects();
+  loadAgentFontSettingsSection();
   applyAgentTypography();
   syncFontSizeControls(getEditorFontSize());
   syncFontFamilyControls(getEditorFontSpec().id);
@@ -1029,6 +1030,14 @@ async function showSettingsModal(tab = 'git') {
     else if (tab === 'compilers') $('#settings-compiler-search')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
+}
+
+function openAgentTypographySettings() {
+  showSettingsModal('appearance');
+  setTimeout(() => {
+    $('#settings-agent-typography')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    $('#settings-agent-font-match')?.focus({ preventScroll: true });
+  }, 120);
 }
 
 function hideSettingsModal() {
@@ -6161,6 +6170,7 @@ function bindEvents() {
   $('#settings-cursor-clear')?.addEventListener('click', clearCursorKeyFromSettings);
   $('#settings-cursor-restart')?.addEventListener('click', restartBridge);
   $('#settings-agent-font-match')?.addEventListener('change', onAgentFontMatchChange);
+  $('#settings-cursor-open-typography')?.addEventListener('click', openAgentTypographySettings);
   $$('.ij-settings-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.settingsTab));
   });
@@ -6418,9 +6428,11 @@ async function init() {
   }
   populateFontSizeSelects();
   populateFontFamilySelects();
+  populateAgentFontSelects();
   syncFontSizeControls(getEditorFontSize());
   ensureEditorFontLoaded(getEditorFontSpec());
   applyAgentTypography();
+  syncAgentFontControls();
   ensureTerminals();
   renderTerminalTabs();
   renderTerminalOutput();
