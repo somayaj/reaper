@@ -686,41 +686,59 @@ fn is_source_file(name: &str) -> bool {
     SOURCE_EXTS.iter().any(|ext| lower.ends_with(&format!(".{ext}")))
 }
 
-pub fn format_content(rel_path: &str, content: &str) -> Result<String> {
+pub fn format_content(ws: &Path, rel_path: &str, content: &str) -> Result<String> {
+    use super::exec::{try_stdin_command, try_tool_stdin};
+
     let lower = rel_path.to_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
 
+    if matches!(ext, "yaml" | "yml") {
+        return format_yaml(ws, rel_path, content);
+    }
+
     if lower.ends_with(".gradle.kts") || ext == "kts" || ext == "kt" {
-        return try_stdin_command("ktfmt", &["-"], content)
-            .or_else(|_| try_stdin_command("ktlint", &["format", "-"], content));
+        return try_stdin_command(ws, "ktfmt", &["-"], content)
+            .or_else(|_| try_stdin_command(ws, "ktlint", &["format", "-"], content));
     }
     if ext == "java" {
-        return try_stdin_command("google-java-format", &["-"], content)
-            .or_else(|_| try_stdin_command("clang-format", &["-assume-filename=file.java"], content));
+        return try_stdin_command(ws, "google-java-format", &["-"], content)
+            .or_else(|_| try_stdin_command(ws, "clang-format", &["-assume-filename=file.java"], content));
     }
     if ext == "rs" {
-        return try_stdin_command("rustfmt", &["--emit", "stdout"], content);
+        return try_stdin_command(ws, "rustfmt", &["--emit", "stdout"], content);
     }
     if ext == "go" || lower.ends_with("go.mod") {
-        return try_stdin_command("gofmt", &[], content);
+        return try_stdin_command(ws, "gofmt", &[], content);
     }
     if ext == "py" {
-        return try_stdin_command("black", &["-q", "-"], content)
-            .or_else(|_| try_stdin_command("autopep8", &["-"], content));
+        return try_stdin_command(ws, "black", &["-q", "-"], content)
+            .or_else(|_| try_stdin_command(ws, "autopep8", &["-"], content));
     }
-    if matches!(ext, "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "json" | "css" | "scss" | "less" | "md" | "yaml" | "yml" | "html" | "xml") {
+    if matches!(ext, "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "json" | "css" | "scss" | "less" | "md" | "html" | "xml") {
         let parser = match ext {
             "ts" | "tsx" => "typescript",
             "js" | "mjs" | "cjs" | "jsx" => "babel",
             "json" => "json",
             "css" | "scss" | "less" => "css",
             "md" => "markdown",
-            "yaml" | "yml" => "yaml",
             "html" => "html",
             "xml" => "xml",
             _ => "babel",
         };
-        return try_stdin_command("prettier", &["--parser", parser, "--stdin-filepath", rel_path], content);
+        return try_tool_stdin(
+            ws,
+            "prettier",
+            &["--parser", parser, "--stdin-filepath", rel_path],
+            content,
+        )
+            .or_else(|_| {
+                try_stdin_command(
+                    ws,
+                    "prettier",
+                    &["--parser", parser, "--stdin-filepath", rel_path],
+                    content,
+                )
+            });
     }
     if ext == "groovy" || lower.ends_with(".gradle") {
         bail!("no Groovy/Gradle formatter found on PATH (install prettier with a Groovy plugin or format manually)");
@@ -729,29 +747,50 @@ pub fn format_content(rel_path: &str, content: &str) -> Result<String> {
     bail!("no formatter available for .{ext} files");
 }
 
-fn try_stdin_command(program: &str, args: &[&str], content: &str) -> Result<String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+fn format_yaml(ws: &Path, rel_path: &str, content: &str) -> Result<String> {
+    use super::exec::{try_stdin_command, try_tool_stdin};
 
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to run {program}"))?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(content.as_bytes())?;
+    if let Some(program) = crate::toolchain::resolve_program("yamlfmt") {
+        if let Ok(formatted) = try_stdin_command(
+            ws,
+            program.to_string_lossy().as_ref(),
+            &["-"],
+            content,
+        ) {
+            return Ok(formatted);
+        }
     }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        bail!("{program} failed: {err}");
+    if let Ok(formatted) = try_tool_stdin(
+        ws,
+        "prettier",
+        &["--parser", "yaml", "--stdin-filepath", rel_path],
+        content,
+    ) {
+        return Ok(formatted);
     }
+    if let Ok(formatted) = try_stdin_command(
+        ws,
+        "prettier",
+        &["--parser", "yaml", "--stdin-filepath", rel_path],
+        content,
+    ) {
+        return Ok(formatted);
+    }
+    format_yaml_builtin(content)
+}
 
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+fn format_yaml_builtin(content: &str) -> Result<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(content)
+        .with_context(|| "invalid YAML — fix syntax errors before formatting")?;
+    let mut out = serde_yaml::to_string(&value)?;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 const TYPE_DEF_KEYWORDS: &[(&str, &str)] = &[
@@ -827,6 +866,104 @@ fn load_symbol_cache(ws: &Path) -> Option<Vec<(u32, ClassSearchHit)>> {
             .map(|hit| (path_score_bonus(&hit.path), hit))
             .collect(),
     )
+}
+
+/// Workspace + file symbol and keyword completions for non-Java languages (and as a supplement).
+pub fn completions(
+    ws: &Path,
+    from_path: &str,
+    content: &str,
+    prefix: &str,
+) -> Result<Vec<super::classpath::CompletionItem>> {
+    use super::classpath::CompletionItem;
+    use std::collections::HashSet;
+
+    let prefix_lower = prefix.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    let mut limit = 80;
+
+    let mut file_hits = Vec::new();
+    collect_symbols_in_content(content, from_path, &mut file_hits);
+    for hit in file_hits {
+        if limit == 0 {
+            break;
+        }
+        if prefix.is_empty()
+            || hit.name.to_lowercase().starts_with(&prefix_lower)
+            || hit.qualified.to_lowercase().starts_with(&prefix_lower)
+        {
+            if seen.insert(hit.name.clone()) {
+                items.push(CompletionItem {
+                    label: hit.name.clone(),
+                    kind: hit.kind.clone(),
+                    detail: Some(hit.qualified.clone()),
+                    path: Some(from_path.to_string()),
+                    line: Some(hit.line),
+                    column: Some(hit.column),
+                });
+                limit -= 1;
+            }
+        }
+    }
+
+    if limit > 0 {
+        if let Some(cached) = load_symbol_cache(ws) {
+            for (_, hit) in cached {
+                if limit == 0 {
+                    break;
+                }
+                if hit.path == from_path {
+                    continue;
+                }
+                if prefix.is_empty()
+                    || hit.name.to_lowercase().starts_with(&prefix_lower)
+                    || hit.qualified.to_lowercase().starts_with(&prefix_lower)
+                {
+                    if seen.insert(hit.name.clone()) {
+                        items.push(CompletionItem {
+                            label: hit.name.clone(),
+                            kind: hit.kind.clone(),
+                            detail: Some(format!("{} · {}", hit.qualified, hit.path)),
+                            path: Some(hit.path.clone()),
+                            line: Some(hit.line),
+                            column: Some(hit.column),
+                        });
+                        limit -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    for kw in super::languages::keywords_for_path(from_path) {
+        if limit == 0 {
+            break;
+        }
+        if prefix.is_empty() || kw.to_lowercase().starts_with(&prefix_lower) {
+            if seen.insert(kw.to_string()) {
+                items.push(CompletionItem {
+                    label: kw.to_string(),
+                    kind: "keyword".to_string(),
+                    detail: Some("keyword".into()),
+                    path: None,
+                    line: None,
+                    column: None,
+                });
+                limit -= 1;
+            }
+        }
+    }
+
+    items.sort_by(|a, b| {
+        let rank = |k: &str| if k == "keyword" { 2 } else { 1 };
+        rank(&a.kind)
+            .cmp(&rank(&b.kind))
+            .then_with(|| a.label.len().cmp(&b.label.len()))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    items.truncate(80);
+    Ok(items)
 }
 
 fn path_score_bonus(rel_path: &str) -> u32 {
