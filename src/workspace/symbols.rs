@@ -240,6 +240,79 @@ pub(crate) fn java_member_qualifier(content: &str, line: u32, column: u32, symbo
     None
 }
 
+/// Qualifier and partial member name when the cursor is in a dotted expression (`foo.`, `foo.get`, `this.`).
+pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Option<(String, String)> {
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let col = column.saturating_sub(1) as usize;
+    let before = &line_text[..col.min(line_text.len())];
+    let trimmed_end = before.trim_end();
+    if trimmed_end.is_empty() {
+        return None;
+    }
+    let dot_pos = trimmed_end.rfind('.')?;
+    let qual_part = trimmed_end[..dot_pos].trim();
+    let member_part = trimmed_end[dot_pos + 1..].trim().to_string();
+    let simple = qual_part.rsplit('.').next()?.trim();
+    if simple.is_empty()
+        || (is_keyword(simple) && simple != "this" && simple != "super")
+    {
+        return None;
+    }
+    Some((simple.to_string(), member_part))
+}
+
+/// FQCN fragment typed after `import` / `import static` on the current line.
+pub(crate) fn java_import_fqcn_prefix(content: &str, line: u32, column: u32) -> Option<String> {
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let trimmed = line_text.trim();
+    let keyword_len = if trimmed.starts_with("import static ") {
+        14
+    } else if trimmed.starts_with("import ") {
+        7
+    } else {
+        return None;
+    };
+    let leading = line_text.len() - line_text.trim_start().len();
+    let col = column.saturating_sub(1) as usize;
+    if col < leading + keyword_len {
+        return Some(String::new());
+    }
+    let body_start = leading + keyword_len;
+    let body = trimmed[keyword_len..].trim_end_matches(';').trim();
+    let body_col = col.saturating_sub(body_start);
+    let prefix = body[..body_col.min(body.len())].trim();
+    Some(prefix.to_string())
+}
+
+pub(crate) fn is_java_import_line(content: &str, line: u32) -> bool {
+    match content.lines().nth(line.saturating_sub(1) as usize) {
+        Some(line_text) => {
+            let trimmed = line_text.trim();
+            trimmed.starts_with("import ") || trimmed.starts_with("import static ")
+        }
+        None => false,
+    }
+}
+
+/// Prefer type names over methods (e.g. `new Foo`, `extends Bar`, uppercase prefix).
+pub(crate) fn is_java_type_reference_context(content: &str, line: u32, column: u32) -> bool {
+    match content.lines().nth(line.saturating_sub(1) as usize) {
+        Some(line_text) => {
+            let col = column.saturating_sub(1) as usize;
+            let end = col.min(line_text.len());
+            let before: &str = line_text.get(..end).unwrap_or(line_text);
+            let trimmed_end = before.trim_end();
+            trimmed_end.ends_with("new ")
+                || trimmed_end.ends_with("extends ")
+                || trimmed_end.ends_with("implements ")
+                || trimmed_end.ends_with("throws ")
+                || trimmed_end.ends_with("catch (")
+                || trimmed_end.ends_with("<")
+        }
+        None => false,
+    }
+}
+
 fn word_before(line: &str, col: usize) -> Option<String> {
     if col == 0 {
         return None;
@@ -868,15 +941,192 @@ fn load_symbol_cache(ws: &Path) -> Option<Vec<(u32, ClassSearchHit)>> {
     )
 }
 
-/// Workspace + file symbol and keyword completions for non-Java languages (and as a supplement).
+fn read_ident_prefix(s: &str) -> Option<(String, usize)> {
+    let s = s.trim_start();
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if c.is_alphanumeric() || c == '_' || c == '$' {
+            end = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    Some((s[..end].to_string(), end))
+}
+
+/// Members used with `qualifier.` anywhere in the file, plus language-specific defs.
+fn member_completions_from_content(
+    content: &str,
+    qualifier: &str,
+    member_prefix: &str,
+    from_path: &str,
+) -> Vec<super::classpath::CompletionItem> {
+    use super::classpath::CompletionItem;
+    use std::collections::HashSet;
+
+    let lang = super::languages::language_for_path(from_path).unwrap_or("plaintext");
+    let prefix_lower = member_prefix.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+
+    let needle = format!("{qualifier}.");
+    let at_needle = format!("@{qualifier}.");
+    for line_text in content.lines() {
+        for needle in [&needle, &at_needle] {
+            let mut search = 0;
+            while let Some(idx) = line_text[search..].find(needle) {
+                let start = search + idx + needle.len();
+                let after = &line_text[start..];
+                if let Some((member, _)) = read_ident_prefix(after) {
+                    if !member.is_empty()
+                        && (member_prefix.is_empty()
+                            || member.to_lowercase().starts_with(&prefix_lower))
+                        && seen.insert(member.clone())
+                    {
+                        let is_call = after
+                            .chars()
+                            .nth(member.len())
+                            .map(|c| c == '(')
+                            .unwrap_or(false);
+                        let kind = if is_call { "method" } else { "field" };
+                        items.push(CompletionItem {
+                            label: member.clone(),
+                            kind: kind.to_string(),
+                            detail: Some(format!("{qualifier}.{member}")),
+                            insert: None,
+                            path: Some(from_path.to_string()),
+                            line: None,
+                            column: None,
+                        });
+                    }
+                }
+                search = start + 1;
+            }
+        }
+    }
+
+    if qualifier == "this" || qualifier == "self" || qualifier == "super" {
+        for line_text in content.lines() {
+            let trimmed = line_text.trim();
+            if lang == "ruby" {
+                if let Some(rest) = trimmed.strip_prefix("def ") {
+                    if let Some((name, _)) = read_ident_prefix(rest) {
+                        if !name.is_empty()
+                            && (member_prefix.is_empty()
+                                || name.to_lowercase().starts_with(&prefix_lower))
+                            && seen.insert(name.clone())
+                        {
+                            items.push(CompletionItem {
+                                label: name,
+                                kind: "method".into(),
+                                detail: Some("method".into()),
+                                insert: None,
+                                path: Some(from_path.to_string()),
+                                line: None,
+                                column: None,
+                            });
+                        }
+                    }
+                }
+                if trimmed.starts_with("attr_reader ") || trimmed.starts_with("attr_accessor ") {
+                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    for part in parts.iter().skip(1) {
+                        let name = part.trim_matches(',');
+                        if !name.is_empty()
+                            && (member_prefix.is_empty()
+                                || name.to_lowercase().starts_with(&prefix_lower))
+                            && seen.insert(name.to_string())
+                        {
+                            items.push(CompletionItem {
+                                label: name.to_string(),
+                                kind: "field".into(),
+                                detail: Some("attribute".into()),
+                                insert: None,
+                                path: Some(from_path.to_string()),
+                                line: None,
+                                column: None,
+                            });
+                        }
+                    }
+                }
+            }
+            if lang == "python" {
+                if let Some(rest) = trimmed.strip_prefix("def ") {
+                    if let Some((name, _)) = read_ident_prefix(rest) {
+                        if name != "self"
+                            && (member_prefix.is_empty()
+                                || name.to_lowercase().starts_with(&prefix_lower))
+                            && seen.insert(name.clone())
+                        {
+                            items.push(CompletionItem {
+                                label: name,
+                                kind: "method".into(),
+                                detail: Some("def".into()),
+                                insert: None,
+                                path: Some(from_path.to_string()),
+                                line: None,
+                                column: None,
+                            });
+                        }
+                    }
+                }
+            }
+            if matches!(lang, "java" | "kotlin" | "groovy" | "csharp" | "typescript" | "javascript") {
+                for marker in ["void ", "public ", "private ", "protected ", "static "] {
+                    if trimmed.contains(marker) {
+                        let after = trimmed.rsplit(marker).next().unwrap_or(trimmed);
+                        if let Some((name, _)) = read_ident_prefix(after) {
+                            if !name.is_empty()
+                                && name != qualifier
+                                && (member_prefix.is_empty()
+                                    || name.to_lowercase().starts_with(&prefix_lower))
+                                && seen.insert(name.clone())
+                            {
+                                let kind = if after.contains('(') { "method" } else { "field" };
+                                items.push(CompletionItem {
+                                    label: name,
+                                    kind: kind.to_string(),
+                                    detail: Some(kind.to_string()),
+                                    insert: None,
+                                    path: Some(from_path.to_string()),
+                                    line: None,
+                                    column: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    items.sort_by(|a, b| a.label.len().cmp(&b.label.len()).then_with(|| a.label.cmp(&b.label)));
+    items.truncate(40);
+    items
+}
+
+/// Workspace + file symbol and keyword completions for all languages.
 pub fn completions(
     ws: &Path,
     from_path: &str,
     content: &str,
     prefix: &str,
+    line: u32,
+    column: u32,
 ) -> Result<Vec<super::classpath::CompletionItem>> {
     use super::classpath::CompletionItem;
     use std::collections::HashSet;
+
+    if let Some((qualifier, member_prefix)) = java_dot_qualifier(content, line, column) {
+        let member_items =
+            member_completions_from_content(content, &qualifier, &member_prefix, from_path);
+        if !member_items.is_empty() {
+            return Ok(member_items);
+        }
+    }
 
     let prefix_lower = prefix.to_lowercase();
     let mut seen = HashSet::new();
@@ -898,6 +1148,7 @@ pub fn completions(
                     label: hit.name.clone(),
                     kind: hit.kind.clone(),
                     detail: Some(hit.qualified.clone()),
+                    insert: None,
                     path: Some(from_path.to_string()),
                     line: Some(hit.line),
                     column: Some(hit.column),
@@ -925,6 +1176,7 @@ pub fn completions(
                             label: hit.name.clone(),
                             kind: hit.kind.clone(),
                             detail: Some(format!("{} · {}", hit.qualified, hit.path)),
+                            insert: None,
                             path: Some(hit.path.clone()),
                             line: Some(hit.line),
                             column: Some(hit.column),
@@ -946,6 +1198,7 @@ pub fn completions(
                     label: kw.to_string(),
                     kind: "keyword".to_string(),
                     detail: Some("keyword".into()),
+                    insert: None,
                     path: None,
                     line: None,
                     column: None,
@@ -1707,6 +1960,22 @@ mod tests {
         )
         .expect("users table");
         assert_eq!(hit.kind, "table");
+    }
+
+    #[test]
+    fn parses_dot_qualifier() {
+        assert_eq!(
+            java_dot_qualifier("foo.", 1, 5),
+            Some(("foo".into(), "".into()))
+        );
+        assert_eq!(
+            java_dot_qualifier("foo.get", 1, 8),
+            Some(("foo".into(), "get".into()))
+        );
+        assert_eq!(
+            java_dot_qualifier("        this.", 1, 14),
+            Some(("this".into(), "".into()))
+        );
     }
 
     #[test]

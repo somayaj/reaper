@@ -136,6 +136,76 @@ impl IndexLookup {
                 }
             })
     }
+
+    fn methods_for_type<'a>(
+        &'a self,
+        type_fqcn: &str,
+        member_prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a IndexedSymbol> {
+        let qual_prefix = format!("{type_fqcn}.");
+        let member_prefix_lower = member_prefix.to_lowercase();
+        let mut items: Vec<&IndexedSymbol> = self
+            .symbols
+            .iter()
+            .filter(|sym| {
+                sym.kind == "method"
+                    && sym.qualified.starts_with(&qual_prefix)
+                    && (member_prefix.is_empty()
+                        || sym.name.to_lowercase().starts_with(&member_prefix_lower))
+            })
+            .collect();
+        items.sort_by(|a, b| a.name.len().cmp(&b.name.len()).then_with(|| a.name.cmp(&b.name)));
+        items.truncate(limit);
+        items
+    }
+
+    fn types_matching_name_prefix<'a>(
+        &'a self,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a IndexedSymbol> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut items: Vec<&'a IndexedSymbol> = self
+            .symbols
+            .iter()
+            .filter(|sym| {
+                sym.kind != "method" && sym.name.to_lowercase().starts_with(&prefix_lower)
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            let pa = spring_priority(&a.qualified);
+            let pb = spring_priority(&b.qualified);
+            pa.cmp(&pb)
+                .then_with(|| a.name.len().cmp(&b.name.len()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        items.truncate(limit);
+        items
+    }
+
+    fn types_matching_fqcn_prefix<'a>(
+        &'a self,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a IndexedSymbol> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut items: Vec<&'a IndexedSymbol> = self
+            .symbols
+            .iter()
+            .filter(|sym| {
+                sym.kind != "method" && sym.qualified.to_lowercase().starts_with(&prefix_lower)
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            a.qualified
+                .len()
+                .cmp(&b.qualified.len())
+                .then_with(|| a.qualified.cmp(&b.qualified))
+        });
+        items.truncate(limit);
+        items
+    }
 }
 
 struct CachedLookup {
@@ -330,6 +400,8 @@ pub struct CompletionItem {
     pub label: String,
     pub kind: String,
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert: Option<String>,
     pub path: Option<String>,
     pub line: Option<u32>,
     pub column: Option<u32>,
@@ -697,14 +769,42 @@ pub fn java_completions(
 
     let lookup = get_lookup(ws, &root)?;
     let at_annotation = is_annotation_context(content, line, column);
+    let imports = parse_imports_cached(&root, from_path, content);
     let prefix = if prefix.is_empty() {
         super::symbols::word_at(content, line, column).unwrap_or_default()
     } else {
         prefix.to_string()
     };
 
+    if super::symbols::is_java_import_line(content, line) {
+        if let Some(import_prefix) = super::symbols::java_import_fqcn_prefix(content, line, column) {
+            return Ok(import_fqcn_completions(ws, &root, &lookup, &import_prefix));
+        }
+    }
+
+    if let Some((qualifier, member_prefix)) = super::symbols::java_dot_qualifier(content, line, column) {
+        let member_items =
+            member_completions_for_qualifier(ws, &root, from_path, &lookup, &imports, &qualifier, &member_prefix)?;
+        if !member_items.is_empty() {
+            return Ok(member_items);
+        }
+    }
+
     if prefix.is_empty() && !at_annotation {
         return Ok(Vec::new());
+    }
+
+    let type_preferred = prefix.chars().next().is_some_and(|c| c.is_uppercase())
+        || super::symbols::is_java_type_reference_context(content, line, column);
+
+    if type_preferred && !prefix.is_empty() {
+        let types = lookup.types_matching_name_prefix(&prefix, 80);
+        if !types.is_empty() {
+            return Ok(types
+                .into_iter()
+                .map(|sym| symbol_to_completion_item(ws, &root, sym, None))
+                .collect());
+        }
     }
 
     let prefix_lower = prefix.to_lowercase();
@@ -716,6 +816,9 @@ pub fn java_completions(
         if at_annotation && sym.kind != "annotation" {
             continue;
         }
+        if type_preferred && sym.kind == "method" {
+            continue;
+        }
         if !prefix.is_empty()
             && !sym.name.to_lowercase().starts_with(&prefix_lower)
             && !sym.qualified.to_lowercase().starts_with(&prefix_lower)
@@ -725,26 +828,102 @@ pub fn java_completions(
         if !seen.insert(sym.qualified.clone()) {
             continue;
         }
-        items.push(CompletionItem {
-            label: sym.name.clone(),
-            kind: sym.kind.clone(),
-            detail: Some(sym.qualified.clone()),
-            path: Some(normalize_index_path(ws, &root, &sym.path)),
-            line: Some(sym.line),
-            column: Some(sym.column),
-        });
+        items.push(symbol_to_completion_item(ws, &root, sym, None));
         if items.len() >= 80 {
             break;
         }
     }
 
     items.sort_by(|a, b| {
-        let pa = spring_priority(a.detail.as_deref().unwrap_or(""));
-        let pb = spring_priority(b.detail.as_deref().unwrap_or(""));
-        pa.cmp(&pb)
+        let type_rank = |k: &str| if k == "method" { 1 } else { 0 };
+        type_rank(&a.kind)
+            .cmp(&type_rank(&b.kind))
+            .then_with(|| {
+                let pa = spring_priority(a.detail.as_deref().unwrap_or(""));
+                let pb = spring_priority(b.detail.as_deref().unwrap_or(""));
+                pa.cmp(&pb)
+            })
             .then_with(|| a.label.len().cmp(&b.label.len()))
             .then_with(|| a.label.cmp(&b.label))
     });
+    Ok(items)
+}
+
+fn symbol_to_completion_item(
+    ws: &Path,
+    root: &Path,
+    sym: &IndexedSymbol,
+    insert: Option<String>,
+) -> CompletionItem {
+    CompletionItem {
+        label: sym.name.clone(),
+        kind: sym.kind.clone(),
+        detail: Some(sym.qualified.clone()),
+        insert,
+        path: Some(normalize_index_path(ws, root, &sym.path)),
+        line: Some(sym.line),
+        column: Some(sym.column),
+    }
+}
+
+fn import_fqcn_completions(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    fqcn_prefix: &str,
+) -> Vec<CompletionItem> {
+    let types = lookup.types_matching_fqcn_prefix(fqcn_prefix, 80);
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for sym in types {
+        if !seen.insert(sym.qualified.clone()) {
+            continue;
+        }
+        let label = if fqcn_prefix.contains('.') {
+            sym.qualified.clone()
+        } else {
+            sym.name.clone()
+        };
+        items.push(CompletionItem {
+            label,
+            kind: sym.kind.clone(),
+            detail: Some(sym.qualified.clone()),
+            insert: Some(sym.qualified.clone()),
+            path: Some(normalize_index_path(ws, root, &sym.path)),
+            line: Some(sym.line),
+            column: Some(sym.column),
+        });
+    }
+    items
+}
+
+fn member_completions_for_qualifier(
+    ws: &Path,
+    root: &Path,
+    from_path: &str,
+    lookup: &IndexLookup,
+    imports: &ImportMap,
+    qualifier: &str,
+    member_prefix: &str,
+) -> Result<Vec<CompletionItem>> {
+    let fqcn = if qualifier == "this" || qualifier == "super" {
+        super::symbols::java_class_from_source_path(from_path)
+    } else {
+        resolve_type_fqcn(lookup, qualifier, imports)
+    };
+    let Some(fqcn) = fqcn else {
+        return Ok(Vec::new());
+    };
+
+    let methods = lookup.methods_for_type(&fqcn, member_prefix, 80);
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for sym in methods {
+        if !seen.insert(sym.name.clone()) {
+            continue;
+        }
+        items.push(symbol_to_completion_item(ws, root, sym, None));
+    }
     Ok(items)
 }
 

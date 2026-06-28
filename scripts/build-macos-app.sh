@@ -16,6 +16,8 @@ cp "$BINARY" "$APP/Contents/MacOS/reaper"
 chmod +x "$APP/Contents/MacOS/reaper"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 
+"$ROOT/scripts/stamp-ui-build.sh"
+
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
   echo "Generating app icon from logo-icon.svg..."
@@ -26,6 +28,13 @@ if [[ -f "$ROOT/packaging/macos/Reaper.icns" ]]; then
 fi
 
 cp -R "$ROOT/static/." "$APP/Contents/Resources/static/"
+
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+if [[ -n "$VERSION" ]]; then
+  sed -i '' "s/name=\"reaper-app-version\" content=\"[^\"]*\"/name=\"reaper-app-version\" content=\"$VERSION\"/" \
+    "$APP/Contents/Resources/static/index.html"
+fi
+
 cp "$ROOT/gradle/reaper-classpath.init.gradle" "$APP/Contents/Resources/gradle/"
 cp "$ROOT/gradlew" "$APP/Contents/Resources/gradlew"
 chmod +x "$APP/Contents/Resources/gradlew"
