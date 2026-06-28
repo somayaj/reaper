@@ -1,8 +1,10 @@
 [package]
 name = "reaper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Reaper — local git host and developer studio"
+authors = ["Asha Somayajula"]
+license = "MIT"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }

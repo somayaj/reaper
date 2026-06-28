@@ -116,7 +116,7 @@ impl SettingsStore {
                     return true;
                 }
                 tracing::warn!(
-                    "Ignoring invalid configured JAVA_HOME {} — clear it in Settings → Compilers",
+                    "Ignoring invalid configured JAVA_HOME {} — clear it in Settings → Compiler",
                     p.display()
                 );
                 false

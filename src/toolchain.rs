@@ -27,7 +27,7 @@ pub struct ToolDef {
     pub env_key: Option<&'static str>,
 }
 
-/// Language compilers and runtimes configurable under Settings → Compilers.
+/// Language compilers and runtimes configurable under Settings → Compiler.
 pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         id: "java",
@@ -52,7 +52,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         id: "python",
-        label: "Python",
+        label: "Python (python3)",
         kind: ToolKind::Binary,
         defaults: &["python3", "python"],
         env_key: Some("REAPER_PYTHON"),
@@ -226,7 +226,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_program_or(id: &str) -> Result<PathBuf> {
-    resolve_program(id).with_context(|| format!("{id} not found — set it in Settings → Compilers"))
+    resolve_program(id).with_context(|| format!("{id} not found — set it in Settings → Compiler"))
 }
 
 pub fn validate_tool_path(id: &str, path: &str) -> Result<PathBuf> {
