@@ -685,83 +685,103 @@ async function loadCursorSettingsSection() {
   updateAgentUi();
 }
 
-async function loadJdkSettingsSection() {
-  const statusEl = $('#settings-jdk-status');
-  const selectEl = $('#settings-jdk-select');
-  const homeEl = $('#settings-jdk-home');
-  if (!statusEl) return;
+async function loadToolchainsSettingsSection() {
+  const list = $('#settings-toolchains-list');
+  if (!list) return;
   try {
-    const cfg = await api('/api/settings/jdk');
-    const installed = cfg.installed || [];
-    if (selectEl) {
-      const current = cfg.java_home || cfg.effective_home || '';
-      selectEl.innerHTML = [
-        '<option value="">— select installed JDK —</option>',
-        ...installed.map((j) => `<option value="${escapeHtml(j.path)}">${escapeHtml(j.label || j.path)}</option>`),
-      ].join('');
-      if (current && installed.some((j) => j.path === current)) {
-        selectEl.value = current;
-      }
-      if (!selectEl.dataset.bound) {
-        selectEl.dataset.bound = '1';
-        selectEl.addEventListener('change', () => {
-          if (homeEl && selectEl.value) homeEl.value = selectEl.value;
-        });
-      }
-    }
-    if (homeEl) homeEl.value = cfg.java_home || '';
-    const configuredLine = cfg.configured
-      ? `<div><strong>Saved:</strong> ${escapeHtml(cfg.java_home || '')}${cfg.version ? ` (${escapeHtml(cfg.version)})` : ''}${cfg.source ? ` · ${escapeHtml(cfg.source)}` : ''}</div>`
-      : '<div><strong>Saved:</strong> none (using system default)</div>';
-    const effectiveLine = cfg.effective_home
-      ? `<div class="mt-2"><strong>Run Java with:</strong> ${escapeHtml(cfg.effective_home)}${cfg.effective_version ? ` (${escapeHtml(cfg.effective_version)})` : ''}</div>`
-      : '';
-    const gradleLine = cfg.gradle_home
-      ? `<div class="mt-1"><strong>Gradle uses:</strong> ${escapeHtml(cfg.gradle_home)}${cfg.gradle_version ? ` (${escapeHtml(cfg.gradle_version)})` : ''}${cfg.java_home && cfg.gradle_home !== cfg.effective_home ? ' <span class="text-gray-500">(newer JVM for Gradle 8+)</span>' : ''}</div>`
-      : '';
-    statusEl.innerHTML = configuredLine + effectiveLine + gradleLine;
-    const clearBtn = $('#settings-jdk-clear');
-    if (clearBtn) clearBtn.disabled = !cfg.configured || cfg.source?.startsWith('env:');
-    if (clearBtn && cfg.source?.startsWith('env:')) {
-      clearBtn.title = `JAVA_HOME is set via ${cfg.source}; unset REAPER_JAVA_HOME to change`;
-    }
+    const cfg = await api('/api/settings/toolchains');
+    const tools = cfg.tools || [];
+    const installed = cfg.java_installed || [];
+    list.innerHTML = tools.map((tool) => {
+      const isJava = tool.id === 'java';
+      const configured = tool.configured
+        ? `<div><strong>Saved:</strong> ${escapeHtml(tool.path || '')}${tool.version ? ` (${escapeHtml(tool.version)})` : ''}${tool.source ? ` · ${escapeHtml(tool.source)}` : ''}</div>`
+        : '<div><strong>Saved:</strong> none (using system default)</div>';
+      const effective = tool.effective
+        ? `<div class="mt-1"><strong>Using:</strong> ${escapeHtml(tool.effective)}${tool.version && !tool.configured ? ` (${escapeHtml(tool.version)})` : ''}</div>`
+        : '<div class="mt-1 text-gray-500">Not found on PATH</div>';
+      const jdkSelect = isJava && installed.length
+        ? `<div class="mt-3">
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">Installed JDKs</label>
+            <select class="ij-settings-select w-full max-w-lg settings-toolchain-jdk-select" data-tool-id="java" title="Pick a JDK">
+              <option value="">— select installed JDK —</option>
+              ${installed.map((j) => `<option value="${escapeHtml(j.path)}"${tool.path === j.path ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
+            </select>
+          </div>`
+        : '';
+      const placeholder = tool.kind === 'home'
+        ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
+        : '/opt/homebrew/bin/' + tool.id;
+      const hint = tool.kind === 'home'
+        ? 'Must contain <code class="font-mono">bin/java</code>. Gradle may use a newer JVM when needed.'
+        : 'Full path to the executable.';
+      return `<div class="border border-surface-700 rounded-lg p-4 space-y-3" data-toolchain-row="${escapeHtml(tool.id)}">
+        <div>
+          <h5 class="text-sm font-medium text-white">${escapeHtml(tool.label)}</h5>
+          <div class="ij-settings-status text-xs mt-2">${configured}${effective}</div>
+        </div>
+        ${jdkSelect}
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-toolchain-${escapeHtml(tool.id)}">Path</label>
+          <input id="settings-toolchain-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-toolchain-input w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" data-tool-id="${escapeHtml(tool.id)}" />
+          <p class="text-[11px] text-gray-600 mt-2">${hint}</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="settings-toolchain-save px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" data-tool-id="${escapeHtml(tool.id)}">Save</button>
+          <button type="button" class="settings-toolchain-clear px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors" data-tool-id="${escapeHtml(tool.id)}"${tool.configured && !tool.source?.startsWith('env:') ? '' : ' disabled'}>Use system default</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    list.querySelectorAll('.settings-toolchain-jdk-select').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const input = list.querySelector(`.settings-toolchain-input[data-tool-id="${sel.dataset.toolId}"]`);
+        if (input && sel.value) input.value = sel.value;
+      });
+    });
+    list.querySelectorAll('.settings-toolchain-save').forEach((btn) => {
+      btn.addEventListener('click', () => saveToolchainFromSettings(btn.dataset.toolId));
+    });
+    list.querySelectorAll('.settings-toolchain-clear').forEach((btn) => {
+      btn.addEventListener('click', () => clearToolchainFromSettings(btn.dataset.toolId));
+    });
   } catch (err) {
-    statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+    list.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
   }
 }
 
-async function saveJdkFromSettings(e) {
-  e?.preventDefault();
-  const home = $('#settings-jdk-home')?.value.trim();
-  if (!home) {
-    toast('Enter a JAVA_HOME path or pick an installed JDK', 'error');
-    $('#settings-jdk-home')?.focus();
+async function saveToolchainFromSettings(id) {
+  const input = document.querySelector(`.settings-toolchain-input[data-tool-id="${id}"]`);
+  const path = input?.value.trim();
+  if (!path) {
+    toast('Enter a path or use system default', 'error');
+    input?.focus();
     return;
   }
   try {
-    await api('/api/settings/jdk', {
+    await api('/api/settings/toolchains', {
       method: 'PATCH',
-      body: JSON.stringify({ java_home: home }),
+      body: JSON.stringify({ id, path }),
     });
-    await loadJdkSettingsSection();
-    toast('JAVA_HOME saved — Run Java uses this JDK; Gradle keeps a newer JVM when needed', 'success');
+    await loadToolchainsSettingsSection();
+    toast(`${id} toolchain saved`, 'success');
   } catch (err) {
-    toast(err.message || 'Failed to save JAVA_HOME', 'error');
+    toast(err.message || `Failed to save ${id}`, 'error');
   }
 }
 
-async function clearJdkFromSettings() {
+async function clearToolchainFromSettings(id) {
   try {
-    await api('/api/settings/jdk', { method: 'DELETE' });
-    await loadJdkSettingsSection();
-    toast('Using system default JAVA_HOME', 'success');
+    await api(`/api/settings/toolchains/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await loadToolchainsSettingsSection();
+    toast(`${id} using system default`, 'success');
   } catch (err) {
-    toast(err.message || 'Failed to clear JAVA_HOME', 'error');
+    toast(err.message || `Failed to clear ${id}`, 'error');
   }
 }
 
 async function loadSettingsModal() {
-  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadJdkSettingsSection()]);
+  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadToolchainsSettingsSection()]);
   loadAppearanceSettingsSection();
   switchSettingsTab(settingsTab);
 }
@@ -778,7 +798,7 @@ async function showSettingsModal(tab = 'git') {
     if (tab === 'cursor') $('#settings-cursor-key')?.focus();
     else if (tab === 'ai') $('#settings-gemini-key')?.focus();
     else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
-    else if (tab === 'java') $('#settings-jdk-select')?.focus();
+    else if (tab === 'toolchains') $('#settings-toolchains-list .settings-toolchain-input')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
 }
@@ -1202,7 +1222,7 @@ async function pollProjectIndexStatus() {
 }
 
 function welcomeScreenHtml() {
-  const recent = state.repos.slice(0, 6);
+  const recent = state.repos.slice(0, 5);
   const recentHtml = recent.length
     ? `<div class="ij-recent">
         <div class="ij-recent-title">Recent repositories</div>
@@ -1377,7 +1397,8 @@ function runMenuAction(action) {
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
     'settings-appearance': () => showSettingsModal('appearance'),
-    'settings-java': () => showSettingsModal('java'),
+    'settings-toolchains': () => showSettingsModal('toolchains'),
+    'settings-java': () => showSettingsModal('toolchains'),
     run: runActive,
   };
   map[action]?.();
@@ -1390,7 +1411,7 @@ const PALETTE_COMMANDS = [
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
   { id: 'settings-appearance', label: 'Editor appearance', run: () => showSettingsModal('appearance') },
-  { id: 'settings-java', label: 'Java (JAVA_HOME)', run: () => showSettingsModal('java') },
+  { id: 'settings-toolchains', label: 'Toolchains', run: () => showSettingsModal('toolchains') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },
@@ -5878,8 +5899,6 @@ function bindEvents() {
   $('#settings-cursor-form')?.addEventListener('submit', saveCursorKeyFromSettings);
   $('#settings-cursor-clear')?.addEventListener('click', clearCursorKeyFromSettings);
   $('#settings-cursor-restart')?.addEventListener('click', restartBridge);
-  $('#settings-jdk-form')?.addEventListener('submit', saveJdkFromSettings);
-  $('#settings-jdk-clear')?.addEventListener('click', clearJdkFromSettings);
   $$('.ij-settings-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.settingsTab));
   });

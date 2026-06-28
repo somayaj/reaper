@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 
-use super::exec::run_command;
+use super::exec::{run_command, run_tool_command};
 use super::java_diagnostics;
 use super::safe_join;
 
@@ -488,7 +488,7 @@ fn check_json(rel_path: &str, content: &str) -> Vec<Diagnostic> {
 fn check_rust(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(
+    let out = run_tool_command(
         ws,
         "rustc",
         &[
@@ -544,17 +544,16 @@ fn parse_location_tail(rest: &str) -> Option<(String, u32, u32)> {
 fn check_python(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    for prog in ["python3", "python"] {
-        let out = run_command(ws, prog, &["-m", "py_compile", &rel]);
-        if out.is_ok() {
-            let out = out?;
-            if out.exit_code == 0 {
-                return Ok(Vec::new());
-            }
-            return Ok(parse_python_output(&format!("{}\n{}", out.stderr, out.stdout), rel_path));
-        }
+    let Ok(out) = run_tool_command(ws, "python", &["-m", "py_compile", &rel]) else {
+        return Ok(Vec::new());
+    };
+    if out.exit_code == 0 {
+        return Ok(Vec::new());
     }
-    Ok(Vec::new())
+    Ok(parse_python_output(
+        &format!("{}\n{}", out.stderr, out.stdout),
+        rel_path,
+    ))
 }
 
 fn parse_python_output(text: &str, focus: &str) -> Vec<Diagnostic> {
@@ -612,7 +611,7 @@ fn check_go(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>>
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
     let null_out = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let out = run_command(ws, "go", &["build", "-o", null_out, &rel])?;
+    let out = run_tool_command(ws, "go", &["build", "-o", null_out, &rel])?;
     Ok(parse_go_output(&format!("{}\n{}", out.stderr, out.stdout), rel_path))
 }
 
@@ -882,40 +881,35 @@ fn check_yaml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic
     write_overlay(ws, rel_path, content)?;
     let abs = ws.join(overlay_rel(rel_path));
     let abs = abs.to_string_lossy();
-    for prog in ["python3", "python"] {
-        let script = format!(
-            "import sys\n\
-             try:\n\
-                 import yaml\n\
-             except ImportError:\n\
-                 sys.exit(0)\n\
-             try:\n\
-                 yaml.safe_load(open(sys.argv[1]))\n\
-             except yaml.YAMLError as e:\n\
-                 print(e)\n\
-                 sys.exit(1)\n"
-        );
-        let out = run_command(ws, prog, &["-c", &script, &abs]);
-        if out.is_err() {
-            continue;
-        }
-        let out = out?;
-        if out.exit_code == 0 {
-            return Ok(Vec::new());
-        }
-        let msg = out.stdout.trim();
-        let line = msg
-            .lines()
-            .find_map(|l| {
-                l.split("line ")
-                    .nth(1)
-                    .and_then(|s| s.split(',').next())
-                    .and_then(|s| s.trim().parse().ok())
-            })
-            .unwrap_or(1);
-        return Ok(vec![diag(rel_path, line, 1, msg, "error")]);
+    let script = format!(
+        "import sys\n\
+         try:\n\
+             import yaml\n\
+         except ImportError:\n\
+             sys.exit(0)\n\
+         try:\n\
+             yaml.safe_load(open(sys.argv[1]))\n\
+         except yaml.YAMLError as e:\n\
+             print(e)\n\
+             sys.exit(1)\n"
+    );
+    let Ok(out) = run_tool_command(ws, "python", &["-c", &script, &abs]) else {
+        return Ok(Vec::new());
+    };
+    if out.exit_code == 0 {
+        return Ok(Vec::new());
     }
-    Ok(Vec::new())
+    let msg = out.stdout.trim();
+    let line = msg
+        .lines()
+        .find_map(|l| {
+            l.split("line ")
+                .nth(1)
+                .and_then(|s| s.split(',').next())
+                .and_then(|s| s.trim().parse().ok())
+        })
+        .unwrap_or(1);
+    Ok(vec![diag(rel_path, line, 1, msg, "error")])
 }
 
 fn check_xml(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -1031,7 +1025,7 @@ fn parse_stylelint_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_ruby(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "ruby", &["-c", &rel])?;
+    let out = run_tool_command(ws, "ruby", &["-c", &rel])?;
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }

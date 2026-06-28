@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::git::GitOutput;
 use crate::jdk;
+use crate::toolchain;
 
 pub fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
     let mut cmd = Command::new(program);
@@ -24,7 +25,13 @@ pub fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput
     })
 }
 
-/// Run java/javac with the configured JDK (Settings → Java), not system default.
+/// Run a configured toolchain binary (Settings → Toolchains), falling back to PATH.
+pub fn run_tool_command(cwd: &Path, tool_id: &str, args: &[&str]) -> Result<GitOutput> {
+    let program = toolchain::resolve_program_or(tool_id)?;
+    run_command(cwd, program.to_string_lossy().as_ref(), args)
+}
+
+/// Run java/javac with the configured JDK (Settings → Toolchains), not system default.
 pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
     let mut cmd = Command::new(program);
     cmd.args(args)

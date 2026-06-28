@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="94" />
+  <meta name="reaper-ui-build" content="99" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script>
@@ -68,7 +68,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=65" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=70" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -103,7 +103,7 @@
         <span class="hidden lg:block text-sm font-semibold text-white tracking-tight">Reaper</span>
       </a>
 
-      <nav class="ij-menu-nav" aria-label="Main menu">
+      <nav class="ij-menu-nav ij-menu-nav--main" aria-label="Main menu">
         <div class="ij-menu-root" data-menu="file">
           <button type="button" class="ij-menu-trigger">File</button>
           <div class="ij-menu-dropdown">
@@ -198,7 +198,7 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
             <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
-            <button type="button" class="ij-menu-item" data-action="settings-java">Java (JAVA_HOME)…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-toolchains">Toolchains…</button>
             <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
             <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
           </div>
@@ -255,7 +255,7 @@
     <div id="workspace-row" class="ij-workspace-row">
 
     <!-- Tool window strip -->
-    <nav class="ij-toolstrip flex flex-col items-center py-1 gap-0 shrink-0">
+    <nav class="ij-toolstrip shrink-0" aria-label="Tool windows">
       <button id="btn-sidebar-expand" type="button" class="activity-btn ij-sidebar-expand-btn" title="Show sidebar" aria-label="Show sidebar">
         <span class="ij-activity-glyph" aria-hidden="true">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5l7 7-7 7"/></svg>
@@ -355,8 +355,17 @@
           </div>
           <textarea id="commit-message" rows="3" placeholder="Describe what changed and why…" class="ij-commit-message"></textarea>
           <div class="ij-commit-actions">
-            <button id="btn-commit-only" type="button" disabled class="ij-commit-btn ij-commit-btn-secondary">Commit</button>
-            <button id="btn-commit-push" type="button" disabled class="ij-commit-btn ij-commit-btn-primary">Commit &amp; Push</button>
+            <button id="btn-commit-only" type="button" disabled class="ij-commit-btn ij-commit-btn-secondary">
+              <span class="ij-commit-btn-icon" data-icon="gitCommit" aria-hidden="true"></span>
+              <span class="ij-commit-btn-label">Commit</span>
+            </button>
+            <button id="btn-commit-push" type="button" disabled class="ij-commit-btn ij-commit-btn-primary">
+              <span class="ij-commit-btn-icon-group" aria-hidden="true">
+                <span class="ij-commit-btn-icon" data-icon="gitCommit"></span>
+                <span class="ij-commit-btn-icon" data-icon="gitPush"></span>
+              </span>
+              <span class="ij-commit-btn-label">Commit &amp; Push</span>
+            </button>
           </div>
           <p class="ij-commit-footnote">Stages checked files only. Commit saves locally; Commit &amp; Push also sends to your remote.</p>
         </div>
@@ -737,7 +746,7 @@
         <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
           <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
-          <button type="button" class="ij-settings-tab" data-settings-tab="java">Java</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="toolchains">Toolchains</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
         </nav>
@@ -745,7 +754,7 @@
           <section id="settings-panel-git" class="ij-settings-panel space-y-4">
             <div>
               <h4 class="text-sm font-semibold text-white">Personal access tokens</h4>
-              <p class="text-xs text-gray-500 mt-1">Stored locally in <code class="text-accent">data/settings.json</code>. Used for private HTTPS clone, pull, and push.</p>
+              <p class="text-xs text-gray-500 mt-1">Stored locally in <code class="text-accent">~/reaper/settings.json</code>. Used for private HTTPS clone, pull, and push.</p>
             </div>
             <div id="settings-pat-list" class="ij-settings-token-list"></div>
             <form id="settings-pat-form" class="space-y-3 border-t border-surface-700 pt-4">
@@ -803,29 +812,12 @@
               <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one.</p>
             </div>
           </section>
-          <section id="settings-panel-java" class="ij-settings-panel hidden space-y-4">
+          <section id="settings-panel-toolchains" class="ij-settings-panel hidden space-y-4">
             <div>
-              <h4 class="text-sm font-semibold text-white">Java (JAVA_HOME)</h4>
-              <p class="text-xs text-gray-500 mt-1">Used for Gradle, Java run, and diagnostics. If you see <code class="font-mono text-gray-400">Unsupported class file major version 70</code>, macOS is defaulting to Java&nbsp;26 — pick Java&nbsp;17 or 21 below. Java&nbsp;8 is fine to save here for legacy projects; Gradle 8+ still runs with Java&nbsp;17/21 automatically.</p>
+              <h4 class="text-sm font-semibold text-white">Toolchains</h4>
+              <p class="text-xs text-gray-500 mt-1">Set compilers and runtimes for diagnostics and Run. Includes Java, Rust, Go, Python, Ruby, and Rails. Leave blank to use <code class="font-mono text-gray-400">PATH</code>. Saved in <code class="font-mono">~/reaper/settings.json</code>.</p>
             </div>
-            <div id="settings-jdk-status" class="ij-settings-status"></div>
-            <form id="settings-jdk-form" class="space-y-3 border-t border-surface-700 pt-4">
-              <div>
-                <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-jdk-select">Installed JDKs</label>
-                <select id="settings-jdk-select" class="ij-settings-select w-full max-w-lg" title="Pick a JDK">
-                  <option value="">— select —</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-jdk-home">JAVA_HOME path</label>
-                <input id="settings-jdk-home" name="java_home" type="text" spellcheck="false" placeholder="/Library/Java/JavaVirtualMachines/…/Contents/Home" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
-                <p class="text-[11px] text-gray-600 mt-2">Must contain <code class="font-mono">bin/java</code>. Saved in <code class="font-mono">data/settings.json</code> (or set <code class="font-mono">REAPER_JAVA_HOME</code> in the environment).</p>
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Save JAVA_HOME</button>
-                <button type="button" id="settings-jdk-clear" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Use system default</button>
-              </div>
-            </form>
+            <div id="settings-toolchains-list" class="space-y-4"></div>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
