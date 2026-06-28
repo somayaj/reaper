@@ -17,8 +17,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 ARCH="$(uname -m)"
 TAG="v${VERSION}"
-DMG="$ROOT/dist/Reaper-${VERSION}-macos-${ARCH}.dmg"
+DMG="$ROOT/dist/reaper-${VERSION}-macos-${ARCH}.dmg"
 DMG_NAME="$(basename "$DMG")"
+LEGACY_DMG_NAME="Reaper-${VERSION}-macos-${ARCH}.dmg"
+LEGACY_DMG_LC="$(printf '%s' "$LEGACY_DMG_NAME" | tr '[:upper:]' '[:lower:]')"
+DMG_NAME_LC="$(printf '%s' "$DMG_NAME" | tr '[:upper:]' '[:lower:]')"
 TITLE="Reaper ${VERSION} (macOS ${ARCH})"
 GH_REPO="${REAPER_GH_REPO:-reaper-org/releases}"
 
@@ -56,6 +59,9 @@ if [[ -n "${REAPER_RELEASES_DIR:-}" && -d "$REAPER_RELEASES_DIR/.git" ]]; then
   ARTIFACT_DIR="$REAPER_RELEASES_DIR/macos/${ARCH}/v${VERSION}"
   mkdir -p "$ARTIFACT_DIR"
   cp "$DMG" "$ARTIFACT_DIR/$DMG_NAME"
+  if [[ "$LEGACY_DMG_LC" != "$DMG_NAME_LC" && -f "$ARTIFACT_DIR/$LEGACY_DMG_NAME" ]]; then
+    rm -f "$ARTIFACT_DIR/$LEGACY_DMG_NAME"
+  fi
   (cd "$ARTIFACT_DIR" && shasum -a 256 "$DMG_NAME" > SHA256SUMS)
   echo "Synced DMG to ${ARTIFACT_DIR}"
 
@@ -66,6 +72,10 @@ if [[ -n "${REAPER_RELEASES_DIR:-}" && -d "$REAPER_RELEASES_DIR/.git" ]]; then
   if ! git -C "$REAPER_RELEASES_DIR" diff --quiet -- "$ARTIFACT_DIR" \
     || [[ -n "$(git -C "$REAPER_RELEASES_DIR" status --porcelain -- "$ARTIFACT_DIR")" ]]; then
     git -C "$REAPER_RELEASES_DIR" add "$ARTIFACT_DIR/$DMG_NAME" "$ARTIFACT_DIR/SHA256SUMS"
+    if [[ "$LEGACY_DMG_LC" != "$DMG_NAME_LC" ]] \
+      && git -C "$REAPER_RELEASES_DIR" ls-files --error-unmatch "$ARTIFACT_DIR/$LEGACY_DMG_NAME" >/dev/null 2>&1; then
+      git -C "$REAPER_RELEASES_DIR" rm -f "$ARTIFACT_DIR/$LEGACY_DMG_NAME"
+    fi
     if [[ -f "$ARTIFACT_DIR/RELEASE_NOTES.md" ]]; then
       git -C "$REAPER_RELEASES_DIR" add "$ARTIFACT_DIR/RELEASE_NOTES.md"
     fi
@@ -145,14 +155,29 @@ cleanup_stray_release_assets() {
   done < <(gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name')
 }
 
+remove_release_asset_if_present() {
+  local name="$1"
+  if gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
+    echo "Removing existing asset for replacement: ${name}"
+    gh release delete-asset "$TAG" "$name" --repo "$GH_REPO" --yes
+  fi
+}
+
+upload_release_dmg() {
+  cleanup_stray_release_assets
+  remove_release_asset_if_present "$DMG_NAME"
+  gh release upload "$TAG" "$DMG" --repo "$GH_REPO" --clobber
+  cleanup_stray_release_assets
+}
+
 if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
   echo "Uploading DMG to existing release ${TAG} on ${GH_REPO}…"
-  gh release upload "$TAG" "$DMG" --repo "$GH_REPO" --clobber
+  upload_release_dmg
   gh release edit "$TAG" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
-  cleanup_stray_release_assets
 else
   echo "Creating release ${TAG} on ${GH_REPO}…"
   gh release create "$TAG" "$DMG" --repo "$GH_REPO" --title "$TITLE" --notes-file "$NOTES_FILE"
+  cleanup_stray_release_assets
 fi
 
 rm -rf "$SUMS_TMP_DIR"

@@ -30,7 +30,7 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 |----------|---------|-------------|
 | `REAPER_HOST` | `127.0.0.1` | Bind address |
 | `REAPER_PORT` | `8080` | HTTP port |
-| `REAPER_DATA_DIR` | `./data` | Root for repos, workspaces, and settings |
+| `REAPER_DATA_DIR` | `~/reaper` | Root for repos, workspaces, metadata, and settings |
 | `REAPER_PAT` | — | Default PAT for private HTTPS remotes |
 | `REAPER_PAT_GITHUB_COM` | — | Host-specific PAT (dots → underscores, uppercased) |
 | `REAPER_GIT_USERNAME` | `git` | Username for generic HTTPS git hosts |
@@ -46,12 +46,14 @@ git clone http://127.0.0.1:8080/git/my-app.git
 ## Architecture
 
 ```
-data/
+~/reaper/
   repos/        ← bare repos (hosted remotes)
   workspaces/   ← local clones for the visual editor
   metadata/     ← upstream remote info for imported repos
   settings.json ← PAT tokens per host (stored locally)
 ```
+
+Override with `REAPER_DATA_DIR`.
 
 The UI edits files in `workspaces/`, commits locally, and pushes to the bare repo. Imported repos sync with private upstreams using your configured PAT.
 
@@ -64,3 +66,7 @@ Git smart HTTP:
 - `GET /git/{name}.git/info/refs?service=git-upload-pack`
 - `POST /git/{name}.git/git-upload-pack`
 - `POST /git/{name}.git/git-receive-pack`
+
+## License
+
+MIT License. Copyright (c) 2026 Asha Somayajula. See [LICENSE](LICENSE).

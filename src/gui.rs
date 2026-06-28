@@ -30,6 +30,7 @@ fn install_macos_menu() -> muda::Menu {
             Some(AboutMetadata {
                 name: Some("Reaper".into()),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
+                copyright: Some("Copyright (c) 2026 Asha Somayajula".into()),
                 ..Default::default()
             }),
         ),
