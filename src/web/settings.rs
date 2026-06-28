@@ -21,6 +21,11 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/settings/cursor/model", patch(set_cursor_model))
         .route("/api/settings/cursor/mode", patch(set_cursor_mode))
         .route("/api/settings/jdk", get(get_jdk).patch(set_jdk).delete(clear_jdk))
+        .route(
+            "/api/settings/toolchains",
+            get(get_toolchains).patch(set_toolchain),
+        )
+        .route("/api/settings/toolchains/{id}", delete(clear_toolchain))
 }
 
 async fn list_tokens(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -252,6 +257,45 @@ async fn set_jdk(
 async fn clear_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _ = state.settings.clear_java_home();
     Json(state.settings.jdk_view()).into_response()
+}
+
+async fn get_toolchains(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.settings.toolchains_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetToolchainRequest {
+    id: String,
+    path: String,
+}
+
+async fn set_toolchain(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetToolchainRequest>,
+) -> impl IntoResponse {
+    let id = body.id.trim();
+    if id.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "id required");
+    }
+    if crate::toolchain::tool_def(id).is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "unknown toolchain");
+    }
+    if let Err(e) = state.settings.set_toolchain_path(id, body.path) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    Json(state.settings.toolchains_view()).into_response()
+}
+
+async fn clear_toolchain(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let id = id.trim();
+    if crate::toolchain::tool_def(id).is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "unknown toolchain");
+    }
+    let _ = state.settings.clear_toolchain_path(id);
+    Json(state.settings.toolchains_view()).into_response()
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {
