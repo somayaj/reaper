@@ -43,6 +43,7 @@ pub fn list_repos(config: &Config, settings: &SettingsStore) -> Result<Vec<RepoS
     let discovered = config::discover_repos(&config.repos_dir)?;
     discovered
         .into_iter()
+        .filter(|(name, _)| !settings.is_repo_hidden(name))
         .map(|(name, path)| summarize_repo(config, settings, &name, &path))
         .collect()
 }
@@ -143,5 +144,18 @@ pub fn delete_repo(config: &Config, name: &str) -> Result<()> {
     }
     std::fs::remove_dir_all(path)?;
     let _ = metadata::delete(config, name);
+    Ok(())
+}
+
+/// Remove a repo from the IDE without deleting its bare repository on disk.
+pub fn unregister_repo(config: &Config, settings: &SettingsStore, name: &str) -> Result<()> {
+    if !config.repo_exists(name) {
+        bail!("repository not found");
+    }
+    settings.hide_repo(name)?;
+    let ws = config.workspace_path(name);
+    if ws.exists() {
+        std::fs::remove_dir_all(ws)?;
+    }
     Ok(())
 }

@@ -6,7 +6,10 @@ mod ruby_nav;
 mod shell;
 mod solargraph;
 mod classpath;
+pub use classpath::CompletionItem;
 mod gradle;
+mod inline_context;
+mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
@@ -14,6 +17,7 @@ mod java_ecosystem;
 mod languages;
 mod project_jobs;
 mod project_profile;
+mod quick_fix;
 mod spring_props;
 mod symbols;
 
@@ -85,8 +89,21 @@ pub fn build_tree_level(ws: &Path, rel_dir: Option<&str>) -> Result<Vec<FileNode
     Ok(nodes)
 }
 
-fn should_skip_entry(name: &str) -> bool {
-    name == ".git"
+fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
+    if name == ".git" {
+        return true;
+    }
+    if !is_dir && name.ends_with(".class") {
+        return true;
+    }
+    if is_dir {
+        return matches!(
+            name,
+            "node_modules" | "target" | "build" | ".gradle" | "dist" | "out" | "bin"
+                | ".idea" | ".vscode" | "vendor" | "tmp" | "log" | "storage" | ".reaper"
+        );
+    }
+    false
 }
 
 fn collect_children(ws: &Path, dir: &Path, nodes: &mut Vec<FileNode>, recursive: bool) -> Result<()> {
@@ -98,10 +115,10 @@ fn collect_children(ws: &Path, dir: &Path, nodes: &mut Vec<FileNode>, recursive:
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if should_skip_entry(&name) {
+        let path = entry.path();
+        if should_skip_tree_name(&name, path.is_dir()) {
             continue;
         }
-        let path = entry.path();
         let rel = path
             .strip_prefix(ws)
             .unwrap_or(&path)
@@ -143,7 +160,7 @@ fn dir_has_listable_children(_ws: &Path, dir: &Path) -> bool {
         .map(|read_dir| {
             read_dir.filter_map(|e| e.ok()).any(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                !should_skip_entry(&name)
+                !should_skip_tree_name(&name, entry.path().is_dir())
             })
         })
         .unwrap_or(false)
@@ -484,6 +501,7 @@ pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfi
 pub use index_jobs::{JavaIndexJobs, JavaIndexStatus};
 pub use project_jobs::{ProjectIndexJobs, ProjectIndexStatus};
 pub use project_profile::ProjectProfile;
+pub use quick_fix::{QuickFix, QuickFixDiagnostic, QuickFixEdit};
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
 pub fn ensure_developer_path() {
@@ -549,7 +567,11 @@ fn dedupe_search_classes(
         }
     }
     out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
-    out.into_iter().take(limit).map(|(_, hit)| hit).collect()
+    out.into_iter()
+        .take(limit)
+        .map(|(_, hit)| hit)
+        .filter(|hit| !hit.path.to_lowercase().ends_with(".class"))
+        .collect()
 }
 
 pub fn find_definition(
@@ -598,8 +620,12 @@ pub fn java_completions(
     line: u32,
     column: u32,
     prefix: &str,
+    content: Option<&str>,
 ) -> Result<Vec<classpath::CompletionItem>> {
-    let content = read_file(ws, from_path)?;
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => read_file(ws, from_path)?,
+    };
     if spring_props::is_spring_config_file(from_path) {
         return spring_props::completions(ws, from_path, line, column, &content, prefix);
     }
@@ -610,7 +636,7 @@ pub fn java_completions(
         Vec::new()
     };
 
-    let sym_items = symbols::completions(ws, from_path, &content, prefix)?;
+    let sym_items = symbols::completions(ws, from_path, &content, prefix, line, column)?;
     if items.is_empty() {
         return Ok(sym_items);
     }
@@ -641,8 +667,20 @@ pub fn file_diagnostics(
     diagnostics::check_file(ws, rel_path, content)
 }
 
+pub fn java_language_level(ws: &Path, rel_path: &str) -> u32 {
+    java_diagnostics::java_language_level(ws, rel_path)
+}
+
+pub fn language_compiler_context(ws: &Path, rel_path: &str) -> language_compiler_context::LanguageCompilerContext {
+    language_compiler_context::detect(ws, rel_path)
+}
+
 pub fn compiler_tool_ids_for_path(path: &str) -> Vec<&'static str> {
     languages::compiler_tool_ids_for_path(path)
+}
+
+pub fn language_for_path(path: &str) -> Option<&'static str> {
+    languages::language_for_path(path)
 }
 
 pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
@@ -659,4 +697,35 @@ pub fn mark_conflict_resolved(ws: &Path, rel_path: &str) -> Result<GitOutput> {
 
 pub fn ensure_upstream_remote(ws: &Path, clean_url: &str) -> Result<()> {
     git::set_remote_url(ws, "upstream", clean_url)
+}
+
+pub fn build_inline_completion_context(
+    ws: &Path,
+    path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    line_prefix: &str,
+) -> String {
+    inline_context::build_inline_completion_context(ws, path, line, column, content, line_prefix)
+}
+
+pub fn inline_completion_fallback(
+    ws: &Path,
+    path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    line_prefix: &str,
+) -> Option<String> {
+    inline_context::inline_completion_fallback(ws, path, line, column, content, line_prefix)
+}
+
+pub fn should_prefer_ai_statement_inline(
+    path: &str,
+    line_prefix: &str,
+    content: &str,
+    line: u32,
+) -> bool {
+    inline_context::should_prefer_ai_statement_inline(path, line_prefix, content, line)
 }
