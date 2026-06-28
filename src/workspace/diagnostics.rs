@@ -177,7 +177,11 @@ fn check_shell(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnosti
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
     for prog in ["bash", "sh", "zsh"] {
-        let out = run_command(ws, prog, &["-n", &rel]);
+        let out = if prog == "bash" {
+            run_tool_command(ws, "bash", &["-n", &rel])
+        } else {
+            run_command(ws, prog, &["-n", &rel])
+        };
         if out.is_err() {
             continue;
         }
@@ -199,7 +203,7 @@ fn check_shell(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnosti
 fn check_lua(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "luac", &["-p", &rel]);
+    let out = run_tool_command(ws, "luac", &["-p", &rel]);
     let Ok(out) = out else {
         return Ok(Vec::new());
     };
@@ -227,7 +231,7 @@ fn check_lua(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>
 fn check_csharp(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "csc", &["/nologo", "/t:library", &rel]);
+    let out = run_tool_command(ws, "csc", &["/nologo", "/t:library", &rel]);
     let Ok(out) = out else {
         return Ok(Vec::new());
     };
@@ -243,7 +247,7 @@ fn check_csharp(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnost
 fn check_dart(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "dart", &["analyze", &rel]);
+    let out = run_tool_command(ws, "dart", &["analyze", &rel]);
     let Ok(out) = out else {
         return Ok(Vec::new());
     };
@@ -652,7 +656,7 @@ fn parse_go_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_javascript(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "node", &["--check", &rel])?;
+    let out = run_tool_command(ws, "node", &["--check", &rel])?;
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }
@@ -723,7 +727,7 @@ fn parse_node_path_line(line: &str) -> Option<(String, u32, u32)> {
 fn check_typescript(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(
+    let out = run_tool_command(
         ws,
         "tsc",
         &[
@@ -796,9 +800,9 @@ fn check_kotlin(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnost
     let rel = overlay_rel(rel_path);
     let out_dir = ws.join(".reaper/diagnostics/kotlin-out");
     std::fs::create_dir_all(&out_dir)?;
-    let out = run_command(
+    let out = run_tool_command(
         ws,
-        "kotlinc",
+        "kotlin",
         &[
             "-nowarn",
             "-d",
@@ -1060,7 +1064,7 @@ fn parse_ruby_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_php(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "php", &["-l", &rel])?;
+    let out = run_tool_command(ws, "php", &["-l", &rel])?;
     if out.exit_code == 0 {
         return Ok(Vec::new());
     }
@@ -1081,10 +1085,10 @@ fn check_php(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>
 fn check_c(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "clang", &["-fsyntax-only", "-x", "c", &rel]);
+    let out = run_tool_command(ws, "clang", &["-fsyntax-only", "-x", "c", &rel]);
     let out = match out {
         Ok(o) => o,
-        Err(_) => run_command(ws, "gcc", &["-fsyntax-only", "-x", "c", &rel])?,
+        Err(_) => run_tool_command(ws, "gcc", &["-fsyntax-only", "-x", "c", &rel])?,
     };
     if out.exit_code == 0 {
         return Ok(Vec::new());
@@ -1105,7 +1109,7 @@ fn parse_clang_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_swift(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "swiftc", &["-typecheck", &rel]);
+    let out = run_tool_command(ws, "swiftc", &["-typecheck", &rel]);
     let Ok(out) = out else {
         return Ok(Vec::new());
     };
@@ -1133,7 +1137,7 @@ fn parse_swift_output(text: &str, focus: &str) -> Vec<Diagnostic> {
 fn check_groovy(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    if let Ok(out) = run_command(ws, "groovyc", &["-d", ".reaper/diagnostics/groovy-out", &rel]) {
+    if let Ok(out) = run_tool_command(ws, "groovy", &["-d", ".reaper/diagnostics/groovy-out", &rel]) {
         if out.exit_code == 0 {
             return Ok(Vec::new());
         }
