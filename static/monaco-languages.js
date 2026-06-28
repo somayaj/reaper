@@ -62,6 +62,51 @@
     return map[ext] || 'plaintext';
   }
 
+  function compilerToolIdsForPath(path) {
+    const lower = (path || '').replace(/\\/g, '/').toLowerCase();
+    const base = lower.split('/').pop() || '';
+    if (base === 'dockerfile' || base.startsWith('dockerfile.')) return ['bash'];
+    if (base === 'makefile' || base === 'gnumakefile') return ['bash'];
+    if (base === 'cmakelists.txt') return ['bash'];
+    if (base === 'gemfile' || base.endsWith('.rb')) return ['ruby', 'bundle'];
+    const lang = langForPath(path);
+    const map = {
+      java: ['java'],
+      kotlin: ['kotlin'],
+      groovy: ['groovy'],
+      python: ['python'],
+      ruby: ['ruby', 'bundle'],
+      rust: ['rustc', 'cargo'],
+      go: ['go'],
+      javascript: ['node'],
+      typescript: ['tsc', 'node'],
+      php: ['php'],
+      csharp: ['csc'],
+      swift: ['swiftc'],
+      c: ['clang', 'gcc'],
+      cpp: ['clang', 'gcc'],
+      shell: ['bash'],
+      lua: ['luac'],
+      dart: ['dart'],
+      json: ['jsonlint'],
+      jsonc: ['jsonlint'],
+      yaml: ['yamllint'],
+    };
+    return map[lang] || [];
+  }
+
+  function compilerLabelsForPath(path) {
+    const ids = compilerToolIdsForPath(path);
+    const labels = {
+      java: 'Java', kotlin: 'Kotlin', groovy: 'Groovy', python: 'Python',
+      ruby: 'Ruby', bundle: 'Bundler', rustc: 'rustc', cargo: 'cargo', go: 'Go',
+      node: 'Node', tsc: 'tsc', php: 'PHP', clang: 'clang', gcc: 'gcc',
+      swiftc: 'swiftc', luac: 'luac', csc: 'csc', dart: 'dart', bash: 'bash',
+      yamllint: 'yamllint', jsonlint: 'jsonlint', ajv: 'ajv',
+    };
+    return ids.map((id) => labels[id] || id).join(', ');
+  }
+
   function langLabel(lang) {
     const labels = {
       groovy: 'Groovy', kotlin: 'Kotlin', javascript: 'JavaScript', typescript: 'TypeScript',
@@ -191,8 +236,65 @@
       annotation: monaco.languages.CompletionItemKind.Interface,
       property: monaco.languages.CompletionItemKind.Property,
       value: monaco.languages.CompletionItemKind.Value,
+      method: monaco.languages.CompletionItemKind.Method,
+      module: monaco.languages.CompletionItemKind.Module,
+      struct: monaco.languages.CompletionItemKind.Struct,
+      keyword: monaco.languages.CompletionItemKind.Keyword,
     };
     return map[kind] || monaco.languages.CompletionItemKind.Text;
+  }
+
+  const ALL_EDITOR_LANGS = [
+    'java', 'kotlin', 'groovy', 'rust', 'javascript', 'typescript', 'python', 'go',
+    'csharp', 'ruby', 'php', 'swift', 'c', 'cpp', 'shell', 'lua', 'dart', 'r', 'sql',
+    'html', 'css', 'scss', 'less', 'json', 'markdown', 'xml', 'yaml', 'toml', 'ini',
+    'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'plaintext',
+  ];
+
+  const CLIENT_KEYWORDS = {
+    rust: ['fn', 'let', 'mut', 'pub', 'struct', 'enum', 'impl', 'trait', 'match', 'use', 'async', 'await'],
+    python: ['def', 'class', 'import', 'from', 'if', 'elif', 'else', 'for', 'while', 'with', 'return', 'async', 'await'],
+    go: ['func', 'package', 'import', 'type', 'struct', 'interface', 'if', 'for', 'return', 'go', 'chan'],
+    javascript: ['function', 'const', 'let', 'var', 'class', 'import', 'export', 'async', 'await', 'return', 'if', 'for'],
+    typescript: ['interface', 'type', 'enum', 'namespace', 'readonly', 'declare', 'function', 'const', 'async', 'await'],
+    java: ['class', 'interface', 'enum', 'public', 'private', 'protected', 'static', 'final', 'void', 'return', 'import'],
+    kotlin: ['fun', 'val', 'var', 'class', 'object', 'interface', 'when', 'suspend', 'data', 'sealed'],
+    groovy: ['def', 'class', 'import', 'package', 'return', 'if', 'for', 'while'],
+    ruby: ['def', 'class', 'module', 'end', 'require', 'include', 'attr_reader', 'attr_writer'],
+    php: ['function', 'class', 'namespace', 'use', 'public', 'private', 'protected', 'return', 'if', 'foreach'],
+    csharp: ['class', 'namespace', 'using', 'public', 'private', 'async', 'await', 'var', 'record', 'interface'],
+    swift: ['func', 'var', 'let', 'class', 'struct', 'enum', 'protocol', 'extension', 'import', 'guard'],
+    c: ['int', 'char', 'void', 'struct', 'enum', 'typedef', 'static', 'const', 'return', 'if', 'for'],
+    cpp: ['class', 'namespace', 'template', 'typename', 'constexpr', 'virtual', 'public', 'private', 'override'],
+    shell: ['if', 'then', 'else', 'fi', 'for', 'do', 'done', 'function', 'export', 'local', 'echo'],
+    lua: ['function', 'local', 'if', 'then', 'else', 'end', 'for', 'while', 'return'],
+    dart: ['class', 'void', 'Future', 'async', 'await', 'import', 'extends', 'implements', 'factory'],
+    sql: ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'JOIN', 'ORDER', 'GROUP'],
+    yaml: ['apiVersion', 'kind', 'metadata', 'spec', 'name', 'labels', 'jobs', 'steps', 'uses', 'run', 'on'],
+    toml: ['true', 'false'],
+    dockerfile: ['FROM', 'RUN', 'CMD', 'COPY', 'WORKDIR', 'ENV', 'EXPOSE', 'ENTRYPOINT'],
+    makefile: ['ifeq', 'endif', 'include', 'export', '.PHONY'],
+    cmake: ['cmake_minimum_required', 'project', 'add_executable', 'find_package', 'target_link_libraries'],
+    html: ['div', 'span', 'script', 'style', 'head', 'body', 'meta', 'link', 'button', 'input', 'form'],
+    css: ['display', 'margin', 'padding', 'color', 'background', 'flex', 'grid', 'position'],
+    scss: ['@import', '@mixin', '@include', '@media'],
+    protobuf: ['message', 'enum', 'service', 'rpc', 'package', 'import'],
+    graphql: ['query', 'mutation', 'type', 'interface', 'input', 'schema'],
+    ini: ['spring.application.name', 'server.port', 'logging.level'],
+  };
+
+  function clientKeywordsForPath(path) {
+    const lang = langForPath(path);
+    return CLIENT_KEYWORDS[lang] || [];
+  }
+
+  function buildCompletionRange(model, position, prefix) {
+    const word = model.getWordUntilPosition(position);
+    const p = prefix || word.word || '';
+    const startCol = p.length
+      ? Math.max(1, position.column - p.length)
+      : word.startColumn;
+    return new monaco.Range(position.lineNumber, startCol, position.lineNumber, position.column);
   }
 
   async function fetchCompletions(helpers, model, position, prefix) {
@@ -279,10 +381,7 @@
   function setupEditorFeatures(editor, helpers) {
     registerGroovy();
 
-    const langs = new Set([
-      'java', 'groovy', 'kotlin', 'rust', 'javascript', 'typescript', 'python', 'go',
-      'csharp', 'ruby', 'php', 'swift', 'c', 'cpp', 'shell',
-    ]);
+    const langs = new Set(ALL_EDITOR_LANGS);
 
     monaco.languages.registerDocumentSymbolProvider(Array.from(langs), {
       provideDocumentSymbols(model) {
@@ -303,88 +402,53 @@
       },
     });
 
-    monaco.languages.registerCompletionItemProvider(['java', 'kotlin', 'groovy'], {
-      triggerCharacters: ['.', '@'],
+    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
+      triggerCharacters: ['.', '@', ':', '-', '<', '"', '/', '#', '*', '='],
       async provideCompletionItems(model, position) {
-        if (!helpers.repoApi || !helpers.getRepo) return { suggestions: [] };
-        const repo = helpers.getRepo();
-        const path = helpers.getActivePath?.() || '';
-        if (!repo || !path) return { suggestions: [] };
-
-        const word = model.getWordUntilPosition(position);
-        const prefix = word.word || '';
-        if (!prefix && model.getValueInRange(new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column)).slice(-1) !== '@') {
-          return { suggestions: [] };
-        }
-
-        try {
-          const items = await fetchCompletions(helpers, model, position, prefix);
-          if (!items.length) return { suggestions: [] };
-
-          const range = new monaco.Range(
-            position.lineNumber,
-            word.startColumn,
-            position.lineNumber,
-            word.endColumn,
-          );
-
-          return {
-            suggestions: items.map((item) => ({
-              label: item.label,
-              kind: completionKind(item.kind),
-              detail: item.detail || undefined,
-              insertText: item.label,
-              range,
-            })),
-          };
-        } catch {
-          return { suggestions: [] };
-        }
-      },
-    });
-
-    monaco.languages.registerCompletionItemProvider(['ini', 'yaml'], {
-      triggerCharacters: ['.', '=', ':'],
-      async provideCompletionItems(model, position) {
-        if (!helpers.repoApi || !helpers.getRepo) return { suggestions: [] };
         const path = helpers.getActivePath?.() || '';
         if (!path) return { suggestions: [] };
-        const lower = path.toLowerCase();
-        if (!lower.endsWith('.properties') && !lower.endsWith('.yml') && !lower.endsWith('.yaml')) {
-          return { suggestions: [] };
-        }
 
         const word = model.getWordUntilPosition(position);
         const linePrefix = model.getValueInRange(
           new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column),
         );
-        const prefix = word.word || linePrefix.split(/[=:#]/).pop()?.trim() || '';
+        const prefix = word.word || linePrefix.split(/[=:#.\s]+/).pop() || '';
+        const range = buildCompletionRange(model, position, prefix);
 
-        try {
-          const items = await fetchCompletions(helpers, model, position, prefix);
-          if (!items.length) return { suggestions: [] };
+        const seen = new Set();
+        const suggestions = [];
 
-          const startCol = Math.max(1, position.column - prefix.length);
-          const range = new monaco.Range(
-            position.lineNumber,
-            startCol,
-            position.lineNumber,
-            position.column,
-          );
-
-          return {
-            suggestions: items.map((item) => ({
-              label: item.label,
-              kind: completionKind(item.kind),
-              detail: item.detail || undefined,
-              documentation: item.detail ? { value: item.detail } : undefined,
-              insertText: item.label,
-              range,
-            })),
-          };
-        } catch {
-          return { suggestions: [] };
+        function add(label, kind, detail) {
+          if (!label || seen.has(label)) return;
+          seen.add(label);
+          suggestions.push({
+            label,
+            kind: completionKind(kind),
+            detail: detail || undefined,
+            insertText: label,
+            range,
+          });
         }
+
+        for (const kw of clientKeywordsForPath(path)) {
+          if (!prefix || kw.toLowerCase().startsWith(prefix.toLowerCase())) {
+            add(kw, 'keyword', 'keyword');
+          }
+        }
+
+        if (helpers.repoApi && helpers.getRepo) {
+          try {
+            const items = await fetchCompletions(helpers, model, position, prefix);
+            for (const item of items) {
+              add(item.label, item.kind, item.detail);
+              if (suggestions.length >= 80) break;
+            }
+          } catch {
+            /* API unavailable — local keywords still shown */
+          }
+        }
+
+        return { suggestions };
       },
     });
 
@@ -399,11 +463,12 @@
             method: 'POST',
             body: JSON.stringify({ path, content: model.getValue() }),
           });
-          if (!res?.content || res.content === model.getValue()) return [];
+          if (typeof res?.content !== 'string' || res.content === model.getValue()) return [];
           const fullRange = model.getFullModelRange();
           return [{ range: fullRange, text: res.content }];
-        } catch {
-          return [];
+        } catch (e) {
+          helpers.toast?.(e?.message || 'Format failed', 'error');
+          throw e;
         }
       },
     });
@@ -479,6 +544,8 @@
   window.ReaperLang = {
     langForPath,
     langLabel,
+    compilerToolIdsForPath,
+    compilerLabelsForPath,
     isDiagnosablePath,
     registerGroovy,
     setupEditorFeatures,

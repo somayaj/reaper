@@ -90,7 +90,7 @@
   --ij-tab-inactive: #1e1e1e;
   --ij-tab-border-active: #00ffff;
   --ij-toolbar: #252526;
-  --ij-status: #007acc;
+  --ij-status: #252526;
   --ij-gutter: #1e1e1e;
   --ij-run: #39ff14;
   --ij-run-hover: #5dff3d;
@@ -4351,6 +4351,15 @@ main { background: var(--ij-bg); }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.ij-compiler-exts {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--ij-text-dim);
+  font-family: var(--ij-mono);
+  opacity: 0.85;
 }
 
 .ij-compiler-badge {

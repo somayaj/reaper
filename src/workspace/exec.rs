@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::git::GitOutput;
 use crate::jdk;
@@ -55,4 +55,79 @@ pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitO
 pub fn run_shell_command(cwd: &Path, command: &str) -> Result<GitOutput> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     run_command(cwd, &shell, &["-lc", command])
+}
+
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\"'\"'"))
+}
+
+/// Run a program with args via login shell so Homebrew and user PATH work from the .app.
+pub fn run_shell_argv(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
+    let mut command = shell_quote(program);
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    run_shell_command(cwd, &command)
+}
+
+/// Prepend common developer directories so GUI-launched Reaper finds brew tools.
+pub fn ensure_developer_path() {
+    let mut prepend: Vec<PathBuf> = Vec::new();
+    for dir in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ] {
+        let path = PathBuf::from(dir);
+        if path.is_dir() {
+            prepend.push(path);
+        }
+    }
+
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut merged: Vec<PathBuf> = prepend;
+    for entry in std::env::split_paths(&current) {
+        if !merged.contains(&entry) {
+            merged.push(entry);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(&merged) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// Run a formatter/linter that reads stdin and writes stdout.
+pub fn try_stdin_command(cwd: &Path, program: &str, args: &[&str], content: &str) -> Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run {program}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(content.as_bytes())?;
+    }
+
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("{program} failed: {err}");
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Like `try_stdin_command`, resolving the program from Settings → Compiler.
+pub fn try_tool_stdin(cwd: &Path, tool_id: &str, args: &[&str], content: &str) -> Result<String> {
+    let program = toolchain::resolve_program(tool_id)
+        .with_context(|| format!("{tool_id} not found — set it in Settings → Compiler"))?;
+    try_stdin_command(cwd, program.to_string_lossy().as_ref(), args, content)
 }

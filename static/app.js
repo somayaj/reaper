@@ -698,6 +698,8 @@ async function loadCompilersSettingsSection() {
     'python', 'ruby', 'bundle', 'rails',
     'rustc', 'cargo', 'go',
     'node', 'tsc',
+    'jsonlint', 'ajv',
+    'yamllint',
     'clang', 'gcc',
     'swiftc', 'dart', 'php', 'luac', 'csc', 'bash',
   ];
@@ -719,6 +721,9 @@ async function loadCompilersSettingsSection() {
       ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
       : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
     const version = tool.version ? `<span class="ij-compiler-version" title="${escapeHtml(tool.version)}">${escapeHtml(tool.version.split('\n')[0].slice(0, 48))}</span>` : '';
+    const exts = (tool.extensions || []).length
+      ? `<span class="ij-compiler-exts" title="File extensions">${escapeHtml(tool.extensions.join(' '))}</span>`
+      : '';
     const jdkSelect = isJava && installed.length
       ? `<div class="ij-compiler-extra">
           <label class="ij-compiler-extra-label">Installed JDKs</label>
@@ -736,6 +741,7 @@ async function loadCompilersSettingsSection() {
         <div class="ij-compiler-name">
           <span class="ij-compiler-label">${escapeHtml(tool.label)}</span>
           ${version}
+          ${exts}
         </div>
         <span class="ij-compiler-badge ij-compiler-badge--${status.cls}">${status.label}</span>
         <input id="settings-compiler-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-compiler-input ij-compiler-path" data-tool-id="${escapeHtml(tool.id)}" aria-label="${escapeHtml(tool.label)} path" />
@@ -3691,7 +3697,12 @@ function activateTabShell(path) {
   }
   updateBreadcrumbs(path);
   const langEl = $('#status-language');
-  if (langEl) langEl.textContent = window.ReaperLang?.langLabel(langForPath(path)) || 'Plain Text';
+  if (langEl) {
+    const lang = window.ReaperLang?.langLabel(langForPath(path)) || 'Plain Text';
+    const compilers = window.ReaperLang?.compilerLabelsForPath(path);
+    langEl.textContent = compilers ? `${lang} · ${compilers}` : lang;
+    langEl.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
+  }
   if (state.editor) updateEditorStatus(state.editor.getPosition());
   $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
   updateSaveButton();
@@ -3943,11 +3954,37 @@ async function openFileAt(path, line = 1, column = 1) {
 
 async function formatDocument() {
   if (!state.editor || !state.activeTab) return;
+  if (!state.repo) {
+    toast('Open a repository first', 'error');
+    return;
+  }
+  const path = state.activeTab;
+  const before = state.editor.getValue();
   try {
-    await state.editor.getAction('editor.action.formatDocument')?.run();
+    const res = await api(repoApi(state.repo, '/workspace/format'), {
+      method: 'POST',
+      body: JSON.stringify({ path, content: before }),
+    });
+    const formatted = res?.content;
+    if (typeof formatted !== 'string') {
+      toast('Format failed', 'error');
+      return;
+    }
+    if (formatted === before) {
+      toast('Already formatted', 'info');
+      return;
+    }
+    state.suppressEditorChange = true;
+    state.editor.setValue(formatted);
+    state.suppressEditorChange = false;
+    state.tabContents.set(path, formatted);
+    state.dirty.add(path);
+    updateSaveButton();
+    renderTabs();
+    scheduleDiagnostics();
     toast('Formatted', 'success');
   } catch (e) {
-    toast(e.message || 'Format failed — install a formatter for this language', 'error');
+    toast(e.message || 'Format failed', 'error');
   }
 }
 
