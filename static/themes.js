@@ -12,22 +12,33 @@
     { id: 'mono', label: 'Black & White', dark: true, monaco: 'reaper-mono' },
   ];
 
-  // Darcula theme: thin red underline only — no gutter icons or scrollbar stripes.
+  // Diagnostic squiggles: visible underline colors; no gutter wash-out or scrollbar stripes.
   const DIAG_EDITOR_COLORS = {
-    'editorError.foreground': '#F87171',
-    'editorError.border': '#00000000',
+    'editorError.foreground': '#FF5555',
+    'editorError.border': '#FF5555',
     'editorError.background': '#00000000',
     'editorWarning.foreground': '#FBBF24',
-    'editorWarning.border': '#00000000',
+    'editorWarning.border': '#FBBF24',
     'editorWarning.background': '#00000000',
     'editorInfo.foreground': '#60A5FA',
-    'editorInfo.border': '#00000000',
+    'editorInfo.border': '#60A5FA',
     'editorInfo.background': '#00000000',
     'minimap.errorHighlight': '#00000000',
     'minimap.warningHighlight': '#00000000',
-    'overviewRuler.errorForeground': '#00000000',
-    'overviewRuler.warningForeground': '#00000000',
-    'overviewRuler.infoForeground': '#00000000',
+    'overviewRuler.errorForeground': '#FF5555',
+    'overviewRuler.warningForeground': '#FBBF24',
+    'overviewRuler.infoForeground': '#60A5FA',
+  };
+
+  const SUGGEST_INLINE_COLORS = {
+    'editorGhostText.foreground': '#808080',
+    'editorSuggestWidget.background': '#3C3F41',
+    'editorSuggestWidget.border': '#515658',
+    'editorSuggestWidget.foreground': '#BBBBBB',
+    'editorSuggestWidget.selectedBackground': '#214283',
+    'editorSuggestWidget.selectedForeground': '#FFFFFF',
+    'editorSuggestWidget.highlightForeground': '#FFFFFF',
+    'editorSuggestWidget.focusHighlightForeground': '#FFFFFF',
   };
 
   const MONACO_THEMES = {
@@ -300,7 +311,7 @@
     Object.entries(MONACO_THEMES).forEach(([id, spec]) => {
       monaco.editor.defineTheme(id, {
         ...spec,
-        colors: { ...spec.colors, ...DIAG_EDITOR_COLORS },
+        colors: { ...spec.colors, ...DIAG_EDITOR_COLORS, ...SUGGEST_INLINE_COLORS },
       });
     });
   }
