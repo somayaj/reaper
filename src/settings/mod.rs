@@ -92,7 +92,7 @@ impl SettingsStore {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Ignoring invalid toolchain {}={}: {e:#}",
+                            "Ignoring invalid compiler {}={}: {e:#}",
                             id,
                             path
                         );
@@ -116,7 +116,7 @@ impl SettingsStore {
                     return true;
                 }
                 tracing::warn!(
-                    "Ignoring invalid configured JAVA_HOME {} — clear it in Settings → Java",
+                    "Ignoring invalid configured JAVA_HOME {} — clear it in Settings → Compilers",
                     p.display()
                 );
                 false
@@ -183,7 +183,7 @@ impl SettingsStore {
         crate::jdk::jdk_settings_view(java_home.as_deref(), source.as_deref())
     }
 
-    pub fn toolchains_view(&self) -> crate::toolchain::ToolchainsView {
+    pub fn compilers_view(&self) -> crate::toolchain::CompilersView {
         let from_env = std::env::var("REAPER_JAVA_HOME")
             .ok()
             .filter(|h| !h.is_empty());
@@ -210,7 +210,11 @@ impl SettingsStore {
             .map(|g| g.toolchain_paths.clone())
             .unwrap_or_default();
 
-        crate::toolchain::toolchains_view(&configured, java_home.as_deref(), java_source.as_deref())
+        crate::toolchain::compilers_view(&configured, java_home.as_deref(), java_source.as_deref())
+    }
+
+    pub fn toolchains_view(&self) -> crate::toolchain::CompilersView {
+        self.compilers_view()
     }
 
     pub fn set_toolchain_path(&self, id: &str, path: String) -> Result<()> {
