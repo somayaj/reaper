@@ -575,6 +575,7 @@ function applyEditorFontSize(size) {
   }
   applyAgentTypography();
   syncFontSizeControls(clamped);
+  syncAgentFontControls();
   updateEditorFontPreview();
   return clamped;
 }
@@ -595,6 +596,7 @@ function applyEditorFontFamily(fontId) {
   }
   applyAgentTypography();
   syncFontFamilyControls(spec.id);
+  syncAgentFontControls();
   updateEditorFontPreview(spec);
   return spec;
 }
@@ -652,14 +654,31 @@ function syncAgentFontControls() {
   const match = getAgentFontMatchEditor();
   const matchCb = $('#settings-agent-font-match');
   if (matchCb) matchCb.checked = match;
-  $('#settings-agent-font-custom')?.classList.toggle('hidden', match);
 
   const sizeEl = $('#settings-agent-font-size');
-  if (sizeEl) sizeEl.value = String(getAgentFontSize());
+  if (sizeEl) {
+    sizeEl.value = String(getAgentFontSize());
+    sizeEl.disabled = match;
+  }
 
   const familyEl = $('#settings-agent-font-family');
   const fontId = getAgentFontSpec().id;
-  if (familyEl && familyEl.value !== fontId) familyEl.value = fontId;
+  if (familyEl) {
+    if (familyEl.value !== fontId) familyEl.value = fontId;
+    familyEl.disabled = match;
+  }
+
+  const summary = $('#settings-agent-font-summary');
+  if (summary) {
+    if (match) {
+      const spec = getEditorFontSpec();
+      summary.textContent = `Using editor font: ${getEditorFontSize()}px · ${spec.label}`;
+      summary.classList.remove('hidden');
+    } else {
+      summary.textContent = '';
+      summary.classList.add('hidden');
+    }
+  }
 
   updateAgentFontPreview();
 }
@@ -990,6 +1009,7 @@ async function clearCompilerFromSettings(id) {
 async function loadSettingsModal() {
   await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadCompilersSettingsSection()]);
   loadAppearanceSettingsSection();
+  loadAgentFontSettingsSection();
   switchSettingsTab(settingsTab);
 }
 
