@@ -685,12 +685,12 @@ async function loadCursorSettingsSection() {
   updateAgentUi();
 }
 
-async function loadToolchainsSettingsSection() {
-  const list = $('#settings-toolchains-list');
+async function loadCompilersSettingsSection() {
+  const list = $('#settings-compilers-list');
   if (!list) return;
   try {
-    const cfg = await api('/api/settings/toolchains');
-    const tools = cfg.tools || [];
+    const cfg = await api('/api/settings/compilers');
+    const tools = cfg.compilers || cfg.tools || [];
     const installed = cfg.java_installed || [];
     list.innerHTML = tools.map((tool) => {
       const isJava = tool.id === 'java';
@@ -703,7 +703,7 @@ async function loadToolchainsSettingsSection() {
       const jdkSelect = isJava && installed.length
         ? `<div class="mt-3">
             <label class="block text-xs font-medium text-gray-400 mb-1.5">Installed JDKs</label>
-            <select class="ij-settings-select w-full max-w-lg settings-toolchain-jdk-select" data-tool-id="java" title="Pick a JDK">
+            <select class="ij-settings-select w-full max-w-lg settings-compiler-jdk-select" data-tool-id="java" title="Pick a JDK">
               <option value="">— select installed JDK —</option>
               ${installed.map((j) => `<option value="${escapeHtml(j.path)}"${tool.path === j.path ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
             </select>
@@ -715,43 +715,43 @@ async function loadToolchainsSettingsSection() {
       const hint = tool.kind === 'home'
         ? 'Must contain <code class="font-mono">bin/java</code>. Gradle may use a newer JVM when needed.'
         : 'Full path to the executable.';
-      return `<div class="border border-surface-700 rounded-lg p-4 space-y-3" data-toolchain-row="${escapeHtml(tool.id)}">
+      return `<div class="border border-surface-700 rounded-lg p-4 space-y-3" data-compiler-row="${escapeHtml(tool.id)}">
         <div>
           <h5 class="text-sm font-medium text-white">${escapeHtml(tool.label)}</h5>
           <div class="ij-settings-status text-xs mt-2">${configured}${effective}</div>
         </div>
         ${jdkSelect}
         <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-toolchain-${escapeHtml(tool.id)}">Path</label>
-          <input id="settings-toolchain-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-toolchain-input w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" data-tool-id="${escapeHtml(tool.id)}" />
+          <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-compiler-${escapeHtml(tool.id)}">Path</label>
+          <input id="settings-compiler-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-compiler-input w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" data-tool-id="${escapeHtml(tool.id)}" />
           <p class="text-[11px] text-gray-600 mt-2">${hint}</p>
         </div>
         <div class="flex flex-wrap gap-2">
-          <button type="button" class="settings-toolchain-save px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" data-tool-id="${escapeHtml(tool.id)}">Save</button>
-          <button type="button" class="settings-toolchain-clear px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors" data-tool-id="${escapeHtml(tool.id)}"${tool.configured && !tool.source?.startsWith('env:') ? '' : ' disabled'}>Use system default</button>
+          <button type="button" class="settings-compiler-save px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" data-tool-id="${escapeHtml(tool.id)}">Save</button>
+          <button type="button" class="settings-compiler-clear px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors" data-tool-id="${escapeHtml(tool.id)}"${tool.configured && !tool.source?.startsWith('env:') ? '' : ' disabled'}>Use system default</button>
         </div>
       </div>`;
     }).join('');
 
-    list.querySelectorAll('.settings-toolchain-jdk-select').forEach((sel) => {
+    list.querySelectorAll('.settings-compiler-jdk-select').forEach((sel) => {
       sel.addEventListener('change', () => {
-        const input = list.querySelector(`.settings-toolchain-input[data-tool-id="${sel.dataset.toolId}"]`);
+        const input = list.querySelector(`.settings-compiler-input[data-tool-id="${sel.dataset.toolId}"]`);
         if (input && sel.value) input.value = sel.value;
       });
     });
-    list.querySelectorAll('.settings-toolchain-save').forEach((btn) => {
-      btn.addEventListener('click', () => saveToolchainFromSettings(btn.dataset.toolId));
+    list.querySelectorAll('.settings-compiler-save').forEach((btn) => {
+      btn.addEventListener('click', () => saveCompilerFromSettings(btn.dataset.toolId));
     });
-    list.querySelectorAll('.settings-toolchain-clear').forEach((btn) => {
-      btn.addEventListener('click', () => clearToolchainFromSettings(btn.dataset.toolId));
+    list.querySelectorAll('.settings-compiler-clear').forEach((btn) => {
+      btn.addEventListener('click', () => clearCompilerFromSettings(btn.dataset.toolId));
     });
   } catch (err) {
     list.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
   }
 }
 
-async function saveToolchainFromSettings(id) {
-  const input = document.querySelector(`.settings-toolchain-input[data-tool-id="${id}"]`);
+async function saveCompilerFromSettings(id) {
+  const input = document.querySelector(`.settings-compiler-input[data-tool-id="${id}"]`);
   const path = input?.value.trim();
   if (!path) {
     toast('Enter a path or use system default', 'error');
@@ -759,21 +759,21 @@ async function saveToolchainFromSettings(id) {
     return;
   }
   try {
-    await api('/api/settings/toolchains', {
+    await api('/api/settings/compilers', {
       method: 'PATCH',
       body: JSON.stringify({ id, path }),
     });
-    await loadToolchainsSettingsSection();
-    toast(`${id} toolchain saved`, 'success');
+    await loadCompilersSettingsSection();
+    toast(`${id} compiler saved`, 'success');
   } catch (err) {
     toast(err.message || `Failed to save ${id}`, 'error');
   }
 }
 
-async function clearToolchainFromSettings(id) {
+async function clearCompilerFromSettings(id) {
   try {
-    await api(`/api/settings/toolchains/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    await loadToolchainsSettingsSection();
+    await api(`/api/settings/compilers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await loadCompilersSettingsSection();
     toast(`${id} using system default`, 'success');
   } catch (err) {
     toast(err.message || `Failed to clear ${id}`, 'error');
@@ -781,7 +781,7 @@ async function clearToolchainFromSettings(id) {
 }
 
 async function loadSettingsModal() {
-  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadToolchainsSettingsSection()]);
+  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadCompilersSettingsSection()]);
   loadAppearanceSettingsSection();
   switchSettingsTab(settingsTab);
 }
@@ -798,7 +798,7 @@ async function showSettingsModal(tab = 'git') {
     if (tab === 'cursor') $('#settings-cursor-key')?.focus();
     else if (tab === 'ai') $('#settings-gemini-key')?.focus();
     else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
-    else if (tab === 'toolchains') $('#settings-toolchains-list .settings-toolchain-input')?.focus();
+    else if (tab === 'compilers') $('#settings-compilers-list .settings-compiler-input')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
 }
@@ -1397,8 +1397,9 @@ function runMenuAction(action) {
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
     'settings-appearance': () => showSettingsModal('appearance'),
-    'settings-toolchains': () => showSettingsModal('toolchains'),
-    'settings-java': () => showSettingsModal('toolchains'),
+    'settings-compilers': () => showSettingsModal('compilers'),
+    'settings-toolchains': () => showSettingsModal('compilers'),
+    'settings-java': () => showSettingsModal('compilers'),
     run: runActive,
   };
   map[action]?.();
@@ -1411,7 +1412,7 @@ const PALETTE_COMMANDS = [
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
   { id: 'settings-appearance', label: 'Editor appearance', run: () => showSettingsModal('appearance') },
-  { id: 'settings-toolchains', label: 'Toolchains', run: () => showSettingsModal('toolchains') },
+  { id: 'settings-compilers', label: 'Compilers', run: () => showSettingsModal('compilers') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },

@@ -27,6 +27,7 @@ pub struct ToolDef {
     pub env_key: Option<&'static str>,
 }
 
+/// Language compilers and runtimes configurable under Settings → Compilers.
 pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         id: "java",
@@ -36,6 +37,20 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_JAVA_HOME"),
     },
     ToolDef {
+        id: "kotlin",
+        label: "Kotlin (kotlinc)",
+        kind: ToolKind::Binary,
+        defaults: &["kotlinc"],
+        env_key: Some("REAPER_KOTLINC"),
+    },
+    ToolDef {
+        id: "groovy",
+        label: "Groovy (groovyc)",
+        kind: ToolKind::Binary,
+        defaults: &["groovyc"],
+        env_key: Some("REAPER_GROOVC"),
+    },
+    ToolDef {
         id: "python",
         label: "Python",
         kind: ToolKind::Binary,
@@ -43,15 +58,36 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_PYTHON"),
     },
     ToolDef {
+        id: "ruby",
+        label: "Ruby",
+        kind: ToolKind::Binary,
+        defaults: &["ruby"],
+        env_key: Some("REAPER_RUBY"),
+    },
+    ToolDef {
+        id: "bundle",
+        label: "Bundler (bundle)",
+        kind: ToolKind::Binary,
+        defaults: &["bundle"],
+        env_key: Some("REAPER_BUNDLE"),
+    },
+    ToolDef {
+        id: "rails",
+        label: "Rails",
+        kind: ToolKind::Binary,
+        defaults: &["rails"],
+        env_key: Some("REAPER_RAILS"),
+    },
+    ToolDef {
         id: "rustc",
-        label: "Rust compiler (rustc)",
+        label: "Rust (rustc)",
         kind: ToolKind::Binary,
         defaults: &["rustc"],
         env_key: Some("REAPER_RUSTC"),
     },
     ToolDef {
         id: "cargo",
-        label: "Rust package manager (cargo)",
+        label: "Rust (cargo)",
         kind: ToolKind::Binary,
         defaults: &["cargo"],
         env_key: Some("REAPER_CARGO"),
@@ -64,18 +100,74 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_GO"),
     },
     ToolDef {
-        id: "ruby",
-        label: "Ruby",
+        id: "node",
+        label: "Node.js",
         kind: ToolKind::Binary,
-        defaults: &["ruby"],
-        env_key: Some("REAPER_RUBY"),
+        defaults: &["node"],
+        env_key: Some("REAPER_NODEJS"),
     },
     ToolDef {
-        id: "rails",
-        label: "Rails",
+        id: "tsc",
+        label: "TypeScript (tsc)",
         kind: ToolKind::Binary,
-        defaults: &["rails", "bundle"],
-        env_key: Some("REAPER_RAILS"),
+        defaults: &["tsc"],
+        env_key: Some("REAPER_TSC"),
+    },
+    ToolDef {
+        id: "php",
+        label: "PHP",
+        kind: ToolKind::Binary,
+        defaults: &["php"],
+        env_key: Some("REAPER_PHP"),
+    },
+    ToolDef {
+        id: "clang",
+        label: "C/C++ (clang)",
+        kind: ToolKind::Binary,
+        defaults: &["clang"],
+        env_key: Some("REAPER_CLANG"),
+    },
+    ToolDef {
+        id: "gcc",
+        label: "C/C++ (gcc)",
+        kind: ToolKind::Binary,
+        defaults: &["gcc"],
+        env_key: Some("REAPER_GCC"),
+    },
+    ToolDef {
+        id: "swiftc",
+        label: "Swift (swiftc)",
+        kind: ToolKind::Binary,
+        defaults: &["swiftc"],
+        env_key: Some("REAPER_SWIFTC"),
+    },
+    ToolDef {
+        id: "luac",
+        label: "Lua (luac)",
+        kind: ToolKind::Binary,
+        defaults: &["luac"],
+        env_key: Some("REAPER_LUAC"),
+    },
+    ToolDef {
+        id: "csc",
+        label: "C# (csc)",
+        kind: ToolKind::Binary,
+        defaults: &["csc"],
+        env_key: Some("REAPER_CSC"),
+    },
+    ToolDef {
+        id: "dart",
+        label: "Dart",
+        kind: ToolKind::Binary,
+        defaults: &["dart"],
+        env_key: Some("REAPER_DART"),
+    },
+    ToolDef {
+        id: "bash",
+        label: "Shell (bash)",
+        kind: ToolKind::Binary,
+        defaults: &["bash", "sh", "zsh"],
+        env_key: Some("REAPER_BASH"),
     },
 ];
 
@@ -134,11 +226,11 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_program_or(id: &str) -> Result<PathBuf> {
-    resolve_program(id).with_context(|| format!("{id} not found — set it in Settings → Toolchains"))
+    resolve_program(id).with_context(|| format!("{id} not found — set it in Settings → Compilers"))
 }
 
 pub fn validate_tool_path(id: &str, path: &str) -> Result<PathBuf> {
-    let def = tool_def(id).context("unknown toolchain")?;
+    let def = tool_def(id).context("unknown compiler")?;
     let path = path.trim();
     if path.is_empty() {
         bail!("path required");
@@ -176,7 +268,7 @@ pub fn tool_version(id: &str, path: &Path) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ToolchainEntryView {
+pub struct CompilerEntryView {
     pub id: String,
     pub label: String,
     pub kind: String,
@@ -188,18 +280,18 @@ pub struct ToolchainEntryView {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct ToolchainsView {
-    pub tools: Vec<ToolchainEntryView>,
+pub struct CompilersView {
+    pub compilers: Vec<CompilerEntryView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java_installed: Option<Vec<crate::jdk::JdkInstall>>,
 }
 
-pub fn toolchains_view(
+pub fn compilers_view(
     configured: &HashMap<String, String>,
     java_home: Option<&str>,
     java_source: Option<&str>,
-) -> ToolchainsView {
-    let mut tools = Vec::new();
+) -> CompilersView {
+    let mut compilers = Vec::new();
     for def in TOOLS {
         let (configured_path, source) = if def.id == "java" {
             (
@@ -211,9 +303,7 @@ pub fn toolchains_view(
                 .get(def.id)
                 .filter(|s| !s.is_empty())
                 .cloned();
-            let source = path
-                .as_ref()
-                .map(|_| "settings".to_string());
+            let source = path.as_ref().map(|_| "settings".to_string());
             (path, source)
         };
 
@@ -222,7 +312,7 @@ pub fn toolchains_view(
             .as_ref()
             .and_then(|p| tool_version(def.id, p));
 
-        tools.push(ToolchainEntryView {
+        compilers.push(CompilerEntryView {
             id: def.id.to_string(),
             label: def.label.to_string(),
             kind: match def.kind {
@@ -238,8 +328,20 @@ pub fn toolchains_view(
         });
     }
 
-    ToolchainsView {
-        tools,
+    CompilersView {
+        compilers,
         java_installed: Some(crate::jdk::list_installed_jdks()),
     }
+}
+
+// Backward-compatible aliases for the previous Toolchains API shape.
+pub type ToolchainEntryView = CompilerEntryView;
+pub type ToolchainsView = CompilersView;
+
+pub fn toolchains_view(
+    configured: &HashMap<String, String>,
+    java_home: Option<&str>,
+    java_source: Option<&str>,
+) -> CompilersView {
+    compilers_view(configured, java_home, java_source)
 }

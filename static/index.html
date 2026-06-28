@@ -198,7 +198,7 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
             <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
-            <button type="button" class="ij-menu-item" data-action="settings-toolchains">Toolchains…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-compilers">Compilers…</button>
             <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
             <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
           </div>
@@ -746,7 +746,7 @@
         <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
           <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
-          <button type="button" class="ij-settings-tab" data-settings-tab="toolchains">Toolchains</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="compilers">Compilers</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
         </nav>
@@ -812,12 +812,12 @@
               <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one.</p>
             </div>
           </section>
-          <section id="settings-panel-toolchains" class="ij-settings-panel hidden space-y-4">
+          <section id="settings-panel-compilers" class="ij-settings-panel hidden space-y-4">
             <div>
-              <h4 class="text-sm font-semibold text-white">Toolchains</h4>
-              <p class="text-xs text-gray-500 mt-1">Set compilers and runtimes for diagnostics and Run. Includes Java, Rust, Go, Python, Ruby, and Rails. Leave blank to use <code class="font-mono text-gray-400">PATH</code>. Saved in <code class="font-mono">~/reaper/settings.json</code>.</p>
+              <h4 class="text-sm font-semibold text-white">Compilers</h4>
+              <p class="text-xs text-gray-500 mt-1">Set language compilers and runtimes for diagnostics and Run. Leave blank to use <code class="font-mono text-gray-400">PATH</code>. Saved in <code class="font-mono">~/reaper/settings.json</code>.</p>
             </div>
-            <div id="settings-toolchains-list" class="space-y-4"></div>
+            <div id="settings-compilers-list" class="space-y-4"></div>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
