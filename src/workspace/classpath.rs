@@ -944,10 +944,26 @@ fn member_completions_for_qualifier(
     qualifier: &str,
     member_prefix: &str,
 ) -> Result<Vec<CompletionItem>> {
+    let inferred_type = if qualifier == "this" || qualifier == "super" {
+        None
+    } else {
+        super::symbols::infer_java_receiver_type(content, qualifier)
+    };
+    let is_array_type = inferred_type
+        .as_ref()
+        .is_some_and(|t| t.contains('['));
+
     let fqcn = if qualifier == "this" || qualifier == "super" {
         super::symbols::java_class_from_source_path(from_path)
-    } else if let Some(type_name) = super::symbols::infer_java_receiver_type(content, qualifier) {
-        resolve_type_fqcn(lookup, &type_name, imports)
+    } else if let Some(type_name) = inferred_type.as_ref() {
+        resolve_type_fqcn(lookup, type_name, imports).or_else(|| {
+            let base = type_name.trim_end_matches("[]").trim();
+            if base != type_name.as_str() {
+                resolve_type_fqcn(lookup, base, imports)
+            } else {
+                None
+            }
+        })
     } else {
         resolve_type_fqcn(lookup, qualifier, imports)
     };
@@ -968,6 +984,25 @@ fn member_completions_for_qualifier(
         }
     }
 
+    if is_array_type {
+        push_builtin_array_members(&mut items, &mut seen, member_prefix);
+        if let Some(obj_fqcn) = resolve_type_fqcn(lookup, "Object", imports) {
+            for sym in lookup.members_for_type(&obj_fqcn, member_prefix, 40) {
+                if !seen.insert(sym.name.clone()) {
+                    continue;
+                }
+                let mut item = symbol_to_completion_item(ws, root, sym, None);
+                if item.detail.is_none() {
+                    item.detail = Some(obj_fqcn.clone());
+                }
+                items.push(item);
+                if items.len() >= 80 {
+                    break;
+                }
+            }
+        }
+    }
+
     for local in super::symbols::member_completions_from_content(content, qualifier, member_prefix, from_path) {
         if seen.insert(local.label.clone()) {
             items.push(local);
@@ -978,6 +1013,30 @@ fn member_completions_for_qualifier(
     }
 
     Ok(items)
+}
+
+fn push_builtin_array_members(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    member_prefix: &str,
+) {
+    let prefix_lower = member_prefix.to_lowercase();
+    for (name, kind) in [("length", "field"), ("clone", "method")] {
+        if !member_prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        if seen.insert(name.to_string()) {
+            items.push(CompletionItem {
+                label: name.to_string(),
+                kind: kind.to_string(),
+                detail: Some("array".into()),
+                insert: None,
+                path: None,
+                line: None,
+                column: None,
+            });
+        }
+    }
 }
 
 fn is_index_cached(ws: &Path, gradle_root: &Path) -> Result<bool> {
