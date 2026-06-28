@@ -10,6 +10,12 @@
     'strictfp', 'transient', 'volatile', 'with',
   ];
 
+  function inlineJavaLevel(helpers) {
+    const ctx = helpers.getLanguageContext?.();
+    if (ctx?.java_level) return ctx.java_level;
+    return helpers.getJavaLanguageLevel?.() ?? 17;
+  }
+
   function langForPath(path) {
     const base = (path.split('/').pop() || '').toLowerCase();
     if (!base) return 'plaintext';
@@ -224,6 +230,18 @@
           column: line.indexOf(py[1]) + 1,
         });
       }
+      const rb = line.match(/^\s*def\s+([A-Za-z_]\w*)/);
+      if (rb) {
+        symbols.push({ name: rb[1], kind: 'method', path, line: idx + 1, column: line.indexOf(rb[1]) + 1 });
+      }
+      const jsFn = line.match(/\bfunction\s+([A-Za-z_$]\w*)/);
+      if (jsFn) {
+        symbols.push({ name: jsFn[1], kind: 'function', path, line: idx + 1, column: line.indexOf(jsFn[1]) + 1 });
+      }
+      const goFn = line.match(/^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)/);
+      if (goFn) {
+        symbols.push({ name: goFn[1], kind: 'func', path, line: idx + 1, column: line.indexOf(goFn[1]) + 1 });
+      }
     });
     return symbols;
   }
@@ -240,6 +258,7 @@
       module: monaco.languages.CompletionItemKind.Module,
       struct: monaco.languages.CompletionItemKind.Struct,
       keyword: monaco.languages.CompletionItemKind.Keyword,
+      snippet: monaco.languages.CompletionItemKind.Snippet,
     };
     return map[kind] || monaco.languages.CompletionItemKind.Text;
   }
@@ -255,9 +274,9 @@
     rust: ['fn', 'let', 'mut', 'pub', 'struct', 'enum', 'impl', 'trait', 'match', 'use', 'async', 'await'],
     python: ['def', 'class', 'import', 'from', 'if', 'elif', 'else', 'for', 'while', 'with', 'return', 'async', 'await'],
     go: ['func', 'package', 'import', 'type', 'struct', 'interface', 'if', 'for', 'return', 'go', 'chan'],
-    javascript: ['function', 'const', 'let', 'var', 'class', 'import', 'export', 'async', 'await', 'return', 'if', 'for'],
+    javascript: ['function', 'const', 'let', 'var', 'class', 'import', 'export', 'async', 'await', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'try', 'catch', 'finally', 'throw', 'break', 'continue', 'new', 'this'],
     typescript: ['interface', 'type', 'enum', 'namespace', 'readonly', 'declare', 'function', 'const', 'async', 'await'],
-    java: ['class', 'interface', 'enum', 'public', 'private', 'protected', 'static', 'final', 'void', 'return', 'import'],
+    java: ['if', 'else', 'for', 'while', 'do', 'switch', 'case', 'try', 'catch', 'finally', 'throw', 'return', 'new', 'this', 'class', 'interface', 'enum', 'public', 'private', 'protected', 'static', 'final', 'void', 'import', 'package', 'extends', 'implements'],
     kotlin: ['fun', 'val', 'var', 'class', 'object', 'interface', 'when', 'suspend', 'data', 'sealed'],
     groovy: ['def', 'class', 'import', 'package', 'return', 'if', 'for', 'while'],
     ruby: ['def', 'class', 'module', 'end', 'require', 'include', 'attr_reader', 'attr_writer'],
@@ -297,19 +316,928 @@
     return new monaco.Range(position.lineNumber, startCol, position.lineNumber, position.column);
   }
 
+  const MIN_AUTOCOMPLETE_CHARS = 1;
+  const MAX_INLINE_LINES = 15;
+  const AUTOCOMPLETE_TRIGGER_RE = /[.@:<#"=/\\\-]$/;
+
+  function capInlineText(text) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    if (lines.length <= MAX_INLINE_LINES) return lines.join('\n');
+    return lines.slice(0, MAX_INLINE_LINES).join('\n');
+  }
+
+  /** Inline ghost text: always try while editing (server may return empty). */
+  function inlineTypingReady() {
+    return true;
+  }
+
+  function stripSnippetMarkers(text) {
+    return String(text || '')
+      .replace(/\$\{\d+:(.*?)}/g, '$1')
+      .replace(/\$\d+/g, '');
+  }
+
+  function hasCompleteControlKeyword(trimmed) {
+    if (CONTROL_KEYWORD_PREFIXES.some((kw) => lineEndsWithKeyword(trimmed, kw))) return true;
+    return trimmed.endsWith('for (') || trimmed.endsWith('for(')
+      || trimmed.endsWith('if (') || trimmed.endsWith('if(')
+      || trimmed.endsWith('while (') || trimmed.endsWith('while(')
+      || trimmed.endsWith('switch (') || trimmed.endsWith('switch(');
+  }
+
+  /** Statement/construct templates disabled — AI inline handles if/for/while/etc. */
+  function controlStructureInlineSuffix(_path, _linePrefix, _content, _lineNumber, _javaLevel) {
+    return '';
+  }
+
+  function controlStructureInlineGhost(_path, _linePrefix, _content, _lineNumber, _javaLevel) {
+    return '';
+  }
+
+  function inlineGhostSuffix(path, linePrefix, content, lineNumber, javaLevel) {
+    const inline = localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel);
+    if (!inline) return '';
+    if (inline.includes('\n')) return inline.split('\n')[0];
+    return inline;
+  }
+
+  function lineIndent(linePrefix) {
+    const m = linePrefix.match(/^[\t ]*/);
+    return m ? m[0] : '';
+  }
+
+  function extractInlinePartialToken(linePrefix) {
+    const trimmed = linePrefix.trimEnd();
+    if (!trimmed) return '';
+    const m = trimmed.match(/([A-Za-z_$][\w$]*)$/);
+    return m ? m[1] : '';
+  }
+
+  function lineEndsWithKeyword(trimmed, kw) {
+    const re = new RegExp(`(?:^|[\\s({])${kw}$`);
+    return re.test(trimmed);
+  }
+
+  const CONTROL_KEYWORD_PREFIXES = [
+    'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'try', 'catch', 'finally',
+    'elif', 'def', 'class', 'function', 'fun', 'when', 'break', 'continue', 'return',
+  ];
+
+  function isControlKeywordPrefix(token) {
+    if (!token) return false;
+    const lower = token.toLowerCase();
+    return CONTROL_KEYWORD_PREFIXES.some((kw) => kw.startsWith(lower));
+  }
+
+  function controlStructureMenuLabel(trimmed, path) {
+    if (lineEndsWithKeyword(trimmed, 'while')) return 'while (…) { }';
+    if (lineEndsWithKeyword(trimmed, 'for')) return 'for (…) { }';
+    if (lineEndsWithKeyword(trimmed, 'do')) return 'do { } while (…)';
+    if (lineEndsWithKeyword(trimmed, 'if')) return 'if (…) { }';
+    if (lineEndsWithKeyword(trimmed, 'else')) return 'else { }';
+    if (lineEndsWithKeyword(trimmed, 'switch')) return 'switch (…) { }';
+    if (lineEndsWithKeyword(trimmed, 'try')) return 'try { } catch { }';
+    if (trimmed.endsWith('while (') || trimmed.endsWith('while(')) return 'while (…) { }';
+    if (trimmed.endsWith('for (') || trimmed.endsWith('for(')) return 'for (…) { }';
+    if (trimmed.endsWith('if (') || trimmed.endsWith('if(')) return 'if (…) { }';
+    if (trimmed.endsWith('switch (') || trimmed.endsWith('switch(')) return 'switch (…) { }';
+    const lang = langForPath(path);
+    if (lang === 'python') {
+      if (lineEndsWithKeyword(trimmed, 'while')) return 'while …:';
+      if (lineEndsWithKeyword(trimmed, 'for')) return 'for … in …:';
+      if (lineEndsWithKeyword(trimmed, 'if')) return 'if …:';
+      if (lineEndsWithKeyword(trimmed, 'elif')) return 'elif …:';
+      if (lineEndsWithKeyword(trimmed, 'else')) return 'else:';
+      if (lineEndsWithKeyword(trimmed, 'def')) return 'def …():';
+      if (lineEndsWithKeyword(trimmed, 'class')) return 'class …:';
+    }
+    return 'block';
+  }
+
+  function editorContextAroundLine(content, lineNumber, maxAbove = 25, maxBelow = 15) {
+    const lines = String(content || '').split(/\r?\n/);
+    const cur = Math.min(Math.max(0, lineNumber - 1), lines.length);
+    const start = Math.max(0, cur - maxAbove);
+    const end = Math.min(lines.length, cur + 1 + maxBelow);
+    return lines.slice(start, end).join('\n');
+  }
+
+  /** Trim huge buffers for API payloads; returns adjusted 1-based line in the slice. */
+  function contentForApiPayload(content, lineNumber) {
+    const text = String(content || '');
+    if (text.length <= 65536) {
+      return { content: text, line: lineNumber };
+    }
+    const lines = text.split(/\r?\n/);
+    const cur = Math.min(Math.max(0, lineNumber - 1), lines.length);
+    const start = Math.max(0, cur - 120);
+    const end = Math.min(lines.length, cur + 1 + 40);
+    return { content: lines.slice(start, end).join('\n'), line: cur - start + 1 };
+  }
+
+  function shouldFetchIndexCompletions(linePrefix, prefix) {
+    const p = prefix || '';
+    if (p.length >= MIN_AUTOCOMPLETE_CHARS) return true;
+    if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '')) return true;
+    if (dotQualifierFromLinePrefix(linePrefix)) return true;
+    const trimmed = (linePrefix || '').trimStart();
+    if (/^import\s/.test(trimmed)) return true;
+    return false;
+  }
+
+  function editorLinePrefix(model, position) {
+    return model.getValueInRange(
+      new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column),
+    );
+  }
+
+  function completionContext(model, position) {
+    const word = model.getWordUntilPosition(position);
+    const linePrefix = editorLinePrefix(model, position);
+    const prefix = word.word || extractInlinePartialToken(linePrefix) || '';
+    const range = buildCompletionRange(model, position, prefix);
+    return { word, linePrefix, prefix, range };
+  }
+
+  function mapIndexItemToSuggestion(item, range, seen) {
+    const label = item.label;
+    if (!label || seen.has(label)) return null;
+    if (!isCodeLikeCompletion(label, item.kind)) return null;
+    seen.add(label);
+    const kind = String(item.kind || '').toLowerCase();
+    let insertText = item.insert;
+    if (!insertText) {
+      insertText = kind === 'method' ? `${label}()` : label;
+    }
+    return {
+      label,
+      kind: completionKind(item.kind),
+      detail: item.detail || undefined,
+      insertText,
+      range,
+      sortText: `1_${label}`,
+    };
+  }
+
+  function sanitizeInlineGhostText(text) {
+    let t = String(text ?? '');
+    const openThink = '<' + 'think' + '>';
+    const closeThink = '<' + '/' + 'think' + '>';
+    const openRr = '<' + 'redacted_reasoning' + '>';
+    const closeRr = '<' + '/' + 'redacted_reasoning' + '>';
+    const stripTag = (s, open, close) => {
+      let out = s;
+      for (;;) {
+        const start = out.toLowerCase().indexOf(open);
+        if (start < 0) break;
+        const after = start + open.length;
+        const endRel = out.toLowerCase().indexOf(close, after);
+        if (endRel < 0) {
+          out = out.slice(0, start);
+          break;
+        }
+        out = out.slice(0, start) + out.slice(endRel + close.length);
+      }
+      return out;
+    };
+    t = stripTag(t, openThink, closeThink);
+    t = stripTag(t, openRr, closeRr);
+    t = t.replace(/^\s*(thinking|thought)\s*:\s*/im, '');
+    const trimmed = t.trim();
+    if (!trimmed) return '';
+    if (/^(here is|the user|this (code|suggestion)|i (think|would)|let me)/i.test(trimmed)) {
+      return '';
+    }
+    return t;
+  }
+
+  function dotQualifierFromLinePrefix(linePrefix) {
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (!trimmed.includes('.')) return null;
+    const dotPos = trimmed.lastIndexOf('.');
+    const qualPart = trimmed.slice(0, dotPos).trim();
+    const memberPart = trimmed.slice(dotPos + 1).replace(/[^\w$].*$/, '');
+    if (!qualPart) return null;
+    const simple = qualPart.split('.').pop().trim();
+    if (!simple) return null;
+    const blockKw = ['if', 'for', 'while', 'return', 'import', 'package', 'new', 'else', 'catch'];
+    if (blockKw.includes(simple) && simple !== 'this' && simple !== 'super' && simple !== 'self') {
+      return null;
+    }
+    if (!/^(?:this|super|self|@[A-Za-z_]\w*|[A-Za-z_$][\w$]*)$/.test(simple)) return null;
+    return { qualifier: simple.replace(/^@/, ''), memberPrefix: memberPart };
+  }
+
+  function readIdentAtStart(s) {
+    const m = String(s || '').trimStart().match(/^([A-Za-z_$][\w$]*)/);
+    return m ? m[1] : '';
+  }
+
+  function localMemberCompletions(content, qualifier, memberPrefix, path) {
+    const items = [];
+    const seen = new Set();
+    const prefixLower = (memberPrefix || '').toLowerCase();
+    const lang = langForPath(path);
+    const needles = [`${qualifier}.`, `@${qualifier}.`];
+    const lines = String(content || '').split(/\r?\n/);
+    for (const lineText of lines) {
+      for (const needle of needles) {
+        let search = 0;
+        for (;;) {
+          const idx = lineText.indexOf(needle, search);
+          if (idx < 0) break;
+          const start = idx + needle.length;
+          const member = readIdentAtStart(lineText.slice(start));
+        if (member
+          && (!memberPrefix || member.toLowerCase().startsWith(prefixLower))
+          && !seen.has(member)) {
+          seen.add(member);
+          const after = lineText.slice(start);
+          const isMethod = after.length > member.length && after[member.length] === '(';
+          items.push({ label: member, kind: isMethod ? 'method' : 'field', detail: `${qualifier}.${member}` });
+        }
+        search = start + 1;
+        }
+      }
+    }
+
+    if (qualifier === 'this' || qualifier === 'self' || qualifier === 'super') {
+      for (const lineText of lines) {
+        const trimmed = lineText.trim();
+        if (lang === 'ruby') {
+          const defM = trimmed.match(/^def\s+([A-Za-z_]\w*)/);
+          if (defM && (!memberPrefix || defM[1].toLowerCase().startsWith(prefixLower)) && seen.add(defM[1])) {
+            items.push({ label: defM[1], kind: 'method', detail: 'method' });
+          }
+          const attrM = trimmed.match(/^attr_(?:reader|writer|accessor)\s+(.+)/);
+          if (attrM) {
+            for (const part of attrM[1].split(/[\s,]+/)) {
+              const name = part.trim();
+              if (name && (!memberPrefix || name.toLowerCase().startsWith(prefixLower)) && seen.add(name)) {
+                items.push({ label: name, kind: 'field', detail: 'attribute' });
+              }
+            }
+          }
+        }
+        if (lang === 'python') {
+          const defM = trimmed.match(/^def\s+([A-Za-z_]\w*)/);
+          if (defM && defM[1] !== 'self'
+            && (!memberPrefix || defM[1].toLowerCase().startsWith(prefixLower)) && seen.add(defM[1])) {
+            items.push({ label: defM[1], kind: 'method', detail: 'def' });
+          }
+        }
+      }
+    }
+
+    return items.slice(0, 40);
+  }
+
+  function syntaxInlineSuffix(path, linePrefix) {
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (!trimmed) return '';
+    const lang = langForPath(path);
+
+    if (/\w\s*\($/.test(trimmed) && !trimmed.endsWith('()')) return ')';
+    if (trimmed.endsWith('{') && !trimmed.endsWith('${')) return '}';
+    if (trimmed.endsWith('[')) return ']';
+    const dq = (trimmed.match(/"/g) || []).length;
+    if (dq % 2 === 1 && !trimmed.endsWith('\\"')) return '"';
+    const sq = (trimmed.match(/'/g) || []).length;
+    if (sq % 2 === 1 && !trimmed.endsWith('\\')) return "'";
+
+    if (lang === 'html' || lang === 'xml') {
+      const tag = trimmed.match(/<([A-Za-z][\w-]*)$/);
+      if (tag) return `></${tag[1]}>`;
+      if (trimmed.endsWith('<')) return '/>';
+    }
+    if (lang === 'css' || lang === 'scss' || lang === 'less') {
+      if (trimmed.endsWith(':')) return ' ;';
+      if (trimmed.endsWith(';')) return '\n';
+    }
+    if (lang === 'json' && trimmed.endsWith('"')) return ': ""';
+    if (lang === 'yaml' && /:\s*$/.test(trimmed)) return ' ';
+    return '';
+  }
+
+  /** Prefer AI over local templates for statements and block bodies (all languages). */
+  function isInsideControlParen(linePrefix) {
+    const trimmed = String(linePrefix || '').trimEnd();
+    return /\b(for|if|while|switch)\s*\([^)]*$/i.test(trimmed);
+  }
+
+  function shouldPreferAiStatementInline(path, linePrefix, content, lineNumber) {
+    const trimmed = linePrefix.trimEnd();
+    if (hasCompleteControlKeyword(trimmed)) return true;
+    if (isInsideControlParen(linePrefix)) return true;
+    if (isWhitespaceOnlyLine(linePrefix) && findEnclosingBlock(content, lineNumber)) return true;
+    const token = extractInlinePartialToken(linePrefix);
+    if (token && isControlKeywordPrefix(token)) return true;
+    return false;
+  }
+
+  function buildInlineCacheKey(repo, path, lineNumber, column, linePrefix) {
+    return `${repo}:${path}:${lineNumber}:${column}:${linePrefix}`;
+  }
+
+  /** Keep ghost text while typed chars match the pending suggestion (IntelliJ-style). */
+  function inlineGhostFromCache(cache, repo, path, lineNumber, column, linePrefix) {
+    if (!cache?.text) return '';
+    const key = buildInlineCacheKey(repo, path, lineNumber, column, linePrefix);
+    if (cache.key === key) return cache.text;
+    if (
+      cache.repo === repo
+      && cache.path === path
+      && cache.lineNumber === lineNumber
+      && column >= cache.column
+      && linePrefix.startsWith(cache.linePrefix)
+    ) {
+      const typed = linePrefix.slice(cache.linePrefix.length);
+      if (cache.text.startsWith(typed)) {
+        return cache.text.slice(typed.length);
+      }
+    }
+    return '';
+  }
+
+  function memberInlineSuffix(content, linePrefix, path) {
+    const dot = dotQualifierFromLinePrefix(linePrefix);
+    if (!dot || !dot.memberPrefix) return '';
+    const members = localMemberCompletions(content, dot.qualifier, dot.memberPrefix, path);
+    const best = members.find((m) =>
+      m.label.toLowerCase().startsWith(dot.memberPrefix.toLowerCase())
+      && m.label.length > dot.memberPrefix.length,
+    );
+    if (!best) return '';
+    let rest = best.label.slice(dot.memberPrefix.length);
+    if (best.kind === 'method' && !rest.endsWith('(')) rest += '()';
+    return rest;
+  }
+
+  function buildLocalCompletionSuggestions(model, position, path, helpers, content) {
+    const { linePrefix, prefix, range } = completionContext(model, position);
+    const seen = new Set();
+    const suggestions = [];
+    const minKwChars = 1;
+    const javaLevel = inlineJavaLevel(helpers);
+    const text = content || model.getValue();
+
+    function push(label, kind, detail, insertText, sortKey = '2', filterText) {
+      if (!label || seen.has(label)) return;
+      if (!isCodeLikeCompletion(label, kind)) return;
+      seen.add(label);
+      const text = insertText ?? label;
+      const item = {
+        label,
+        kind: completionKind(kind),
+        detail: detail || undefined,
+        insertText: text,
+        range,
+        sortText: `${sortKey}_${label}`,
+      };
+      if (filterText) item.filterText = filterText;
+      if (
+        kind === 'snippet'
+        || text.includes('\n')
+        || text.includes('$0')
+        || text.includes('$1')
+      ) {
+        item.insertTextRules = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+      }
+      suggestions.push(item);
+    }
+
+    const dot = dotQualifierFromLinePrefix(linePrefix);
+    if (dot) {
+      for (const m of localMemberCompletions(text, dot.qualifier, dot.memberPrefix, path)) {
+        const insert = m.kind === 'method' ? `${m.label}()` : m.label;
+        push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0');
+      }
+    }
+
+    for (const sym of extractSymbols(text, path)) {
+      if (!prefix || sym.name.toLowerCase().startsWith(prefix.toLowerCase())) {
+        push(sym.name, sym.kind, sym.kind, sym.name, '1');
+      }
+    }
+
+    for (const kw of clientKeywordsForPath(path)) {
+      if (
+        !shouldPreferAiStatementInline(path, linePrefix, text, position.lineNumber)
+        && prefix.length >= minKwChars
+        && kw.toLowerCase().startsWith(prefix.toLowerCase())
+      ) {
+        push(kw, 'keyword', 'keyword', kw, '2');
+      }
+    }
+
+    return { suggestions, linePrefix, prefix, range, seen };
+  }
+
+  const JAVA_COLLECTION_PREFIXES = [
+    'List<', 'ArrayList<', 'LinkedList<', 'Set<', 'HashSet<', 'LinkedHashSet<',
+    'Collection<', 'Iterable<', 'Queue<', 'Deque<', 'ArrayDeque<',
+  ];
+  const JAVA_MAP_PREFIXES = ['Map<', 'HashMap<', 'LinkedHashMap<', 'TreeMap<', 'ConcurrentHashMap<'];
+
+  function scanJavaGenericDecl(ctx, prefixes) {
+    let best = null;
+    for (const prefix of prefixes) {
+      let search = 0;
+      for (;;) {
+        const idx = ctx.indexOf(prefix, search);
+        if (idx < 0) break;
+        const after = ctx.slice(idx + prefix.length);
+        const endGt = after.indexOf('>');
+        if (endGt < 0) {
+          search = idx + prefix.length;
+          continue;
+        }
+        const inner = after.slice(0, endGt).trim();
+        const rest = after.slice(endGt + 1).trimStart();
+        const nameMatch = rest.match(/^([A-Za-z_$]\w*)/);
+        if (nameMatch) {
+          if (!best || idx > best.idx) {
+            best = { idx, inner, name: nameMatch[1] };
+          }
+        }
+        search = idx + prefix.length;
+      }
+    }
+    return best;
+  }
+
+  function lastJavaCollection(ctx) {
+    return scanJavaGenericDecl(ctx, JAVA_COLLECTION_PREFIXES);
+  }
+
+  function lastJavaMap(ctx) {
+    const hit = scanJavaGenericDecl(ctx, JAVA_MAP_PREFIXES);
+    if (!hit) return null;
+    const parts = hit.inner.split(',');
+    const key = (parts[0] || 'Object').trim();
+    const val = (parts[1] || 'Object').trim();
+    return { key, val, name: hit.name, idx: hit.idx };
+  }
+
+  /** Latest List/array target for indexed `for` — prefers nearest declaration (e.g. `s` over `args`). */
+  function bestJavaIndexedForTarget(ctx) {
+    let best = null;
+    const consider = (idx, name, useSize) => {
+      if (!name) return;
+      if (!best || idx > best.idx) best = { idx, name, useSize };
+    };
+
+    const typeArrayRe = /\b(?:String|int|byte|char|short|long|float|double|boolean|[A-Za-z_$][\w$]*)\s*\[\s*\]\s+([A-Za-z_$]\w*)/g;
+    for (const m of ctx.matchAll(typeArrayRe)) {
+      consider(m.index ?? 0, m[1], false);
+    }
+    const varargsRe = /\b(?:String|[A-Za-z_$][\w$]*)\s+\.\.\.\s+([A-Za-z_$]\w*)/g;
+    for (const m of ctx.matchAll(varargsRe)) {
+      consider(m.index ?? 0, m[1], false);
+    }
+    const cStyleRe = /\b([A-Za-z_$]\w*)\s*\[\s*\]\s+([A-Za-z_$]\w*)\s*[,)]/g;
+    for (const m of ctx.matchAll(cStyleRe)) {
+      consider(m.index ?? 0, m[2], false);
+    }
+
+    const coll = scanJavaGenericDecl(ctx, JAVA_COLLECTION_PREFIXES);
+    if (coll) consider(coll.idx, coll.name, true);
+
+    const typed = lastJavaTypedArray(ctx);
+    if (typed) consider(typed.idx, typed.name, false);
+
+    const arrayDecl = ctx.match(/\b([A-Za-z_]\w*)\s*\[\s*\]/);
+    if (arrayDecl) consider(arrayDecl.index ?? 0, arrayDecl[1], false);
+
+    if (!best) return null;
+    const bound = best.useSize ? `${best.name}.size()` : `${best.name}.length`;
+    return { idx: best.idx, init: `int i = 0; i < ${bound}; i++` };
+  }
+
+  function lastJavaTypedArray(ctx) {
+    let best = null;
+    const lines = ctx.split(/\r?\n/);
+    let offset = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const bracket = trimmed.indexOf('[');
+      if (bracket >= 0) {
+        const before = trimmed.slice(0, bracket).trimEnd();
+        const typePart = before.split(/\s+/).pop() || '';
+        const rest = trimmed.slice(bracket);
+        if (rest.startsWith('[') && rest.includes(']')) {
+          const after = rest.slice(rest.indexOf(']') + 1).trimStart();
+          const nameMatch = after.match(/^([A-Za-z_$]\w*)/);
+          if (typePart && nameMatch) {
+            const pos = offset + line.indexOf(trimmed);
+            if (!best || pos > best.idx) {
+              best = { idx: pos, type: typePart, name: nameMatch[1] };
+            }
+          }
+        }
+      }
+      offset += line.length + 1;
+    }
+    return best;
+  }
+
+  function forEachVarName(init) {
+    const t = String(init || '').trim();
+    if (!t.includes(':') || t.includes(';')) return null;
+    const lhs = t.slice(0, t.indexOf(':')).trim();
+    const parts = lhs.split(/\s+/);
+    return parts.length ? parts[parts.length - 1] : null;
+  }
+
+  function inferInlineCondition(path, content, lineNumber, kind, javaLevel = 17) {
+    const lang = langForPath(path);
+    const ctx = editorContextAroundLine(content, lineNumber);
+    const boolVars = [];
+    const addBool = (name) => {
+      if (name && !boolVars.includes(name)) boolVars.push(name);
+    };
+    for (const m of ctx.matchAll(/\bboolean\s+([A-Za-z_]\w*)/g)) addBool(m[1]);
+    for (const m of ctx.matchAll(/\bbool\s+([A-Za-z_]\w*)/g)) addBool(m[1]);
+    for (const m of ctx.matchAll(/(?:let|var|const)\s+([A-Za-z_]\w*)\s*=\s*(?:true|false)/gi)) addBool(m[1]);
+
+    const conds = [];
+    for (const m of ctx.matchAll(/\b(?:if|while)\s*\(\s*([^);]+)\)/g)) {
+      const c = m[1].trim();
+      if (c && c !== 'condition' && c.length < 72) conds.push(c);
+    }
+
+    const isJavaLike = lang === 'java' || lang === 'kotlin' || lang === 'groovy';
+    const isCLike = isJavaLike || lang === 'c' || lang === 'cpp' || lang === 'csharp' || lang === 'swift';
+
+    if (kind === 'while') {
+      if (isJavaLike) {
+        const iterAssign = ctx.match(/\b([A-Za-z_]\w*)\s*=\s*[^;]*\.iterator\s*\(\s*\)/);
+        if (iterAssign) return `${iterAssign[1]}.hasNext()`;
+        if (/\bIterator\s*</.test(ctx) || /\biterator\s*\(\)/.test(ctx)) return 'iterator.hasNext()';
+        const listDecl = ctx.match(/\b(?:List|ArrayList|LinkedList)<[^>]*>\s+([A-Za-z_]\w*)/);
+        if (listDecl) return `i < ${listDecl[1]}.size()`;
+        const coll = lastJavaCollection(ctx);
+        if (coll) return `i < ${coll.name}.size()`;
+        const arrayDecl = ctx.match(/\b([A-Za-z_]\w*)\s*\[\s*\]/);
+        if (arrayDecl) return `i < ${arrayDecl[1]}.length`;
+      }
+      if (lang === 'javascript' || lang === 'typescript') {
+        const arr = ctx.match(/\bconst\s+([A-Za-z_]\w*)\s*=\s*\[/);
+        if (arr) return `i < ${arr[1]}.length`;
+      }
+      const flags = ['running', 'done', 'hasMore', 'active', 'valid', 'found'];
+      for (const f of flags) {
+        if (new RegExp(`\\b${f}\\b`).test(ctx)) {
+          if (f === 'hasMore' && isJavaLike) return 'iterator.hasNext()';
+          return f;
+        }
+      }
+      if (boolVars.length) return boolVars[boolVars.length - 1];
+      if (conds.length) return conds[conds.length - 1];
+      if (isCLike) return 'true';
+      if (lang === 'python') return 'True';
+      return 'condition';
+    }
+
+    if (kind === 'if') {
+      if (conds.length) return conds[conds.length - 1];
+      if (boolVars.length) return boolVars[boolVars.length - 1];
+      if (isCLike) return 'true';
+      if (lang === 'python') return 'True';
+      return 'condition';
+    }
+
+    return 'condition';
+  }
+
+  function keywordInlineSuffix(path, token) {
+    if (!token) return '';
+    const lower = token.toLowerCase();
+    let best = null;
+    for (const kw of clientKeywordsForPath(path)) {
+      const kl = kw.toLowerCase();
+      if (kl.startsWith(lower) && kw.length > token.length) {
+        const suffix = kw.slice(token.length);
+        if (!best || suffix.length < best.length) best = suffix;
+      }
+    }
+    return best || '';
+  }
+
+  function isWhitespaceOnlyLine(linePrefix) {
+    return !extractInlinePartialToken(linePrefix);
+  }
+
+  function findEnclosingBlock(content, lineNumber) {
+    const lines = String(content || '').split(/\r?\n/);
+    const cur = lineNumber - 1;
+    if (cur < 0 || cur >= lines.length) return null;
+    const curIndent = lineIndent(lines[cur]);
+
+    for (let i = cur - 1; i >= 0; i--) {
+      const line = lines[i];
+      const ind = lineIndent(line);
+      const trimmed = line.trimEnd();
+      if (ind.length < curIndent.length && trimmed.endsWith('{')) {
+        let m;
+        if ((m = trimmed.match(/\bwhile\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
+          return { type: 'while', cond: m[1].trim(), indent: curIndent };
+        }
+        if ((m = trimmed.match(/\bfor\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
+          const inside = m[1].trim();
+          const type = inside.includes(':') && !inside.includes(';') ? 'for-each' : 'for';
+          return { type, init: inside, indent: curIndent };
+        }
+        if ((m = trimmed.match(/\bif\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
+          return { type: 'if', cond: m[1].trim(), indent: curIndent };
+        }
+        if (/\belse\s*\{?\s*$/.test(trimmed)) {
+          return { type: 'else', indent: curIndent };
+        }
+      }
+      if (trimmed === '{' && i > 0) {
+        const prev = lines[i - 1].trimEnd();
+        let m;
+        if ((m = prev.match(/\bwhile\s*\(\s*([^)]*)\)\s*$/))) {
+          return { type: 'while', cond: m[1].trim(), indent: curIndent };
+        }
+        if ((m = prev.match(/\bfor\s*\(\s*([^)]*)\)\s*$/))) {
+          const inside = m[1].trim();
+          const type = inside.includes(':') && !inside.includes(';') ? 'for-each' : 'for';
+          return { type, init: inside, indent: curIndent };
+        }
+        if ((m = prev.match(/\bif\s*\(\s*([^)]*)\)\s*$/))) {
+          return { type: 'if', cond: m[1].trim(), indent: curIndent };
+        }
+      }
+    }
+    return null;
+  }
+
+  function sameIndentLinesInBlock(content, lineNumber, indent) {
+    const lines = String(content || '').split(/\r?\n/);
+    const cur = lineNumber - 1;
+    const above = [];
+    const below = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (i === cur || !lines[i].trim()) continue;
+      if (lineIndent(lines[i]) !== indent) continue;
+      const entry = { i, text: lines[i].trim() };
+      if (i < cur) above.push(entry);
+      else below.push(entry);
+    }
+    return { above, below };
+  }
+
+  function inferEmptyLineContinuationFullLine(path, content, lineNumber, linePrefix, javaLevel = 17) {
+    const block = findEnclosingBlock(content, lineNumber);
+    if (!block) return '';
+    const indent = lineIndent(linePrefix) || block.indent;
+    const lang = langForPath(path);
+    const { above, below } = sameIndentLinesInBlock(content, lineNumber, indent);
+
+    if (lang === 'java' || lang === 'kotlin' || lang === 'groovy') {
+      if (block.type === 'while') {
+        const cond = block.cond;
+        let m;
+        if ((m = cond.match(/i\s*<\s*(\w+)\.size\s*\(\s*\)/))) {
+          const list = m[1];
+          const hasGet = above.some((x) => x.text.includes('.get(i)'));
+          if (!hasGet) {
+            return javaLevel >= 10
+              ? `${indent}var item = ${list}.get(i);`
+              : `${indent}${list}.get(i);`;
+          }
+          if (!above.some((x) => x.text === 'i++;' || /\bi\s*\+\+\s*;/.test(x.text))) {
+            return `${indent}i++;`;
+          }
+        }
+        if ((m = cond.match(/(\w+)\.hasNext\s*\(\s*\)/))) {
+          const iter = m[1];
+          if (!above.some((x) => x.text.includes('.next()'))) {
+            return javaLevel >= 10
+              ? `${indent}var item = ${iter}.next();`
+              : `${indent}Object item = ${iter}.next();`;
+          }
+        }
+      }
+      if (block.type === 'for-each' || (block.type === 'for' && block.init.includes(':') && !block.init.includes(';'))) {
+        const varName = forEachVarName(block.init);
+        if (varName && !above.some((x) => x.text.includes(varName))) {
+          if (block.init.includes('.entrySet()')) {
+            return `${indent}var key = ${varName}.getKey();`;
+          }
+          return `${indent}System.out.println(${varName});`;
+        }
+      }
+      if (block.type === 'for') {
+        const init = block.init;
+        let m;
+        if ((m = init.match(/(?:var\s+)?(\w+)\s*:\s*(\w+)\s*$/))) {
+          const varName = m[1];
+          if (!above.length) return `${indent}System.out.println(${varName});`;
+        }
+        if (init.includes('i = 0') && init.includes('i++')) {
+          const m2 = init.match(/i\s*<\s*(\w+)/);
+          if (m2 && !above.some((x) => x.text.includes('.get(i)'))) {
+            return `${indent}${m2[1]}.get(i);`;
+          }
+          if (m2 && above.some((x) => x.text.includes('.get(i)') && !above.some((x) => /\bi\s*\+\+\s*;/.test(x.text)))) {
+            return `${indent}i++;`;
+          }
+        }
+      }
+      if ((block.type === 'if' || block.type === 'else') && !above.length) {
+        return `${indent}// TODO`;
+      }
+    }
+
+    if (lang === 'python') {
+      if ((block.type === 'while' || block.type === 'for' || block.type === 'if') && !above.length) {
+        return `${indent}pass`;
+      }
+    }
+
+    if (!above.length && below.length) {
+      const belowText = below[0].text;
+      if (belowText.startsWith('return ')) return `${indent}// ...`;
+    }
+
+    return '';
+  }
+
+  function inferEmptyLineContinuationSuffix(path, content, lineNumber, linePrefix, javaLevel = 17) {
+    const full = inferEmptyLineContinuationFullLine(path, content, lineNumber, linePrefix, javaLevel);
+    if (!full) return '';
+    if (full.startsWith(linePrefix)) return full.slice(linePrefix.length);
+    const wantIndent = lineIndent(full);
+    const haveIndent = lineIndent(linePrefix);
+    if (wantIndent.length >= haveIndent.length) {
+      return full.slice(haveIndent.length);
+    }
+    return full.trimStart();
+  }
+
+  /** Synchronous local ghost text — single-line suffixes only (blocks go in the suggest menu). */
+  function localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel = 17) {
+    const member = memberInlineSuffix(content, linePrefix, path);
+    if (member) return member;
+    const syntax = syntaxInlineSuffix(path, linePrefix);
+    if (syntax) return syntax;
+    const trimmed = linePrefix.trimEnd();
+    const token = extractInlinePartialToken(linePrefix);
+    if (token && !hasCompleteControlKeyword(trimmed) && !isControlKeywordPrefix(token)) {
+      const kwSuffix = keywordInlineSuffix(path, token);
+      if (kwSuffix) return kwSuffix;
+    }
+    return '';
+  }
+
+  function isCodeLikeCompletion(label, kind) {
+    const k = String(kind || '').toLowerCase();
+    if (k === 'keyword' || k === 'method' || k === 'field' || k === 'class' || k === 'interface'
+      || k === 'variable' || k === 'property' || k === 'enum' || k === 'function' || k === 'type'
+      || k === 'snippet' || k === 'statement') {
+      return true;
+    }
+    const t = String(label ?? '').trim();
+    if (!t || t.length > 120) return false;
+    if (/^[A-Za-z_$@][\w$.]*$/.test(t)) return true;
+    if (/^[A-Za-z_$][\w$]*\(/.test(t)) return true;
+    if (/[();.=\[\]{}<>]/.test(t)) return true;
+    return false;
+  }
+
+  function isKeywordPrefixTyping(path, prefix) {
+    if (!prefix) return false;
+    const lower = prefix.toLowerCase();
+    return clientKeywordsForPath(path).some((kw) => kw.toLowerCase().startsWith(lower));
+  }
+
+  function buildInlineItems(model, position, linePrefix, text) {
+    const suffix = capInlineText(sanitizeInlineGhostText(text));
+    if (!suffix) return { items: [] };
+    const token = extractInlinePartialToken(linePrefix);
+    const filterText = token && !suffix.startsWith(token) ? token + suffix : suffix;
+    return {
+      items: [{
+        insertText: suffix,
+        filterText,
+        range: new monaco.Range(
+          position.lineNumber,
+          position.column,
+          position.lineNumber,
+          position.column,
+        ),
+      }],
+    };
+  }
+
+  function shouldFetchCompletions(linePrefix, prefix) {
+    const p = prefix || '';
+    if (p.length >= MIN_AUTOCOMPLETE_CHARS) return true;
+    return AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '');
+  }
+
+  function localSmartCompletions(path, content, lineNumber, linePrefix, javaLevel) {
+    const inline = localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel);
+    if (!inline) return [];
+    const firstLine = inline.split('\n')[0];
+    const label = firstLine.length > 52 ? `${firstLine.slice(0, 49)}…` : firstLine;
+    return [{
+      label,
+      kind: 'snippet',
+      detail: 'Next code',
+      insert: inline,
+    }];
+  }
+
+  const INDEX_COMPLETE_CACHE_MS = 2000;
+  const INDEX_COMPLETE_CACHE_MAX = 96;
+  const indexCompleteCache = new Map();
+
+  function indexCompleteCacheKey(repo, path, line, column, prefix, contentLen) {
+    return `${repo}:${path}:${line}:${column}:${prefix}:${contentLen}`;
+  }
+
+  function pruneIndexCompleteCache() {
+    if (indexCompleteCache.size <= INDEX_COMPLETE_CACHE_MAX) return;
+    const first = indexCompleteCache.keys().next().value;
+    if (first) indexCompleteCache.delete(first);
+  }
+
+  async function fetchAiCompletions(helpers, model, position, linePrefix, prefix, cache) {
+    if (!helpers.getGeminiConfigured?.()) return [];
+    const repo = helpers.getRepo();
+    const path = helpers.getActivePath?.() || '';
+    if (!repo || !path || !helpers.repoApi) return [];
+
+    const cacheKey = `${repo}:${path}:${position.lineNumber}:${position.column}:${linePrefix}:${prefix}`;
+    if (cache.key === cacheKey && Date.now() - cache.time < 1200) {
+      return cache.items;
+    }
+
+    const url = helpers.repoApi(repo, '/workspace/ai-completions');
+    const payload = contentForApiPayload(model.getValue(), position.lineNumber);
+    const items = await helpers.api(url, {
+      method: 'POST',
+      body: JSON.stringify({
+        path,
+        line: payload.line,
+        column: position.column,
+        content: payload.content,
+        line_prefix: linePrefix,
+        prefix: prefix || '',
+      }),
+    });
+    const list = Array.isArray(items) ? items : [];
+    cache.key = cacheKey;
+    cache.items = list;
+    cache.time = Date.now();
+    return list;
+  }
+
   async function fetchCompletions(helpers, model, position, prefix) {
     const repo = helpers.getRepo();
     const path = helpers.getActivePath?.() || '';
     if (!repo || !path) return [];
 
-    const q = new URLSearchParams({
-      path,
-      line: String(position.lineNumber),
-      column: String(position.column),
-      prefix: prefix || '',
-    });
-    const items = await helpers.api(`${helpers.repoApi(repo, '/workspace/completions')}?${q}`);
-    return Array.isArray(items) ? items : [];
+    const line = position.lineNumber;
+    const column = position.column;
+    const dirty = helpers.isFileDirty?.(path);
+    const content = dirty ? model.getValue() : undefined;
+    const contentLen = content?.length ?? 0;
+    const cacheKey = indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen);
+    const cached = indexCompleteCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < INDEX_COMPLETE_CACHE_MS) {
+      return cached.items;
+    }
+
+    const url = helpers.repoApi(repo, '/workspace/completions');
+    let items;
+
+    if (dirty && content !== undefined) {
+      const payload = contentForApiPayload(content, line);
+      items = await helpers.api(url, {
+        method: 'POST',
+        body: JSON.stringify({
+          path, line: payload.line, column, prefix: prefix || '', content: payload.content,
+        }),
+      });
+    } else {
+      const q = new URLSearchParams({
+        path,
+        line: String(line),
+        column: String(column),
+        prefix: prefix || '',
+      });
+      items = await helpers.api(`${url}?${q}`);
+    }
+
+    const list = Array.isArray(items) ? items : [];
+    indexCompleteCache.set(cacheKey, { items: list, time: Date.now() });
+    pruneIndexCompleteCache();
+    return list;
   }
 
   const definitionCache = new Map();
@@ -402,54 +1330,774 @@
       },
     });
 
+    const quickFixCache = new Map();
+    const QUICK_FIX_CACHE_MS = 45000;
+    const QUICK_FIX_CACHE_MAX = 64;
+
+    function quickFixCacheKey(repo, path, contentLen, sig) {
+      return `${repo}:${path}:${contentLen}:${sig}`;
+    }
+
+    function diagnosticSignature(items) {
+      return items.map((d) => `${d.line}:${d.column}:${d.message}`).join('|');
+    }
+
+    function markersInRange(model, range) {
+      return monaco.editor.getModelMarkers({ resource: model.uri }).filter((m) => {
+        if (range.endLineNumber < m.startLineNumber || range.startLineNumber > m.endLineNumber) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    function markerFromDiagnostic(model, d, span) {
+      return {
+        severity: d.severity === 'warning'
+          ? monaco.MarkerSeverity.Warning
+          : monaco.MarkerSeverity.Error,
+        message: d.message,
+        startLineNumber: span.startLineNumber,
+        startColumn: span.startColumn,
+        endLineNumber: span.endLineNumber,
+        endColumn: span.endColumn,
+      };
+    }
+
+    function markersToDiagnosticPayload(markers) {
+      return markers.map((m) => ({
+        line: m.startLineNumber,
+        column: m.startColumn,
+        message: m.message,
+        severity: m.severity === monaco.MarkerSeverity.Warning ? 'warning' : 'error',
+      }));
+    }
+
+    function codeActionFromFix(model, fix, linkedDiagnostics) {
+      const edits = (fix.edits || []).map((e) => ({
+        resource: model.uri,
+        versionId: model.getVersionId(),
+        textEdit: {
+          range: new monaco.Range(
+            e.start_line,
+            e.start_column,
+            e.end_line,
+            e.end_column,
+          ),
+          text: e.text ?? '',
+        },
+      }));
+      if (!edits.length) return null;
+      return {
+        title: fix.title.startsWith('AI:') ? fix.title : `AI: ${fix.title}`,
+        kind: monaco.languages.CodeActionKind.QuickFix,
+        isPreferred: true,
+        diagnostics: linkedDiagnostics,
+        edit: { edits },
+      };
+    }
+
+    function buildQuickFixActions(model, markers, fixes) {
+      const linked = markers.map((m) => ({
+        severity: m.severity,
+        message: m.message,
+        startLineNumber: m.startLineNumber,
+        startColumn: m.startColumn,
+        endLineNumber: m.endLineNumber,
+        endColumn: m.endColumn,
+      }));
+      const actions = [];
+      for (const fix of fixes) {
+        const action = codeActionFromFix(model, fix, linked);
+        if (action) actions.push(action);
+      }
+      return actions;
+    }
+
+    function allFileMarkers(model) {
+      return monaco.editor.getModelMarkers({ resource: model.uri });
+    }
+
+    function fileQuickFixCacheKey(repo, path, model) {
+      const markers = allFileMarkers(model);
+      const payload = markersToDiagnosticPayload(markers);
+      return quickFixCacheKey(
+        repo, path, model.getValue().length, diagnosticSignature(payload),
+      );
+    }
+
+    function applyQuickFixEdits(ed, fix) {
+      const editBatch = (fix.edits || []).map((e) => ({
+        range: new monaco.Range(
+          e.start_line, e.start_column, e.end_line, e.end_column,
+        ),
+        text: e.text ?? '',
+      }));
+      if (!editBatch.length) return false;
+      ed.executeEdits('reaper-quick-fix', editBatch);
+      return true;
+    }
+
+    async function fetchQuickFixes(model, markers) {
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!repo || !path || !helpers.repoApi || !markers.length) return [];
+      const content = model.getValue();
+      const payload = markersToDiagnosticPayload(markers);
+      const key = quickFixCacheKey(repo, path, content.length, diagnosticSignature(payload));
+      const cached = quickFixCache.get(key);
+      if (cached && Date.now() - cached.time < QUICK_FIX_CACHE_MS) {
+        return cached.fixes;
+      }
+      try {
+        const fixes = await helpers.api(helpers.repoApi(repo, '/workspace/quick-fixes'), {
+          method: 'POST',
+          body: JSON.stringify({ path, content, diagnostics: payload }),
+        });
+        const list = Array.isArray(fixes) ? fixes : [];
+        quickFixCache.set(key, { fixes: list, time: Date.now() });
+        if (quickFixCache.size > QUICK_FIX_CACHE_MAX) {
+          const first = quickFixCache.keys().next().value;
+          if (first) quickFixCache.delete(first);
+        }
+        return list;
+      } catch (err) {
+        helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
+        return [];
+      }
+    }
+
+    function prefetchQuickFixes(model, diags) {
+      if (!model || !diags?.length || !helpers.repoApi || !helpers.getRepo()) return;
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!repo || !path) return;
+      const key = fileQuickFixCacheKey(repo, path, model);
+      const existing = quickFixCache.get(key);
+      if (existing?.fixes?.length && Date.now() - existing.time < QUICK_FIX_CACHE_MS) {
+        return;
+      }
+      const markers = allFileMarkers(model);
+      const markerInput = markers.length
+        ? markers
+        : diags.map((d) => {
+          const span = helpers.diagnosticSpan?.(model, d);
+          return {
+            startLineNumber: span?.startLineNumber ?? d.line,
+            startColumn: (span?.startColumn ?? d.column) || 1,
+            endLineNumber: span?.endLineNumber ?? d.line,
+            endColumn: (span?.endColumn ?? (d.column || 1) + 1),
+            message: d.message,
+            severity: d.severity === 'warning'
+              ? monaco.MarkerSeverity.Warning
+              : monaco.MarkerSeverity.Error,
+          };
+        });
+      fetchQuickFixes(model, markerInput).then((fixes) => {
+        if (fixes.length) editor._reaperQuickFixReady = Date.now();
+      });
+    }
+
+    editor.prefetchAiQuickFixes = (diags) => {
+      const model = editor.getModel();
+      if (model) prefetchQuickFixes(model, diags);
+    };
+
+    editor.runAiQuickFix = async () => {
+      const model = editor.getModel();
+      if (!model) return;
+      const markers = allFileMarkers(model);
+      if (!markers.length) {
+        helpers.toast?.('No compiler errors on this file', 'info');
+        return;
+      }
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
+      let fixes = cacheKey ? quickFixCache.get(cacheKey)?.fixes : null;
+      if (!fixes?.length) {
+        fixes = await fetchQuickFixes(model, markers);
+      }
+      if (!fixes?.length) {
+        helpers.toast?.('No AI fixes available — check Gemini API key in Settings', 'error');
+        return;
+      }
+      if (fixes.length === 1) {
+        if (applyQuickFixEdits(editor, fixes[0])) {
+          helpers.toast?.(`Applied: ${fixes[0].title}`, 'success');
+          helpers.scheduleDiagnostics?.();
+        }
+        return;
+      }
+      helpers.showQuickFixMenu?.(fixes, (fix) => {
+        if (applyQuickFixEdits(editor, fix)) {
+          helpers.toast?.(`Applied: ${fix.title}`, 'success');
+          helpers.scheduleDiagnostics?.();
+        }
+      });
+    };
+
+    monaco.languages.registerCodeActionProvider(
+      [{ pattern: '**' }],
+      {
+        provideCodeActions(model, range, context) {
+          const only = context.only;
+          if (
+            only
+            && !only.contains(monaco.languages.CodeActionKind.QuickFix)
+            && !only.contains(monaco.languages.CodeActionKind.Empty)
+          ) {
+            return { actions: [], dispose: () => {} };
+          }
+          const markers = markersInRange(model, range);
+          if (!markers.length) {
+            return { actions: [], dispose: () => {} };
+          }
+          const repo = helpers.getRepo();
+          const path = helpers.getActivePath?.() || '';
+          const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
+          const cached = cacheKey ? quickFixCache.get(cacheKey) : null;
+          if (cached?.fixes?.length) {
+            return {
+              actions: buildQuickFixActions(model, markers, cached.fixes),
+              dispose: () => {},
+            };
+          }
+          const allMarkers = allFileMarkers(model);
+          return fetchQuickFixes(model, allMarkers.length ? allMarkers : markers).then((fixes) => {
+            if (!fixes.length) {
+              return { actions: [], dispose: () => {} };
+            }
+            return {
+              actions: buildQuickFixActions(model, markers, fixes),
+              dispose: () => {},
+            };
+          });
+        },
+      },
+      {
+        providedCodeActionKinds: [monaco.languages.CodeActionKind.QuickFix],
+      },
+    );
+
+    let aiInlineTimer = null;
+    let aiInlineCache = {
+      key: '', text: '', controlSnippet: '',
+      repo: '', path: '', lineNumber: 0, column: 0, linePrefix: '',
+    };
+    let aiInlineErrorShown = false;
+    const AI_INLINE_DEBOUNCE_MS = 200;
+    const AI_INLINE_STATEMENT_DEBOUNCE_MS = 70;
+    let aiInlineSeq = 0;
+    const aiCompleteCache = { key: '', items: [], time: 0 };
+    let inlineShowTimer = null;
+
+    function editorContent(ed, model) {
+      return ed._reaperContent ?? model.getValue();
+    }
+
+    function queueInlineSuggestion(ed) {
+      clearTimeout(inlineShowTimer);
+      inlineShowTimer = setTimeout(() => {
+        requestAnimationFrame(() => {
+          ed.trigger('reaper', 'editor.action.inlineSuggest.trigger', {});
+          setTimeout(() => {
+            ed.trigger('reaper', 'editor.action.inlineSuggest.trigger', {});
+          }, 48);
+        });
+      }, 16);
+    }
+
+    function aiInlineEnabled() {
+      return helpers.getAiInlineComplete?.() && helpers.repoApi && helpers.getRepo?.();
+    }
+
+    function inlineCacheKey(model, position, linePrefix) {
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      return buildInlineCacheKey(repo, path, position.lineNumber, position.column, linePrefix);
+    }
+
+    function inlineCacheMeta(repo, path, position, linePrefix) {
+      return {
+        repo,
+        path,
+        lineNumber: position.lineNumber,
+        column: position.column,
+        linePrefix,
+      };
+    }
+
+    function clearInlineCache(ed) {
+      aiInlineCache = {
+        key: '', text: '', controlSnippet: '',
+        repo: '', path: '', lineNumber: 0, column: 0, linePrefix: '',
+      };
+      if (ed) ed._reaperPendingControlSnippet = null;
+    }
+
+    function setInlineCache(ed, cacheKey, text, controlSnippet, meta) {
+      const clean = capInlineText(sanitizeInlineGhostText(text));
+      const snippet = controlSnippet || '';
+      if (!clean) {
+        if (aiInlineCache.text) {
+          clearInlineCache(ed);
+        }
+        return;
+      }
+      if (
+        aiInlineCache.key === cacheKey
+        && aiInlineCache.text === clean
+        && aiInlineCache.controlSnippet === snippet
+      ) {
+        return;
+      }
+      aiInlineCache = {
+        key: cacheKey,
+        text: clean,
+        controlSnippet: snippet,
+        repo: meta?.repo ?? aiInlineCache.repo,
+        path: meta?.path ?? aiInlineCache.path,
+        lineNumber: meta?.lineNumber ?? aiInlineCache.lineNumber,
+        column: meta?.column ?? aiInlineCache.column,
+        linePrefix: meta?.linePrefix ?? aiInlineCache.linePrefix,
+      };
+      if (snippet) {
+        ed._reaperPendingControlSnippet = { key: cacheKey, snippet };
+      } else {
+        ed._reaperPendingControlSnippet = null;
+      }
+      queueInlineSuggestion(ed);
+    }
+
+    function acceptInlineOrControlSnippet(ed) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (!model || !position) return;
+
+      const linePrefix = editorLinePrefix(model, position);
+      const cacheKey = inlineCacheKey(model, position, linePrefix);
+      const pending = ed._reaperPendingControlSnippet;
+      const insertRange = new monaco.Range(
+        position.lineNumber, position.column, position.lineNumber, position.column,
+      );
+
+      const clearInline = () => {
+        clearInlineCache(ed);
+      };
+
+      if (pending?.snippet && pending.key === cacheKey) {
+        ed.trigger('reaper', 'editor.action.insertSnippet', { snippet: pending.snippet });
+        clearInline();
+        return;
+      }
+
+      if (aiInlineCache.key === cacheKey && aiInlineCache.controlSnippet) {
+        ed.trigger('reaper', 'editor.action.insertSnippet', { snippet: aiInlineCache.controlSnippet });
+        clearInline();
+        return;
+      }
+
+      if (aiInlineCache.key === cacheKey && aiInlineCache.text) {
+        ed.executeEdits('reaper', [{ range: insertRange, text: aiInlineCache.text }]);
+        clearInline();
+        return;
+      }
+
+      ed.trigger('reaper', 'editor.action.inlineSuggest.commit', null);
+    }
+
+    function hasActiveInlineSuggestion(ed) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (model && position) {
+        const cacheKey = inlineCacheKey(model, position, editorLinePrefix(model, position));
+        if (ed._reaperPendingControlSnippet?.snippet && ed._reaperPendingControlSnippet.key === cacheKey) {
+          return true;
+        }
+        if (aiInlineCache.key === cacheKey && (aiInlineCache.text || aiInlineCache.controlSnippet)) {
+          return true;
+        }
+      }
+      const ctx = ed._contextKeyService;
+      return ctx?.getContextKeyValue('inlineSuggestionVisible') ?? false;
+    }
+
+    function handleEditorTab(ed) {
+      const ctx = ed._contextKeyService;
+      if (ctx?.getContextKeyValue('suggestWidgetVisible')) {
+        ed.trigger('reaper', 'acceptSelectedSuggestion', null);
+        return;
+      }
+      if (ctx?.getContextKeyValue('inSnippetMode')) {
+        ed.trigger('reaper', 'jumpToNextSnippetPlaceholder', null);
+        return;
+      }
+      if (hasActiveInlineSuggestion(ed)) {
+        acceptInlineOrControlSnippet(ed);
+        return;
+      }
+      ed.trigger('reaper', 'tab', null);
+    }
+
+    function shouldAutoOpenSuggest(model, position, path, content) {
+      const linePrefix = editorLinePrefix(model, position);
+      if (
+        path && content && shouldPreferAiStatementInline(
+          path, linePrefix, content, position.lineNumber,
+        )
+      ) {
+        return false;
+      }
+      const word = model.getWordUntilPosition(position);
+      const p = word.word || extractInlinePartialToken(linePrefix) || '';
+      if (isControlKeywordPrefix(p)) return true;
+      if (dotQualifierFromLinePrefix(linePrefix)) return true;
+      if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix)) return true;
+      if (p.length >= 2) return true;
+      if (p.length === 1 && isKeywordPrefixTyping(path || helpers.getActivePath?.() || '', p)) return true;
+      return false;
+    }
+
+    function scheduleAutocompleteSuggest(ed, force) {
+      clearTimeout(ed._reaperSuggestTimer);
+      const delay = force ? 40 : 120;
+      ed._reaperSuggestTimer = setTimeout(() => {
+        const model = ed.getModel();
+        const position = ed.getPosition();
+        if (!model || !position) return;
+        const path = helpers.getActivePath?.() || '';
+        const content = editorContent(ed, model);
+        if (!shouldAutoOpenSuggest(model, position, path, content)) return;
+        ed.trigger('reaper', 'editor.action.triggerSuggest', {});
+      }, delay);
+    }
+
+    // Instant local suggestions — never blocks on network.
     monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
-      triggerCharacters: ['.', '@', ':', '-', '<', '"', '/', '#', '*', '='],
-      async provideCompletionItems(model, position) {
+      triggerCharacters: ['.', '@', ':', '-', '<', '"', "'", '/', '#', '*', '=', '(', '[', '{'],
+      provideCompletionItems(model, position) {
+        const path = helpers.getActivePath?.() || '';
+        if (!path) return { suggestions: [] };
+        const content = editorContent(editor, model);
+        const { suggestions } = buildLocalCompletionSuggestions(model, position, path, helpers, content);
+        return { suggestions };
+      },
+    });
+
+    // Index / workspace symbols — all languages, from 1st character or after `.`
+    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
+      triggerCharacters: ['.', '@', ':', '<', '"', "'", '(', '[', '#'],
+      async provideCompletionItems(model, position, context) {
+        const path = helpers.getActivePath?.() || '';
+        if (!path || !helpers.repoApi || !helpers.getRepo()) return { suggestions: [] };
+
+        const { linePrefix, prefix, range, seen } = completionContext(model, position);
+        const manual = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
+        if (!shouldFetchIndexCompletions(linePrefix, prefix) && !manual) {
+          return { suggestions: [] };
+        }
+
+        try {
+          const items = await fetchCompletions(helpers, model, position, prefix);
+          const suggestions = [];
+          for (const item of items) {
+            const mapped = mapIndexItemToSuggestion(item, range, seen);
+            if (mapped) suggestions.push(mapped);
+            if (suggestions.length >= 80) break;
+          }
+          return { suggestions };
+        } catch {
+          return { suggestions: [] };
+        }
+      },
+    });
+
+    // AI completions — Ctrl+Space only (Gemini is too slow for every keystroke).
+    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
+      async provideCompletionItems(model, position, context) {
+        if (context.triggerKind !== monaco.languages.CompletionTriggerKind.Invoke) {
+          return { suggestions: [] };
+        }
+        if (!helpers.getAiInlineComplete?.() || !helpers.getGeminiConfigured?.()) {
+          return { suggestions: [] };
+        }
         const path = helpers.getActivePath?.() || '';
         if (!path) return { suggestions: [] };
 
-        const word = model.getWordUntilPosition(position);
-        const linePrefix = model.getValueInRange(
-          new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column),
-        );
-        const prefix = word.word || linePrefix.split(/[=:#.\s]+/).pop() || '';
-        const range = buildCompletionRange(model, position, prefix);
-
+        const { linePrefix, prefix, range } = completionContext(model, position);
         const seen = new Set();
-        const suggestions = [];
-
-        function add(label, kind, detail) {
-          if (!label || seen.has(label)) return;
-          seen.add(label);
-          suggestions.push({
-            label,
-            kind: completionKind(kind),
-            detail: detail || undefined,
-            insertText: label,
-            range,
-          });
-        }
-
-        for (const kw of clientKeywordsForPath(path)) {
-          if (!prefix || kw.toLowerCase().startsWith(prefix.toLowerCase())) {
-            add(kw, 'keyword', 'keyword');
-          }
-        }
-
-        if (helpers.repoApi && helpers.getRepo) {
-          try {
-            const items = await fetchCompletions(helpers, model, position, prefix);
-            for (const item of items) {
-              add(item.label, item.kind, item.detail);
-              if (suggestions.length >= 80) break;
+        try {
+          const aiItems = await fetchAiCompletions(
+            helpers, model, position, linePrefix, prefix, aiCompleteCache,
+          );
+          const suggestions = [];
+          for (const item of aiItems) {
+            const label = item.label;
+            if (!label || seen.has(label)) continue;
+            if (!isCodeLikeCompletion(label, item.kind)) continue;
+            seen.add(label);
+            const kind = String(item.kind || '').toLowerCase();
+            let insertText = item.insert;
+            if (!insertText) insertText = kind === 'method' ? `${label}()` : label;
+            const suggestion = {
+              label,
+              kind: completionKind(item.kind),
+              detail: item.detail ? `AI · ${item.detail}` : 'AI ·',
+              insertText,
+              range,
+              sortText: `0_${label}`,
+            };
+            if (
+              kind === 'snippet'
+              || insertText.includes('\n')
+              || insertText.includes('$0')
+              || insertText.includes('$1')
+            ) {
+              suggestion.insertTextRules =
+                monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
             }
-          } catch {
-            /* API unavailable — local keywords still shown */
+            suggestions.push(suggestion);
+            if (suggestions.length >= 12) break;
+          }
+          return { suggestions };
+        } catch {
+          return { suggestions: [] };
+        }
+      },
+    });
+
+    function scheduleEmptyLineInline(ed) {
+      if (!helpers.getAiInlineComplete?.()) return;
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !repo || !path) return;
+      const linePrefix = editorLinePrefix(model, position);
+      if (!isWhitespaceOnlyLine(linePrefix)) return;
+      const javaLevel = inlineJavaLevel(helpers);
+      const content = editorContent(ed, model);
+      const cacheKey = buildInlineCacheKey(repo, path, position.lineNumber, position.column, linePrefix);
+      const meta = inlineCacheMeta(repo, path, position, linePrefix);
+      const local = localInlineSuggestion(path, linePrefix, content, position.lineNumber, javaLevel);
+      if (local) {
+        setInlineCache(ed, cacheKey, local, '', meta);
+        return;
+      }
+      scheduleAiInlineFetch();
+    }
+
+    function insertInlineContinuationAtCursor(ed) {
+      const model = ed.getModel();
+      const pos = ed.getPosition();
+      if (!model || !pos) return false;
+      const linePrefix = editorLinePrefix(model, pos);
+      if (!isWhitespaceOnlyLine(linePrefix)) return false;
+      const path = helpers.getActivePath?.() || '';
+      if (!path) return false;
+      const javaLevel = inlineJavaLevel(helpers);
+      const content = editorContent(ed, model);
+      const suffix = localInlineSuggestion(path, linePrefix, content, pos.lineNumber, javaLevel);
+      if (!suffix) return false;
+      ed.executeEdits('reaper', [{
+        range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
+        text: suffix,
+      }]);
+      const cacheKey = buildInlineCacheKey(helpers.getRepo(), path, pos.lineNumber, pos.column, linePrefix);
+      clearInlineCache(ed);
+      requestAnimationFrame(() => scheduleEmptyLineInline(ed));
+      return true;
+    }
+
+    async function fetchInlineComplete(model, position, linePrefix) {
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!repo || !path) return '';
+      const payload = contentForApiPayload(editorContent(editor, model), position.lineNumber);
+      const res = await helpers.api(helpers.repoApi(repo, '/workspace/inline-complete'), {
+        method: 'POST',
+        body: JSON.stringify({
+          path,
+          line: payload.line,
+          column: position.column,
+          content: payload.content,
+          line_prefix: linePrefix,
+        }),
+      });
+      return res?.text ?? '';
+    }
+
+    function scheduleAiInlineFetch() {
+      if (!aiInlineEnabled()) return;
+      clearTimeout(aiInlineTimer);
+      const seq = ++aiInlineSeq;
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      let debounceMs = AI_INLINE_DEBOUNCE_MS;
+      if (model && position) {
+        const path = helpers.getActivePath?.() || '';
+        const linePrefix = editorLinePrefix(model, position);
+        const content = editorContent(editor, model);
+        if (
+          path && shouldPreferAiStatementInline(
+            path, linePrefix, content, position.lineNumber,
+          )
+        ) {
+          debounceMs = AI_INLINE_STATEMENT_DEBOUNCE_MS;
+        }
+      }
+      aiInlineTimer = setTimeout(async () => {
+        if (seq !== aiInlineSeq) return;
+        const model = editor.getModel();
+        const position = editor.getPosition();
+        if (!model || !position) return;
+        const repo = helpers.getRepo();
+        const path = helpers.getActivePath?.() || '';
+        if (!repo || !path) return;
+        const linePrefix = editorLinePrefix(model, position);
+        if (!inlineTypingReady()) return;
+        const cacheKey = buildInlineCacheKey(
+          repo, path, position.lineNumber, position.column, linePrefix,
+        );
+        const meta = inlineCacheMeta(repo, path, position, linePrefix);
+        if (aiInlineCache.key === cacheKey && aiInlineCache.text) return;
+        const javaLevel = inlineJavaLevel(helpers);
+        const content = editorContent(editor, model);
+        const preferAi = shouldPreferAiStatementInline(
+          path, linePrefix, content, position.lineNumber,
+        );
+        const local = localInlineSuggestion(path, linePrefix, content, position.lineNumber, javaLevel);
+        if (local && local.length >= 4 && !preferAi) return;
+        try {
+          const text = await fetchInlineComplete(model, position, linePrefix);
+          if (!text || seq !== aiInlineSeq) return;
+          setInlineCache(editor, cacheKey, text, '', meta);
+        } catch (err) {
+          if (!aiInlineErrorShown) {
+            aiInlineErrorShown = true;
+            helpers.toast?.(err?.message || 'Inline completion failed', 'error');
+            setTimeout(() => { aiInlineErrorShown = false; }, 8000);
+          }
+        }
+      }, debounceMs);
+    }
+
+    monaco.languages.registerInlineCompletionsProvider(ALL_EDITOR_LANGS, {
+      provideInlineCompletions: async (model, position, _context, token) => {
+        const repo = helpers.getRepo();
+        const path = helpers.getActivePath?.() || '';
+        if (!repo || !path) return { items: [] };
+
+        const linePrefix = editorLinePrefix(model, position);
+        if (!inlineTypingReady()) return { items: [] };
+
+        const cacheKey = buildInlineCacheKey(
+          repo, path, position.lineNumber, position.column, linePrefix,
+        );
+        const javaLevel = inlineJavaLevel(helpers);
+        const content = editorContent(editor, model);
+        const preferAi = shouldPreferAiStatementInline(
+          path, linePrefix, content, position.lineNumber,
+        );
+
+        const cachedGhost = inlineGhostFromCache(
+          aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
+        );
+        if (cachedGhost) {
+          editor._reaperPendingControlSnippet = null;
+          if (token.isCancellationRequested) return { items: [] };
+          return buildInlineItems(model, position, linePrefix, cachedGhost);
+        }
+
+        if (!preferAi) {
+          const local = inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
+          if (local) {
+            const meta = inlineCacheMeta(repo, path, position, linePrefix);
+            setInlineCache(editor, cacheKey, local, '', meta);
+            editor._reaperPendingControlSnippet = null;
+            if (token.isCancellationRequested) return { items: [] };
+            return buildInlineItems(model, position, linePrefix, local);
           }
         }
 
-        return { suggestions };
+        if (!aiInlineEnabled()) {
+          return { items: [] };
+        }
+
+        scheduleAiInlineFetch();
+        return { items: [] };
       },
+      freeInlineCompletions: () => {},
+    });
+
+    editor.onDidChangeModelContent(() => {
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      if (model) editor._reaperContent = model.getValue();
+
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      let preferAi = false;
+      if (model && position && repo && path) {
+        const linePrefix = editorLinePrefix(model, position);
+        const cacheKey = buildInlineCacheKey(
+          repo, path, position.lineNumber, position.column, linePrefix,
+        );
+        const meta = inlineCacheMeta(repo, path, position, linePrefix);
+        const javaLevel = inlineJavaLevel(helpers);
+        const content = editor._reaperContent;
+        preferAi = shouldPreferAiStatementInline(
+          path, linePrefix, content, position.lineNumber,
+        );
+        const local = preferAi
+          ? ''
+          : inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
+        if (local) {
+          setInlineCache(editor, cacheKey, local, '', meta);
+          if (aiInlineEnabled() && local.length >= 4) {
+            scheduleAiInlineFetch();
+          }
+        } else {
+          const stale = inlineGhostFromCache(
+            aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
+          );
+          if (stale) {
+            aiInlineCache = {
+              key: cacheKey,
+              text: stale,
+              controlSnippet: '',
+              repo,
+              path,
+              lineNumber: position.lineNumber,
+              column: position.column,
+              linePrefix,
+            };
+            queueInlineSuggestion(editor);
+            if (aiInlineEnabled()) scheduleAiInlineFetch();
+          } else {
+            if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+              clearInlineCache(editor);
+            }
+            if (aiInlineEnabled()) scheduleAiInlineFetch();
+          }
+        }
+      } else {
+        clearInlineCache(editor);
+      }
+
+      if (!preferAi) {
+        scheduleAutocompleteSuggest(editor);
+      }
+    });
+
+    editor.onDidChangeCursorPosition((e) => {
+      const model = editor.getModel();
+      if (!model) return;
+      const linePrefix = editorLinePrefix(model, e.position);
+      if (!isWhitespaceOnlyLine(linePrefix)) return;
+      clearTimeout(editor._reaperEmptyLineTimer);
+      editor._reaperEmptyLineTimer = setTimeout(() => scheduleEmptyLineInline(editor), 120);
     });
 
     monaco.languages.registerDocumentFormattingEditProvider(Array.from(langs).concat(['json', 'html', 'css', 'scss', 'less', 'yaml', 'markdown', 'xml', 'ini']), {
@@ -480,6 +2128,13 @@
         helpers.openFileAt(path, selection?.startLineNumber || 1, selection?.startColumn || 1);
         return true;
       },
+    });
+
+    editor.addAction({
+      id: 'reaper.aiQuickFix',
+      label: 'AI Quick Fix',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Period],
+      run: (ed) => ed.runAiQuickFix?.(),
     });
 
     editor.addAction({
@@ -519,11 +2174,38 @@
       },
     });
 
+    editor.onKeyDown((e) => {
+      if (e.keyCode !== monaco.KeyCode.Tab || e.shiftKey) return;
+      const ev = e.browserEvent;
+      if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+
+      const ctx = editor._contextKeyService;
+      const suggestVisible = ctx?.getContextKeyValue('suggestWidgetVisible');
+      const snippetMode = ctx?.getContextKeyValue('inSnippetMode');
+      const hasInline = hasActiveInlineSuggestion(editor);
+
+      if (suggestVisible || snippetMode || hasInline) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleEditorTab(editor);
+      }
+    });
+
     editor.addAction({
       id: 'reaper.goToSymbol',
       label: 'Go to Symbol in File',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO],
       run: () => editor.getAction('editor.action.quickOutline')?.run(),
+    });
+
+    editor.addAction({
+      id: 'reaper.inlineSuggest.acceptEnter',
+      label: 'Accept Inline Suggestion',
+      keybindings: [monaco.KeyCode.Enter],
+      precondition: 'inlineSuggestionVisible && !suggestWidgetVisible',
+      run: (ed) => {
+        acceptInlineOrControlSnippet(ed);
+      },
     });
 
     editor.onDidChangeModelContent(() => {

@@ -26,6 +26,7 @@ use super::agent;
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
+        .route("/api/version", get(app_version))
         .route("/api/repos", get(list_repos).post(create_repo))
         .route("/api/repos/import", post(import_repo_handler))
         .route("/api/repos/import/local", post(import_local_repo_handler))
@@ -68,11 +69,17 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
         .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
-        .route("/api/repos/{name}/workspace/completions", get(workspace_completions))
+        .route("/api/repos/{name}/workspace/completions", get(workspace_completions).post(workspace_completions_post))
+        .route("/api/repos/{name}/workspace/ai-completions", post(workspace_ai_completions))
+        .route("/api/repos/{name}/workspace/inline-complete", post(workspace_inline_complete))
         .route("/api/repos/{name}/workspace/java/index-status", get(java_index_status))
         .route("/api/repos/{name}/workspace/project/index-status", get(project_index_status))
         .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
+        .route("/api/repos/{name}/workspace/quick-fixes", post(workspace_quick_fixes))
+        .route("/api/repos/{name}/workspace/java-level", get(workspace_java_level))
+        .route("/api/repos/{name}/workspace/language-context", get(workspace_language_context))
         .route("/api/repos/{name}/workspace/format", post(workspace_format))
+        .route("/api/repos/{name}/unregister", post(unregister_repo_handler))
         .route(
             "/api/repos/{name}",
             get(get_repo).delete(delete_repo_handler),
@@ -148,6 +155,16 @@ async fn delete_repo_handler(
             let _ = std::fs::remove_dir_all(ws);
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(e) => api_error(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn unregister_repo_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match repos::unregister_repo(&state.config, &state.settings, &name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, e),
     }
 }
@@ -928,9 +945,130 @@ async fn workspace_completions(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let prefix = q.prefix.unwrap_or_default();
-    state.java_index_jobs.ensure_building(&name, &ws);
-    match workspace::java_completions(&ws, q.path.trim(), q.line, q.column, &prefix) {
+    let from_path = q.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None) {
         Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CompletionsBody {
+    path: String,
+    line: u32,
+    column: u32,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn workspace_completions_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<CompletionsBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let prefix = body.prefix.unwrap_or_default();
+    let from_path = body.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    match workspace::java_completions(
+        &ws,
+        from_path,
+        body.line,
+        body.column,
+        &prefix,
+        body.content.as_deref(),
+    ) {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct AiCompletionsBody {
+    path: String,
+    line: u32,
+    column: u32,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    line_prefix: Option<String>,
+    content: String,
+}
+
+async fn workspace_ai_completions(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<AiCompletionsBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let prefix = body.prefix.unwrap_or_default();
+    let line_prefix = body.line_prefix.unwrap_or_default();
+    match git_agent::suggest_ai_completions(
+        &state.settings,
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+        &line_prefix,
+        &prefix,
+    )
+    .await
+    {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct InlineCompleteRequest {
+    path: String,
+    line: u32,
+    column: u32,
+    content: String,
+    #[serde(default)]
+    line_prefix: String,
+}
+
+#[derive(Serialize)]
+struct InlineCompleteResponse {
+    text: String,
+}
+
+async fn workspace_inline_complete(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<InlineCompleteRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match git_agent::suggest_inline_completion(
+        &state.settings,
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+        &body.line_prefix,
+    )
+    .await
+    {
+        Ok(text) => Json(InlineCompleteResponse { text }).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -955,6 +1093,39 @@ async fn project_index_status(
     Json(state.project_index_jobs.status(&name)).into_response()
 }
 
+async fn workspace_java_level(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = q.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    let level = workspace::java_language_level(&ws, &path);
+    Json(serde_json::json!({ "level": level })).into_response()
+}
+
+async fn workspace_language_context(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = q.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    Json(workspace::language_compiler_context(&ws, &path)).into_response()
+}
+
 async fn workspace_diagnostics(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -970,6 +1141,36 @@ async fn workspace_diagnostics(
         Ok(Ok(items)) => Json(items).into_response(),
         Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("diagnostics task failed: {e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct QuickFixesRequest {
+    path: String,
+    content: String,
+    diagnostics: Vec<workspace::QuickFixDiagnostic>,
+}
+
+async fn workspace_quick_fixes(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<QuickFixesRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+  match git_agent::suggest_quick_fixes(
+        &state.settings,
+        &ws,
+        body.path.trim(),
+        &body.content,
+        &body.diagnostics,
+    )
+    .await
+    {
+        Ok(fixes) => Json(fixes).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
 
@@ -1033,6 +1234,19 @@ fn exec_stream_response(rx: tokio::sync::mpsc::Receiver<workspace::ExecStreamEve
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+#[derive(Serialize)]
+struct AppVersionResponse {
+    version: &'static str,
+    build: &'static str,
+}
+
+async fn app_version() -> Json<AppVersionResponse> {
+    Json(AppVersionResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        build: env!("REAPER_UI_BUILD"),
+    })
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {
