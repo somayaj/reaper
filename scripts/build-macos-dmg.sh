@@ -7,7 +7,7 @@ APP="$ROOT/dist/Reaper.app"
 STAGING="$ROOT/dist/dmg-staging"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 ARCH="$(uname -m)"
-DMG="$ROOT/dist/Reaper-${VERSION}-macos-${ARCH}.dmg"
+DMG="$ROOT/dist/reaper-${VERSION}-macos-${ARCH}.dmg"
 
 if [[ -z "$VERSION" ]]; then
   echo "Could not read version from Cargo.toml" >&2

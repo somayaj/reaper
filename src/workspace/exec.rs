@@ -25,7 +25,7 @@ pub fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput
     })
 }
 
-/// Run a configured compiler (Settings → Compilers), falling back to PATH.
+/// Run a configured compiler (Settings → Compiler), falling back to PATH.
 pub fn run_tool_command(cwd: &Path, tool_id: &str, args: &[&str]) -> Result<GitOutput> {
     let program = toolchain::resolve_program_or(tool_id)?;
     run_command(cwd, program.to_string_lossy().as_ref(), args)

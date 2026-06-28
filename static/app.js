@@ -586,6 +586,10 @@ function switchSettingsTab(tab) {
   $$('.ij-settings-panel').forEach((panel) => {
     panel.classList.toggle('hidden', panel.id !== `settings-panel-${tab}`);
   });
+  $('.ij-settings-modal')?.classList.toggle('ij-settings-modal--compiler', tab === 'compilers');
+  if (tab === 'compilers') {
+    setTimeout(() => $('#settings-compiler-search')?.focus(), 0);
+  }
 }
 
 async function loadPatTokensList() {
@@ -688,63 +692,120 @@ async function loadCursorSettingsSection() {
 async function loadCompilersSettingsSection() {
   const list = $('#settings-compilers-list');
   if (!list) return;
+
+  const COMPILER_ORDER = [
+    'java', 'kotlin', 'groovy',
+    'python', 'ruby', 'bundle', 'rails',
+    'rustc', 'cargo', 'go',
+    'node', 'tsc',
+    'clang', 'gcc',
+    'swiftc', 'dart', 'php', 'luac', 'csc', 'bash',
+  ];
+
+  function compilerStatus(tool) {
+    if (tool.configured) {
+      return { cls: 'custom', label: 'Custom' };
+    }
+    if (tool.effective) {
+      return { cls: 'ready', label: 'PATH' };
+    }
+    return { cls: 'missing', label: 'Missing' };
+  }
+
+  function renderCompilerRow(tool, installed) {
+    const isJava = tool.id === 'java';
+    const status = compilerStatus(tool);
+    const placeholder = tool.kind === 'home'
+      ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
+      : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
+    const version = tool.version ? `<span class="ij-compiler-version" title="${escapeHtml(tool.version)}">${escapeHtml(tool.version.split('\n')[0].slice(0, 48))}</span>` : '';
+    const jdkSelect = isJava && installed.length
+      ? `<div class="ij-compiler-extra">
+          <label class="ij-compiler-extra-label">Installed JDKs</label>
+          <select class="ij-settings-select settings-compiler-jdk-select" data-tool-id="java" title="Pick a JDK">
+            <option value="">— pick installed JDK —</option>
+            ${installed.map((j) => `<option value="${escapeHtml(j.path)}"${tool.path === j.path ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
+          </select>
+        </div>`
+      : '';
+    const using = tool.effective
+      ? `<div class="ij-compiler-using" title="${escapeHtml(tool.effective)}">Using ${escapeHtml(tool.effective)}</div>`
+      : '';
+    return `<article class="ij-compiler-row" data-compiler-row="${escapeHtml(tool.id)}" data-compiler-label="${escapeHtml(tool.label.toLowerCase())} ${escapeHtml(tool.id)}">
+      <div class="ij-compiler-row-main">
+        <div class="ij-compiler-name">
+          <span class="ij-compiler-label">${escapeHtml(tool.label)}</span>
+          ${version}
+        </div>
+        <span class="ij-compiler-badge ij-compiler-badge--${status.cls}">${status.label}</span>
+        <input id="settings-compiler-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-compiler-input ij-compiler-path" data-tool-id="${escapeHtml(tool.id)}" aria-label="${escapeHtml(tool.label)} path" />
+        <div class="ij-compiler-actions">
+          <button type="button" class="ij-compiler-btn ij-compiler-btn--save settings-compiler-save" data-tool-id="${escapeHtml(tool.id)}" title="Save path">Save</button>
+          <button type="button" class="ij-compiler-btn settings-compiler-clear" data-tool-id="${escapeHtml(tool.id)}" title="Use system default"${tool.configured && !tool.source?.startsWith('env:') ? '' : ' disabled'}>Reset</button>
+        </div>
+      </div>
+      ${using}
+      ${jdkSelect}
+    </article>`;
+  }
+
+  function bindCompilerRows(root) {
+    root.querySelectorAll('.settings-compiler-jdk-select').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const input = root.querySelector(`.settings-compiler-input[data-tool-id="${sel.dataset.toolId}"]`);
+        if (input && sel.value) input.value = sel.value;
+      });
+    });
+    root.querySelectorAll('.settings-compiler-save').forEach((btn) => {
+      btn.addEventListener('click', () => saveCompilerFromSettings(btn.dataset.toolId));
+    });
+    root.querySelectorAll('.settings-compiler-clear').forEach((btn) => {
+      btn.addEventListener('click', () => clearCompilerFromSettings(btn.dataset.toolId));
+    });
+    root.querySelectorAll('.settings-compiler-input').forEach((input) => {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          saveCompilerFromSettings(input.dataset.toolId);
+        }
+      });
+    });
+  }
+
+  function filterCompilerRows(query) {
+    const q = query.trim().toLowerCase();
+    list.querySelectorAll('.ij-compiler-row').forEach((row) => {
+      const hay = row.dataset.compilerLabel || '';
+      row.classList.toggle('ij-compiler-row--hidden', q && !hay.includes(q));
+    });
+  }
+
   try {
     const cfg = await api('/api/settings/compilers');
     const tools = cfg.compilers || cfg.tools || [];
     const installed = cfg.java_installed || [];
-    list.innerHTML = tools.map((tool) => {
-      const isJava = tool.id === 'java';
-      const configured = tool.configured
-        ? `<div><strong>Saved:</strong> ${escapeHtml(tool.path || '')}${tool.version ? ` (${escapeHtml(tool.version)})` : ''}${tool.source ? ` · ${escapeHtml(tool.source)}` : ''}</div>`
-        : '<div><strong>Saved:</strong> none (using system default)</div>';
-      const effective = tool.effective
-        ? `<div class="mt-1"><strong>Using:</strong> ${escapeHtml(tool.effective)}${tool.version && !tool.configured ? ` (${escapeHtml(tool.version)})` : ''}</div>`
-        : '<div class="mt-1 text-gray-500">Not found on PATH</div>';
-      const jdkSelect = isJava && installed.length
-        ? `<div class="mt-3">
-            <label class="block text-xs font-medium text-gray-400 mb-1.5">Installed JDKs</label>
-            <select class="ij-settings-select w-full max-w-lg settings-compiler-jdk-select" data-tool-id="java" title="Pick a JDK">
-              <option value="">— select installed JDK —</option>
-              ${installed.map((j) => `<option value="${escapeHtml(j.path)}"${tool.path === j.path ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
-            </select>
-          </div>`
-        : '';
-      const placeholder = tool.kind === 'home'
-        ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
-        : '/opt/homebrew/bin/' + tool.id;
-      const hint = tool.kind === 'home'
-        ? 'Must contain <code class="font-mono">bin/java</code>. Gradle may use a newer JVM when needed.'
-        : 'Full path to the executable.';
-      return `<div class="border border-surface-700 rounded-lg p-4 space-y-3" data-compiler-row="${escapeHtml(tool.id)}">
-        <div>
-          <h5 class="text-sm font-medium text-white">${escapeHtml(tool.label)}</h5>
-          <div class="ij-settings-status text-xs mt-2">${configured}${effective}</div>
-        </div>
-        ${jdkSelect}
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5" for="settings-compiler-${escapeHtml(tool.id)}">Path</label>
-          <input id="settings-compiler-${escapeHtml(tool.id)}" type="text" spellcheck="false" value="${escapeHtml(tool.path || '')}" placeholder="${escapeHtml(placeholder)}" class="settings-compiler-input w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" data-tool-id="${escapeHtml(tool.id)}" />
-          <p class="text-[11px] text-gray-600 mt-2">${hint}</p>
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <button type="button" class="settings-compiler-save px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" data-tool-id="${escapeHtml(tool.id)}">Save</button>
-          <button type="button" class="settings-compiler-clear px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors" data-tool-id="${escapeHtml(tool.id)}"${tool.configured && !tool.source?.startsWith('env:') ? '' : ' disabled'}>Use system default</button>
-        </div>
-      </div>`;
-    }).join('');
+    const byId = Object.fromEntries(tools.map((t) => [t.id, t]));
+    const ordered = [
+      ...COMPILER_ORDER.map((id) => byId[id]).filter(Boolean),
+      ...tools.filter((t) => !COMPILER_ORDER.includes(t.id)),
+    ];
+    list.innerHTML = `<div class="ij-compiler-table">
+      <div class="ij-compiler-head" aria-hidden="true">
+        <span>Language</span>
+        <span>Status</span>
+        <span>Path override</span>
+        <span></span>
+      </div>
+      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, installed)).join('')}</div>
+    </div>`;
+    bindCompilerRows(list);
 
-    list.querySelectorAll('.settings-compiler-jdk-select').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        const input = list.querySelector(`.settings-compiler-input[data-tool-id="${sel.dataset.toolId}"]`);
-        if (input && sel.value) input.value = sel.value;
-      });
-    });
-    list.querySelectorAll('.settings-compiler-save').forEach((btn) => {
-      btn.addEventListener('click', () => saveCompilerFromSettings(btn.dataset.toolId));
-    });
-    list.querySelectorAll('.settings-compiler-clear').forEach((btn) => {
-      btn.addEventListener('click', () => clearCompilerFromSettings(btn.dataset.toolId));
-    });
+    const search = $('#settings-compiler-search');
+    if (search && !search.dataset.bound) {
+      search.dataset.bound = '1';
+      search.addEventListener('input', (e) => filterCompilerRows(e.target.value));
+    }
+    filterCompilerRows(search?.value || '');
   } catch (err) {
     list.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
   }
@@ -793,12 +854,13 @@ async function showSettingsModal(tab = 'git') {
   const overlay = $('#settings-modal-overlay');
   overlay?.classList.remove('hidden');
   overlay?.classList.add('flex');
+  $('.ij-settings-modal')?.classList.toggle('ij-settings-modal--compiler', tab === 'compilers');
   void loadSettingsModal();
   setTimeout(() => {
     if (tab === 'cursor') $('#settings-cursor-key')?.focus();
     else if (tab === 'ai') $('#settings-gemini-key')?.focus();
     else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
-    else if (tab === 'compilers') $('#settings-compilers-list .settings-compiler-input')?.focus();
+    else if (tab === 'compilers') $('#settings-compiler-search')?.focus();
     else $('#settings-pat-host')?.focus();
   }, 50);
 }
@@ -1397,6 +1459,7 @@ function runMenuAction(action) {
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
     'settings-appearance': () => showSettingsModal('appearance'),
+    'settings-compiler': () => showSettingsModal('compilers'),
     'settings-compilers': () => showSettingsModal('compilers'),
     'settings-toolchains': () => showSettingsModal('compilers'),
     'settings-java': () => showSettingsModal('compilers'),
@@ -1412,7 +1475,7 @@ const PALETTE_COMMANDS = [
   { id: 'settings-git', label: 'Git hosts (PAT)', run: () => showSettingsModal('git') },
   { id: 'settings-cursor', label: 'Cursor agent key', run: () => showSettingsModal('cursor') },
   { id: 'settings-appearance', label: 'Editor appearance', run: () => showSettingsModal('appearance') },
-  { id: 'settings-compilers', label: 'Compilers', run: () => showSettingsModal('compilers') },
+  { id: 'settings-compiler', label: 'Compiler', run: () => showSettingsModal('compilers') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },

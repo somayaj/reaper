@@ -14,9 +14,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let data_dir = std::env::var("REAPER_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| default_data_dir());
+        let data_dir = Config::resolve_data_dir();
         let static_dir = resolve_static_dir();
 
         Self {
@@ -70,15 +68,25 @@ impl Config {
     pub fn repo_exists(&self, name: &str) -> bool {
         is_bare_repo(&self.repo_path(name))
     }
+
+    /// Default data root (`~/reaper`), or `REAPER_DATA_DIR` when set.
+    pub fn resolve_data_dir() -> PathBuf {
+        std::env::var("REAPER_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_data_dir())
+    }
 }
 
 fn default_data_dir() -> PathBuf {
-    if running_in_app_bundle() {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/Reaper");
-        }
-    }
-    PathBuf::from("./data")
+    home_dir()
+        .map(|home| home.join("reaper"))
+        .unwrap_or_else(|| PathBuf::from("./data"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn resolve_static_dir() -> PathBuf {

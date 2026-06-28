@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="99" />
+  <meta name="reaper-ui-build" content="101" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script>
@@ -68,7 +68,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=70" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=72" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -198,7 +198,7 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
             <button type="button" class="ij-menu-item" data-action="settings-appearance">Appearance…</button>
-            <button type="button" class="ij-menu-item" data-action="settings-compilers">Compilers…</button>
+            <button type="button" class="ij-menu-item" data-action="settings-compiler">Compiler…</button>
             <button type="button" class="ij-menu-item" data-action="settings-git">Git hosts (PAT)…</button>
             <button type="button" class="ij-menu-item" data-action="settings-cursor">Cursor agent…</button>
           </div>
@@ -746,7 +746,7 @@
         <nav class="ij-settings-nav shrink-0 border-r border-surface-700 bg-surface-850/50 p-2 space-y-0.5">
           <button type="button" class="ij-settings-tab active" data-settings-tab="git">Git hosts</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="appearance">Appearance</button>
-          <button type="button" class="ij-settings-tab" data-settings-tab="compilers">Compilers</button>
+          <button type="button" class="ij-settings-tab" data-settings-tab="compilers">Compiler</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="cursor">Cursor agent</button>
           <button type="button" class="ij-settings-tab" data-settings-tab="ai">AI</button>
         </nav>
@@ -812,12 +812,15 @@
               <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one.</p>
             </div>
           </section>
-          <section id="settings-panel-compilers" class="ij-settings-panel hidden space-y-4">
+          <section id="settings-panel-compilers" class="ij-settings-panel hidden space-y-3">
             <div>
-              <h4 class="text-sm font-semibold text-white">Compilers</h4>
-              <p class="text-xs text-gray-500 mt-1">Set language compilers and runtimes for diagnostics and Run. Leave blank to use <code class="font-mono text-gray-400">PATH</code>. Saved in <code class="font-mono">~/reaper/settings.json</code>.</p>
+              <h4 class="text-sm font-semibold text-white">Compiler</h4>
+              <p class="text-xs text-gray-500 mt-1">Set paths for language compilers and runtimes. Blank uses <code class="font-mono text-gray-400">PATH</code>. Saved in <code class="font-mono">~/reaper/settings.json</code>.</p>
             </div>
-            <div id="settings-compilers-list" class="space-y-4"></div>
+            <div class="ij-compiler-toolbar">
+              <input id="settings-compiler-search" type="search" placeholder="Filter languages… (e.g. python, java, rust)" class="ij-compiler-search" autocomplete="off" spellcheck="false" />
+            </div>
+            <div id="settings-compilers-list" class="ij-compiler-table-wrap"></div>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
@@ -904,6 +907,6 @@
   <script src="/icons.js?v=2"></script>
   <script src="/monaco-languages.js?v=9"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=94"></script>
+  <script src="/app.js?v=101"></script>
 </body>
 </html>

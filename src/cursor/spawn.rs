@@ -41,13 +41,11 @@ fn bridge_deps_ready(dir: &Path) -> bool {
         && dir.join("node_modules/@connectrpc/connect/package.json").is_file()
 }
 
-fn app_support_bridge_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home).join("Library/Application Support/Reaper/cursor-bridge")
-    })
+fn runtime_bridge_dir() -> Option<PathBuf> {
+    Some(crate::config::Config::resolve_data_dir().join("cursor-bridge"))
 }
 
-fn sync_bridge_to_app_support(source: &Path, dest: &Path) -> Result<()> {
+fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let marker = dest.join(".bridge-version");
     let ready = bridge_deps_ready(dest);
@@ -76,7 +74,7 @@ fn sync_bridge_to_app_support(source: &Path, dest: &Path) -> Result<()> {
         .arg(source)
         .arg(dest)
         .status()
-        .context("failed to copy cursor-bridge into Application Support")?;
+        .context("failed to copy cursor-bridge into Reaper data directory")?;
 
     #[cfg(not(target_os = "macos"))]
     let status = std::process::Command::new("cp")
@@ -84,10 +82,10 @@ fn sync_bridge_to_app_support(source: &Path, dest: &Path) -> Result<()> {
         .arg(source)
         .arg(dest)
         .status()
-        .context("failed to copy cursor-bridge into Application Support")?;
+        .context("failed to copy cursor-bridge into Reaper data directory")?;
 
     if !status.success() {
-        bail!("failed to copy cursor-bridge into Application Support");
+        bail!("failed to copy cursor-bridge into Reaper data directory");
     }
     fs::write(&marker, version)?;
     Ok(())
@@ -103,9 +101,9 @@ async fn prepare_bridge_dir() -> Result<PathBuf> {
     }
 
     if running_in_app_bundle() {
-        let dest = app_support_bridge_dir()
+        let dest = runtime_bridge_dir()
             .ok_or_else(|| anyhow::anyhow!("HOME not set; cannot install Cursor bridge"))?;
-        sync_bridge_to_app_support(&source, &dest)?;
+        sync_bridge_to_runtime(&source, &dest)?;
         return Ok(dest);
     }
 
