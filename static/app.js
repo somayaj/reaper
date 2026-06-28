@@ -3,6 +3,9 @@ const TERMINAL_DOCK_KEY = 'reaper-terminal-dock';
 const TERMINAL_BOTTOM_HEIGHT_KEY = 'reaper-terminal-bottom-height';
 const EDITOR_FONT_SIZE_KEY = 'reaper-editor-font-size';
 const EDITOR_FONT_FAMILY_KEY = 'reaper-editor-font-family';
+const AGENT_FONT_SIZE_KEY = 'reaper-agent-font-size';
+const AGENT_FONT_FAMILY_KEY = 'reaper-agent-font-family';
+const AGENT_FONT_MATCH_EDITOR_KEY = 'reaper-agent-font-match-editor';
 const AUTO_SAVE_KEY = 'reaper-auto-save';
 const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
@@ -323,6 +326,25 @@ function getEditorFontSpec() {
   return EDITOR_FONTS.find((f) => f.id === id) || EDITOR_FONTS[0];
 }
 
+function getAgentFontMatchEditor() {
+  const stored = localStorage.getItem(AGENT_FONT_MATCH_EDITOR_KEY);
+  if (stored === null) return true;
+  return stored === '1' || stored === 'true';
+}
+
+function getAgentFontSize() {
+  if (getAgentFontMatchEditor()) return getEditorFontSize();
+  const n = parseInt(localStorage.getItem(AGENT_FONT_SIZE_KEY), 10);
+  if (Number.isFinite(n) && n >= MIN_EDITOR_FONT_SIZE && n <= MAX_EDITOR_FONT_SIZE) return n;
+  return DEFAULT_EDITOR_FONT_SIZE;
+}
+
+function getAgentFontSpec() {
+  if (getAgentFontMatchEditor()) return getEditorFontSpec();
+  const id = localStorage.getItem(AGENT_FONT_FAMILY_KEY) || DEFAULT_EDITOR_FONT_ID;
+  return EDITOR_FONTS.find((f) => f.id === id) || EDITOR_FONTS[0];
+}
+
 function ensureEditorFontLoaded(spec) {
   if (!spec?.google || document.getElementById(`reaper-font-${spec.id}`)) return;
   const link = document.createElement('link');
@@ -500,14 +522,46 @@ function syncFontSizeControls(size) {
   });
 }
 
-function applyEditorTypography() {
-  const size = getEditorFontSize();
-  const spec = getEditorFontSpec();
+function applyAgentTypography() {
+  const size = getAgentFontSize();
+  const spec = getAgentFontSpec();
   ensureEditorFontLoaded(spec);
   const root = document.documentElement;
   root.style.setProperty('--ij-ui-font-size', `${size}px`);
   root.style.setProperty('--ij-ui-font-family', spec.family);
   root.style.setProperty('--ij-ui-line-height', String(20 / 13));
+}
+
+function applyAgentFontSize(size) {
+  const clamped = Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)));
+  localStorage.setItem(AGENT_FONT_SIZE_KEY, String(clamped));
+  applyAgentTypography();
+  syncAgentFontControls();
+  return clamped;
+}
+
+function applyAgentFontFamily(fontId) {
+  const spec = EDITOR_FONTS.find((f) => f.id === fontId) || EDITOR_FONTS[0];
+  localStorage.setItem(AGENT_FONT_FAMILY_KEY, spec.id);
+  ensureEditorFontLoaded(spec);
+  applyAgentTypography();
+  syncAgentFontControls();
+  updateAgentFontPreview(spec);
+  return spec;
+}
+
+function setAgentFontMatchEditor(match) {
+  if (!match) {
+    if (!localStorage.getItem(AGENT_FONT_SIZE_KEY)) {
+      localStorage.setItem(AGENT_FONT_SIZE_KEY, String(getEditorFontSize()));
+    }
+    if (!localStorage.getItem(AGENT_FONT_FAMILY_KEY)) {
+      localStorage.setItem(AGENT_FONT_FAMILY_KEY, getEditorFontSpec().id);
+    }
+  }
+  localStorage.setItem(AGENT_FONT_MATCH_EDITOR_KEY, match ? '1' : '0');
+  syncAgentFontControls();
+  applyAgentTypography();
 }
 
 function applyEditorFontSize(size) {
@@ -519,8 +573,9 @@ function applyEditorFontSize(size) {
       lineHeight: editorLineHeightFor(clamped),
     });
   }
-  applyEditorTypography();
+  applyAgentTypography();
   syncFontSizeControls(clamped);
+  updateEditorFontPreview();
   return clamped;
 }
 
@@ -538,7 +593,7 @@ function applyEditorFontFamily(fontId) {
   if (state.editor) {
     state.editor.updateOptions({ fontFamily: spec.family });
   }
-  applyEditorTypography();
+  applyAgentTypography();
   syncFontFamilyControls(spec.id);
   updateEditorFontPreview(spec);
   return spec;
@@ -548,7 +603,18 @@ function updateEditorFontPreview(spec = getEditorFontSpec()) {
   const preview = $('#settings-editor-font-preview');
   if (!preview) return;
   ensureEditorFontLoaded(spec);
+  preview.style.fontFamily = spec.family;
+  preview.style.fontSize = `${getEditorFontSize()}px`;
   preview.textContent = 'fn harvest() {\n  return "reaper";\n}';
+}
+
+function updateAgentFontPreview(spec = getAgentFontSpec()) {
+  const preview = $('#settings-agent-font-preview');
+  if (!preview) return;
+  ensureEditorFontLoaded(spec);
+  preview.style.fontFamily = spec.family;
+  preview.style.fontSize = `${getAgentFontSize()}px`;
+  preview.textContent = 'Explain what this function does…';
 }
 
 function onEditorFontFamilyChange(e) {
@@ -556,10 +622,71 @@ function onEditorFontFamilyChange(e) {
   document.querySelectorAll('.ij-menu-root.open').forEach((m) => m.classList.remove('open'));
 }
 
+function populateAgentFontSelects() {
+  const sizeSelect = document.getElementById('settings-agent-font-size');
+  if (sizeSelect && !sizeSelect.dataset.populated) {
+    sizeSelect.dataset.populated = '1';
+    for (let n = MIN_EDITOR_FONT_SIZE; n <= MAX_EDITOR_FONT_SIZE; n += 1) {
+      const opt = document.createElement('option');
+      opt.value = String(n);
+      opt.textContent = `${n}px`;
+      sizeSelect.appendChild(opt);
+    }
+    sizeSelect.addEventListener('change', onAgentFontSizeChange);
+  }
+
+  const familySelect = document.getElementById('settings-agent-font-family');
+  if (familySelect && !familySelect.dataset.populated) {
+    familySelect.dataset.populated = '1';
+    EDITOR_FONTS.forEach((font) => {
+      const opt = document.createElement('option');
+      opt.value = font.id;
+      opt.textContent = font.label;
+      familySelect.appendChild(opt);
+    });
+    familySelect.addEventListener('change', onAgentFontFamilyChange);
+  }
+}
+
+function syncAgentFontControls() {
+  const match = getAgentFontMatchEditor();
+  const matchCb = $('#settings-agent-font-match');
+  if (matchCb) matchCb.checked = match;
+  $('#settings-agent-font-custom')?.classList.toggle('hidden', match);
+
+  const sizeEl = $('#settings-agent-font-size');
+  if (sizeEl) sizeEl.value = String(getAgentFontSize());
+
+  const familyEl = $('#settings-agent-font-family');
+  const fontId = getAgentFontSpec().id;
+  if (familyEl && familyEl.value !== fontId) familyEl.value = fontId;
+
+  updateAgentFontPreview();
+}
+
+function onAgentFontSizeChange(e) {
+  const size = parseInt(e.target.value, 10);
+  if (!Number.isFinite(size)) return;
+  applyAgentFontSize(size);
+}
+
+function onAgentFontFamilyChange(e) {
+  applyAgentFontFamily(e.target.value);
+}
+
+function onAgentFontMatchChange(e) {
+  setAgentFontMatchEditor(e.target.checked);
+}
+
+function loadAgentFontSettingsSection() {
+  populateAgentFontSelects();
+  syncAgentFontControls();
+}
+
 function loadAppearanceSettingsSection() {
   populateFontSizeSelects();
   populateFontFamilySelects();
-  applyEditorTypography();
+  applyAgentTypography();
   syncFontSizeControls(getEditorFontSize());
   syncFontFamilyControls(getEditorFontSpec().id);
   updateEditorFontPreview();
@@ -698,6 +825,7 @@ async function loadCursorSettingsSection() {
   } catch (err) {
     statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
   }
+  loadAgentFontSettingsSection();
   updateAgentUi();
 }
 
@@ -6012,6 +6140,7 @@ function bindEvents() {
   $('#settings-cursor-form')?.addEventListener('submit', saveCursorKeyFromSettings);
   $('#settings-cursor-clear')?.addEventListener('click', clearCursorKeyFromSettings);
   $('#settings-cursor-restart')?.addEventListener('click', restartBridge);
+  $('#settings-agent-font-match')?.addEventListener('change', onAgentFontMatchChange);
   $$('.ij-settings-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.settingsTab));
   });
@@ -6271,7 +6400,7 @@ async function init() {
   populateFontFamilySelects();
   syncFontSizeControls(getEditorFontSize());
   ensureEditorFontLoaded(getEditorFontSpec());
-  applyEditorTypography();
+  applyAgentTypography();
   ensureTerminals();
   renderTerminalTabs();
   renderTerminalOutput();
