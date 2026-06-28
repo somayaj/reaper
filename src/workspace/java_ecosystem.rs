@@ -556,6 +556,198 @@ fn method_block_end(lines: &[&str], signature_idx: usize) -> usize {
     lines.len().saturating_sub(1)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct JavaMethodScope {
+    pub name: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct JavaEditorScope {
+    pub package: Option<String>,
+    pub class_fqcn: Option<String>,
+    pub class_name: Option<String>,
+    pub method_name: Option<String>,
+    pub method_signature: Option<String>,
+    pub method_body_lines: Vec<String>,
+    pub imports: Vec<String>,
+    pub fields: Vec<String>,
+}
+
+pub fn list_java_method_scopes(content: &str) -> Vec<JavaMethodScope> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            i += 1;
+            continue;
+        }
+        let code = strip_leading_annotations(trimmed);
+        if let Some(name) = super::symbols::java_method_name_on_line(code) {
+            let end = method_block_end(&lines, i);
+            out.push(JavaMethodScope {
+                name,
+                start_line: (i + 1) as u32,
+                end_line: (end + 1) as u32,
+                signature: trimmed.to_string(),
+            });
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+pub fn java_class_simple_name_at_line(content: &str, line: u32) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = line.saturating_sub(1) as usize;
+    if idx >= lines.len() {
+        return None;
+    }
+    for i in (0..=idx).rev() {
+        let trimmed = lines[i].trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(name) = simple_type_name_on_line(trimmed) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn simple_type_name_on_line(line: &str) -> Option<String> {
+    if line.contains('(') {
+        return None;
+    }
+    for (needle, skip) in [("class ", 6usize), ("interface ", 10usize), ("enum ", 5usize), ("record ", 7usize)] {
+        if let Some(pos) = line.find(needle) {
+            let rest = &line[pos + skip..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn find_enclosing_class_line(content: &str, line: u32) -> Option<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = line.saturating_sub(1) as usize;
+    if idx >= lines.len() {
+        return None;
+    }
+    for i in (0..=idx).rev() {
+        let trimmed = lines[i].trim();
+        if trimmed.contains(" class ")
+            || trimmed.starts_with("class ")
+            || trimmed.contains(" interface ")
+            || trimmed.starts_with("interface ")
+            || trimmed.contains(" enum ")
+            || trimmed.starts_with("enum ")
+            || trimmed.contains(" record ")
+            || trimmed.starts_with("record ")
+        {
+            if !trimmed.contains('(') {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn collect_import_lines(content: &str, limit: usize) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("import "))
+        .take(limit)
+        .map(str::to_string)
+        .collect()
+}
+
+fn collect_class_fields(lines: &[&str], class_start: usize, until: usize) -> Vec<String> {
+    if until <= class_start {
+        return Vec::new();
+    }
+    lines[class_start..until]
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("//")
+                && !l.starts_with("@")
+                && l.ends_with(';')
+                && !l.starts_with("import ")
+                && !l.starts_with("package ")
+                && !l.contains('{')
+                && !l.contains('}')
+        })
+        .take(24)
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn java_editor_scope(rel_path: &str, content: &str, line: u32) -> JavaEditorScope {
+    let lines: Vec<&str> = content.lines().collect();
+    let line_idx = line.saturating_sub(1) as usize;
+    let mut scope = JavaEditorScope {
+        package: content
+            .lines()
+            .find_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("package ")
+                    .and_then(|rest| rest.split(';').next())
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            }),
+        class_fqcn: java_fqcn(rel_path, content),
+        class_name: java_class_simple_name_at_line(content, line),
+        imports: collect_import_lines(content, 30),
+        ..Default::default()
+    };
+
+    if let Some(method) = list_java_method_scopes(content)
+        .into_iter()
+        .find(|m| line >= m.start_line && line <= m.end_line)
+    {
+        scope.method_name = Some(method.name.clone());
+        scope.method_signature = Some(method.signature.clone());
+        let start = method.start_line.saturating_sub(1) as usize;
+        let end = line_idx.min(lines.len());
+        if start + 1 < end {
+            let body_start = start + 1;
+            let take_from = end.saturating_sub(body_start).saturating_sub(28) + body_start;
+            scope.method_body_lines = lines[take_from..end]
+                .iter()
+                .map(|l| l.to_string())
+                .collect();
+        }
+    }
+
+    if let Some(class_line) = find_enclosing_class_line(content, line) {
+        let methods = list_java_method_scopes(content);
+        let until = methods
+            .iter()
+            .find(|m| line >= m.start_line)
+            .map(|m| m.start_line.saturating_sub(1) as usize)
+            .unwrap_or(line_idx);
+        scope.fields = collect_class_fields(&lines, class_line, until.max(class_line + 1));
+    }
+
+    scope
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
