@@ -272,7 +272,7 @@
 
   /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
   const REAPER_DOC_SELECTOR = ALL_EDITOR_LANGS;
-  const REAPER_COMPLETION_REV = '245';
+  const REAPER_COMPLETION_REV = '246';
   let reaperDotCompletionHandler = null;
 
   /** WKWebView Monaco builds may omit CodeActionKind — use string fallbacks. */
@@ -2517,7 +2517,7 @@
     }
 
     function setInlineCache(ed, cacheKey, text, controlSnippet, meta) {
-      const path = meta?.path ?? helpers.getActivePath?.() || '';
+      const path = meta?.path ?? (helpers.getActivePath?.() || '');
       const linePrefix = meta?.linePrefix ?? '';
       const clean = capInlineText(sanitizeInlineGhostText(text));
       const snippet = controlSnippet || '';
