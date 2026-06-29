@@ -211,6 +211,7 @@ const state = {
   indexFreezeActive: false,
   projectProfile: null,
   repoPickerUnregisterName: null,
+  patTokenPendingRemove: null,
   treeNavAnchor: null,
   mergeState: null,
   conflictDecorationIds: [],
@@ -924,6 +925,7 @@ function loadAppearanceSettingsSection() {
     }
   }
   syncDotfilesControls(getShowDotfiles());
+  void populateDefaultRepoSelect();
   const newWindowOnRepo = $('#settings-new-window-on-repo');
   if (newWindowOnRepo) {
     newWindowOnRepo.checked = getNewWindowOnRepoChange();
@@ -931,6 +933,39 @@ function loadAppearanceSettingsSection() {
       newWindowOnRepo.dataset.bound = '1';
       newWindowOnRepo.addEventListener('change', (e) => setNewWindowOnRepoChange(e.target.checked));
     }
+  }
+}
+
+async function populateDefaultRepoSelect() {
+  const select = $('#settings-default-repo');
+  if (!select) return;
+  try {
+    const [general, repos] = await Promise.all([
+      api('/api/settings/general'),
+      state.repos.length ? Promise.resolve(state.repos) : api('/api/repos'),
+    ]);
+    const current = general?.default_repo || '';
+    const names = (repos || []).map((r) => r.name);
+    select.innerHTML = '<option value="">None — show welcome screen</option>'
+      + names.map((name) => `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    if (!select.dataset.bound) {
+      select.dataset.bound = '1';
+      select.addEventListener('change', async (e) => {
+        const value = e.target.value.trim();
+        try {
+          await api('/api/settings/general', {
+            method: 'PATCH',
+            body: JSON.stringify({ default_repo: value || null }),
+          });
+          toast(value ? `Default repo set to ${value}` : 'Default repo cleared', 'success');
+        } catch (err) {
+          toast(err.message, 'error');
+          populateDefaultRepoSelect();
+        }
+      });
+    }
+  } catch (err) {
+    select.innerHTML = `<option value="">Could not load: ${escapeHtml(err.message)}</option>`;
   }
 }
 
@@ -959,8 +994,17 @@ async function loadPatTokensList() {
     }
     list.innerHTML = tokens.map((t) => {
       const removable = t.source === 'settings';
+      if (removable && state.patTokenPendingRemove === t.host) {
+        return `<div class="ij-settings-token-row ij-settings-token-row--confirm">
+          <span class="ij-settings-token-confirm-text">Remove token for <strong>${escapeHtml(t.host)}</strong>?</span>
+          <div class="ij-settings-token-confirm-actions">
+            <button type="button" class="ij-settings-remove" data-pat-remove-confirm="${escapeHtml(t.host)}">Remove</button>
+            <button type="button" class="ij-settings-remove ghost" data-pat-remove-cancel>Cancel</button>
+          </div>
+        </div>`;
+      }
       const removeBtn = removable
-        ? `<button type="button" class="ij-settings-remove" data-host="${escapeHtml(t.host)}">Remove</button>`
+        ? `<button type="button" class="ij-settings-remove" data-pat-remove="${escapeHtml(t.host)}">Remove</button>`
         : '<span class="text-[10px] text-gray-600 shrink-0">read-only</span>';
       return `<div class="ij-settings-token-row">
         <div class="min-w-0">
@@ -970,8 +1014,20 @@ async function loadPatTokensList() {
         ${removeBtn}
       </div>`;
     }).join('');
-    list.querySelectorAll('.ij-settings-remove').forEach((btn) => {
-      btn.addEventListener('click', () => removePatToken(btn.dataset.host));
+    list.querySelectorAll('[data-pat-remove]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.patTokenPendingRemove = btn.dataset.patRemove;
+        loadPatTokensList();
+      });
+    });
+    list.querySelectorAll('[data-pat-remove-confirm]').forEach((btn) => {
+      btn.addEventListener('click', () => removePatToken(btn.dataset.patRemoveConfirm));
+    });
+    list.querySelectorAll('[data-pat-remove-cancel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.patTokenPendingRemove = null;
+        loadPatTokensList();
+      });
     });
   } catch (err) {
     list.innerHTML = `<p class="ij-settings-empty">${escapeHtml(err.message)}</p>`;
@@ -979,9 +1035,10 @@ async function loadPatTokensList() {
 }
 
 async function removePatToken(host) {
-  if (!host || !confirm(`Remove token for ${host}?`)) return;
+  if (!host) return;
   try {
     await api(`/api/settings/tokens/${encodeURIComponent(host)}`, { method: 'DELETE' });
+    state.patTokenPendingRemove = null;
     toast(`Removed token for ${host}`, 'success');
     await loadPatTokensList();
   } catch (err) {
@@ -2340,7 +2397,7 @@ function renderRepoPickerResults() {
   const current = state.repo;
   const pending = state.repoPickerUnregisterName;
   results.innerHTML = state.repos.map((r) => {
-    const label = r.default_branch ? `${r.name} (${r.default_branch})` : r.name;
+    const label = r.name;
     const isCurrent = r.name === current;
     if (pending === r.name) {
       return `
@@ -4504,6 +4561,7 @@ async function openFile(path) {
       toast(err.message, 'error');
     }
     activateTab(path);
+    navigateToPrimarySource(path);
     return;
   }
   state.tabs.push(path);
@@ -4521,6 +4579,7 @@ async function openFile(path) {
     setEditorContent(path, state.tabContents.get(path));
     renderTabs();
     $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
+    navigateToPrimarySource(path);
     scheduleGradleInfoRefresh();
   } catch (err) {
     state.tabs = state.tabs.filter((t) => t !== path);
@@ -5114,6 +5173,30 @@ function updateRunButtons() {
   if (tbFormat) tbFormat.disabled = !state.activeTab;
   if (tbSave) tbSave.disabled = !state.activeTab || !state.dirty.has(state.activeTab);
   updateRollbackButton();
+}
+
+function primaryJavaNavTarget(content) {
+  if (!content) return { line: 1, column: 1 };
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/(?:public\s+|protected\s+|private\s+)?(?:abstract\s+|static\s+|final\s+)*?(?:class|interface|enum|@interface)\s+(\w+)/);
+    if (m) {
+      const col = line.indexOf(m[1]) + 1;
+      return { line: i + 1, column: col > 0 ? col : 1 };
+    }
+  }
+  return { line: 1, column: 1 };
+}
+
+function navigateToPrimarySource(path, { force = false } = {}) {
+  if (!state.editor || !path?.endsWith('.java')) return;
+  if (!force && path !== state.activeTab) return;
+  const content = state.tabContents.get(path) ?? state.editor.getModel()?.getValue?.() ?? '';
+  const { line, column } = primaryJavaNavTarget(content);
+  if (line <= 1 && column <= 1) return;
+  state.editor.revealLineInCenter(line);
+  state.editor.setPosition({ lineNumber: line, column });
 }
 
 async function openFileAt(path, line = 1, column = 1) {
@@ -5790,9 +5873,15 @@ async function refreshAfterAgent({ fromAgent = false, final = false } = {}) {
   if (fromAgent && state.agentBusy && !status.clean) {
     await followAgentFileChanges(status);
   }
-  if (final && state.agentHadFileChanges) {
-    toast('Agent finished — review diffs in the main panel or Source Control', 'success');
-    state.agentHadFileChanges = false;
+  if (final) {
+    if (state.agentHadFileChanges) {
+      toast('Agent finished — review changes in Source Control', 'success');
+      state.agentHadFileChanges = false;
+    }
+    if (!status.clean && state.activePanel !== 'git') {
+      const badge = $('#git-badge');
+      if (badge) badge.classList.remove('hidden');
+    }
   }
   return !status.clean;
 }
@@ -5944,6 +6033,7 @@ async function checkoutBranch(branch) {
   terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
   await refreshTree();
   await refreshGitStatus();
+  await refreshHistory();
   startProjectIndexPolling();
 }
 
@@ -7063,11 +7153,6 @@ function applyAgentDock() {
   panel.classList.toggle('hidden', !showAgent);
   panel.classList.toggle('flex', showAgent);
 
-  sidebar.classList.toggle('w-72', dock === 'left' && state.activePanel === 'agent');
-  sidebar.classList.toggle('lg:w-80', dock === 'left' && state.activePanel === 'agent');
-  sidebar.classList.toggle('w-60', !(dock === 'left' && state.activePanel === 'agent'));
-  sidebar.classList.toggle('lg:w-64', !(dock === 'left' && state.activePanel === 'agent'));
-
   syncActivityButtons();
   updateAgentUi();
   syncDockMenuControls();
@@ -7731,6 +7816,15 @@ async function init() {
   const initialRepo = getInitialRepoFromUrl();
   if (!initialRepo && !state.repo) {
     showNoRepoFileTree();
+    try {
+      const general = await api('/api/settings/general');
+      const defaultRepo = general?.default_repo;
+      if (defaultRepo && state.repos.some((r) => r.name === defaultRepo)) {
+        await selectRepo(defaultRepo);
+      }
+    } catch {
+      /* settings unavailable */
+    }
   }
   if (initialRepo && state.repos.some((r) => r.name === initialRepo)) {
     await selectRepo(initialRepo);

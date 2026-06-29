@@ -3099,6 +3099,19 @@
         if (del) {
           return { ...fix, edits: [del] };
         }
+        if (marker.endLineNumber > marker.startLineNumber
+            || marker.endColumn > marker.startColumn) {
+          return {
+            ...fix,
+            edits: [{
+              start_line: marker.startLineNumber,
+              start_column: marker.startColumn,
+              end_line: marker.endLineNumber,
+              end_column: marker.endColumn,
+              text: '',
+            }],
+          };
+        }
       }
       let edits = fix.edits.map((e) => clampQuickFixEdit(model, e));
       if (marker && /insert.*;|add.*semicolon|missing semicolon/.test(title)) {
@@ -3221,6 +3234,22 @@
         if (msgLower.includes('empty statement') || msgLower.includes('not a statement')
             || msgLower.includes('illegal start of expression')) {
           const trimmed = lineText.trim();
+          const rangeKey = `drop-range:${m.startLineNumber}:${m.startColumn}:${m.endLineNumber}:${m.endColumn}`;
+          if ((m.endLineNumber > m.startLineNumber || m.endColumn > m.startColumn)
+              && !seen.has(rangeKey)) {
+            seen.add(rangeKey);
+            fixes.push({
+              title: 'Remove invalid token',
+              provider: 'local',
+              edits: [{
+                start_line: m.startLineNumber,
+                start_column: m.startColumn,
+                end_line: m.endLineNumber,
+                end_column: m.endColumn,
+                text: '',
+              }],
+            });
+          }
           const delEdit = lineDeletionEdit(model, line);
           if (delEdit && (trimmed === ';' || trimmed === '')) {
             const key = `drop:${line}`;

@@ -5442,6 +5442,29 @@ main { background: var(--ij-bg); }
   background: var(--ij-bg);
 }
 
+.ij-settings-token-row--confirm {
+  background: color-mix(in srgb, #ef4444 6%, var(--ij-bg));
+  border-color: color-mix(in srgb, #ef4444 25%, var(--ij-border-light));
+}
+
+.ij-settings-token-confirm-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ij-text);
+}
+
+.ij-settings-token-confirm-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ij-settings-remove.ghost {
+  color: var(--ij-text-dim);
+  border-color: var(--ij-border);
+}
+
 .ij-settings-token-host {
   font-size: 13px;
   font-family: var(--ij-mono);

@@ -2719,7 +2719,7 @@ fn find_java_source_for_fqcn(
     for dir in source_dirs {
         if let Some(found) = find_file_by_name(dir, file_name) {
             if let Ok(content) = std::fs::read_to_string(&found) {
-                if source_matches_fqcn(&content, fqcn) {
+                if source_matches_fqcn(&content, fqcn, &found) {
                     return Some(found);
                 }
             }
@@ -2729,7 +2729,7 @@ fn find_java_source_for_fqcn(
     if reaper_sources.is_dir() {
         if let Some(found) = find_file_by_name(&reaper_sources, file_name) {
             if let Ok(content) = std::fs::read_to_string(&found) {
-                if source_matches_fqcn(&content, fqcn) {
+                if source_matches_fqcn(&content, fqcn, &found) {
                     return Some(found);
                 }
             }
@@ -2898,12 +2898,13 @@ fn read_type_line_in_java_source(path: &Path, simple: &str) -> (u32, u32) {
     (1, 1)
 }
 
-fn source_matches_fqcn(content: &str, fqcn: &str) -> bool {
-    let Some(pkg) = fqcn.rsplit_once('.') else {
+fn source_matches_fqcn(content: &str, fqcn: &str, source_path: &Path) -> bool {
+    let Some((pkg, class_name)) = fqcn.rsplit_once('.') else {
         return true;
     };
-    let (pkg, class_name) = pkg;
-    find_package(content).is_some_and(|p| p == pkg)
+    let rel = source_path.to_string_lossy().replace('\\', "/");
+    package_from_source_or_path(content, &rel)
+        .is_some_and(|p| p == pkg)
         && content.lines().any(|line| {
             line.contains("class ")
                 && line.contains(class_name)
@@ -3037,7 +3038,7 @@ fn should_index_methods(rel_path: &str) -> bool {
 }
 
 fn index_java_content(content: &str, rel_path: &str, index_methods: bool, symbols: &mut Vec<IndexedSymbol>) {
-    let package = find_package(content);
+    let package = package_from_source_or_path(content, rel_path);
     let pkg_prefix = package.as_deref().map(|p| format!("{p}."));
 
     let mut current_class: Option<String> = None;
@@ -3169,6 +3170,41 @@ fn find_package(source: &str) -> Option<String> {
                     return Some(pkg.to_string());
                 }
             }
+        }
+    }
+    None
+}
+
+fn package_from_source_or_path(content: &str, rel_path: &str) -> Option<String> {
+    find_package(content).or_else(|| infer_package_from_java_path(rel_path))
+}
+
+fn infer_package_from_java_path(rel_path: &str) -> Option<String> {
+    let norm = rel_path.replace('\\', "/");
+    for marker in ["src/main/java/", "src/test/java/"] {
+        if let Some(rest) = norm.split_once(marker).map(|(_, tail)| tail) {
+            if let Some((pkg_path, file)) = rest.rsplit_once('/') {
+                if file.ends_with(".java") && !pkg_path.is_empty() {
+                    return Some(pkg_path.replace('/', "."));
+                }
+            }
+        }
+    }
+    let parts: Vec<&str> = norm.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if !matches!(*part, "org" | "com" | "javax" | "jakarta" | "java" | "kotlin") {
+            continue;
+        }
+        if i + 1 >= parts.len() {
+            continue;
+        }
+        let file = parts[parts.len() - 1];
+        if !file.ends_with(".java") {
+            continue;
+        }
+        let pkg_parts = &parts[i..parts.len() - 1];
+        if !pkg_parts.is_empty() {
+            return Some(pkg_parts.join("."));
         }
     }
     None
