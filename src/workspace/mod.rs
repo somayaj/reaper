@@ -586,6 +586,131 @@ pub fn find_definition(
     find_definition_with_content(ws, from_path, line, column, None)
 }
 
+pub fn find_symbol_hover_with_content(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    symbol: &str,
+    content: Option<&str>,
+) -> Result<Option<symbols::HoverInfo>> {
+    let symbol = symbol.trim().trim_end_matches("()");
+    if symbol.is_empty() {
+        return Ok(None);
+    }
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => read_file(ws, from_path)?,
+    };
+
+    if classpath::is_java_like(from_path) {
+        let items = java_completions(ws, from_path, line, column, "", Some(&content))?;
+        if let Some(item) = items.into_iter().find(|i| i.label == symbol) {
+            let mut info = hover_info_from_completion_item(&item);
+            if info.documentation.is_none() {
+                if let (Some(path), Some(line_no)) = (info.path.clone(), info.line) {
+                    if let Ok(def_content) = read_file(ws, &path) {
+                        let hit = symbols::SymbolLocation {
+                            name: symbol.to_string(),
+                            kind: info.kind.clone(),
+                            path,
+                            line: line_no,
+                            column: 1,
+                        };
+                        info = symbols::hover_info_from_location(&def_content, &hit);
+                    }
+                }
+            }
+            return Ok(Some(info));
+        }
+    }
+
+    if let Some(hit) = symbols::find_definition_for_symbol(ws, from_path, &content, symbol)? {
+        let def_content = read_file(ws, &hit.path).unwrap_or(content);
+        return Ok(Some(symbols::hover_info_from_location(&def_content, &hit)));
+    }
+
+    Ok(None)
+}
+
+pub fn find_member_hover_with_content(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    member: &str,
+    content: Option<&str>,
+) -> Result<Option<symbols::HoverInfo>> {
+    let member = member.trim().trim_end_matches("()");
+    if member.is_empty() {
+        return Ok(None);
+    }
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => read_file(ws, from_path)?,
+    };
+    if !classpath::is_java_like(from_path) {
+        return Ok(None);
+    }
+
+    if let Some(col) = symbols::java_hover_column_for_member(&content, line, column, member) {
+        if let Some(info) = find_hover_with_content(ws, from_path, line, col, Some(&content))? {
+            return Ok(Some(info));
+        }
+    }
+
+    let items = java_completions(ws, from_path, line, column, "", Some(&content))?;
+    let Some(item) = items.into_iter().find(|i| i.label == member) else {
+        return Ok(None);
+    };
+    let mut info = hover_info_from_completion_item(&item);
+    if info.documentation.is_none() {
+        if let (Some(path), Some(line_no)) = (info.path.clone(), info.line) {
+            if let Ok(def_content) = read_file(ws, &path) {
+                let hit = symbols::SymbolLocation {
+                    name: member.to_string(),
+                    kind: info.kind.clone(),
+                    path,
+                    line: line_no,
+                    column: 1,
+                };
+                info = symbols::hover_info_from_location(&def_content, &hit);
+            }
+        }
+    }
+    Ok(Some(info))
+}
+
+fn hover_info_from_completion_item(item: &classpath::CompletionItem) -> symbols::HoverInfo {
+    symbols::HoverInfo {
+        name: item.label.clone(),
+        kind: item.kind.clone(),
+        signature: item.detail.clone(),
+        documentation: item.documentation.clone(),
+        path: item.path.clone(),
+        line: item.line,
+    }
+}
+
+pub fn find_hover_with_content(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: Option<&str>,
+) -> Result<Option<symbols::HoverInfo>> {
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => read_file(ws, from_path)?,
+    };
+    let hit = find_definition_with_content(ws, from_path, line, column, Some(&content))?;
+    let Some(hit) = hit else {
+        return Ok(None);
+    };
+    let def_content = read_file(ws, &hit.path).unwrap_or(content);
+    Ok(Some(symbols::hover_info_from_location(&def_content, &hit)))
+}
+
 pub fn find_definition_with_content(
     ws: &Path,
     from_path: &str,

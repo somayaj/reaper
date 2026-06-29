@@ -1,4 +1,5 @@
 const AGENT_DOCK_KEY = 'reaper-agent-dock';
+const AGENT_PROVIDER_KEY = 'reaper-agent-provider';
 const TERMINAL_DOCK_KEY = 'reaper-terminal-dock';
 const TERMINAL_BOTTOM_HEIGHT_KEY = 'reaper-terminal-bottom-height';
 const EDITOR_FONT_SIZE_KEY = 'reaper-editor-font-size';
@@ -79,6 +80,83 @@ const CURSOR_MODELS_FALLBACK = [
   { id: 'claude-opus-4-8-thinking-high', label: 'Claude Opus 4.8' },
 ];
 
+/** Registered chat agents — add providers here as backends land. */
+const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic'];
+
+const AGENT_PROVIDERS = {
+  cursor: {
+    id: 'cursor',
+    label: 'Cursor',
+    settingsTab: 'cursor',
+    capabilities: { modes: true, tools: true, revert: true, liveFollow: true },
+    isConfigured: () => state.cursorConfigured,
+    isReady: () => state.cursorConfigured && state.cursorBridgeOk,
+    welcome: () => 'Ask the Cursor agent to edit files, run git commands, or explain the codebase.',
+    placeholder: 'Ask Cursor… (Enter to send)',
+    emptyReply: () => 'Done — check Source Control for changes.',
+    hintWhenReady: 'Enter to send · Shift+Enter for newline',
+    messageLabel: 'Cursor agent',
+    labelClass: 'agent-msg-label-cursor',
+    models: () => (state.cursorModels?.length ? state.cursorModels : CURSOR_MODELS_FALLBACK),
+    currentModel: () => state.cursorModel,
+    setModel: (id) => setCursorAgentModel(id),
+    statusText: () => {
+      const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
+      return `Cursor ${modeLabel} · ${state.cursorModel || 'composer-2.5'}`;
+    },
+    chatPath: '/cursor/chat',
+    stopPath: '/cursor/stop',
+    chatBody: (prompt) => ({ prompt, model: state.cursorModel, mode: state.cursorMode }),
+    notConfiguredHint: 'Configure Cursor in Settings (⌘,)',
+    notReadyHint: () => state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper',
+  },
+  gemini: {
+    id: 'gemini',
+    label: 'Gemini',
+    settingsTab: 'ai',
+    capabilities: { readOnly: true },
+    isConfigured: () => state.geminiConfigured,
+    isReady: () => state.geminiConfigured,
+    welcome: () => 'Ask the Gemini agent to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.',
+    placeholder: 'Ask Gemini… (Enter to send)',
+    emptyReply: () => 'No response from Gemini. Check your API key and model in Settings → AI.',
+    hintWhenReady: 'Gemini agent — read-only Q&A · Enter to send',
+    messageLabel: 'Gemini agent',
+    labelClass: 'agent-msg-label-gemini',
+    models: () => GEMINI_MODELS,
+    currentModel: () => state.geminiModel,
+    setModel: (id) => setGeminiAgentModel(id),
+    statusText: () => `Gemini agent · ${state.geminiModel}`,
+    chatPath: '/gemini/chat',
+    stopPath: null,
+    chatBody: (prompt) => ({ prompt, model: state.geminiModel }),
+    notConfiguredHint: 'Configure Gemini in Settings → AI (⌘,)',
+  },
+  anthropic: {
+    id: 'anthropic',
+    label: 'Claude',
+    settingsTab: 'ai',
+    comingSoon: true,
+    capabilities: { readOnly: true },
+    isConfigured: () => false,
+    isReady: () => false,
+    welcome: () => 'Claude agent is coming soon — Anthropic API key support is on the way.',
+    placeholder: 'Claude agent — coming soon',
+    emptyReply: () => 'No response from Claude.',
+    hintWhenReady: 'Claude agent — coming soon',
+    messageLabel: 'Claude agent',
+    labelClass: 'agent-msg-label-anthropic',
+    models: () => [],
+    currentModel: () => '',
+    setModel: () => {},
+    statusText: () => 'Claude — coming soon',
+    chatPath: '/anthropic/chat',
+    stopPath: null,
+    chatBody: () => ({}),
+    notConfiguredHint: 'Claude agent — coming soon',
+  },
+};
+
 const state = {
   repo: null,
   repos: [],
@@ -101,6 +179,7 @@ const state = {
   cursorKeyMasked: null,
   cursorKeySource: null,
   cursorModel: 'composer-2.5',
+  agentProvider: localStorage.getItem(AGENT_PROVIDER_KEY) || 'cursor',
   cursorMode: 'agent',
   cursorModels: [],
   agentBusy: false,
@@ -1241,6 +1320,7 @@ async function loadGeminiSettingsSection() {
     state.geminiConfigured = !!cfg.configured;
     ensureAiInlineCompleteDefault(cfg.configured);
     syncGeminiModelSelect(cfg.model);
+    refreshAgentProviderUi();
     if (cfg.configured) {
       statusEl.innerHTML = '<span class="ok">AI commit messages are enabled</span>';
       form?.classList.add('hidden');
@@ -1272,6 +1352,7 @@ async function loadGeminiSettingsSection() {
     state.geminiConfigured = false;
     form?.classList.remove('hidden');
     changeBtn?.classList.add('hidden');
+    refreshAgentProviderUi();
   }
 }
 
@@ -1492,6 +1573,70 @@ function updateBreadcrumbs(path) {
 function updateEditorStatus(pos) {
   const el = $('#status-cursor');
   if (el && pos) el.textContent = `${pos.lineNumber}:${pos.column}`;
+  updateDiagnosticHintAtCursor(pos);
+}
+
+function diagnosticFriendlyHint(msg) {
+  const lower = String(msg || '').toLowerCase();
+  if (lower.includes('reached end of file while parsing')) {
+    return ' — check for a missing closing brace }';
+  }
+  if (lower.includes("'}' expected") || lower.includes('\'}\' expected')) {
+    return ' — add a closing brace }';
+  }
+  if (lower.includes('illegal start of type') && lower.includes('}')) {
+    return ' — a method or block may be missing }';
+  }
+  return '';
+}
+
+function formatDiagnosticDisplay(d) {
+  const msg = String(d?.message || '').trim();
+  if (!msg) return '';
+  const prefix = d.severity === 'warning' ? 'Warning: ' : 'Error: ';
+  return `${prefix}${msg}${diagnosticFriendlyHint(msg)}`;
+}
+
+function truncateDiagnosticText(text, max = 72) {
+  const s = String(text || '').trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
+}
+
+function primaryDiagnosticForUi(model, diags) {
+  if (!diags.length) return null;
+  const pos = state.editor?.getPosition();
+  if (model && pos) {
+    const atCursor = findDiagnosticNearLine(model, pos.lineNumber);
+    if (atCursor) return atCursor;
+  }
+  const errors = diags.filter((d) => d.severity !== 'warning');
+  return errors[0] || diags[0];
+}
+
+function updateDiagnosticHintAtCursor(pos) {
+  const hint = $('#status-diag-hint');
+  if (!hint) return;
+  const model = state.editor?.getModel();
+  if (!model || !pos || !fileDiags.length) {
+    hint.classList.add('hidden');
+    hint.textContent = '';
+    hint.title = '';
+    return;
+  }
+  const d = findDiagnosticNearLine(model, pos.lineNumber);
+  if (!d) {
+    hint.classList.add('hidden');
+    hint.textContent = '';
+    hint.title = '';
+    return;
+  }
+  const formatted = formatDiagnosticDisplay(d);
+  hint.classList.remove('hidden');
+  hint.classList.toggle('is-error', d.severity !== 'warning');
+  hint.classList.toggle('is-warning', d.severity === 'warning');
+  hint.textContent = truncateDiagnosticText(formatted, 96);
+  hint.title = formatted;
 }
 
 function setStatusMessage(msg) {
@@ -3319,6 +3464,8 @@ function initEditor() {
         localityBonus: true,
         showStatusBar: false,
         shareSuggestSelections: true,
+        showInlineDetails: true,
+        acceptSuggestionOnCommitCharacter: false,
       },
       inlineSuggest: {
         enabled: true,
@@ -3327,9 +3474,7 @@ function initEditor() {
         mode: 'subwordSmart',
       },
       lightbulb: {
-        enabled: monaco.editor.ShowLightbulbIconMode?.On
-          ?? monaco.editor.ShowLightbulbIconMode?.OnCode
-          ?? 2,
+        enabled: monaco.editor.ShowLightbulbIconMode?.Off ?? false,
       },
       tabCompletion: 'on',
       renderWhitespace: 'selection',
@@ -3364,6 +3509,8 @@ function initEditor() {
       setCompleteDebugStatus,
       setStatusMessage,
       showQuickFixMenu,
+      hideQuickFixMenu,
+      isQuickFixMenuOpen,
       scheduleDiagnostics: () => scheduleDiagnostics(),
       getDiagnosticsInRange: (model, range) => {
         if (!model || !range || !fileDiags.length) return [];
@@ -3377,6 +3524,7 @@ function initEditor() {
         });
       },
       diagnosticSpan: (model, d) => diagnosticMarkerSpan(model, d),
+      diagnosticFriendlyHint,
       setLanguageStatus: (label) => {
         const el = $('#status-language');
         if (el) el.textContent = label;
@@ -4499,6 +4647,7 @@ function clearDiagnostics() {
   diagJumpIndex = 0;
   updateDiagnosticsStatusBar(state.activeTab, []);
   clearDiagDecorations();
+  state.editor?.clearQuickFixBulbs?.();
   const model = state.editor?.getModel();
   if (model && window.monaco) {
     monaco.editor.setModelMarkers(model, 'reaper-diagnostics', []);
@@ -4555,6 +4704,14 @@ function diagnosticMarkerSpan(model, d) {
   const adjusted = adjustDiagnosticPosition(model, d);
   const line = Math.max(1, adjusted.line || 1);
   const lineText = model.getLineContent(line);
+  if (!lineText.trim()) {
+    return {
+      startLineNumber: line,
+      startColumn: 1,
+      endLineNumber: line,
+      endColumn: Math.max(2, lineText.length + 1),
+    };
+  }
   let startCol = Math.max(1, adjusted.column || 1);
 
   const msg = String(d.message || '');
@@ -4615,8 +4772,8 @@ function diagnosticMarkerSpan(model, d) {
 function updateAiFixControls(errors) {
   const show = errors > 0;
   const title = show
-    ? `AI quick fix for ${errors} error${errors === 1 ? '' : 's'} (Ctrl+.)`
-    : 'AI quick fix';
+    ? `Quick fix for ${errors} error${errors === 1 ? '' : 's'} (⌘.) — local fixes + Cursor/Gemini`
+    : 'Quick fix';
   const dock = $('#ai-bulb-dock');
   const tb = $('#tb-ai-fix');
   const status = $('#status-ai-fix');
@@ -4648,6 +4805,7 @@ function aiFixMenuAnchor() {
 function updateDiagnosticsStatusBar(path, diags) {
   const el = $('#status-diagnostics');
   const countEl = $('#status-diag-count');
+  const primaryEl = $('#status-diag-primary');
   if (!el || !countEl) return;
 
   const errors = diags.filter((d) => d.severity !== 'warning').length;
@@ -4657,9 +4815,11 @@ function updateDiagnosticsStatusBar(path, diags) {
     el.classList.add('hidden');
     el.classList.remove('has-errors', 'has-warnings');
     countEl.textContent = '';
+    if (primaryEl) primaryEl.textContent = '';
     el.title = 'No problems';
     updateAiFixControls(0);
     hideQuickFixMenu();
+    updateDiagnosticHintAtCursor(state.editor?.getPosition());
     return;
   }
 
@@ -4672,10 +4832,22 @@ function updateDiagnosticsStatusBar(path, diags) {
   if (warnings) parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`);
   countEl.textContent = parts.join(', ');
 
+  const model = state.editor?.getModel();
+  const primary = primaryDiagnosticForUi(model, diags);
+  const primaryText = primary ? formatDiagnosticDisplay(primary) : '';
+  if (primaryEl) {
+    primaryEl.textContent = primaryText ? truncateDiagnosticText(primaryText, 56) : '';
+    primaryEl.title = primaryText;
+  }
+
   const name = path?.split('/').pop() || 'file';
-  el.title = `${name}: ${parts.join(', ')} — click to go to next problem`;
+  const titleParts = [`${name}: ${parts.join(', ')}`];
+  if (primaryText) titleParts.push(primaryText);
+  titleParts.push('click to go to next problem');
+  el.title = titleParts.join(' — ');
 
   updateAiFixControls(errors);
+  updateDiagnosticHintAtCursor(state.editor?.getPosition());
 }
 
 function hideQuickFixMenu() {
@@ -4683,12 +4855,30 @@ function hideQuickFixMenu() {
   if (pop) pop.classList.add('hidden');
 }
 
-function showQuickFixMenu(fixes, onPick) {
+function isQuickFixMenuOpen() {
   const pop = $('#ai-quickfix-popover');
-  const anchor = aiFixMenuAnchor();
+  return !!(pop && !pop.classList.contains('hidden'));
+}
+
+function quickFixMenuLabel(f) {
+  const title = String(f?.title || 'Fix').replace(/</g, '&lt;');
+  if (f?.provider === 'loading') return title;
+  if (/^(AI|Cursor):/i.test(title)) return title;
+  if (f?.provider === 'local') return title;
+  const src = f?.provider === 'cursor' ? 'Cursor' : 'AI';
+  return `${src}: ${title}`;
+}
+
+function showQuickFixMenu(fixes, onPick, anchorEl) {
+  const pop = $('#ai-quickfix-popover');
+  const anchor = anchorEl || aiFixMenuAnchor();
   if (!pop || !fixes?.length) return;
   pop.innerHTML = fixes.map((f, i) => {
-    const title = String(f.title || 'Fix').replace(/</g, '&lt;');
+    const title = quickFixMenuLabel(f);
+    const loading = f?.provider === 'loading' || !f?.edits?.length;
+    if (loading) {
+      return `<div class="ij-quickfix-item ij-quickfix-item--loading" data-idx="${i}">${title}</div>`;
+    }
     return `<button type="button" class="ij-quickfix-item" data-idx="${i}">${title}</button>`;
   }).join('');
   pop.classList.remove('hidden');
@@ -4708,12 +4898,12 @@ function showQuickFixMenu(fixes, onPick) {
       });
     }
   }
-  pop.querySelectorAll('.ij-quickfix-item').forEach((btn) => {
+  pop.querySelectorAll('.ij-quickfix-item:not(.ij-quickfix-item--loading)').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const fix = fixes[Number(btn.dataset.idx)];
       hideQuickFixMenu();
-      if (fix) onPick(fix);
+      if (fix?.edits?.length) onPick(fix);
     });
   });
 }
@@ -4844,6 +5034,7 @@ function applyDiagnostics(path, diags) {
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
   updateDiagnosticsStatusBar(path, diags);
   state.editor?.prefetchAiQuickFixes?.(diags);
+  state.editor?.refreshQuickFixBulbs?.(diags);
 }
 
 function isGradleFilePath(path) {
@@ -6117,10 +6308,33 @@ function pickAgentFinalText(textBuffer, buffer, summary) {
   return cleaned || streamed || done;
 }
 
+function getAgentProvider(id) {
+  return AGENT_PROVIDERS[id] || AGENT_PROVIDERS.cursor;
+}
+
+function agentProviderDef() {
+  return getAgentProvider(state.agentProvider);
+}
+
+function anyAgentProviderConfigured() {
+  return AGENT_PROVIDER_ORDER.some((id) => {
+    const p = AGENT_PROVIDERS[id];
+    return !p.comingSoon && p.isConfigured();
+  });
+}
+
+function agentAssistantLabel(provider) {
+  return getAgentProvider(provider || state.agentProvider).messageLabel;
+}
+
+function agentEmptyReplyText() {
+  return agentProviderDef().emptyReply();
+}
+
 async function finalizeAgentMessage(el, { textBuffer, buffer, summary }) {
   const finalText = pickAgentFinalText(textBuffer, buffer, summary);
   if (!finalText) {
-    await window.ReaperAgentMarkdown?.renderAgentContent(el, 'Done — check Source Control for changes.');
+    await window.ReaperAgentMarkdown?.renderAgentContent(el, agentEmptyReplyText());
     return;
   }
   if (!window.ReaperAgentMarkdown?.renderAgentContent) {
@@ -6131,22 +6345,28 @@ async function finalizeAgentMessage(el, { textBuffer, buffer, summary }) {
   await window.ReaperAgentMarkdown.renderAgentContent(el, finalText);
 }
 
-function appendAgentMessage(role, text) {
+function appendAgentMessage(role, text, opts = {}) {
   const box = $('#agent-messages');
   const placeholder = box.querySelector('.agent-msg-system.text-center');
   if (placeholder) box.innerHTML = '';
 
+  const provider = opts.provider || state.agentProvider || 'cursor';
+  const providerDef = getAgentProvider(provider);
   const wrap = document.createElement('div');
   wrap.className = `rounded-lg px-3 py-2 ${
     role === 'user' ? 'agent-msg-user text-gray-200' :
-    role === 'assistant' ? 'agent-msg-assistant text-gray-300' :
-    'agent-msg-system'
+    role === 'assistant'
+      ? `agent-msg-assistant text-gray-300 agent-provider-${provider}`
+      : 'agent-msg-system'
   }`;
+  if (role === 'assistant') {
+    wrap.dataset.agentProvider = provider;
+  }
 
   if (role !== 'system') {
     const label = document.createElement('div');
-    label.className = 'text-[10px] uppercase tracking-wide text-gray-500 mb-1';
-    label.textContent = role === 'user' ? 'You' : 'Cursor';
+    label.className = `agent-msg-label text-[10px] uppercase tracking-wide mb-1 ${providerDef.labelClass}`;
+    label.textContent = role === 'user' ? 'You' : providerDef.messageLabel;
     wrap.appendChild(label);
   }
 
@@ -6210,23 +6430,18 @@ async function restoreAgentWorkspacePaths(paths) {
   }
 }
 
-function removeAgentMessageWrap(wrap) {
-  wrap?.remove();
-  const box = $('#agent-messages');
-  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
-    box.innerHTML = '<div class="agent-msg-system text-center py-4 px-2">Ask the Cursor agent to edit files, run git commands, or explain the codebase.</div>';
-  }
-}
-
 async function stopAgentChat() {
   if (!state.agentBusy || !state.repo) return;
   state.agentStopRequested = true;
   state.agentMessageQueue = [];
   state.agentAbortController?.abort();
-  try {
-    await api(repoApi(state.repo, '/cursor/stop'), { method: 'POST' });
-  } catch {
-    /* stream abort still stops the UI */
+  const stopPath = agentProviderDef().stopPath;
+  if (stopPath) {
+    try {
+      await api(repoApi(state.repo, stopPath), { method: 'POST' });
+    } catch {
+      /* stream abort still stops the UI */
+    }
   }
   updateAgentUi();
 }
@@ -6251,28 +6466,260 @@ async function revertAgentMessage() {
   updateAgentUi();
 }
 
+function removeAgentMessageWrap(wrap) {
+  wrap?.remove();
+  const box = $('#agent-messages');
+  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
+    setAgentWelcomeMessage();
+  }
+}
+
+function currentAgentModel() {
+  return agentProviderDef().currentModel();
+}
+
+function agentWelcomeText() {
+  return agentProviderDef().welcome();
+}
+
+function setAgentWelcomeMessage() {
+  const el = $('#agent-welcome-msg');
+  if (el) {
+    el.textContent = agentWelcomeText();
+    return;
+  }
+  const box = $('#agent-messages');
+  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
+    box.innerHTML = `<div id="agent-welcome-msg" class="agent-msg-system text-center py-4 px-2">${escapeHtml(agentWelcomeText())}</div>`;
+  }
+}
+
+function fillAgentModelSelect(select, models, currentId) {
+  select.innerHTML = '';
+  const ids = new Set();
+  for (const m of models) {
+    ids.add(m.id);
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label || m.id;
+    if (m.description) opt.title = m.description;
+    select.appendChild(opt);
+  }
+  if (currentId && !ids.has(currentId)) {
+    const opt = document.createElement('option');
+    opt.value = currentId;
+    opt.textContent = currentId;
+    select.appendChild(opt);
+  }
+  select.value = currentId;
+}
+
+function agentProviderChipStatus(def) {
+  if (def.comingSoon) return 'soon';
+  if (!def.isConfigured()) return 'needs-key';
+  if (!def.isReady()) return 'waiting';
+  return 'ready';
+}
+
+function agentProviderChipTitle(def) {
+  if (def.comingSoon) return `${def.label} agent — coming soon`;
+  if (!def.isConfigured()) return `Configure ${def.label} in Settings`;
+  if (!def.isReady()) return def.notReadyHint?.() || `${def.label} — not ready`;
+  const caps = def.capabilities;
+  if (caps.readOnly) return `${def.label} agent — read-only Q&A`;
+  return `${def.label} agent — edit files and run tools`;
+}
+
+function renderAgentProviderPicker() {
+  const picker = $('#agent-provider-picker');
+  if (!picker) return;
+  picker.innerHTML = '';
+  for (const id of AGENT_PROVIDER_ORDER) {
+    const def = AGENT_PROVIDERS[id];
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.dataset.agentProvider = id;
+    chip.className = 'agent-provider-chip';
+    chip.setAttribute('role', 'tab');
+    chip.setAttribute('aria-selected', id === state.agentProvider ? 'true' : 'false');
+    chip.dataset.status = agentProviderChipStatus(def);
+    chip.title = agentProviderChipTitle(def);
+
+    const dot = document.createElement('span');
+    dot.className = 'agent-provider-status-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    chip.appendChild(dot);
+
+    const name = document.createElement('span');
+    name.className = 'agent-provider-chip-label';
+    name.textContent = def.label;
+    chip.appendChild(name);
+
+    if (def.comingSoon) {
+      const badge = document.createElement('span');
+      badge.className = 'agent-provider-soon';
+      badge.textContent = 'Soon';
+      chip.appendChild(badge);
+    }
+
+    chip.classList.toggle('active', id === state.agentProvider);
+    picker.appendChild(chip);
+  }
+}
+
+function renderAgentProviderControls() {
+  const container = $('#agent-provider-controls');
+  if (!container) return;
+  const def = agentProviderDef();
+  container.innerHTML = '';
+  container.dataset.provider = def.id;
+
+  if (def.comingSoon) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-gray-600 leading-snug';
+    hint.textContent = 'Coming soon — Anthropic API key support is on the way.';
+    container.appendChild(hint);
+    return;
+  }
+
+  if (def.capabilities.modes) {
+    const modeBar = document.createElement('div');
+    modeBar.className = 'flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0';
+    modeBar.title = 'Conversation mode';
+    for (const [idx, mode] of ['agent', 'plan', 'ask'].entries()) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.agentMode = mode;
+      btn.className = `agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors${idx ? ' border-l border-surface-700' : ''}`;
+      btn.title = mode === 'agent'
+        ? 'Agent — edit files and run tools'
+        : mode === 'plan'
+          ? 'Plan — design before implementing'
+          : 'Ask — read-only Q&A';
+      btn.textContent = mode === 'agent' ? 'Agent' : mode === 'plan' ? 'Plan' : 'Ask';
+      btn.classList.toggle('active', state.cursorMode === mode);
+      modeBar.appendChild(btn);
+    }
+    container.appendChild(modeBar);
+  }
+
+  if (def.capabilities.readOnly) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-gray-600 shrink-0';
+    hint.textContent = 'Read-only chat';
+    container.appendChild(hint);
+  }
+
+  const models = def.models();
+  if (models.length) {
+    const select = document.createElement('select');
+    select.id = 'agent-provider-model';
+    select.className = 'ij-theme-menu-select flex-1 min-w-0 text-[11px]';
+    select.title = `${def.label} model`;
+    const current = def.currentModel();
+    fillAgentModelSelect(select, models, current);
+    if (def.id === 'cursor') state.cursorModel = select.value;
+    else if (def.id === 'gemini') state.geminiModel = select.value;
+    container.appendChild(select);
+  }
+}
+
+function ensureAgentProviderAvailable() {
+  const current = getAgentProvider(state.agentProvider);
+  if (!current.comingSoon && current.isConfigured()) return;
+  const fallback = AGENT_PROVIDER_ORDER.find((id) => {
+    const p = AGENT_PROVIDERS[id];
+    return !p.comingSoon && p.isConfigured();
+  });
+  if (fallback) state.agentProvider = fallback;
+  else if (current.comingSoon || !AGENT_PROVIDERS[state.agentProvider]) {
+    state.agentProvider = AGENT_PROVIDER_ORDER[0];
+  }
+}
+
+function refreshAgentProviderUi() {
+  ensureAgentProviderAvailable();
+  localStorage.setItem(AGENT_PROVIDER_KEY, state.agentProvider);
+  renderAgentProviderPicker();
+  renderAgentProviderControls();
+
+  const def = agentProviderDef();
+  const input = $('#agent-input');
+  if (input) input.placeholder = def.placeholder;
+
+  setAgentWelcomeMessage();
+}
+
+function agentCanChat() {
+  if (!state.repo) return false;
+  const def = agentProviderDef();
+  if (def.comingSoon) return false;
+  return def.isReady();
+}
+
+async function setAgentProvider(provider) {
+  const def = getAgentProvider(provider);
+  if (!def || provider === state.agentProvider) return;
+  if (def.comingSoon) {
+    toast('Claude agent is coming soon', 'info');
+    return;
+  }
+  if (!def.isConfigured()) {
+    toast(`Add a ${def.label} API key in Settings`, 'error');
+    showSettingsModal(def.settingsTab);
+    return;
+  }
+  state.agentProvider = provider;
+  refreshAgentProviderUi();
+  updateAgentUi();
+}
+
 function updateAgentUi() {
-  const canChat = state.repo && state.cursorConfigured && state.cursorBridgeOk;
+  const prevProvider = $('#agent-provider-controls')?.dataset.provider;
+  ensureAgentProviderAvailable();
+  localStorage.setItem(AGENT_PROVIDER_KEY, state.agentProvider);
+  renderAgentProviderPicker();
+  if (state.agentProvider !== prevProvider) {
+    renderAgentProviderControls();
+    setAgentWelcomeMessage();
+  }
+
+  const def = agentProviderDef();
+  const input = $('#agent-input');
+  if (input) input.placeholder = def.placeholder;
+
+  const canChat = agentCanChat();
   $('#agent-input').disabled = !canChat;
   $('#btn-agent-send').disabled = !canChat;
-  const modelEl = $('#agent-model');
-  if (modelEl) modelEl.disabled = !state.cursorConfigured || !state.cursorBridgeOk;
+
+  const modelEl = $('#agent-provider-model');
+  if (modelEl) {
+    modelEl.disabled = !def.isConfigured() || def.comingSoon;
+  }
 
   let status = 'Ready';
-  if (!state.cursorConfigured) status = 'API key not configured';
-  else if (!state.cursorBridgeOk) {
-    status = state.cursorBridgeError ? `Bridge offline — ${state.cursorBridgeError}` : 'Bridge offline';
+  if (!anyAgentProviderConfigured()) {
+    status = 'API key not configured';
+  } else if (def.comingSoon) {
+    status = def.statusText();
+  } else if (!def.isConfigured()) {
+    status = `${def.label} API key not configured`;
+  } else if (!def.isReady()) {
+    status = def.notReadyHint?.() || 'Not ready';
   } else if (state.agentBusy) {
     const queued = state.agentMessageQueue.length;
     status = queued ? `Working… · ${queued} queued` : 'Working…';
-  } else if (!state.repo) status = 'Select a repo';
-  else {
-    const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
-    status = `${modeLabel} · ${state.cursorModel || 'composer-2.5'}`;
+  } else if (!state.repo) {
+    status = 'Select a repo';
+  } else {
+    status = def.statusText();
   }
   $('#agent-status').textContent = status;
-  $('#btn-agent-retry')?.classList.toggle('hidden', state.cursorBridgeOk || !state.cursorConfigured);
-  $('#agent-config-banner')?.classList.toggle('hidden', state.cursorConfigured);
+  $('#btn-agent-retry')?.classList.toggle(
+    'hidden',
+    def.id !== 'cursor' || state.cursorBridgeOk || !state.cursorConfigured,
+  );
+  $('#agent-config-banner')?.classList.toggle('hidden', anyAgentProviderConfigured());
 
   const workBar = $('#agent-work-status');
   const workText = $('#agent-work-status-text');
@@ -6290,19 +6737,24 @@ function updateAgentUi() {
     }
   }
 
-  const hint = !state.cursorConfigured ? 'Configure Cursor in Settings (⌘,)' :
-    !state.repo ? 'Select a repo to chat' :
-    !state.cursorBridgeOk ? (state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper') :
-    state.agentBusy ? 'Enter to queue another message · Shift+Enter for newline' :
-    'Enter to send · Shift+Enter for newline';
+  let hint;
+  if (!anyAgentProviderConfigured()) {
+    hint = 'Configure an agent in Settings (⌘,)';
+  } else if (def.comingSoon || !def.isConfigured()) {
+    hint = def.notConfiguredHint;
+  } else if (!state.repo) {
+    hint = 'Select a repo to chat';
+  } else if (!def.isReady()) {
+    hint = def.notReadyHint?.() || def.notConfiguredHint;
+  } else if (state.agentBusy) {
+    hint = 'Enter to queue another message · Shift+Enter for newline';
+  } else {
+    hint = def.hintWhenReady;
+  }
   $('#agent-hint').textContent = hint;
 
   $$('[data-agent-dock]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.agentDock === state.agentDock);
-  });
-
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
   });
 
   const agentBadge = $('#agent-badge');
@@ -6311,55 +6763,31 @@ function updateAgentUi() {
   const stopBtn = $('#btn-agent-stop');
   if (stopBtn) stopBtn.disabled = !canChat || !state.agentBusy;
   const revertBtn = $('#btn-agent-revert');
-  if (revertBtn) revertBtn.disabled = !canChat || state.agentBusy || !state.agentLastRevertibleTurn;
-}
-
-function populateAgentModelSelect(models, selectedId) {
-  const el = $('#agent-model');
-  if (!el) return;
-  const list = models?.length ? models : CURSOR_MODELS_FALLBACK;
-  const current = selectedId || state.cursorModel || 'composer-2.5';
-  el.innerHTML = '';
-  const ids = new Set();
-  for (const m of list) {
-    ids.add(m.id);
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.label || m.id;
-    if (m.description) opt.title = m.description;
-    el.appendChild(opt);
+  if (revertBtn) {
+    revertBtn.classList.toggle('hidden', !def.capabilities.revert);
+    revertBtn.disabled = !canChat || state.agentBusy || !state.agentLastRevertibleTurn;
   }
-  if (!ids.has(current)) {
-    const opt = document.createElement('option');
-    opt.value = current;
-    opt.textContent = current;
-    el.appendChild(opt);
-  }
-  el.value = current;
-  state.cursorModel = current;
 }
 
 async function loadCursorModels() {
   if (!state.cursorConfigured) {
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    if (state.agentProvider === 'cursor') renderAgentProviderControls();
     return;
   }
   try {
     const data = await api('/api/cursor/models');
-    const models = data.models || [];
-    state.cursorModels = models;
-    populateAgentModelSelect(models.length ? models : CURSOR_MODELS_FALLBACK, state.cursorModel);
+    state.cursorModels = data.models || [];
   } catch {
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    /* keep fallback list */
   }
+  if (state.agentProvider === 'cursor') renderAgentProviderControls();
+  updateAgentUi();
 }
 
 async function setAgentMode(mode) {
   if (!['agent', 'plan', 'ask'].includes(mode) || mode === state.cursorMode) return;
   state.cursorMode = mode;
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.agentMode === mode);
-  });
+  renderAgentProviderControls();
   updateAgentUi();
   try {
     const cfg = await api('/api/settings/cursor/mode', {
@@ -6372,7 +6800,7 @@ async function setAgentMode(mode) {
   }
 }
 
-async function setAgentModel(modelId) {
+async function setCursorAgentModel(modelId) {
   if (!modelId || modelId === state.cursorModel) return;
   state.cursorModel = modelId;
   updateAgentUi();
@@ -6387,8 +6815,23 @@ async function setAgentModel(modelId) {
   }
 }
 
+async function setGeminiAgentModel(modelId) {
+  if (!modelId || modelId === state.geminiModel) return;
+  state.geminiModel = modelId;
+  updateAgentUi();
+  try {
+    const cfg = await api('/api/settings/gemini/model', {
+      method: 'PATCH',
+      body: JSON.stringify({ model: modelId }),
+    });
+    state.geminiModel = cfg.model || modelId;
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function showAgentKeyForm() {
-  showSettingsModal('cursor');
+  showSettingsModal(agentProviderDef().settingsTab);
 }
 
 async function loadCursorStatus() {
@@ -6405,13 +6848,14 @@ async function loadCursorStatus() {
       btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
     });
     await loadCursorModels();
+    refreshAgentProviderUi();
   } catch {
     state.cursorConfigured = false;
     state.cursorBridgeOk = false;
     state.cursorBridgeError = null;
     state.cursorKeyMasked = null;
     state.cursorKeySource = null;
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    refreshAgentProviderUi();
   }
   updateAgentUi();
 }
@@ -6658,10 +7102,13 @@ function toggleAgent() {
 async function clearAgentSession() {
   if (state.repo) {
     try {
-      await api(repoApi(state.repo, '/cursor/session'), { method: 'DELETE' });
+      await Promise.all([
+        api(repoApi(state.repo, '/cursor/session'), { method: 'DELETE' }).catch(() => {}),
+        api(repoApi(state.repo, '/gemini/session'), { method: 'DELETE' }).catch(() => {}),
+      ]);
     } catch { /* ignore */ }
   }
-  $('#agent-messages').innerHTML = '<div class="agent-msg-system text-center py-6 px-2">New conversation started.</div>';
+  setAgentWelcomeMessage();
   state.agentMessageQueue = [];
   state.agentLastRevertibleTurn = null;
   updateAgentUi();
@@ -6670,7 +7117,7 @@ async function clearAgentSession() {
 async function sendAgentMessage() {
   const prompt = $('#agent-input').value.trim();
   if (!prompt || !state.repo) return;
-  if (!state.cursorConfigured || !state.cursorBridgeOk) return;
+  if (!agentCanChat()) return;
 
   $('#agent-input').value = '';
 
@@ -6698,13 +7145,15 @@ async function runAgentChat(prompt, opts = {}) {
   }
 
   let userWrap = null;
+  const def = agentProviderDef();
+  const chatProvider = def.id;
   if (!opts.skipUserBubble) {
-    ({ wrap: userWrap } = appendAgentMessage('user', prompt));
+    ({ wrap: userWrap } = appendAgentMessage('user', prompt, { provider: chatProvider }));
   }
   state.agentBusy = true;
   state.agentStopRequested = false;
   state.agentAbortController = new AbortController();
-  state.agentLiveFollow = state.cursorMode === 'agent';
+  state.agentLiveFollow = !!def.capabilities.liveFollow && state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
   state.agentLastToolPath = null;
   state.agentSeenPaths = new Set();
@@ -6713,21 +7162,18 @@ async function runAgentChat(prompt, opts = {}) {
   updateAgentUi();
   if (state.agentLiveFollow) showAgentDiffPlaceholder();
 
-  const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…');
+  const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…', { provider: chatProvider });
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
   let cancelled = false;
 
   try {
-    const res = await fetch(repoApi(state.repo, '/cursor/chat'), {
+    const chatUrl = repoApi(state.repo, def.chatPath);
+    const res = await fetch(chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        model: state.cursorModel,
-        mode: state.cursorMode,
-      }),
+      body: JSON.stringify(def.chatBody(prompt)),
       signal: state.agentAbortController.signal,
     });
 
@@ -6774,7 +7220,9 @@ async function runAgentChat(prompt, opts = {}) {
             buffer = buffer || 'Stopped.';
             textBuffer = textBuffer || buffer;
           } else if (!buffer && data.status === 'finished') {
-            buffer = 'Done — check Source Control for file changes, or reopen files in the editor.';
+            buffer = def.capabilities.tools
+              ? 'Done — check Source Control for file changes, or reopen files in the editor.'
+              : def.emptyReply();
             textBuffer = buffer;
           } else if (!buffer && data.status === 'error') {
             throw new Error('Agent run failed');
@@ -6993,7 +7441,7 @@ function bindEvents() {
     hidePublishModal();
     showSettingsModal('git');
   });
-  $('#btn-agent-open-settings')?.addEventListener('click', () => showSettingsModal('cursor'));
+  $('#btn-agent-open-settings')?.addEventListener('click', showAgentKeyForm);
   $('#file-modal-cancel').addEventListener('click', hideFileModal);
   $('#new-repo-form').addEventListener('submit', createRepo);
   $('#clone-repo-form')?.addEventListener('submit', cloneRepo);
@@ -7038,11 +7486,20 @@ function bindEvents() {
   $('#btn-agent-revert')?.addEventListener('click', revertAgentMessage);
   $('#btn-agent-settings').addEventListener('click', showAgentKeyForm);
   $('#btn-agent-clear').addEventListener('click', clearAgentSession);
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.addEventListener('click', () => setAgentMode(btn.dataset.agentMode));
+  $('#agent-provider-picker')?.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-agent-provider]');
+    if (chip) setAgentProvider(chip.dataset.agentProvider);
   });
-  $('#agent-model')?.addEventListener('change', (e) => setAgentModel(e.target.value));
-  populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+  $('#agent-provider-controls')?.addEventListener('click', (e) => {
+    const modeBtn = e.target.closest('[data-agent-mode]');
+    if (modeBtn) setAgentMode(modeBtn.dataset.agentMode);
+  });
+  $('#agent-provider-controls')?.addEventListener('change', (e) => {
+    if (e.target.id === 'agent-provider-model') {
+      agentProviderDef().setModel(e.target.value);
+    }
+  });
+  refreshAgentProviderUi();
   $('#btn-close-diff')?.addEventListener('click', () => {
     state.agentLiveDiffPath = null;
     state.agentLiveFollow = false;
