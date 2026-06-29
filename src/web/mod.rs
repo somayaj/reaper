@@ -1,6 +1,7 @@
 mod api;
 mod agent;
 mod cursor;
+mod gemini_chat;
 mod git_http;
 mod settings;
 
@@ -21,6 +22,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(api::routes())
         .merge(cursor::routes())
+        .merge(gemini_chat::routes())
         .merge(settings::routes())
         .merge(git_http::routes())
         .route_service(

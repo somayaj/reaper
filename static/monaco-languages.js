@@ -252,6 +252,7 @@
       interface: monaco.languages.CompletionItemKind.Interface,
       enum: monaco.languages.CompletionItemKind.Enum,
       annotation: monaco.languages.CompletionItemKind.Interface,
+      field: monaco.languages.CompletionItemKind.Field,
       property: monaco.languages.CompletionItemKind.Property,
       value: monaco.languages.CompletionItemKind.Value,
       method: monaco.languages.CompletionItemKind.Method,
@@ -259,6 +260,7 @@
       struct: monaco.languages.CompletionItemKind.Struct,
       keyword: monaco.languages.CompletionItemKind.Keyword,
       snippet: monaco.languages.CompletionItemKind.Snippet,
+      variable: monaco.languages.CompletionItemKind.Variable,
     };
     return map[kind] || monaco.languages.CompletionItemKind.Text;
   }
@@ -272,7 +274,7 @@
 
   /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
   const REAPER_DOC_SELECTOR = ALL_EDITOR_LANGS;
-  const REAPER_COMPLETION_REV = '246';
+  const REAPER_COMPLETION_REV = '253';
   let reaperDotCompletionHandler = null;
 
   /** WKWebView Monaco builds may omit CodeActionKind — use string fallbacks. */
@@ -552,9 +554,11 @@
     }
     const sortRank = memberContext ? '0' : '1';
     const detail = item.detail
-      ? (memberContext && kind === 'method' ? `${item.detail} · method` : item.detail)
+      ? (memberContext && kind === 'method' && !item.detail.includes('(')
+        ? `${item.detail} · method`
+        : item.detail)
       : undefined;
-    return {
+    const suggestion = {
       label,
       kind: completionKind(item.kind),
       detail,
@@ -565,6 +569,323 @@
         ? `${memberContext.memberPrefix || ''}${label}`
         : undefined,
     };
+    if (item.documentation) {
+      const doc = String(item.documentation);
+      suggestion.documentation = doc;
+      suggestion.documentationHtml = `<div class="reaper-java-hover-doc">${javadocHtmlFromText(doc)}</div>`;
+    }
+    return suggestion;
+  }
+
+  function extractJavaJavadocBeforeLine(lines, lineIndex) {
+    let end = lineIndex - 1;
+    while (end >= 0 && !lines[end].trim()) end -= 1;
+    if (end < 0 || !lines[end].trim().endsWith('*/')) return '';
+    let start = end;
+    while (start >= 0 && !lines[start].trim().startsWith('/**')) start -= 1;
+    if (start < 0) return '';
+    return lines.slice(start, end + 1)
+      .map((ln) => ln.trim()
+        .replace(/^\/\*\*?/, '')
+        .replace(/\*\/$/, '')
+        .replace(/^\*\s?/, '')
+        .trim())
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function javaMethodMetaFromContent(content, methodName) {
+    const lines = String(content || '').split(/\r?\n/);
+    const re = new RegExp(`\\b${methodName}\\s*\\(`);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!re.test(line)) continue;
+      const trimmed = line.split('//')[0].trim();
+      if (!trimmed.includes(`${methodName}(`)) continue;
+      if (/^\s*(if|while|for|catch|switch|return|throw|new)\b/.test(trimmed)) continue;
+      const sig = trimmed.split('{')[0].split(';')[0].trim();
+      const doc = extractJavaJavadocBeforeLine(lines, i);
+      return { signature: sig, documentation: doc };
+    }
+    return null;
+  }
+
+  function enrichJavaSuggestion(item, content, path) {
+    if (!content || langForPath(path || '') !== 'java') return item;
+    const label = typeof item.label === 'string' ? item.label : (item.label?.label || '');
+    const kindStr = String(item.kind || '').toLowerCase();
+    const isMethod = kindStr.includes('method')
+      || (typeof item.kind === 'number'
+        && typeof monaco !== 'undefined'
+        && item.kind === monaco.languages.CompletionItemKind.Method);
+    const isField = kindStr.includes('field')
+      || kindStr.includes('property')
+      || (typeof item.kind === 'number'
+        && typeof monaco !== 'undefined'
+        && (item.kind === monaco.languages.CompletionItemKind.Field
+          || item.kind === monaco.languages.CompletionItemKind.Property));
+    if (!isMethod && !isField) return item;
+    const bare = label.replace(/\(\)$/, '');
+    const meta = javaMethodMetaFromContent(content, bare);
+    if (!meta) return item;
+    if (meta.signature && (!item.detail || !item.detail.includes('('))) {
+      item.detail = meta.signature;
+    }
+    if (meta.documentation && !item.documentation) {
+      item.documentation = meta.documentation;
+    }
+    return item;
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function javadocHtmlFromText(text) {
+    const doc = String(text || '').trim();
+    if (!doc) return '';
+    return doc.split('\n').map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '<div class="reaper-javadoc-spacer"></div>';
+      if (trimmed.startsWith('@')) {
+        const m = trimmed.match(/^@(\w+)\s*(.*)/);
+        if (m) {
+          return `<div class="reaper-javadoc-tag"><span class="reaper-javadoc-tag-name">@${escapeHtml(m[1])}</span>${m[2] ? ` ${escapeHtml(m[2])}` : ''}</div>`;
+        }
+      }
+      return `<div class="reaper-javadoc-line">${escapeHtml(trimmed)}</div>`;
+    }).join('');
+  }
+
+  function hoverHtmlFromInfo(info) {
+    if (!info?.name) return '';
+    const kind = escapeHtml(info.kind || 'symbol');
+    let html = '<div class="reaper-java-hover">';
+    if (info.signature) {
+      html += '<div class="reaper-java-hover-head">';
+      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      html += `<div class="reaper-java-hover-sig">${escapeHtml(info.signature)}</div>`;
+      html += '</div>';
+    } else {
+      html += '<div class="reaper-java-hover-title">';
+      html += `<span class="reaper-java-hover-name">${escapeHtml(info.name)}</span>`;
+      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      html += '</div>';
+    }
+    if (info.documentation) {
+      html += `<div class="reaper-java-hover-doc panel-scroll">${javadocHtmlFromText(info.documentation)}</div>`;
+    } else if (info.kind === 'method' || info.kind === 'field') {
+      html += '<div class="reaper-java-hover-empty">No documentation available.</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function buildEditorHoverHtml(symInfo, markers) {
+    const parts = [];
+    if (symInfo?.name) {
+      parts.push(hoverHtmlFromInfo(symInfo));
+    }
+    if (markers?.length) {
+      const errors = markers.filter(
+        (m) => m.severity === monaco.MarkerSeverity.Error,
+      );
+      const warnings = markers.filter(
+        (m) => m.severity === monaco.MarkerSeverity.Warning,
+      );
+      const tone = errors.length ? 'error' : 'warning';
+      const count = markers.length;
+      const line = markers[0].startLineNumber;
+      const title = count === 1 ? '1 problem' : `${count} problems`;
+
+      let diagHtml = `<div class="reaper-editor-hover-problems reaper-editor-hover-problems--${tone}">`;
+      diagHtml += '<div class="reaper-editor-hover-problems-head">';
+      diagHtml += `<span class="reaper-editor-hover-problems-badge">${tone === 'error' ? 'Error' : 'Warning'}</span>`;
+      diagHtml += `<span class="reaper-editor-hover-problems-title">${escapeHtml(title)}</span>`;
+      diagHtml += `<span class="reaper-editor-hover-problems-loc">Ln ${line}</span>`;
+      diagHtml += '</div>';
+      diagHtml += '<ul class="reaper-editor-hover-problems-list">';
+      for (const m of markers) {
+        const hint = typeof helpers?.diagnosticFriendlyHint === 'function'
+          ? helpers.diagnosticFriendlyHint(m.message)
+          : '';
+        const msg = String(m.message || '').trim() + hint;
+        if (msg) {
+          diagHtml += `<li>${escapeHtml(msg)}</li>`;
+        }
+      }
+      diagHtml += '</ul>';
+      if (errors.length) {
+        diagHtml += '<div class="reaper-editor-hover-problems-foot">⌘. quick fix · click flag in status bar</div>';
+      }
+      diagHtml += '</div>';
+      parts.push(diagHtml);
+    }
+    if (!parts.length) return '';
+    const rootCls = markers?.length && !symInfo?.name
+      ? 'reaper-editor-hover reaper-editor-hover--problems-only panel-scroll'
+      : 'reaper-editor-hover panel-scroll';
+    return `<div class="${rootCls}">${parts.join('')}</div>`;
+  }
+
+  function itemDocumentationParts(item) {
+    if (item?.documentationHtml) {
+      return { text: '', html: String(item.documentationHtml).trim() };
+    }
+    if (!item?.documentation) return { text: '', html: '' };
+    const doc = item.documentation;
+    if (typeof doc === 'string') {
+      return { text: doc.trim(), html: '' };
+    }
+    if (typeof doc === 'object') {
+      const value = typeof doc.value === 'string' ? doc.value.trim() : '';
+      if (!value) return { text: '', html: '' };
+      if (doc.supportHtml || value.includes('<')) {
+        return { text: '', html: value };
+      }
+      return { text: value, html: '' };
+    }
+    return { text: '', html: '' };
+  }
+
+  function itemDocumentationText(item) {
+    const parts = itemDocumentationParts(item);
+    if (parts.text) return parts.text;
+    if (!parts.html) return '';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = parts.html;
+    return (tmp.textContent || '').trim();
+  }
+
+  function enrichItemDocumentationFromSource(item, content, path) {
+    if (!item || !content) return item;
+    enrichJavaSuggestion(item, content, path);
+    return item;
+  }
+
+  function hoverInfoFromItem(item, content, path) {
+    enrichItemDocumentationFromSource(item, content, path);
+    const kindKey = typeof item.kind === 'number' ? '' : String(item.kind || '');
+    const docParts = itemDocumentationParts(item);
+    return {
+      name: typeof item.label === 'string' ? item.label : (item.label?.label || ''),
+      kind: kindKey || 'member',
+      signature: item.detail ? String(item.detail) : '',
+      documentation: docParts.text || itemDocumentationText(item),
+      documentationHtml: docParts.html,
+    };
+  }
+
+  function applyHoverInfoToDocPanel(sigEl, bodyEl, info, kindKey) {
+    const sig = info?.signature ? String(info.signature) : '';
+    if (sigEl) {
+      sigEl.textContent = sig;
+      sigEl.hidden = !sig;
+    }
+    if (!bodyEl) return;
+    const docHtml = info?.documentationHtml ? String(info.documentationHtml).trim() : '';
+    const doc = info?.documentation ? String(info.documentation).trim() : '';
+    if (docHtml) {
+      bodyEl.innerHTML = docHtml;
+      bodyEl.classList.remove('reaper-member-suggest-doc-empty');
+      return;
+    }
+    if (doc) {
+      renderJavadocBody(bodyEl, doc);
+      bodyEl.classList.remove('reaper-member-suggest-doc-empty');
+      return;
+    }
+    bodyEl.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'reaper-java-hover-empty';
+    empty.textContent = (kindKey === 'method' || kindKey === 'field' || kindKey === 'member')
+      ? 'No documentation available.'
+      : '';
+    if (empty.textContent) bodyEl.appendChild(empty);
+  }
+
+  function formatJavadocMarkdown(doc) {
+    return String(doc || '').split('\n').map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (trimmed.startsWith('@')) {
+        const m = trimmed.match(/^@(\w+)\s*(.*)/);
+        if (m) return `**@${m[1]}** ${m[2]}`.trim();
+      }
+      return trimmed;
+    }).filter((line, i, arr) => !(line === '' && arr[i + 1] === '')).join('\n\n');
+  }
+
+  function hoverMarkdownFromInfo(info) {
+    if (!info?.name) return '';
+    const parts = [];
+    if (info.signature) {
+      parts.push(`\`\`\`java\n${info.signature}\n\`\`\``);
+    } else {
+      parts.push(`**${info.name}** · ${info.kind || 'symbol'}`);
+    }
+    if (info.documentation) {
+      parts.push(formatJavadocMarkdown(info.documentation));
+    } else if (info.kind === 'method' || info.kind === 'field') {
+      parts.push('*No documentation.*');
+    }
+    return parts.join('\n\n');
+  }
+
+  function renderJavadocBody(el, text) {
+    el.innerHTML = '';
+    const doc = String(text || '').trim();
+    if (!doc) return;
+    for (const line of doc.split('\n')) {
+      const row = document.createElement('div');
+      const trimmed = line.trim();
+      if (!trimmed) {
+        row.className = 'reaper-javadoc-spacer';
+        el.appendChild(row);
+        continue;
+      }
+      if (trimmed.startsWith('@')) {
+        row.className = 'reaper-javadoc-tag';
+        const m = trimmed.match(/^@(\w+)\s*(.*)/);
+        if (m) {
+          const tag = document.createElement('span');
+          tag.className = 'reaper-javadoc-tag-name';
+          tag.textContent = `@${m[1]}`;
+          row.appendChild(tag);
+          if (m[2]) {
+            row.appendChild(document.createTextNode(` ${m[2]}`));
+          }
+        } else {
+          row.textContent = trimmed;
+        }
+      } else {
+        row.className = 'reaper-javadoc-line';
+        row.textContent = trimmed;
+      }
+      el.appendChild(row);
+    }
+  }
+
+  function wordRangeAt(model, position) {
+    const word = model.getWordAtPosition(position);
+    if (!word) {
+      return new monaco.Range(
+        position.lineNumber,
+        position.column,
+        position.lineNumber,
+        position.column,
+      );
+    }
+    return new monaco.Range(
+      position.lineNumber,
+      word.startColumn,
+      position.lineNumber,
+      word.endColumn,
+    );
   }
 
   function sanitizeInlineGhostText(text) {
@@ -675,6 +996,65 @@
   const JDK_STATIC_FIELD_TYPES = {
     System: { out: 'PrintStream', in: 'InputStream', err: 'PrintStream' },
   };
+
+  const JDK_MEMBER_SUMMARIES = {
+    'System.out': 'Standard output. A PrintStream used for console output.',
+    'System.in': 'Standard input. An InputStream for reading from the console.',
+    'System.err': 'Standard error. A PrintStream for error messages.',
+    'Math.PI': 'Ratio of the circumference of a circle to its diameter (π).',
+    'Math.E': "Euler's number, the base of natural logarithms.",
+  };
+
+  function memberKindFromItem(item) {
+    const k = item?.kind;
+    if (typeof k === 'number' && typeof monaco !== 'undefined') {
+      if (k === monaco.languages.CompletionItemKind.Method) return 'method';
+      if (k === monaco.languages.CompletionItemKind.Field
+        || k === monaco.languages.CompletionItemKind.Property) return 'field';
+    }
+    const s = String(k || '').toLowerCase();
+    if (s.includes('method')) return 'method';
+    if (s.includes('field') || s.includes('property')) return 'field';
+    return 'member';
+  }
+
+  function memberDotQualifierFromEditor(ed, model) {
+    const position = ed?.getPosition?.();
+    if (!model || !position) return '';
+    const linePrefix = editorLinePrefix(model, position);
+    const ctx = dotQualifierFromLinePrefix(linePrefix);
+    return ctx?.qualifier || '';
+  }
+
+  function memberDisplaySignature(item, qualifier) {
+    const label = typeof item.label === 'string' ? item.label : (item.label?.label || '');
+    const detail = item.detail ? String(item.detail) : '';
+    if (detail.includes('(') || detail.includes(';')) return detail;
+    const base = String(qualifier || detail.split('.')[0] || '').split('.')[0];
+    const fieldType = JDK_STATIC_FIELD_TYPES[base]?.[label];
+    if (fieldType) {
+      return `public static final ${fieldType} ${label}`;
+    }
+    if (detail.includes('.')) return detail;
+    return detail || label;
+  }
+
+  function memberDocFallback(item, qualifier) {
+    const label = typeof item.label === 'string' ? item.label : (item.label?.label || '');
+    const base = String(qualifier || '').split('.')[0]
+      || String(item.detail || '').split('.')[0]
+      || '';
+    const key = base ? `${base}.${label}` : label;
+    if (JDK_MEMBER_SUMMARIES[key]) return JDK_MEMBER_SUMMARIES[key];
+    const kind = memberKindFromItem(item);
+    if (kind === 'field') {
+      const ft = JDK_STATIC_FIELD_TYPES[base]?.[label];
+      if (ft) return `${kind} · ${ft}`;
+    }
+    if (kind === 'method') return 'No Javadoc in source.';
+    if (kind === 'field') return 'No Javadoc in source.';
+    return '';
+  }
 
   const JDK_CLASS_STATIC_MEMBERS = {
     System: ['out', 'in', 'err'],
@@ -1066,6 +1446,7 @@
       ) {
         item.insertTextRules = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
       }
+      enrichJavaSuggestion(item, text, path);
       suggestions.push(item);
     }
 
@@ -1677,6 +2058,7 @@
   }
 
   const definitionCache = new Map();
+  const hoverCache = new Map();
   const DEF_CACHE_MAX = 512;
 
   function definitionCacheKey(repo, path, line, column, content) {
@@ -1728,6 +2110,58 @@
     }
   }
 
+  async function lookupHoverInfo(helpers, model, position, { member, symbol } = {}) {
+    if (!helpers.repoApi || !helpers.getRepo) return null;
+    const repo = helpers.getRepo();
+    if (!repo) return null;
+    const path = helpers.getActivePath?.() || '';
+    if (!path) return null;
+
+    const line = position.lineNumber;
+    const column = position.column;
+    const dirty = helpers.isFileDirty?.(path);
+    const content = dirty ? model.getValue() : undefined;
+    const extraKey = member ? `:member:${member}` : symbol ? `:symbol:${symbol}` : '';
+    const cacheKey = `${definitionCacheKey(repo, path, line, column, content ?? model.getValue())}${extraKey}`;
+    if (hoverCache.has(cacheKey)) {
+      return hoverCache.get(cacheKey);
+    }
+
+    try {
+      const url = helpers.repoApi(repo, '/workspace/hover');
+      const payload = {
+        path,
+        line,
+        column,
+        content,
+        ...(member ? { member } : {}),
+        ...(symbol ? { symbol } : {}),
+      };
+      const hit = dirty || member || symbol
+        ? await helpers.api(url, { method: 'POST', body: JSON.stringify(payload) })
+        : await helpers.api(`${url}?${new URLSearchParams({
+            path,
+            line: String(line),
+            column: String(column),
+            ...(member ? { member } : {}),
+            ...(symbol ? { symbol } : {}),
+          })}`);
+      const info = hit?.name ? hit : null;
+      if (info) {
+        if (hoverCache.size >= DEF_CACHE_MAX) hoverCache.clear();
+        hoverCache.set(cacheKey, info);
+      }
+      return info;
+    } catch {
+      return null;
+    }
+  }
+
+  async function lookupSymbolHover(helpers, model, position) {
+    const info = await lookupHoverInfo(helpers, model, position);
+    return info?.name ? info : null;
+  }
+
   async function navigateToDefinition(helpers, hit) {
     await helpers.openFileAt(hit.path, hit.line || 1, hit.column || 1);
     const editor = helpers.getEditor?.();
@@ -1775,7 +2209,9 @@
 
     let memberFallbackEl = null;
     let memberFallbackItems = [];
+    let memberFallbackAllItems = [];
     let memberFallbackIndex = 0;
+    let memberDocFetchGen = 0;
 
     function hideMemberSuggestFallback() {
       if (memberFallbackEl) {
@@ -1783,7 +2219,42 @@
         memberFallbackEl = null;
       }
       memberFallbackItems = [];
+      memberFallbackAllItems = [];
       memberFallbackIndex = 0;
+    }
+
+    function filterVisibleSuggestions(items, model, position) {
+      return items.filter((item) => {
+        const label = memberFallbackLabel(item);
+        const range = item.range || completionContext(model, position).range;
+        const typed = model.getValueInRange(range);
+        if (!typed) return true;
+        if (typed === label || typed.startsWith(`${label}(`)) return false;
+        return label.toLowerCase().startsWith(typed.toLowerCase());
+      });
+    }
+
+    function dismissMonacoSuggestWidget(ed) {
+      if (!ed) return;
+      try {
+        ed.trigger('keyboard', 'hideSuggestWidget', null);
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    function presentCompletionSuggestions(ed, items, { content, path } = {}) {
+      if (!items?.length) return false;
+      const model = ed?.getModel();
+      const position = ed?.getPosition();
+      if (!model || !position) return false;
+      const text = content ?? model.getValue();
+      const filePath = path || helpers.getActivePath?.() || '';
+      for (const item of items) {
+        enrichJavaSuggestion(item, text, filePath);
+      }
+      showMemberSuggestFallback(ed, items);
+      return true;
     }
 
     function memberFallbackLabel(item) {
@@ -1796,6 +2267,96 @@
       return label;
     }
 
+    function memberKindKey(item) {
+      return memberKindFromItem(item);
+    }
+
+    function memberKindLetter(kindKey) {
+      if (kindKey === 'method') return 'm';
+      if (kindKey === 'field') return 'f';
+      return '·';
+    }
+
+    function memberItemDetail(item) {
+      return item.detail ? String(item.detail) : '';
+    }
+
+    async function updateMemberFallbackDoc() {
+      if (!memberFallbackEl) return;
+      const sigEl = memberFallbackEl.querySelector('.reaper-member-suggest-doc-sig');
+      const bodyEl = memberFallbackEl.querySelector('.reaper-member-suggest-doc-body');
+      const item = memberFallbackItems[memberFallbackIndex];
+      if (!item || !bodyEl) return;
+      const kindKey = memberKindKey(item);
+      const label = memberFallbackLabel(item);
+      const fetchGen = ++memberDocFetchGen;
+
+      const ed = activeEditor();
+      const model = ed?.getModel();
+      const position = ed?.getPosition();
+      const path = helpers.getActivePath?.() || '';
+      const content = model?.getValue() || '';
+      const qualifier = memberDotQualifierFromEditor(ed, model);
+
+      enrichItemDocumentationFromSource(item, content, path);
+      let info = hoverInfoFromItem(item, content, path);
+      info.signature = memberDisplaySignature(item, qualifier) || info.signature;
+      if (!info.documentation) {
+        info.documentation = memberDocFallback(item, qualifier);
+      }
+
+      applyHoverInfoToDocPanel(sigEl, bodyEl, info, kindKey);
+      const hasLocalDoc = !!(info.documentation || info.documentationHtml);
+      if (!hasLocalDoc && !info.signature) {
+        bodyEl.innerHTML = '<div class="reaper-doc-loading">Loading documentation…</div>';
+      } else if (!hasLocalDoc) {
+        const loading = document.createElement('div');
+        loading.className = 'reaper-doc-loading';
+        loading.textContent = 'Loading documentation…';
+        bodyEl.innerHTML = '';
+        bodyEl.appendChild(loading);
+      }
+
+      if (!model || !position || !path) return;
+
+      const hoverOpts = qualifier
+        ? { member: label }
+        : { symbol: label };
+      const remote = await lookupHoverInfo(helpers, model, position, hoverOpts);
+      if (fetchGen !== memberDocFetchGen || !memberFallbackEl) return;
+
+      const fallbackDoc = memberDocFallback(item, qualifier);
+      const fallbackSig = memberDisplaySignature(item, qualifier) || info.signature;
+      const localDoc = info.documentation || info.documentationHtml || '';
+
+      if (!remote) {
+        applyHoverInfoToDocPanel(sigEl, bodyEl, {
+          ...info,
+          signature: fallbackSig,
+          documentation: info.documentation || fallbackDoc,
+        }, kindKey);
+        return;
+      }
+
+      if (remote.signature) item.detail = remote.signature;
+      if (remote.documentation) item.documentation = remote.documentation;
+      info = {
+        name: remote.name || label,
+        kind: remote.kind || kindKey,
+        signature: remote.signature || fallbackSig,
+        documentation: remote.documentation || info.documentation || fallbackDoc,
+        documentationHtml: remote.documentation ? '' : info.documentationHtml,
+      };
+      if (!info.documentation && !info.documentationHtml && !fallbackDoc) {
+        applyHoverInfoToDocPanel(sigEl, bodyEl, info, kindKey);
+        return;
+      }
+      if (!info.documentation && !info.documentationHtml && fallbackDoc) {
+        info.documentation = fallbackDoc;
+      }
+      applyHoverInfoToDocPanel(sigEl, bodyEl, info, kindKey);
+    }
+
     function focusMemberFallbackRow() {
       if (!memberFallbackEl) return;
       const rows = memberFallbackEl.querySelectorAll('.reaper-member-suggest-row');
@@ -1804,6 +2365,7 @@
       });
       const focused = rows[memberFallbackIndex];
       if (focused) focused.scrollIntoView({ block: 'nearest' });
+      updateMemberFallbackDoc();
     }
 
     function acceptMemberFallbackItem(ed) {
@@ -1867,22 +2429,16 @@
         ], { warn: true });
         return;
       }
+      dismissMonacoSuggestWidget(ed);
       const pt = memberSuggestCoords(ed, position);
       if (!pt) {
         completionDebug(helpers, ['fallback', 'skip: no coords'], { warn: true });
         return;
       }
 
-      memberFallbackItems = items;
+      memberFallbackAllItems = items;
       memberFallbackIndex = 0;
-      const visibleItems = items.filter((item) => {
-        const label = memberFallbackLabel(item);
-        const range = item.range || completionContext(model, position).range;
-        const typed = model.getValueInRange(range);
-        if (!typed) return true;
-        if (typed === label || typed.startsWith(`${label}(`)) return false;
-        return label.toLowerCase().startsWith(typed.toLowerCase());
-      });
+      const visibleItems = filterVisibleSuggestions(items, model, position);
       if (!visibleItems.length) {
         hideMemberSuggestFallback();
         return;
@@ -1894,19 +2450,56 @@
       memberFallbackEl.style.left = `${pt.left}px`;
       memberFallbackEl.style.top = `${pt.top}px`;
 
+      const panel = document.createElement('div');
+      panel.className = 'reaper-member-suggest-panel';
+
+      const listEl = document.createElement('div');
+      listEl.className = 'reaper-member-suggest-list';
+
       visibleItems.forEach((item, i) => {
         const row = document.createElement('div');
         row.className = `reaper-member-suggest-row${i === 0 ? ' focused' : ''}`;
-        row.textContent = memberFallbackLabel(item);
+        const kindKey = memberKindKey(item);
+        const icon = document.createElement('span');
+        icon.className = `reaper-member-suggest-kind ${kindKey}`;
+        icon.textContent = memberKindLetter(kindKey);
+        icon.setAttribute('aria-hidden', 'true');
+        const name = document.createElement('span');
+        name.className = 'reaper-member-suggest-name';
+        name.textContent = memberFallbackLabel(item);
+        row.appendChild(icon);
+        row.appendChild(name);
+        row.addEventListener('mouseenter', () => {
+          memberFallbackIndex = i;
+          focusMemberFallbackRow();
+        });
         row.addEventListener('mousedown', (e) => {
           e.preventDefault();
           memberFallbackIndex = i;
           acceptMemberFallbackItem(ed);
         });
-        memberFallbackEl.appendChild(row);
+        listEl.appendChild(row);
       });
 
+      const docPanel = document.createElement('div');
+      docPanel.className = 'reaper-member-suggest-doc panel-scroll';
+      const docHead = document.createElement('div');
+      docHead.className = 'reaper-member-suggest-doc-head';
+      docHead.textContent = 'Documentation';
+      const sigEl = document.createElement('div');
+      sigEl.className = 'reaper-member-suggest-doc-sig reaper-java-hover-sig';
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'reaper-member-suggest-doc-body reaper-java-hover-doc';
+      docPanel.appendChild(docHead);
+      docPanel.appendChild(sigEl);
+      docPanel.appendChild(bodyEl);
+
+      panel.appendChild(listEl);
+      panel.appendChild(docPanel);
+      memberFallbackEl.appendChild(panel);
+
       root.appendChild(memberFallbackEl);
+      updateMemberFallbackDoc();
       completionDebug(helpers, [
         'fallback',
         `n=${visibleItems.length}`,
@@ -1914,13 +2507,100 @@
       ]);
     }
 
+    function suggestPopupShouldStayOpen(model, position) {
+      const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
+      if (position.lineNumber !== range.startLineNumber) return false;
+      if (position.column < range.startColumn) return false;
+      if (!shouldFetchIndexCompletions(linePrefix, prefix)) return false;
+      if (memberCtx || dotQualifierFromLinePrefix(linePrefix)) return true;
+      const tokenEnd = range.startColumn + Math.max((prefix || '').length, 0);
+      return position.column <= tokenEnd;
+    }
+
+    function dismissSuggestUi(ed) {
+      hideMemberSuggestFallback();
+      dismissMonacoSuggestWidget(ed || activeEditor());
+    }
+
+    function completionUiBlocksTyping(ed) {
+      if (!ed) return false;
+      if (memberFallbackEl) return true;
+      const ctx = ed._contextKeyService;
+      return !!(ctx?.getContextKeyValue('suggestWidgetVisible')
+        || ctx?.getContextKeyValue('inlineSuggestionVisible'));
+    }
+
+    function editorIsTypingTarget(ed) {
+      if (!ed) return false;
+      if (ed.hasTextFocus?.()) return true;
+      const root = ed.getDomNode?.();
+      return !!(root && root.contains(document.activeElement));
+    }
+
+    function cursorAfterIdentifier(model, position) {
+      if (!model || !position || position.column <= 1) return false;
+      const line = model.getLineContent(position.lineNumber);
+      return /[\w$]/.test(line.charAt(position.column - 2));
+    }
+
+    function typeThroughCompletion(ed, text) {
+      clearTimeout(ed._reaperSuggestTimer);
+      hideMemberSuggestFallback();
+      dismissMonacoSuggestWidget(ed);
+      dismissInlineGhost(ed);
+      const model = ed.getModel();
+      const pos = ed.getPosition();
+      if (!model || !pos || text == null || text === '') return;
+      ed.executeEdits('reaper-type-through', [{
+        range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
+        text,
+      }]);
+      ed.focus();
+    }
+
+    function onCompletionTypeThroughKeydown(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const ed = activeEditor();
+      if (!ed || !editorIsTypingTarget(ed)) return;
+      const model = ed.getModel();
+      const pos = ed.getPosition();
+      if (!model || !pos) return;
+
+      const blocking = completionUiBlocksTyping(ed);
+      const afterId = cursorAfterIdentifier(model, pos);
+      if (!blocking && !afterId) return;
+
+      if (e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        typeThroughCompletion(ed, ' ');
+        return;
+      }
+      if (e.key.length === 1 && /[^a-zA-Z0-9_$]/.test(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        typeThroughCompletion(ed, e.key);
+      }
+    }
+
     function onMemberFallbackKeydown(e) {
       if (!memberFallbackEl) return;
       const ed = activeEditor();
-      if (e.key === 'Escape') {
+      if (e.key === ' ' || (e.key.length === 1 && /[^a-zA-Z0-9_$]/.test(e.key))) {
+        return;
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
         hideMemberSuggestFallback();
-        e.preventDefault();
-        e.stopPropagation();
+        return;
+      }
+      if (e.key === 'Escape' || e.key === 'Tab') {
+        hideMemberSuggestFallback();
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+        }
         return;
       }
       if (e.key === 'ArrowDown') {
@@ -1938,38 +2618,53 @@
         e.stopPropagation();
         return;
       }
-      if (e.key === 'Enter' || e.key === 'Tab') {
+      if (e.key === 'Enter') {
         acceptMemberFallbackItem(ed);
         e.preventDefault();
         e.stopPropagation();
       }
     }
 
+    function refreshSuggestFallbackFilter() {
+      if (!memberFallbackEl || !memberFallbackAllItems.length) return;
+      const ed = activeEditor();
+      const model = ed?.getModel();
+      const position = ed?.getPosition();
+      if (!model || !position) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      if (!suggestPopupShouldStayOpen(model, position)) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      const visibleItems = filterVisibleSuggestions(memberFallbackAllItems, model, position);
+      if (!visibleItems.length) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      if (visibleItems.length === memberFallbackItems.length
+        && visibleItems.every((item, i) => item === memberFallbackItems[i])) {
+        return;
+      }
+      memberFallbackIndex = Math.min(memberFallbackIndex, visibleItems.length - 1);
+      showMemberSuggestFallback(ed, memberFallbackAllItems);
+    }
+
+    document.addEventListener('keydown', onCompletionTypeThroughKeydown, true);
     document.addEventListener('keydown', onMemberFallbackKeydown, true);
+    document.addEventListener('mousedown', (e) => {
+      if (!memberFallbackEl) return;
+      if (memberFallbackEl.contains(e.target)) return;
+      hideMemberSuggestFallback();
+    }, true);
     editor.onDidChangeModelContent(() => {
       if (!memberFallbackEl) return;
-      const model = editor.getModel();
-      const pos = editor.getPosition();
-      if (!model || !pos) {
-        hideMemberSuggestFallback();
-        return;
-      }
-      const linePrefix = editorLinePrefix(model, pos);
-      if (!dotQualifierFromLinePrefix(linePrefix)) {
-        hideMemberSuggestFallback();
-      }
+      refreshSuggestFallbackFilter();
     });
-    editor.onDidChangeCursorPosition((e) => {
+    editor.onDidChangeCursorPosition(() => {
       if (!memberFallbackEl) return;
-      const model = editor.getModel();
-      if (!model) {
-        hideMemberSuggestFallback();
-        return;
-      }
-      const linePrefix = editorLinePrefix(model, e.position);
-      if (!dotQualifierFromLinePrefix(linePrefix)) {
-        hideMemberSuggestFallback();
-      }
+      refreshSuggestFallbackFilter();
     });
     editor.onDidBlurEditorWidget(() => hideMemberSuggestFallback());
 
@@ -2019,14 +2714,14 @@
       let localLabels = '';
       let jdkN = 0;
       let localSuggestions = [];
+      const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
+      localSuggestions = local.suggestions;
+      localN = localSuggestions.length;
+      localLabels = localSuggestions.slice(0, 6).map((s) => s.label).join(',');
       if (memberContext) {
         jdkN = memberPreviewItems(
           content, memberContext.qualifier, memberContext.memberPrefix, path, model,
         ).length;
-        const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
-        localSuggestions = local.suggestions;
-        localN = localSuggestions.length;
-        localLabels = localSuggestions.slice(0, 6).map((s) => s.label).join(',');
       }
 
       completionDebug(helpers, [
@@ -2041,42 +2736,58 @@
         localLabels ? `items=${localLabels}` : (memberContext ? 'items=(none)' : ''),
       ], { warn: !!(memberContext && localN === 0 && jdkN === 0) });
 
+      const showSuggestPopup = (merged) => {
+        if (!merged.length) return;
+        for (const item of merged) {
+          enrichJavaSuggestion(item, content, path);
+        }
+        showMemberSuggestFallback(ed, merged);
+      };
+
       const showMemberMerged = (fromIndex) => {
-        if (!fromIndex.length) return;
+        if (!fromIndex.length && !localSuggestions.length) return;
         const merged = localSuggestions.length > 0
           ? [...localSuggestions]
           : fromIndex;
-        if (localSuggestions.length > 0) {
+        if (localSuggestions.length > 0 && fromIndex.length > 0) {
           const labels = new Set(localSuggestions.map((s) => s.label));
           for (const item of fromIndex) {
             if (!labels.has(item.label)) merged.push(item);
           }
         }
-        showMemberSuggestFallback(ed, merged);
+        showSuggestPopup(merged);
       };
 
       void (repo ? fetchCompletionsWithTimeout(helpers, model, position, completionPrefix)
         .then((items) => {
           if (!Array.isArray(items) || items.length === 0) return;
+          const { range } = completionContext(model, position);
+          const seen = new Set(localSuggestions.map((s) => s.label));
+          const fromIndex = [];
+          mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, fromIndex);
           if (memberContext) {
-            const { range } = completionContext(model, position);
-            const seen = new Set();
-            const fromIndex = [];
-            mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, fromIndex);
             showMemberMerged(fromIndex);
             return;
           }
-          requestAnimationFrame(() => runSuggestAction(ed));
+          const merged = localSuggestions.length > 0
+            ? [...localSuggestions]
+            : fromIndex;
+          if (localSuggestions.length > 0) {
+            for (const item of fromIndex) {
+              if (!seen.has(item.label)) merged.push(item);
+            }
+          }
+          showSuggestPopup(merged);
         })
         .catch(() => {}) : Promise.resolve());
       if (memberContext) {
         if (localSuggestions.length > 0) {
-          showMemberSuggestFallback(ed, localSuggestions);
+          showSuggestPopup(localSuggestions);
         }
         return;
       }
       if (localN > 0) {
-        openSuggestWidget(ed);
+        showSuggestPopup(localSuggestions);
       }
     }
 
@@ -2137,6 +2848,9 @@
         local.suggestions.slice(0, 6).map((s) => s.label).join(',') || '(none)',
       ], { warn: local.suggestions.length === 0 });
       if (local.suggestions.length > 0) {
+        for (const item of local.suggestions) {
+          enrichJavaSuggestion(item, content, path);
+        }
         showMemberSuggestFallback(ed, local.suggestions);
       }
       fireCompletionsSuggest(ed, { force: true });
@@ -2180,31 +2894,66 @@
       return true;
     }
 
-    monaco.languages.registerHoverProvider(REAPER_DOC_SELECTOR, {
-      provideHover(model, position) {
-        const markers = monaco.editor.getModelMarkers({ resource: model.uri })
-          .filter((m) => positionInMarker(position, m));
-        if (!markers.length) return null;
-        const primary = markers[0];
-        const contents = markers.map((m) => {
-          const tag = m.severity === monaco.MarkerSeverity.Warning ? 'Warning' : 'Error';
-          return { value: `**${tag}:** ${m.message}` };
-        });
-        return {
-          range: new monaco.Range(
+    function markersAtEditorPosition(model, position) {
+      return monaco.editor.getModelMarkers({ resource: model.uri })
+        .filter((m) => position.lineNumber >= m.startLineNumber
+          && position.lineNumber <= m.endLineNumber);
+    }
+
+    function hoverResultForMarkers(model, position, markers, range) {
+      const html = buildEditorHoverHtml(null, markers);
+      const primary = markers[0];
+      const hoverRange = primary
+        ? new monaco.Range(
             primary.startLineNumber,
             primary.startColumn,
             primary.endLineNumber,
             primary.endColumn,
-          ),
-          contents,
-        };
+          )
+        : range;
+      return {
+        range: hoverRange,
+        contents: [{
+          value: html,
+          supportHtml: true,
+          isTrusted: true,
+        }],
+      };
+    }
+
+    monaco.languages.registerHoverProvider(REAPER_DOC_SELECTOR, {
+      provideHover(model, position) {
+        const range = wordRangeAt(model, position);
+        const markers = markersAtEditorPosition(model, position);
+
+        // Return synchronously on error lines — async symbol lookup triggers
+        // Monaco's "Loading..." placeholder and slows the problem hover.
+        if (markers.length) {
+          return hoverResultForMarkers(model, position, markers, range);
+        }
+
+        return lookupSymbolHover(helpers, model, position).then((symInfo) => {
+          if (!symInfo?.name) return null;
+          const html = buildEditorHoverHtml(symInfo, []);
+          if (!html) return null;
+          return {
+            range,
+            contents: [{
+              value: html,
+              supportHtml: true,
+              isTrusted: true,
+            }],
+          };
+        });
       },
     });
 
     const quickFixCache = new Map();
-    const QUICK_FIX_CACHE_MS = 45000;
+    const quickFixInflight = new Map();
+    const QUICK_FIX_CACHE_MS = 120000;
+    const QUICK_FIX_EMPTY_CACHE_MS = 8000;
     const QUICK_FIX_CACHE_MAX = 64;
+    const QUICK_FIX_FETCH_TIMEOUT_MS = 20000;
 
     function quickFixCacheKey(repo, path, contentLen, sig) {
       return `${repo}:${path}:${contentLen}:${sig}`;
@@ -2245,10 +2994,513 @@
       }));
     }
 
+    function quickFixActionTitle(fix) {
+      const title = String(fix?.title || 'Fix');
+      if (/^(AI|Cursor):/i.test(title)) return title;
+      if (fix?.provider === 'local') return title;
+      const src = fix?.provider === 'cursor' ? 'Cursor' : 'AI';
+      return `${src}: ${title}`;
+    }
+
+    function readEditField(edit, snake, camel) {
+      const v = edit?.[snake] ?? edit?.[camel];
+      return v == null ? null : Number(v);
+    }
+
+    function lineMaxColumn(model, line) {
+      return model.getLineContent(line).length + 1;
+    }
+
+    function lineDeletionEdit(model, line) {
+      const lineCount = model.getLineCount();
+      if (line < 1 || line > lineCount) return null;
+      if (line < lineCount) {
+        return {
+          start_line: line,
+          start_column: 1,
+          end_line: line + 1,
+          end_column: 1,
+          text: '',
+        };
+      }
+      const lineText = model.getLineContent(line);
+      if (lineCount === 1 && !lineText.length) return null;
+      return {
+        start_line: line,
+        start_column: 1,
+        end_line: line,
+        end_column: lineMaxColumn(model, line),
+        text: '',
+      };
+    }
+
+    function clampQuickFixEdit(model, raw) {
+      const lineCount = model.getLineCount();
+      let sl = Math.max(1, readEditField(raw, 'start_line', 'startLine') ?? 1);
+      let sc = Math.max(1, readEditField(raw, 'start_column', 'startColumn') ?? 1);
+      let el = Math.max(1, readEditField(raw, 'end_line', 'endLine') ?? sl);
+      let ec = Math.max(1, readEditField(raw, 'end_column', 'endColumn') ?? sc);
+      if (sl === 0 || sc === 0) {
+        sl = Math.max(1, sl);
+        sc = Math.max(1, sc);
+      }
+      sl = Math.min(sl, lineCount);
+      el = Math.min(el, lineCount);
+      sc = Math.min(sc, lineMaxColumn(model, sl));
+      ec = Math.min(ec, lineMaxColumn(model, el));
+      if (el === sl && ec < sc) ec = sc;
+      return {
+        start_line: sl,
+        start_column: sc,
+        end_line: el,
+        end_column: ec,
+        text: raw?.text ?? '',
+      };
+    }
+
+    function editRangeText(model, edit) {
+      return model.getValueInRange(new monaco.Range(
+        edit.start_line,
+        edit.start_column,
+        edit.end_line,
+        edit.end_column,
+      ));
+    }
+
+    function fixWouldChangeModel(model, fix) {
+      return (fix?.edits || []).some((e) => {
+        const clamped = clampQuickFixEdit(model, e);
+        return editRangeText(model, clamped) !== (clamped.text ?? '');
+      });
+    }
+
+    function isRemovalQuickFix(fix) {
+      const title = String(fix?.title || '').toLowerCase();
+      const edits = fix?.edits || [];
+      const emptyText = edits.every((e) => !String(e?.text ?? '').length);
+      return emptyText && (
+        /remove|delete|drop|strip|clear|invalid statement|empty statement|not a statement/.test(title)
+      );
+    }
+
+    function normalizeQuickFixForMarkers(model, fix, markers) {
+      if (!fix?.edits?.length) return fix;
+      if (fix.provider === 'local') {
+        return {
+          ...fix,
+          edits: fix.edits.map((e) => clampQuickFixEdit(model, e)),
+        };
+      }
+      const title = String(fix.title || '').toLowerCase();
+      const marker = markers?.find((m) => m.severity === monaco.MarkerSeverity.Error)
+        || markers?.[0];
+      if (marker && isRemovalQuickFix(fix)) {
+        const del = lineDeletionEdit(model, marker.startLineNumber);
+        if (del) {
+          return { ...fix, edits: [del] };
+        }
+      }
+      let edits = fix.edits.map((e) => clampQuickFixEdit(model, e));
+      if (marker && /insert.*;|add.*semicolon|missing semicolon/.test(title)) {
+        const line = marker.startLineNumber;
+        const lineText = model.getLineContent(line);
+        const insertCol = lineText.trimEnd().length + 1;
+        edits = [{
+          start_line: line,
+          start_column: insertCol,
+          end_line: line,
+          end_column: insertCol,
+          text: edits[0]?.text?.includes(';') ? edits[0].text : ';',
+        }];
+      } else if (marker && /cannot find symbol|systemout|system\.out/.test(
+        String(marker.message || '').toLowerCase() + title,
+      )) {
+        const msg = String(marker.message || '');
+        const sym = msg.match(/symbol:\s*(?:class|interface|variable|method)?\s*(\S+)/i)?.[1];
+        const line = marker.startLineNumber;
+        const lineText = model.getLineContent(line);
+        if (sym && lineText.includes(sym)) {
+          let replacement = null;
+          if (/^systemout$/i.test(sym)) {
+            replacement = 'System.out';
+          } else if (/^System[A-Z]\w*/.test(sym)) {
+            replacement = `System.${sym.slice(6)}`;
+          } else {
+            replacement = sym.replace(/([a-z])([A-Z])/g, '$1.$2');
+          }
+          if (replacement && replacement !== sym) {
+            const idx = lineText.indexOf(sym);
+            edits = [{
+              start_line: line,
+              start_column: idx + 1,
+              end_line: line,
+              end_column: idx + sym.length + 1,
+              text: replacement,
+            }];
+          }
+        }
+      }
+      return { ...fix, edits };
+    }
+
+    function sanitizeFixList(model, fixes, markers) {
+      const out = [];
+      const seen = new Set();
+      for (const fix of fixes || []) {
+        const normalized = normalizeQuickFixForMarkers(model, fix, markers);
+        if (!normalized?.edits?.length || !fixWouldChangeModel(model, normalized)) continue;
+        const key = `${normalized.provider || 'ai'}:${normalized.title}:${normalized.edits.map(
+          (e) => `${e.start_line}:${e.start_column}:${e.end_line}:${e.end_column}:${e.text}`,
+        ).join('|')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(normalized);
+      }
+      return out;
+    }
+
+    function readCachedQuickFixes(key, model, markers) {
+      const cached = quickFixCache.get(key);
+      if (!cached) return null;
+      if (cached.empty) {
+        if (Date.now() - cached.time < QUICK_FIX_EMPTY_CACHE_MS) return [];
+        quickFixCache.delete(key);
+        return null;
+      }
+      if (Date.now() - cached.time >= QUICK_FIX_CACHE_MS) {
+        quickFixCache.delete(key);
+        return null;
+      }
+      return sanitizeFixList(model, cached.fixes || [], markers);
+    }
+
+    function storeQuickFixCache(key, fixes) {
+      if (fixes.length > 0) {
+        quickFixCache.set(key, { fixes, time: Date.now() });
+      } else {
+        quickFixCache.set(key, { fixes: [], time: Date.now(), empty: true });
+      }
+      if (quickFixCache.size > QUICK_FIX_CACHE_MAX) {
+        const first = quickFixCache.keys().next().value;
+        if (first) quickFixCache.delete(first);
+      }
+    }
+
+    function localQuickFixesForMarkers(model, markers) {
+      const fixes = [];
+      const seen = new Set();
+      for (const m of markers) {
+        const msg = String(m.message || '');
+        const msgLower = msg.toLowerCase();
+        const line = m.startLineNumber;
+        const lineText = model.getLineContent(line);
+        const trimmedEnd = lineText.trimEnd();
+        const insertCol = trimmedEnd.length + 1;
+
+        if (msgLower.includes(';') && msgLower.includes('expected')) {
+          const trimmed = trimmedEnd.trim();
+          if (trimmed && !trimmed.endsWith(';') && !trimmed.endsWith('{') && !trimmed.endsWith('}')) {
+            const key = `semi:${line}:${insertCol}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              fixes.push({
+                title: "Insert ';'",
+                provider: 'local',
+                edits: [{
+                  start_line: line,
+                  start_column: insertCol,
+                  end_line: line,
+                  end_column: insertCol,
+                  text: ';',
+                }],
+              });
+            }
+          }
+        }
+
+        if (msgLower.includes('empty statement') || msgLower.includes('not a statement')
+            || msgLower.includes('illegal start of expression')) {
+          const trimmed = lineText.trim();
+          const delEdit = lineDeletionEdit(model, line);
+          if (delEdit && (trimmed === ';' || trimmed === '')) {
+            const key = `drop:${line}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              fixes.push({
+                title: 'Remove empty statement',
+                provider: 'local',
+                edits: [delEdit],
+              });
+            }
+          } else if (delEdit && (msgLower.includes('not a statement')
+              || msgLower.includes('illegal start'))) {
+            const key = `drop-line:${line}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              fixes.push({
+                title: 'Remove invalid statement',
+                provider: 'local',
+                edits: [delEdit],
+              });
+            }
+          }
+        }
+
+        if (msgLower.includes("'}' expected") || msgLower.includes('reached end of file while parsing')) {
+          const key = `brace:${line}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            let braceIndent = (lineText.match(/^(\s*)/) || ['', ''])[1];
+            if (!braceIndent) {
+              const nextLine = line < model.getLineCount()
+                ? model.getLineContent(line + 1)
+                : '';
+              const nextMatch = nextLine.match(/^(\s*)\}/);
+              if (nextMatch) {
+                braceIndent = nextMatch[1] || '    ';
+              } else {
+                for (let scan = line - 1; scan >= 1; scan--) {
+                  const prev = model.getLineContent(scan);
+                  const block = prev.match(/^(\s*)(?:public |private |protected |static |\w.*\{\s*)$/);
+                  if (block) {
+                    braceIndent = block[1];
+                    break;
+                  }
+                  if (prev.trim()) {
+                    const m = prev.match(/^(\s*)/);
+                    braceIndent = m?.[1]?.length >= 4 ? m[1].slice(0, -4) : (m?.[1] || '    ');
+                    break;
+                  }
+                }
+              }
+            }
+            if (!braceIndent) braceIndent = '    ';
+            const insertText = lineText.trim()
+              ? `\n${braceIndent}}`
+              : `${braceIndent}}`;
+            const col = lineText.trim() ? Math.max(1, insertCol) : 1;
+            fixes.push({
+              title: "Insert missing '}'",
+              provider: 'local',
+              edits: [{
+                start_line: line,
+                start_column: col,
+                end_line: line,
+                end_column: col,
+                text: insertText,
+              }],
+            });
+          }
+        }
+      }
+      return fixes;
+    }
+
+    function buildAiQuickFixCommandAction(markers) {
+      return {
+        title: 'Quick fix (Cursor / Gemini)…',
+        kind: reaperCodeActionKind('QuickFix'),
+        diagnostics: markers.map((m) => ({
+          severity: m.severity,
+          message: m.message,
+          startLineNumber: m.startLineNumber,
+          startColumn: m.startColumn,
+          endLineNumber: m.endLineNumber,
+          endColumn: m.endColumn,
+        })),
+        command: {
+          id: 'reaper.aiQuickFix',
+          title: 'Quick fix',
+        },
+      };
+    }
+
+    function markersForQuickFix(model, ed, scopeMarkers) {
+      const pos = ed?.getPosition?.();
+      const all = scopeMarkers?.length ? scopeMarkers : allFileMarkers(model);
+      if (!pos) return all;
+      const atLine = all.filter(
+        (m) => pos.lineNumber >= m.startLineNumber && pos.lineNumber <= m.endLineNumber,
+      );
+      return atLine.length ? atLine : all;
+    }
+
+    function mergeQuickFixLists(...lists) {
+      const out = [];
+      const seen = new Set();
+      for (const list of lists) {
+        for (const fix of list || []) {
+          if (!fix?.edits?.length) continue;
+          const key = `${fix.provider || 'ai'}:${fix.title}:${fix.edits.map(
+            (e) => `${e.start_line}:${e.start_column}:${e.end_line}:${e.end_column}:${e.text}`,
+          ).join('|')}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(fix);
+        }
+      }
+      return out;
+    }
+
+    const mergeQuickFixes = mergeQuickFixLists;
+
+    function collectQuickFixes(model, markers, { includeCachedAi = true } = {}) {
+      const local = sanitizeFixList(model, localQuickFixesForMarkers(model, markers), markers);
+      if (!includeCachedAi) return local;
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
+      const cached = cacheKey ? readCachedQuickFixes(cacheKey, model, markers) : null;
+      if (cached === null) return local;
+      return mergeQuickFixes(local, cached);
+    }
+
+    function hasAiQuickFixes(fixes) {
+      return fixes.some((f) => f.provider && f.provider !== 'local');
+    }
+
+    const QUICK_FIX_LOADING = Object.freeze({
+      title: 'Fetching AI fixes…',
+      provider: 'loading',
+    });
+
+    function presentQuickFixes(ed, fixes, {
+      alwaysMenu = false,
+      anchorEl = null,
+      markers = null,
+    } = {}) {
+      const model = ed.getModel();
+      const scoped = model && markers
+        ? sanitizeFixList(model, fixes || [], markers)
+        : (fixes || []).filter((f) => f.edits?.length);
+      const list = scoped;
+      const actionable = list.filter((f) => f.edits?.length);
+      const pending = (fixes || []).some((f) => f.provider === 'loading');
+
+      if (!actionable.length && !pending) {
+        helpers.toast?.(
+          'No quick fixes available — configure Cursor or Gemini in Settings',
+          'error',
+        );
+        return;
+      }
+      const showMenu = alwaysMenu
+        || actionable.length > 1
+        || hasAiQuickFixes(actionable)
+        || pending;
+      if (!showMenu && actionable.length === 1) {
+        if (applyQuickFixEdits(ed, actionable[0], markers)) {
+          helpers.toast?.(`Applied: ${quickFixActionTitle(actionable[0])}`, 'success');
+          helpers.scheduleDiagnostics?.();
+        } else {
+          helpers.toast?.('Could not apply fix — try again', 'error');
+        }
+        return;
+      }
+      const menuItems = pending
+        ? [...actionable, ...(fixes || []).filter((f) => f.provider === 'loading')]
+        : actionable;
+      helpers.showQuickFixMenu?.(menuItems, (fix) => {
+        if (applyQuickFixEdits(ed, fix, markers)) {
+          helpers.toast?.(`Applied: ${quickFixActionTitle(fix)}`, 'success');
+          helpers.scheduleDiagnostics?.();
+        } else {
+          helpers.toast?.('Could not apply fix', 'error');
+        }
+      }, anchorEl);
+    }
+
+    function runQuickFixFlow(ed, {
+      fetchAi = true,
+      scopeMarkers = null,
+      alwaysMenu = true,
+      anchorEl = null,
+      line = null,
+    } = {}) {
+      const model = ed.getModel();
+      if (!model) return;
+      let markers = scopeMarkers;
+      if (line != null) {
+        markers = allFileMarkers(model).filter((m) => m.startLineNumber === line);
+      }
+      markers = markersForQuickFix(model, ed, markers);
+      if (!markers.length) {
+        helpers.toast?.('No compiler errors on this line', 'info');
+        return;
+      }
+      const fixes = collectQuickFixes(model, markers);
+      const needsAiFetch = fetchAi && !hasAiQuickFixes(fixes);
+
+      if (fixes.length) {
+        presentQuickFixes(ed, fixes, { alwaysMenu, anchorEl, markers });
+      } else if (needsAiFetch) {
+        presentQuickFixes(ed, [QUICK_FIX_LOADING], { alwaysMenu, anchorEl, markers });
+      } else {
+        presentQuickFixes(ed, fixes, { alwaysMenu, anchorEl, markers });
+        return;
+      }
+
+      if (!needsAiFetch) return;
+
+      const allMarkers = allFileMarkers(model);
+      fetchQuickFixes(
+        model, allMarkers.length ? allMarkers : markers, { silent: true, scopeMarkers: markers },
+      ).then((aiFixes) => {
+        const merged = mergeQuickFixes(fixes, aiFixes);
+        const menuOpen = helpers.isQuickFixMenuOpen?.();
+        const hadInitialFixes = fixes.length > 0;
+
+        if (merged.length && (menuOpen || !hadInitialFixes)) {
+          presentQuickFixes(ed, merged, { alwaysMenu, anchorEl, markers });
+        } else if (!merged.length && !hadInitialFixes) {
+          helpers.hideQuickFixMenu?.();
+          helpers.toast?.(
+            'No quick fixes available — configure Cursor or Gemini in Settings',
+            'error',
+          );
+        }
+      }).catch((err) => {
+        if (!fixes.length) {
+          helpers.hideQuickFixMenu?.();
+          helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
+        }
+      });
+    }
+
+    function syncQuickFixActions(model, markers) {
+      const errorMarkers = markers.filter(
+        (m) => m.severity === monaco.MarkerSeverity.Error,
+      );
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
+      const cached = cacheKey ? quickFixCache.get(cacheKey) : null;
+      const cacheFresh = cached && (
+        (cached.empty && Date.now() - cached.time < QUICK_FIX_EMPTY_CACHE_MS)
+        || (cached.fixes?.length && Date.now() - cached.time < QUICK_FIX_CACHE_MS)
+      );
+
+      if (!cacheFresh) {
+        const allMarkers = allFileMarkers(model);
+        fetchQuickFixes(
+          model, allMarkers.length ? allMarkers : markers,
+          { silent: true, scopeMarkers: markers },
+        );
+      }
+
+      const fixes = collectQuickFixes(model, markers);
+      const actions = fixes.length
+        ? buildQuickFixActions(model, markers, fixes)
+        : [];
+      if (errorMarkers.length && !hasAiQuickFixes(fixes)) {
+        actions.push(buildAiQuickFixCommandAction(markers));
+      }
+      return actions;
+    }
+
     function codeActionFromFix(model, fix, linkedDiagnostics) {
       const edits = (fix.edits || []).map((e) => ({
         resource: model.uri,
-        versionId: model.getVersionId(),
         textEdit: {
           range: new monaco.Range(
             e.start_line,
@@ -2261,7 +3513,7 @@
       }));
       if (!edits.length) return null;
       return {
-        title: fix.title.startsWith('AI:') ? fix.title : `AI: ${fix.title}`,
+        title: quickFixActionTitle(fix),
         kind: reaperCodeActionKind('QuickFix'),
         isPreferred: true,
         diagnostics: linkedDiagnostics,
@@ -2298,47 +3550,80 @@
       );
     }
 
-    function applyQuickFixEdits(ed, fix) {
-      const editBatch = (fix.edits || []).map((e) => ({
-        range: new monaco.Range(
-          e.start_line, e.start_column, e.end_line, e.end_column,
-        ),
-        text: e.text ?? '',
-      }));
+    function applyQuickFixEdits(ed, fix, markers) {
+      const model = ed.getModel();
+      if (!model) return false;
+      const normalized = normalizeQuickFixForMarkers(model, fix, markers);
+      if (!fixWouldChangeModel(model, normalized)) return false;
+      const editBatch = (normalized.edits || [])
+        .map((e) => ({
+          range: new monaco.Range(
+            e.start_line,
+            e.start_column,
+            e.end_line,
+            e.end_column,
+          ),
+          text: e.text ?? '',
+        }))
+        .sort((a, b) => {
+          if (a.range.startLineNumber !== b.range.startLineNumber) {
+            return b.range.startLineNumber - a.range.startLineNumber;
+          }
+          return b.range.startColumn - a.range.startColumn;
+        });
       if (!editBatch.length) return false;
-      ed.executeEdits('reaper-quick-fix', editBatch);
-      return true;
+      ed.pushUndoStop?.();
+      return ed.executeEdits('reaper-quick-fix', editBatch);
     }
 
-    async function fetchQuickFixes(model, markers, { silent = false } = {}) {
+    async function fetchQuickFixes(model, markers, {
+      silent = false,
+      scopeMarkers = null,
+    } = {}) {
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
       if (!repo || !path || !helpers.repoApi || !markers.length) return [];
       const content = model.getValue();
       const payload = markersToDiagnosticPayload(markers);
       const key = quickFixCacheKey(repo, path, content.length, diagnosticSignature(payload));
-      const cached = quickFixCache.get(key);
-      if (cached && Date.now() - cached.time < QUICK_FIX_CACHE_MS) {
-        return cached.fixes;
-      }
-      try {
-        const fixes = await helpers.api(helpers.repoApi(repo, '/workspace/quick-fixes'), {
-          method: 'POST',
-          body: JSON.stringify({ path, content, diagnostics: payload }),
-        });
-        const list = Array.isArray(fixes) ? fixes : [];
-        quickFixCache.set(key, { fixes: list, time: Date.now() });
-        if (quickFixCache.size > QUICK_FIX_CACHE_MAX) {
-          const first = quickFixCache.keys().next().value;
-          if (first) quickFixCache.delete(first);
+      const anchorMarkers = scopeMarkers || markers;
+      const cached = readCachedQuickFixes(key, model, anchorMarkers);
+      if (cached !== null) return cached;
+      const inflight = quickFixInflight.get(key);
+      if (inflight) return inflight;
+
+      const promise = (async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), QUICK_FIX_FETCH_TIMEOUT_MS);
+        try {
+          const fixes = await helpers.api(helpers.repoApi(repo, '/workspace/quick-fixes'), {
+            method: 'POST',
+            body: JSON.stringify({ path, content, diagnostics: payload }),
+            signal: controller.signal,
+          });
+          const list = sanitizeFixList(
+            model,
+            Array.isArray(fixes) ? fixes : [],
+            anchorMarkers,
+          );
+          storeQuickFixCache(key, list);
+          return list;
+        } catch (err) {
+          if (!silent) {
+            const msg = err?.name === 'AbortError'
+              ? 'AI quick fix timed out — try again or add Gemini in Settings'
+              : (err?.message || 'AI quick fix failed');
+            helpers.toast?.(msg, 'error');
+          }
+          return [];
+        } finally {
+          clearTimeout(timer);
+          quickFixInflight.delete(key);
         }
-        return list;
-      } catch (err) {
-        if (!silent) {
-          helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
-        }
-        return [];
-      }
+      })();
+
+      quickFixInflight.set(key, promise);
+      return promise;
     }
 
     function prefetchQuickFixes(model, diags) {
@@ -2347,10 +3632,12 @@
       const path = helpers.getActivePath?.() || '';
       if (!repo || !path) return;
       const key = fileQuickFixCacheKey(repo, path, model);
-      const existing = quickFixCache.get(key);
-      if (existing?.fixes?.length && Date.now() - existing.time < QUICK_FIX_CACHE_MS) {
-        return;
-      }
+      const cached = quickFixCache.get(key);
+      const cacheFresh = cached && (
+        (cached.empty && Date.now() - cached.time < QUICK_FIX_EMPTY_CACHE_MS)
+        || (cached.fixes?.length && Date.now() - cached.time < QUICK_FIX_CACHE_MS)
+      );
+      if (cacheFresh || quickFixInflight.has(key)) return;
       const markers = allFileMarkers(model);
       const markerInput = markers.length
         ? markers
@@ -2377,39 +3664,91 @@
       if (model) prefetchQuickFixes(model, diags);
     };
 
-    editor.runAiQuickFix = async () => {
+    const QUICK_FIX_BULB_SVG = '<svg class="ij-ai-bulb-icon" viewBox="0 0 24 24" aria-hidden="true">'
+      + '<g class="ij-ai-sparkles">'
+      + '<path class="ij-ai-sparkle ij-ai-sparkle-a" fill="currentColor" d="M4.5 7.5l1-2 1 2-2 1 2 1-1 2-1-2-2-1z"/>'
+      + '<path class="ij-ai-sparkle ij-ai-sparkle-b" fill="currentColor" d="M19.5 4l.75-1.5.75 1.5-1.5.75 1.5.75-.75 1.5-.75-1.5-1.5-.75z"/>'
+      + '</g>'
+      + '<path class="ij-ai-bulb-glass" fill="currentColor" fill-opacity="0.28" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 18h6M10 22h4M12 2a7 7 0 017 7c0 2.5-1.3 4.7-3.3 6H8.3A7 7 0 0112 2z"/>'
+      + '</svg>';
+
+    function clearQuickFixBulbs(ed) {
+      if (!ed?._reaperQuickFixBulbs?.length) {
+        ed._reaperQuickFixBulbs = [];
+        return;
+      }
+      for (const widget of ed._reaperQuickFixBulbs) {
+        try {
+          ed.removeGlyphMarginWidget(widget);
+        } catch {
+          /* stale widget */
+        }
+      }
+      ed._reaperQuickFixBulbs = [];
+    }
+
+    function createQuickFixBulbWidget(line) {
+      const domNode = document.createElement('button');
+      domNode.type = 'button';
+      domNode.className = 'ij-quickfix-glyph-bulb ij-ai-bulb-btn is-glowing';
+      domNode.title = 'Quick fix — show all fixes (⌘.)';
+      domNode.setAttribute('aria-label', 'Quick fix');
+      domNode.innerHTML = QUICK_FIX_BULB_SVG;
+      domNode.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      domNode.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.runAiQuickFix?.({ line, anchorEl: domNode });
+      });
+      const lane = monaco.editor.GlyphMarginLane?.Left ?? 1;
+      return {
+        getId: () => `reaper-quickfix-bulb-${line}`,
+        getDomNode: () => domNode,
+        getPosition: () => ({
+          range: new monaco.Range(line, 1, line, 1),
+          lane,
+        }),
+      };
+    }
+
+    function refreshQuickFixBulbs(diags) {
+      clearQuickFixBulbs(editor);
+      if (!diags?.length || typeof editor.addGlyphMarginWidget !== 'function') return;
       const model = editor.getModel();
       if (!model) return;
-      const markers = allFileMarkers(model);
-      if (!markers.length) {
-        helpers.toast?.('No compiler errors on this file', 'info');
-        return;
+      const lines = new Set();
+      for (const d of diags) {
+        if (d.severity === 'warning') continue;
+        const span = helpers.diagnosticSpan?.(model, d);
+        const line = span?.startLineNumber ?? d.line ?? 1;
+        if (line > 0) lines.add(line);
       }
-      const repo = helpers.getRepo();
-      const path = helpers.getActivePath?.() || '';
-      const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
-      let fixes = cacheKey ? quickFixCache.get(cacheKey)?.fixes : null;
-      if (!fixes?.length) {
-        fixes = await fetchQuickFixes(model, markers);
+      editor._reaperQuickFixBulbs = [];
+      for (const line of [...lines].sort((a, b) => a - b)) {
+        const widget = createQuickFixBulbWidget(line);
+        editor.addGlyphMarginWidget(widget);
+        editor._reaperQuickFixBulbs.push(widget);
       }
-      if (!fixes?.length) {
-        helpers.toast?.('No AI fixes available — check Gemini API key in Settings', 'error');
-        return;
-      }
-      if (fixes.length === 1) {
-        if (applyQuickFixEdits(editor, fixes[0])) {
-          helpers.toast?.(`Applied: ${fixes[0].title}`, 'success');
-          helpers.scheduleDiagnostics?.();
-        }
-        return;
-      }
-      helpers.showQuickFixMenu?.(fixes, (fix) => {
-        if (applyQuickFixEdits(editor, fix)) {
-          helpers.toast?.(`Applied: ${fix.title}`, 'success');
-          helpers.scheduleDiagnostics?.();
-        }
+    }
+
+    editor.refreshQuickFixBulbs = refreshQuickFixBulbs;
+    editor.clearQuickFixBulbs = () => clearQuickFixBulbs(editor);
+
+    editor.runAiQuickFix = async (opts) => {
+      const line = typeof opts === 'number' ? opts : opts?.line;
+      const anchorEl = opts?.anchorEl || null;
+      await runQuickFixFlow(editor, {
+        fetchAi: true,
+        line: line ?? null,
+        alwaysMenu: true,
+        anchorEl,
       });
     };
+
+    editor.runQuickFix = editor.runAiQuickFix;
 
     try {
     monaco.languages.registerCodeActionProvider(
@@ -2423,28 +3762,10 @@
           if (!markers.length) {
             return { actions: [], dispose: () => {} };
           }
-          const repo = helpers.getRepo();
-          const path = helpers.getActivePath?.() || '';
-          const cacheKey = repo && path ? fileQuickFixCacheKey(repo, path, model) : '';
-          const cached = cacheKey ? quickFixCache.get(cacheKey) : null;
-          if (cached?.fixes?.length) {
-            return {
-              actions: buildQuickFixActions(model, markers, cached.fixes),
-              dispose: () => {},
-            };
-          }
-          const allMarkers = allFileMarkers(model);
-          return fetchQuickFixes(
-            model, allMarkers.length ? allMarkers : markers, { silent: true },
-          ).then((fixes) => {
-            if (!fixes.length) {
-              return { actions: [], dispose: () => {} };
-            }
-            return {
-              actions: buildQuickFixActions(model, markers, fixes),
-              dispose: () => {},
-            };
-          });
+          return {
+            actions: syncQuickFixActions(model, markers),
+            dispose: () => {},
+          };
         },
       },
       {
@@ -2606,6 +3927,11 @@
     }
 
     function handleEditorTab(ed) {
+      if (memberFallbackEl) {
+        hideMemberSuggestFallback();
+        ed.trigger('reaper', 'tab', null);
+        return;
+      }
       const ctx = ed._contextKeyService;
       if (ctx?.getContextKeyValue('suggestWidgetVisible')) {
         ed.trigger('reaper', 'acceptSelectedSuggestion', null);
@@ -2695,15 +4021,11 @@
         };
 
         if (!helpers.repoApi || !helpers.getRepo?.()) {
-          if (memberContext) {
-            if (suggestions.length > 0 && ed) {
-              showMemberSuggestFallback(ed, suggestions);
-            }
-            report('member no repo');
-            return { suggestions: [], incomplete: false };
+          if (suggestions.length > 0 && ed) {
+            presentCompletionSuggestions(ed, suggestions, { content, path });
           }
-          report('no repo');
-          return { suggestions, incomplete: false };
+          report(memberContext ? 'member no repo' : 'no repo');
+          return { suggestions: [], incomplete: false };
         }
 
         const cached = readCachedIndexCompletions(helpers, model, position, completionPrefix);
@@ -2730,7 +4052,7 @@
                     const merged = suggestions.length > 0
                       ? [...suggestions, ...fromIndex.filter((i) => !suggestions.some((s) => s.label === i.label))]
                       : fromIndex;
-                    showMemberSuggestFallback(ed, merged);
+                    presentCompletionSuggestions(ed, merged, { content, path });
                   }
                 }
               })
@@ -2743,7 +4065,7 @@
               });
           }
           if (suggestions.length > 0 && ed) {
-            showMemberSuggestFallback(ed, suggestions);
+            presentCompletionSuggestions(ed, suggestions, { content, path });
           }
           report(cached ? 'member+cache' : 'member');
           return { suggestions: [], incomplete: false };
@@ -2751,7 +4073,11 @@
 
         if (manual) {
           report('manual');
-          return { suggestions, incomplete: false };
+          return { suggestions: [], incomplete: false };
+        }
+
+        if (suggestions.length > 0 && ed) {
+          presentCompletionSuggestions(ed, suggestions, { content, path });
         }
 
         return (async () => {
@@ -2768,11 +4094,14 @@
             if (items) {
               mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions);
             }
+            if (suggestions.length > 0 && ed) {
+              presentCompletionSuggestions(ed, suggestions, { content, path });
+            }
             report('async index');
           } catch {
             /* index completions are best-effort */
           }
-          return { suggestions, incomplete: false };
+          return { suggestions: [], incomplete: false };
         })();
       },
     });
@@ -3132,7 +4461,7 @@
 
     editor.addAction({
       id: 'reaper.aiQuickFix',
-      label: 'AI Quick Fix',
+      label: 'Quick fix',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Period],
       run: (ed) => ed.runAiQuickFix?.(),
     });

@@ -33,6 +33,54 @@ pub struct SymbolLocation {
     pub column: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HoverInfo {
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+}
+
+pub fn hover_info_from_location(content: &str, hit: &SymbolLocation) -> HoverInfo {
+    let line_idx = hit.line.saturating_sub(1) as usize;
+    let source_line = content.lines().nth(line_idx);
+    let signature = source_line.and_then(|line| {
+        java_member_signature_on_line(line, &hit.name).or_else(|| {
+            let trimmed = line.split("//").next()?.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    trimmed
+                        .split('{')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .split(';')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                )
+            }
+        })
+    });
+    let documentation = java_javadoc_before_line(content, hit.line);
+    HoverInfo {
+        name: hit.name.clone(),
+        kind: hit.kind.clone(),
+        signature,
+        documentation,
+        path: Some(hit.path.clone()),
+        line: Some(hit.line),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ClassSearchHit {
     pub name: String,
@@ -114,23 +162,32 @@ pub fn find_definition(
         (Some(s), _) | (_, Some(s)) if !s.is_empty() => s,
         _ => return Ok(None),
     };
+    find_definition_for_symbol(ws, from_path, content, &symbol)
+}
 
-    if is_keyword(&symbol) {
+pub fn find_definition_for_symbol(
+    ws: &Path,
+    from_path: &str,
+    content: &str,
+    symbol: &str,
+) -> Result<Option<SymbolLocation>> {
+    let symbol = symbol.trim().trim_end_matches("()");
+    if symbol.is_empty() || is_keyword(symbol) {
         return Ok(None);
     }
 
     if crate::workspace::ruby_nav::is_ruby_path(from_path) {
-        if let Some(hit) = crate::workspace::ruby_nav::find_rails_constant(ws, &symbol)? {
+        if let Some(hit) = crate::workspace::ruby_nav::find_rails_constant(ws, symbol)? {
             return Ok(Some(hit));
         }
     }
 
     let mut hits = Vec::new();
-    if let Some(hit) = find_in_content(&symbol, from_path, content) {
+    if let Some(hit) = find_in_content(symbol, from_path, content) {
         hits.push(hit);
     }
-    collect_definitions(ws, ws, from_path, &symbol, &mut hits)?;
-    Ok(best_definition(&hits, &symbol, from_path))
+    collect_definitions(ws, ws, from_path, symbol, &mut hits)?;
+    Ok(best_definition(&hits, symbol, from_path))
 }
 
 pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
@@ -206,6 +263,72 @@ pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Javadoc comment immediately above `line` (1-based), if any.
+pub(crate) fn java_javadoc_before_line(content: &str, line: u32) -> Option<String> {
+    if line == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut end = line.saturating_sub(1) as usize;
+    while end > 0 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let end_idx = end - 1;
+    if !lines[end_idx].trim().ends_with("*/") {
+        return None;
+    }
+    let mut start_idx = end_idx;
+    while start_idx > 0 {
+        if lines[start_idx].trim().starts_with("/**") {
+            break;
+        }
+        start_idx -= 1;
+    }
+    if !lines[start_idx].trim().starts_with("/**") {
+        return None;
+    }
+    Some(format_java_javadoc_block(&lines[start_idx..=end_idx]))
+}
+
+fn format_java_javadoc_block(block: &[&str]) -> String {
+    let mut out = Vec::new();
+    for line in block {
+        let t = line.trim();
+        let inner = t
+            .trim_start_matches("/**")
+            .trim_end_matches("*/")
+            .trim_start_matches('*')
+            .trim();
+        if !inner.is_empty() {
+            out.push(inner.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// Method or field declaration snippet on `line` for completion detail.
+pub(crate) fn java_member_signature_on_line(line: &str, member: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains(&format!("{member}("))
+        && !trimmed.contains(&format!("{member};"))
+        && !trimmed.contains(&format!("{member} ="))
+    {
+        return None;
+    }
+    let sig = trimmed.split('{').next()?.split(';').next()?.trim();
+    if sig.is_empty() {
+        None
+    } else {
+        Some(sig.to_string())
+    }
+}
+
 pub(crate) fn java_class_from_source_path(path: &str) -> Option<String> {
     for prefix in ["src/main/java/", "src/test/java/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
@@ -237,6 +360,32 @@ pub(crate) fn java_member_qualifier(content: &str, line: u32, column: u32, symbo
         }
         end = pos;
     }
+    None
+}
+
+/// 1-based column at the start of `member` on `line` (for go-to-definition style hover).
+pub(crate) fn java_hover_column_for_member(
+    content: &str,
+    line: u32,
+    column: u32,
+    member: &str,
+) -> Option<u32> {
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let col0 = column.saturating_sub(1) as usize;
+    let col_limit = col0.min(line_text.len());
+    let before = &line_text[..col_limit];
+
+    if let Some(dot) = before.rfind('.') {
+        let after_dot = &before[dot + 1..];
+        if member.starts_with(after_dot) || after_dot.is_empty() {
+            return Some((dot + 2) as u32);
+        }
+    }
+
+    if let Some(pos) = line_text.find(&format!(".{member}")) {
+        return Some((pos + 2) as u32);
+    }
+
     None
 }
 
@@ -1465,6 +1614,7 @@ pub(crate) fn member_completions_from_content(
                             path: Some(from_path.to_string()),
                             line: None,
                             column: None,
+                            documentation: None,
                         });
                     }
                 }
@@ -1495,6 +1645,7 @@ pub(crate) fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1516,6 +1667,7 @@ pub(crate) fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1537,6 +1689,7 @@ pub(crate) fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1562,6 +1715,7 @@ pub(crate) fn member_completions_from_content(
                                     path: Some(from_path.to_string()),
                                     line: None,
                                     column: None,
+                                    documentation: None,
                                 });
                             }
                         }
@@ -1620,6 +1774,7 @@ pub fn completions(
                     path: Some(from_path.to_string()),
                     line: Some(hit.line),
                     column: Some(hit.column),
+                    documentation: None,
                 });
                 limit -= 1;
             }
@@ -1648,6 +1803,7 @@ pub fn completions(
                             path: Some(hit.path.clone()),
                             line: Some(hit.line),
                             column: Some(hit.column),
+                            documentation: None,
                         });
                         limit -= 1;
                     }
@@ -1670,6 +1826,7 @@ pub fn completions(
                     path: None,
                     line: None,
                     column: None,
+                    documentation: None,
                 });
                 limit -= 1;
             }
@@ -2355,6 +2512,55 @@ mod tests {
             Some("main".into())
         );
         assert_eq!(java_method_name_on_line("        SpringApplication.run(Application.class, args);"), None);
+    }
+
+    #[test]
+    fn extracts_java_javadoc_before_method() {
+        let src = r#"
+public class Demo {
+    /**
+     * Prints a greeting.
+     * @param name the recipient
+     */
+    public void greet(String name) {
+    }
+}
+"#;
+        assert_eq!(
+            java_javadoc_before_line(src, 7),
+            Some("Prints a greeting.\n@param name the recipient".into())
+        );
+    }
+
+    #[test]
+    fn extracts_java_member_signature() {
+        let line = "    public void println(String x) {";
+        assert_eq!(
+            java_member_signature_on_line(line, "println"),
+            Some("public void println(String x)".into())
+        );
+    }
+
+    #[test]
+    fn builds_hover_info_from_definition() {
+        let src = r#"
+public class Demo {
+    /** Greets someone. */
+    public void greet(String name) {
+    }
+}
+"#;
+        let hit = SymbolLocation {
+            name: "greet".into(),
+            kind: "method".into(),
+            path: "Demo.java".into(),
+            line: 4,
+            column: 5,
+        };
+        let info = hover_info_from_location(src, &hit);
+        assert_eq!(info.name, "greet");
+        assert_eq!(info.documentation.as_deref(), Some("Greets someone."));
+        assert!(info.signature.as_ref().is_some_and(|s| s.contains("greet(String name)")));
     }
 
     #[test]

@@ -235,6 +235,7 @@ fn key_completions(index: &SpringPropertiesIndex, prefix: &str) -> Vec<Completio
             path: None,
             line: None,
             column: None,
+            documentation: None,
         });
         if items.len() >= 80 {
             break;
@@ -268,6 +269,7 @@ fn value_completions(
             path: None,
             line: None,
             column: None,
+            documentation: None,
         });
     }
 
@@ -282,6 +284,7 @@ fn value_completions(
                     path: None,
                     line: None,
                     column: None,
+                    documentation: None,
                 });
             }
         }
