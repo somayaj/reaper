@@ -270,6 +270,65 @@
     'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'plaintext',
   ];
 
+  /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
+  const REAPER_DOC_SELECTOR = ALL_EDITOR_LANGS;
+  const REAPER_COMPLETION_REV = '245';
+  let reaperDotCompletionHandler = null;
+
+  /** WKWebView Monaco builds may omit CodeActionKind — use string fallbacks. */
+  function reaperCodeActionKind(name) {
+    const kind = monaco.languages.CodeActionKind?.[name];
+    if (kind != null) return kind;
+    const fallbacks = { QuickFix: 'quickfix', Empty: '' };
+    return fallbacks[name] ?? String(name).toLowerCase();
+  }
+
+  function codeActionOnlyWantsQuickFix(only) {
+    if (!only) return true;
+    const quickFix = reaperCodeActionKind('QuickFix');
+    const empty = reaperCodeActionKind('Empty');
+    if (typeof only.contains === 'function') {
+      return only.contains(quickFix) || only.contains(empty);
+    }
+    return only === quickFix || only === empty;
+  }
+
+  function editorContent(ed, model) {
+    return ed?._reaperContent ?? model.getValue();
+  }
+
+  function completionDebugEnabled() {
+    try {
+      if (localStorage.getItem('reaper-complete-debug') === '0') return false;
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  function completionTriggerLabel(context) {
+    const k = context?.triggerKind;
+    const T = monaco.languages.CompletionTriggerKind;
+    if (k === T.Invoke) return 'Invoke';
+    if (k === T.TriggerCharacter) return 'TriggerChar';
+    if (k === T.TriggerForIncompleteCompletions) return 'Incomplete';
+    return `kind:${k ?? '?'}`;
+  }
+
+  function completionDebug(helpers, parts, { warn = false } = {}) {
+    const msg = parts.filter(Boolean).join(' · ');
+    console.log(`[Reaper complete] ${msg}`);
+    if (!completionDebugEnabled()) return;
+    helpers.setCompleteDebugStatus?.(`[complete] ${msg}`);
+    helpers.setStatusMessage?.(`[complete] ${msg}`);
+    helpers.terminalLog?.(`[complete] ${msg}`);
+    try {
+      helpers.toast?.(msg, warn ? 'warning' : 'info', { duration: warn ? 8000 : 6000 });
+    } catch (err) {
+      console.warn('[Reaper complete] toast failed', err);
+    }
+  }
+
   const CLIENT_KEYWORDS = {
     rust: ['fn', 'let', 'mut', 'pub', 'struct', 'enum', 'impl', 'trait', 'match', 'use', 'async', 'await'],
     python: ['def', 'class', 'import', 'from', 'if', 'elif', 'else', 'for', 'while', 'with', 'return', 'async', 'await'],
@@ -307,7 +366,20 @@
     return CLIENT_KEYWORDS[lang] || [];
   }
 
-  function buildCompletionRange(model, position, prefix) {
+  function buildCompletionRange(model, position, prefix, linePrefix) {
+    const memberCtx = linePrefix ? dotQualifierFromLinePrefix(linePrefix) : null;
+    if (memberCtx) {
+      const dotIdx = linePrefix.lastIndexOf('.');
+      const startCol = dotIdx >= 0
+        ? dotIdx + 2
+        : Math.max(1, position.column - memberCtx.memberPrefix.length);
+      return new monaco.Range(
+        position.lineNumber,
+        startCol,
+        position.lineNumber,
+        position.column,
+      );
+    }
     const word = model.getWordUntilPosition(position);
     const p = prefix || word.word || '';
     const startCol = p.length
@@ -440,6 +512,7 @@
     if (p.length >= MIN_AUTOCOMPLETE_CHARS) return true;
     if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '')) return true;
     if (dotQualifierFromLinePrefix(linePrefix)) return true;
+    if (isInsideControlParen(linePrefix)) return true;
     const trimmed = (linePrefix || '').trimStart();
     if (/^import\s/.test(trimmed)) return true;
     return false;
@@ -451,12 +524,20 @@
     );
   }
 
-  function completionContext(model, position) {
-    const word = model.getWordUntilPosition(position);
+  function memberDotContext(model, position) {
     const linePrefix = editorLinePrefix(model, position);
-    const prefix = word.word || extractInlinePartialToken(linePrefix) || '';
-    const range = buildCompletionRange(model, position, prefix);
-    return { word, linePrefix, prefix, range };
+    return { linePrefix, member: dotQualifierFromLinePrefix(linePrefix) };
+  }
+
+  function completionContext(model, position) {
+    const linePrefix = editorLinePrefix(model, position);
+    const memberCtx = dotQualifierFromLinePrefix(linePrefix);
+    const word = model.getWordUntilPosition(position);
+    const prefix = memberCtx
+      ? (memberCtx.memberPrefix || '')
+      : (word.word || extractInlinePartialToken(linePrefix) || '');
+    const range = buildCompletionRange(model, position, prefix, linePrefix);
+    return { word, linePrefix, prefix, range, memberCtx };
   }
 
   function mapIndexItemToSuggestion(item, range, seen, memberContext) {
@@ -480,6 +561,9 @@
       insertText,
       range,
       sortText: `${sortRank}_${label}`,
+      filterText: memberContext
+        ? `${memberContext.memberPrefix || ''}${label}`
+        : undefined,
     };
   }
 
@@ -515,6 +599,16 @@
     return t;
   }
 
+  function isValidJsReceiverExpr(expr) {
+    const e = String(expr || '').trim();
+    if (!e) return false;
+    if (e === 'this' || e === 'super' || e === 'self') return true;
+    if (/^@[A-Za-z_]\w*$/.test(e)) return true;
+    if (/^(?:[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*$/.test(e)) return true;
+    if (/^(?:this|super|self|[A-Za-z_$][\w$]*)\[(?:\d+|[A-Za-z_$][\w$]*)\]$/.test(e)) return true;
+    return false;
+  }
+
   function dotQualifierFromLinePrefix(linePrefix) {
     const trimmed = String(linePrefix || '').trimEnd();
     if (!trimmed.includes('.')) return null;
@@ -523,16 +617,14 @@
     const memberPart = trimmed.slice(dotPos + 1).replace(/[^\w$].*$/, '');
     if (!qualPart) return null;
     const paren = qualPart.lastIndexOf('(');
-    const simple = paren >= 0
-      ? qualPart.slice(paren + 1).trim().split('.').pop().trim()
-      : qualPart.split('.').pop().trim();
-    if (!simple) return null;
+    const receiverExpr = paren >= 0 ? qualPart.slice(paren + 1).trim() : qualPart;
+    if (!receiverExpr || !isValidJsReceiverExpr(receiverExpr)) return null;
+    const baseIdent = receiverExpr.split(/[.\[]/)[0].trim();
     const blockKw = ['if', 'for', 'while', 'return', 'import', 'package', 'new', 'else', 'catch'];
-    if (blockKw.includes(simple) && simple !== 'this' && simple !== 'super' && simple !== 'self') {
+    if (blockKw.includes(baseIdent) && baseIdent !== 'this' && baseIdent !== 'super' && baseIdent !== 'self') {
       return null;
     }
-    if (!/^(?:this|super|self|@[A-Za-z_]\w*|[A-Za-z_$][\w$]*)$/.test(simple)) return null;
-    return { qualifier: simple.replace(/^@/, ''), memberPrefix: memberPart };
+    return { qualifier: receiverExpr.replace(/^@/, ''), memberPrefix: memberPart };
   }
 
   function readIdentAtStart(s) {
@@ -540,11 +632,163 @@
     return m ? m[1] : '';
   }
 
-  function localMemberCompletions(content, qualifier, memberPrefix, path) {
+  function simplifyJavaTypeName(typeName) {
+    let s = String(typeName || '').trim();
+    if (!s) return '';
+    s = s.replace(/\[\]/g, '');
+    const lt = s.indexOf('<');
+    if (lt > 0) s = s.slice(0, lt);
+    return s.split('.').pop() || s;
+  }
+
+  function inferJavaDeclaredMemberType(content, memberName) {
+    const name = String(memberName || '').replace(/^@/, '').trim();
+    if (!name || name === 'this' || name === 'super') return '';
+    const src = String(content || '');
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const typePat = '([A-Za-z_][\\w.<>,]*(?:\\[\\])*?)';
+    const fieldRe = new RegExp(
+      `(?:^|[\\n;{}])\\s*(?:@[\\w.]+\\s*)*(?:public|private|protected)?\\s*(?:static\\s+)?(?:final\\s+)?${typePat}\\s+${escaped}\\s*[=;]`,
+      'gm',
+    );
+    let m = fieldRe.exec(src);
+    if (m) return simplifyJavaTypeName(m[1]);
+    const localRe = new RegExp(
+      `(?:^|[;{}])\\s*(?:final\\s+)?${typePat}\\s+${escaped}\\s*[=;]`,
+      'gm',
+    );
+    m = localRe.exec(src);
+    if (m) return simplifyJavaTypeName(m[1]);
+    return inferJavaMethodParameterType(content, name);
+  }
+
+  function inferJavaMethodParameterType(content, paramName) {
+    const name = String(paramName || '').trim();
+    if (!name) return '';
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const typePat = '([A-Za-z_][\\w.<>,]*(?:\\[\\])*?)';
+    const re = new RegExp(`\\([^)]*?${typePat}\\s+${escaped}\\b`, 'g');
+    const m = re.exec(String(content || ''));
+    return m ? simplifyJavaTypeName(m[1]) : '';
+  }
+
+  const JDK_STATIC_FIELD_TYPES = {
+    System: { out: 'PrintStream', in: 'InputStream', err: 'PrintStream' },
+  };
+
+  const JDK_CLASS_STATIC_MEMBERS = {
+    System: ['out', 'in', 'err'],
+    Math: ['PI', 'E', 'abs', 'max', 'min', 'random', 'sqrt'],
+    Arrays: ['asList', 'sort', 'copyOf', 'equals', 'stream'],
+  };
+
+  function effectiveEditorLang(path, model) {
+    const fromPath = langForPath(path || '');
+    if (fromPath !== 'plaintext') return fromPath;
+    const fromModel = model?.getLanguageId?.();
+    if (fromModel && fromModel !== 'plaintext') return fromModel;
+    const base = String(path || '').split('/').pop() || '';
+    if (/\.java$/i.test(base)) return 'java';
+    if (/\.(kt|kts)$/i.test(base)) return 'kotlin';
+    if (/\.(groovy|gradle)$/i.test(base)) return 'groovy';
+    return fromPath || 'plaintext';
+  }
+
+  function ensureModelLanguageForPath(path, model) {
+    const expected = langForPath(path || '');
+    if (!expected || expected === 'plaintext' || !model) return expected;
+    if (model.getLanguageId() !== expected) {
+      ensureMonacoBasicLanguage(expected);
+      monaco.editor.setModelLanguage(model, expected);
+    }
+    return expected;
+  }
+
+  function jdkStaticMemberItems(qualifier, memberPrefix, content = '') {
+    const q = String(qualifier || '').trim();
+    if (!q) return [];
+    if (q.includes('.')) {
+      const type = resolveJavaQualifierType(content, q);
+      return type ? jdkBuiltinMembersForType(type, memberPrefix) : [];
+    }
+    const base = q.split('.')[0];
+    if (!base) return [];
+    const members = JDK_CLASS_STATIC_MEMBERS[base];
+    if (!members) return [];
+    const prefixLower = (memberPrefix || '').toLowerCase();
+    const staticTypes = JDK_STATIC_FIELD_TYPES[base] || {};
+    return members
+      .filter((m) => !memberPrefix || m.toLowerCase().startsWith(prefixLower))
+      .map((m) => ({
+        label: m,
+        kind: staticTypes[m] ? 'field' : 'method',
+        detail: `${base}.${m}`,
+      }));
+  }
+
+  function memberPreviewItems(content, qualifier, memberPrefix, path, model) {
+    return localMemberCompletions(content, qualifier, memberPrefix, path, model);
+  }
+
+  function resolveJavaQualifierType(content, qualifier) {
+    const q = String(qualifier || '').trim();
+    if (!q) return '';
+    const parts = q.split('.');
+    if (parts.length === 1) {
+      const declared = inferJavaDeclaredMemberType(content, parts[0]);
+      if (declared) return declared;
+      const param = inferJavaMethodParameterType(content, parts[0]);
+      if (param) return param;
+      if (JDK_CLASS_STATIC_MEMBERS[parts[0]]) return parts[0];
+      return '';
+    }
+    const staticFields = JDK_STATIC_FIELD_TYPES[parts[0]];
+    if (staticFields && parts.length === 2 && staticFields[parts[1]]) {
+      return staticFields[parts[1]];
+    }
+    if (parts.length >= 2) {
+      const parent = parts.slice(0, -1).join('.');
+      const parentType = resolveJavaQualifierType(content, parent);
+      if (parentType && parentType !== parts[0]) return parentType;
+    }
+    return '';
+  }
+
+  const JDK_TYPE_MEMBERS = {
+    String: ['charAt', 'length', 'substring', 'toLowerCase', 'toUpperCase', 'equals', 'isEmpty', 'trim', 'split', 'concat', 'replace', 'startsWith', 'endsWith', 'indexOf', 'lastIndexOf', 'contains', 'format', 'valueOf', 'getBytes', 'toCharArray', 'compareTo', 'strip', 'repeat'],
+    Integer: ['intValue', 'longValue', 'toString', 'parseInt', 'valueOf', 'compare', 'equals', 'hashCode'],
+    Long: ['longValue', 'intValue', 'toString', 'parseLong', 'valueOf', 'compare', 'equals'],
+    Boolean: ['booleanValue', 'toString', 'valueOf', 'equals'],
+    Object: ['toString', 'equals', 'hashCode', 'getClass', 'clone', 'notify', 'notifyAll', 'wait'],
+    List: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains', 'addAll', 'removeAll'],
+    ArrayList: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains'],
+    Map: ['get', 'put', 'size', 'isEmpty', 'clear', 'remove', 'containsKey', 'containsValue', 'keySet', 'values', 'entrySet'],
+    HashMap: ['get', 'put', 'size', 'isEmpty', 'clear', 'remove', 'containsKey'],
+    Set: ['add', 'size', 'isEmpty', 'clear', 'remove', 'contains', 'iterator'],
+    PrintStream: ['print', 'println', 'printf', 'format', 'write', 'flush', 'close'],
+    Scanner: ['next', 'nextLine', 'nextInt', 'hasNext', 'close'],
+  };
+
+  function jdkBuiltinMembersForType(typeName, memberPrefix) {
+    const simple = simplifyJavaTypeName(typeName);
+    const members = JDK_TYPE_MEMBERS[simple];
+    if (!members) return [];
+    const prefixLower = (memberPrefix || '').toLowerCase();
+    return members
+      .filter((m) => !memberPrefix || m.toLowerCase().startsWith(prefixLower))
+      .map((m) => ({ label: m, kind: 'method', detail: `${simple}.${m}` }));
+  }
+
+  function localMemberCompletions(content, qualifier, memberPrefix, path, model) {
     const items = [];
     const seen = new Set();
     const prefixLower = (memberPrefix || '').toLowerCase();
-    const lang = langForPath(path);
+    const lang = effectiveEditorLang(path, model);
+
+    for (const m of jdkStaticMemberItems(qualifier, memberPrefix, content)) {
+      if (seen.add(m.label)) items.push(m);
+    }
+
     const needles = [`${qualifier}.`, `@${qualifier}.`];
     const lines = String(content || '').split(/\r?\n/);
     for (const lineText of lines) {
@@ -596,6 +840,27 @@
       }
     }
 
+    if (lang === 'java' || lang === 'kotlin') {
+      const type = resolveJavaQualifierType(content, qualifier);
+      if (type) {
+        for (const m of jdkBuiltinMembersForType(type, memberPrefix)) {
+          if (seen.add(m.label)) {
+            items.push(m);
+          }
+        }
+      }
+      const base = qualifier.split('.')[0];
+      if (base && qualifier.indexOf('.') < 0 && JDK_CLASS_STATIC_MEMBERS[base]) {
+        const staticTypes = JDK_STATIC_FIELD_TYPES[base] || {};
+        for (const m of JDK_CLASS_STATIC_MEMBERS[base]) {
+          if ((!memberPrefix || m.toLowerCase().startsWith(prefixLower)) && seen.add(m)) {
+            const kind = staticTypes[m] ? 'field' : 'method';
+            items.push({ label: m, kind, detail: `${base}.${m}` });
+          }
+        }
+      }
+    }
+
     return items.slice(0, 40);
   }
 
@@ -633,6 +898,52 @@
     return /\b(for|if|while|switch)\s*\([^)]*$/i.test(trimmed);
   }
 
+  function collectJavaScopeVariables(content, throughLine) {
+    const out = [];
+    const seen = new Set();
+    const lines = String(content || '').split(/\r?\n/);
+    const limit = Math.min(throughLine, lines.length);
+    const add = (name, typeHint) => {
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      out.push({ name, typeHint: typeHint || '' });
+    };
+    const parseLocal = (seg) => {
+      const decl = seg.split('=')[0].trim().replace(/,$/, '');
+      if (!decl || decl.includes('(') || /\b(class|interface|enum|record)\b/.test(decl)) return;
+      const parts = decl.split(/\s+/);
+      const mods = new Set(['public', 'private', 'protected', 'static', 'final', 'volatile', 'transient']);
+      while (parts.length > 2 && mods.has(parts[0])) parts.shift();
+      if (parts.length < 2) return;
+      const name = parts[parts.length - 1];
+      const ty = parts.slice(0, -1).join(' ');
+      if (name && ty && !isControlKeywordPrefix(name)) add(name, ty);
+    };
+    for (let i = 0; i < limit; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed || trimmed.startsWith('//')) continue;
+      const parenOpen = trimmed.indexOf('(');
+      const parenClose = trimmed.lastIndexOf(')');
+      if (parenOpen >= 0 && parenClose > parenOpen) {
+        trimmed.slice(parenOpen + 1, parenClose).split(',').forEach((param) => {
+          const p = param.trim();
+          const parts = p.split(/\s+/);
+          if (parts.length >= 2) {
+            const name = parts[parts.length - 1].replace(/\.\.\.$/, '');
+            const ty = parts.slice(0, -1).join(' ').replace(/\.\.\.$/, '[]');
+            if (name && !isControlKeywordPrefix(name)) add(name, ty);
+          }
+        });
+      }
+      trimmed.split(';').forEach((seg) => {
+        const s = seg.trim();
+        if (!s || /^(for|if|while|switch|return)\b/.test(s)) return;
+        parseLocal(s);
+      });
+    }
+    return out;
+  }
+
   function shouldPreferAiStatementInline(path, linePrefix, content, lineNumber) {
     if (dotQualifierFromLinePrefix(linePrefix)) return false;
     const trimmed = linePrefix.trimEnd();
@@ -644,6 +955,45 @@
     return false;
   }
 
+  const JAVA_PRIMITIVE_TYPES = new Set([
+    'int', 'long', 'boolean', 'char', 'byte', 'short', 'float', 'double', 'void', 'var',
+  ]);
+
+  /** Typing `String greeting` — suppress AI ghost that would glue `greeting` onto the type. */
+  function isJavaDeclarationTyping(path, linePrefix) {
+    const lang = langForPath(path);
+    if (lang !== 'java' && lang !== 'kotlin' && lang !== 'kts') return false;
+    const trimmed = linePrefix.trimStart();
+    if (!trimmed || trimmed.includes('=') || trimmed.includes(';')) return false;
+    if (/\.\w/.test(trimmed)) return false;
+    const declRe = /^(?:(?:public|private|protected|static|final|volatile|transient)\s+)*([\w][\w.<>\[\]]*)\s*([\w$]*)$/;
+    const m = trimmed.match(declRe);
+    if (!m) return false;
+    const typePart = m[1];
+    if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
+    return JAVA_PRIMITIVE_TYPES.has(typePart)
+      || /^[A-Z]/.test(typePart)
+      || typePart.includes('<')
+      || typePart.includes('[');
+  }
+
+  /** Ghost must not start with an identifier char when the line already ends on one. */
+  function inlineGhostSafeAfter(linePrefix, ghostText) {
+    const ghost = String(ghostText ?? '');
+    if (!ghost) return false;
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (!trimmed) return true;
+    const last = trimmed[trimmed.length - 1];
+    if (!/[A-Za-z0-9_$]/.test(last)) return true;
+    return !/[A-Za-z0-9_$]/.test(ghost[0]);
+  }
+
+  function shouldSuppressInlineGhost(path, linePrefix, ghostText) {
+    if (isJavaDeclarationTyping(path, linePrefix)) return true;
+    if (!inlineGhostSafeAfter(linePrefix, ghostText)) return true;
+    return false;
+  }
+
   function buildInlineCacheKey(repo, path, lineNumber, column, linePrefix) {
     return `${repo}:${path}:${lineNumber}:${column}:${linePrefix}`;
   }
@@ -652,8 +1002,10 @@
   function inlineGhostFromCache(cache, repo, path, lineNumber, column, linePrefix) {
     if (!cache?.text) return '';
     const key = buildInlineCacheKey(repo, path, lineNumber, column, linePrefix);
-    if (cache.key === key) return cache.text;
-    if (
+    let ghost = '';
+    if (cache.key === key) {
+      ghost = cache.text;
+    } else if (
       cache.repo === repo
       && cache.path === path
       && cache.lineNumber === lineNumber
@@ -662,10 +1014,12 @@
     ) {
       const typed = linePrefix.slice(cache.linePrefix.length);
       if (cache.text.startsWith(typed)) {
-        return cache.text.slice(typed.length);
+        ghost = cache.text.slice(typed.length);
       }
     }
-    return '';
+    if (!ghost) return '';
+    if (shouldSuppressInlineGhost(path, linePrefix, ghost)) return '';
+    return ghost;
   }
 
   function memberInlineSuffix(content, linePrefix, path) {
@@ -683,7 +1037,7 @@
   }
 
   function buildLocalCompletionSuggestions(model, position, path, helpers, content) {
-    const { linePrefix, prefix, range } = completionContext(model, position);
+    const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
     const seen = new Set();
     const suggestions = [];
     const minKwChars = 1;
@@ -715,11 +1069,33 @@
       suggestions.push(item);
     }
 
-    const dot = dotQualifierFromLinePrefix(linePrefix);
+    const dot = memberCtx || dotQualifierFromLinePrefix(linePrefix);
     if (dot) {
-      for (const m of localMemberCompletions(text, dot.qualifier, dot.memberPrefix, path)) {
+      for (const m of jdkStaticMemberItems(dot.qualifier, dot.memberPrefix, text)) {
         const insert = m.kind === 'method' ? `${m.label}()` : m.label;
-        push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0');
+        const filterText = `${dot.memberPrefix || ''}${m.label}`;
+        push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0', filterText);
+      }
+      for (const m of localMemberCompletions(text, dot.qualifier, dot.memberPrefix, path, model)) {
+        const insert = m.kind === 'method' ? `${m.label}()` : m.label;
+        const filterText = `${dot.memberPrefix || ''}${m.label}`;
+        push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0', filterText);
+      }
+      return { suggestions, linePrefix, prefix, range, seen };
+    }
+
+    if (langForPath(path) === 'java' && isInsideControlParen(linePrefix)) {
+      const trimmed = linePrefix.trimEnd();
+      if (trimmed.endsWith('for (') || trimmed.endsWith('for(')) {
+        for (const prim of ['int', 'long', 'boolean', 'char', 'String', 'var']) {
+          push(prim, 'keyword', 'type', prim, '0');
+        }
+      } else if (/\bfor\s*\([^)]*:/.test(trimmed)) {
+        collectJavaScopeVariables(text, position.lineNumber).forEach(({ name, typeHint }) => {
+          if (!prefix || name.toLowerCase().startsWith(prefix.toLowerCase())) {
+            push(name, 'variable', typeHint || 'variable', name, '0');
+          }
+        });
       }
     }
 
@@ -1175,6 +1551,30 @@
     if (first) indexCompleteCache.delete(first);
   }
 
+  function readCachedIndexCompletions(helpers, model, position, prefix) {
+    const repo = helpers.getRepo?.();
+    const path = helpers.getActivePath?.() || '';
+    if (!repo || !path) return null;
+    const contentLen = model.getValue()?.length ?? 0;
+    const cacheKey = indexCompleteCacheKey(
+      repo, path, position.lineNumber, position.column, prefix || '', contentLen,
+    );
+    const cached = indexCompleteCache.get(cacheKey);
+    if (cached && Date.now() - cached.time < INDEX_COMPLETE_CACHE_MS) {
+      return cached.items;
+    }
+    return null;
+  }
+
+  function mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions, limit = 80) {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const mapped = mapIndexItemToSuggestion(item, range, seen, memberContext);
+      if (mapped) suggestions.push(mapped);
+      if (suggestions.length >= limit) break;
+    }
+  }
+
   async function fetchAiCompletions(helpers, model, position, linePrefix, prefix, cache) {
     if (!helpers.getGeminiConfigured?.()) return [];
     const repo = helpers.getRepo();
@@ -1214,7 +1614,8 @@
     const line = position.lineNumber;
     const column = position.column;
     const dirty = helpers.isFileDirty?.(path);
-    const content = dirty ? model.getValue() : undefined;
+    const content = model.getValue();
+    const needsLiveContent = dirty || /\.(java|kt|kts|groovy)$/i.test(path);
     const contentLen = content?.length ?? 0;
     const cacheKey = indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen);
     const cached = indexCompleteCache.get(cacheKey);
@@ -1225,28 +1626,54 @@
     const url = helpers.repoApi(repo, '/workspace/completions');
     let items;
 
-    if (dirty && content !== undefined) {
-      const payload = contentForApiPayload(content, line);
-      items = await helpers.api(url, {
-        method: 'POST',
-        body: JSON.stringify({
-          path, line: payload.line, column, prefix: prefix || '', content: payload.content,
-        }),
-      });
-    } else {
-      const q = new URLSearchParams({
-        path,
-        line: String(line),
-        column: String(column),
-        prefix: prefix || '',
-      });
-      items = await helpers.api(`${url}?${q}`);
+    try {
+      if (needsLiveContent) {
+        const payload = contentForApiPayload(content, line);
+        items = await helpers.api(url, {
+          method: 'POST',
+          body: JSON.stringify({
+            path,
+            line: payload.line,
+            column,
+            prefix: prefix || '',
+            content: payload.content,
+          }),
+        });
+      } else {
+        const q = new URLSearchParams({
+          path,
+          line: String(line),
+          column: String(column),
+          prefix: prefix || '',
+        });
+        items = await helpers.api(`${url}?${q}`);
+      }
+    } catch {
+      return [];
     }
 
     const list = Array.isArray(items) ? items : [];
     indexCompleteCache.set(cacheKey, { items: list, time: Date.now() });
     pruneIndexCompleteCache();
     return list;
+  }
+
+  const COMPLETION_FETCH_TIMEOUT_MS = 8000;
+  const INDEX_COMPLETION_BUDGET_MS = 600;
+
+  function fetchCompletionsWithTimeout(helpers, model, position, prefix, timeoutMs = COMPLETION_FETCH_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Completions timed out')), timeoutMs);
+      fetchCompletions(helpers, model, position, prefix)
+        .then((items) => {
+          clearTimeout(timer);
+          resolve(items);
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+    });
   }
 
   const definitionCache = new Map();
@@ -1316,9 +1743,407 @@
   }
 
   function setupEditorFeatures(editor, helpers) {
+    completionDebug(helpers, ['debug active', `build=${document.querySelector('meta[name="reaper-ui-build"]')?.content?.trim() || '?'}`]);
+
     registerGroovy();
 
     const langs = new Set(ALL_EDITOR_LANGS);
+    const activeEditor = () => helpers.getEditor?.() || editor;
+
+    function runSuggestAction(ed) {
+      const action = ed.getAction('editor.action.triggerSuggest');
+      if (action) {
+        action.run();
+        return;
+      }
+      ed.trigger('keyboard', 'editor.action.triggerSuggest', {});
+    }
+
+    function openSuggestWidget(ed, { delayMs = 0 } = {}) {
+      const run = () => {
+        requestAnimationFrame(() => {
+          runSuggestAction(ed);
+          setTimeout(() => {
+            const visible = ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible');
+            if (!visible) runSuggestAction(ed);
+          }, 100);
+        });
+      };
+      if (delayMs > 0) setTimeout(run, delayMs);
+      else run();
+    }
+
+    let memberFallbackEl = null;
+    let memberFallbackItems = [];
+    let memberFallbackIndex = 0;
+
+    function hideMemberSuggestFallback() {
+      if (memberFallbackEl) {
+        memberFallbackEl.remove();
+        memberFallbackEl = null;
+      }
+      memberFallbackItems = [];
+      memberFallbackIndex = 0;
+    }
+
+    function memberFallbackLabel(item) {
+      if (!item) return '';
+      let label = typeof item.label === 'string' ? item.label : (item.label?.label || '');
+      label = String(label).trim();
+      if (label.endsWith('()')) label = label.slice(0, -2);
+      const dot = label.lastIndexOf('.');
+      if (dot >= 0) label = label.slice(dot + 1);
+      return label;
+    }
+
+    function focusMemberFallbackRow() {
+      if (!memberFallbackEl) return;
+      const rows = memberFallbackEl.querySelectorAll('.reaper-member-suggest-row');
+      rows.forEach((row, i) => {
+        row.classList.toggle('focused', i === memberFallbackIndex);
+      });
+      const focused = rows[memberFallbackIndex];
+      if (focused) focused.scrollIntoView({ block: 'nearest' });
+    }
+
+    function acceptMemberFallbackItem(ed) {
+      const item = memberFallbackItems[memberFallbackIndex];
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (!item || !model || !position) return;
+      let text = item.insertText ?? memberFallbackLabel(item);
+      if (typeof text !== 'string') text = memberFallbackLabel(item);
+      const range = item.range || completionContext(model, position).range;
+      ed.executeEdits('reaper-member', [{ range, text }]);
+      ed._reaperMemberAcceptedUntil = Date.now() + 500;
+      hideMemberSuggestFallback();
+      ed.focus();
+      requestAnimationFrame(() => hideMemberSuggestFallback());
+    }
+
+    function memberSuggestCoords(ed, position) {
+      const coords = ed.getScrolledVisiblePosition(position);
+      if (coords) {
+        return { left: coords.left, top: coords.top + coords.height + 2 };
+      }
+      try {
+        const layout = ed.getLayoutInfo();
+        const top = ed.getTopForLineNumber(position.lineNumber) - ed.getScrollTop() + layout.contentTop;
+        const left = ed.getOffsetForColumn(position.lineNumber, position.column)
+          - ed.getScrollLeft() + layout.contentLeft;
+        if (Number.isFinite(top) && Number.isFinite(left)) {
+          const lineHeight = ed.getOption(monaco.editor.EditorOption.lineHeight);
+          return { left, top: top + lineHeight + 2 };
+        }
+      } catch {
+        /* layout not ready */
+      }
+      const dom = ed.getDomNode()?.querySelector('.view-lines');
+      if (dom) {
+        const rect = dom.getBoundingClientRect();
+        const root = document.getElementById('editor-overflow-root')?.getBoundingClientRect();
+        if (root) {
+          return { left: rect.left - root.left + 8, top: rect.top - root.top + 24 };
+        }
+      }
+      return null;
+    }
+
+    function showMemberSuggestFallback(ed, items) {
+      hideMemberSuggestFallback();
+      if (!items.length) {
+        completionDebug(helpers, ['fallback', 'skip: no items']);
+        return;
+      }
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const root = document.getElementById('editor-overflow-root');
+      if (!model || !position || !root) {
+        completionDebug(helpers, [
+          'fallback', 'skip: no model/root',
+          !model ? 'no-model' : '',
+          !position ? 'no-pos' : '',
+          !root ? 'no-root' : '',
+        ], { warn: true });
+        return;
+      }
+      const pt = memberSuggestCoords(ed, position);
+      if (!pt) {
+        completionDebug(helpers, ['fallback', 'skip: no coords'], { warn: true });
+        return;
+      }
+
+      memberFallbackItems = items;
+      memberFallbackIndex = 0;
+      const visibleItems = items.filter((item) => {
+        const label = memberFallbackLabel(item);
+        const range = item.range || completionContext(model, position).range;
+        const typed = model.getValueInRange(range);
+        if (!typed) return true;
+        if (typed === label || typed.startsWith(`${label}(`)) return false;
+        return label.toLowerCase().startsWith(typed.toLowerCase());
+      });
+      if (!visibleItems.length) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      memberFallbackItems = visibleItems;
+
+      memberFallbackEl = document.createElement('div');
+      memberFallbackEl.className = 'reaper-member-suggest visible';
+      memberFallbackEl.style.left = `${pt.left}px`;
+      memberFallbackEl.style.top = `${pt.top}px`;
+
+      visibleItems.forEach((item, i) => {
+        const row = document.createElement('div');
+        row.className = `reaper-member-suggest-row${i === 0 ? ' focused' : ''}`;
+        row.textContent = memberFallbackLabel(item);
+        row.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          memberFallbackIndex = i;
+          acceptMemberFallbackItem(ed);
+        });
+        memberFallbackEl.appendChild(row);
+      });
+
+      root.appendChild(memberFallbackEl);
+      completionDebug(helpers, [
+        'fallback',
+        `n=${visibleItems.length}`,
+        visibleItems.slice(0, 6).map((s) => memberFallbackLabel(s)).join(','),
+      ]);
+    }
+
+    function onMemberFallbackKeydown(e) {
+      if (!memberFallbackEl) return;
+      const ed = activeEditor();
+      if (e.key === 'Escape') {
+        hideMemberSuggestFallback();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        memberFallbackIndex = (memberFallbackIndex + 1) % memberFallbackItems.length;
+        focusMemberFallbackRow();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        memberFallbackIndex = (memberFallbackIndex - 1 + memberFallbackItems.length)
+          % memberFallbackItems.length;
+        focusMemberFallbackRow();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        acceptMemberFallbackItem(ed);
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+
+    document.addEventListener('keydown', onMemberFallbackKeydown, true);
+    editor.onDidChangeModelContent(() => {
+      if (!memberFallbackEl) return;
+      const model = editor.getModel();
+      const pos = editor.getPosition();
+      if (!model || !pos) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      const linePrefix = editorLinePrefix(model, pos);
+      if (!dotQualifierFromLinePrefix(linePrefix)) {
+        hideMemberSuggestFallback();
+      }
+    });
+    editor.onDidChangeCursorPosition((e) => {
+      if (!memberFallbackEl) return;
+      const model = editor.getModel();
+      if (!model) {
+        hideMemberSuggestFallback();
+        return;
+      }
+      const linePrefix = editorLinePrefix(model, e.position);
+      if (!dotQualifierFromLinePrefix(linePrefix)) {
+        hideMemberSuggestFallback();
+      }
+    });
+    editor.onDidBlurEditorWidget(() => hideMemberSuggestFallback());
+
+    let lastMemberSuggestKey = '';
+    let lastMemberSuggestAt = 0;
+
+    function fireCompletionsSuggest(ed, { force = false } = {}) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (!model || !position) return;
+      const path = helpers.getActivePath?.() || '';
+      if (!path) {
+        if (force) helpers.toast?.('Open a file first', 'info');
+        return;
+      }
+      const repo = helpers.getRepo?.();
+
+      const { linePrefix, prefix } = completionContext(model, position);
+      const memberContext = dotQualifierFromLinePrefix(linePrefix);
+      const completionPrefix = memberContext
+        ? (memberContext.memberPrefix || prefix || '')
+        : (prefix || '');
+      if (
+        !force
+        && !memberContext
+        && !shouldFetchIndexCompletions(linePrefix, completionPrefix)
+      ) {
+        return;
+      }
+
+      if (memberContext && !force) {
+        ensureModelLanguageForPath(path, model);
+        const dedupeKey = `${path}:${position.lineNumber}:${position.column}:${memberContext.qualifier}`;
+        const now = Date.now();
+        if (dedupeKey === lastMemberSuggestKey && now - lastMemberSuggestAt < 180) {
+          return;
+        }
+        lastMemberSuggestKey = dedupeKey;
+        lastMemberSuggestAt = now;
+      } else if (memberContext) {
+        ensureModelLanguageForPath(path, model);
+      }
+
+      const content = editorContent(ed, model);
+      const effLang = effectiveEditorLang(path, model);
+      let localN = 0;
+      let localLabels = '';
+      let jdkN = 0;
+      let localSuggestions = [];
+      if (memberContext) {
+        jdkN = memberPreviewItems(
+          content, memberContext.qualifier, memberContext.memberPrefix, path, model,
+        ).length;
+        const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
+        localSuggestions = local.suggestions;
+        localN = localSuggestions.length;
+        localLabels = localSuggestions.slice(0, 6).map((s) => s.label).join(',');
+      }
+
+      completionDebug(helpers, [
+        'fireSuggest',
+        force ? 'force' : 'auto',
+        memberContext ? `member=${memberContext.qualifier}` : '',
+        memberContext ? `jdkN=${jdkN}` : '',
+        memberContext ? `localN=${localN}` : '',
+        `lang=${effLang}`,
+        `model=${model.getLanguageId()}`,
+        path.split('/').pop() || path,
+        localLabels ? `items=${localLabels}` : (memberContext ? 'items=(none)' : ''),
+      ], { warn: !!(memberContext && localN === 0 && jdkN === 0) });
+
+      const showMemberMerged = (fromIndex) => {
+        if (!fromIndex.length) return;
+        const merged = localSuggestions.length > 0
+          ? [...localSuggestions]
+          : fromIndex;
+        if (localSuggestions.length > 0) {
+          const labels = new Set(localSuggestions.map((s) => s.label));
+          for (const item of fromIndex) {
+            if (!labels.has(item.label)) merged.push(item);
+          }
+        }
+        showMemberSuggestFallback(ed, merged);
+      };
+
+      void (repo ? fetchCompletionsWithTimeout(helpers, model, position, completionPrefix)
+        .then((items) => {
+          if (!Array.isArray(items) || items.length === 0) return;
+          if (memberContext) {
+            const { range } = completionContext(model, position);
+            const seen = new Set();
+            const fromIndex = [];
+            mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, fromIndex);
+            showMemberMerged(fromIndex);
+            return;
+          }
+          requestAnimationFrame(() => runSuggestAction(ed));
+        })
+        .catch(() => {}) : Promise.resolve());
+      if (memberContext) {
+        if (localSuggestions.length > 0) {
+          showMemberSuggestFallback(ed, localSuggestions);
+        }
+        return;
+      }
+      if (localN > 0) {
+        openSuggestWidget(ed);
+      }
+    }
+
+    function scheduleMemberCompletions(ed) {
+      clearTimeout(ed._reaperMemberSuggestTimer);
+      ed._reaperMemberSuggestTimer = setTimeout(() => {
+        if (typeof reaperDotCompletionHandler === 'function') {
+          reaperDotCompletionHandler(ed);
+        } else {
+          fireCompletionsSuggest(ed, { force: true });
+        }
+      }, 20);
+    }
+
+    function scheduleAutocompleteSuggest(ed, force) {
+      clearTimeout(ed._reaperSuggestTimer);
+      const delay = force ? 0 : 280;
+      ed._reaperSuggestTimer = setTimeout(() => {
+        fireCompletionsSuggest(ed, { force });
+      }, delay);
+    }
+
+    function handleDotCompletion(ed = editor) {
+      if (ed._reaperMemberAcceptedUntil && Date.now() < ed._reaperMemberAcceptedUntil) {
+        return 0;
+      }
+      const model = ed?.getModel?.();
+      const position = ed?.getPosition?.();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !path) {
+        completionDebug(helpers, ['handleDot', 'skip: no model/path']);
+        return 0;
+      }
+      ensureModelLanguageForPath(path, model);
+      const expectedLang = langForPath(path);
+      const actualLang = model.getLanguageId();
+      if (expectedLang && actualLang !== expectedLang) {
+        ensureMonacoBasicLanguage(expectedLang);
+        monaco.editor.setModelLanguage(model, expectedLang);
+      }
+      const { linePrefix } = completionContext(model, position);
+      const memberContext = dotQualifierFromLinePrefix(linePrefix);
+      if (!memberContext) {
+        completionDebug(helpers, [
+          'handleDot',
+          'skip: not member ctx',
+          `line=…${linePrefix.slice(-24)}`,
+        ]);
+        return 0;
+      }
+      const content = editorContent(ed, model);
+      const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
+      completionDebug(helpers, [
+        'handleDot',
+        `lang=${model.getLanguageId()}`,
+        `member=${memberContext.qualifier}`,
+        `n=${local.suggestions.length}`,
+        local.suggestions.slice(0, 6).map((s) => s.label).join(',') || '(none)',
+      ], { warn: local.suggestions.length === 0 });
+      if (local.suggestions.length > 0) {
+        showMemberSuggestFallback(ed, local.suggestions);
+      }
+      fireCompletionsSuggest(ed, { force: true });
+      return local.suggestions.length;
+    }
+
+    reaperDotCompletionHandler = handleDotCompletion;
 
     monaco.languages.registerDocumentSymbolProvider(Array.from(langs), {
       provideDocumentSymbols(model) {
@@ -1336,6 +2161,44 @@
     monaco.languages.registerDefinitionProvider(Array.from(langs), {
       provideDefinition(model, position) {
         return lookupDefinition(helpers, model, position);
+      },
+    });
+
+    function positionInMarker(position, marker) {
+      if (position.lineNumber < marker.startLineNumber
+        || position.lineNumber > marker.endLineNumber) {
+        return false;
+      }
+      if (position.lineNumber === marker.startLineNumber
+        && position.column < marker.startColumn) {
+        return false;
+      }
+      if (position.lineNumber === marker.endLineNumber
+        && position.column > marker.endColumn) {
+        return false;
+      }
+      return true;
+    }
+
+    monaco.languages.registerHoverProvider(REAPER_DOC_SELECTOR, {
+      provideHover(model, position) {
+        const markers = monaco.editor.getModelMarkers({ resource: model.uri })
+          .filter((m) => positionInMarker(position, m));
+        if (!markers.length) return null;
+        const primary = markers[0];
+        const contents = markers.map((m) => {
+          const tag = m.severity === monaco.MarkerSeverity.Warning ? 'Warning' : 'Error';
+          return { value: `**${tag}:** ${m.message}` };
+        });
+        return {
+          range: new monaco.Range(
+            primary.startLineNumber,
+            primary.startColumn,
+            primary.endLineNumber,
+            primary.endColumn,
+          ),
+          contents,
+        };
       },
     });
 
@@ -1399,7 +2262,7 @@
       if (!edits.length) return null;
       return {
         title: fix.title.startsWith('AI:') ? fix.title : `AI: ${fix.title}`,
-        kind: monaco.languages.CodeActionKind.QuickFix,
+        kind: reaperCodeActionKind('QuickFix'),
         isPreferred: true,
         diagnostics: linkedDiagnostics,
         edit: { edits },
@@ -1447,7 +2310,7 @@
       return true;
     }
 
-    async function fetchQuickFixes(model, markers) {
+    async function fetchQuickFixes(model, markers, { silent = false } = {}) {
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
       if (!repo || !path || !helpers.repoApi || !markers.length) return [];
@@ -1471,7 +2334,9 @@
         }
         return list;
       } catch (err) {
-        helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
+        if (!silent) {
+          helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
+        }
         return [];
       }
     }
@@ -1502,7 +2367,7 @@
               : monaco.MarkerSeverity.Error,
           };
         });
-      fetchQuickFixes(model, markerInput).then((fixes) => {
+      fetchQuickFixes(model, markerInput, { silent: true }).then((fixes) => {
         if (fixes.length) editor._reaperQuickFixReady = Date.now();
       });
     }
@@ -1546,16 +2411,12 @@
       });
     };
 
+    try {
     monaco.languages.registerCodeActionProvider(
       [{ pattern: '**' }],
       {
         provideCodeActions(model, range, context) {
-          const only = context.only;
-          if (
-            only
-            && !only.contains(monaco.languages.CodeActionKind.QuickFix)
-            && !only.contains(monaco.languages.CodeActionKind.Empty)
-          ) {
+          if (!codeActionOnlyWantsQuickFix(context.only)) {
             return { actions: [], dispose: () => {} };
           }
           const markers = markersInRange(model, range);
@@ -1573,7 +2434,9 @@
             };
           }
           const allMarkers = allFileMarkers(model);
-          return fetchQuickFixes(model, allMarkers.length ? allMarkers : markers).then((fixes) => {
+          return fetchQuickFixes(
+            model, allMarkers.length ? allMarkers : markers, { silent: true },
+          ).then((fixes) => {
             if (!fixes.length) {
               return { actions: [], dispose: () => {} };
             }
@@ -1585,25 +2448,23 @@
         },
       },
       {
-        providedCodeActionKinds: [monaco.languages.CodeActionKind.QuickFix],
+        providedCodeActionKinds: [reaperCodeActionKind('QuickFix')],
       },
     );
+    } catch (err) {
+      console.warn('[Reaper] code action provider skipped:', err);
+    }
 
     let aiInlineTimer = null;
     let aiInlineCache = {
       key: '', text: '', controlSnippet: '',
       repo: '', path: '', lineNumber: 0, column: 0, linePrefix: '',
     };
-    let aiInlineErrorShown = false;
     const AI_INLINE_DEBOUNCE_MS = 200;
     const AI_INLINE_STATEMENT_DEBOUNCE_MS = 70;
     let aiInlineSeq = 0;
     const aiCompleteCache = { key: '', items: [], time: 0 };
     let inlineShowTimer = null;
-
-    function editorContent(ed, model) {
-      return ed._reaperContent ?? model.getValue();
-    }
 
     function queueInlineSuggestion(ed) {
       clearTimeout(inlineShowTimer);
@@ -1615,6 +2476,10 @@
           }, 48);
         });
       }, 16);
+    }
+
+    function aiInlineFetchEnabled() {
+      return helpers.getAiInlineComplete?.() && helpers.getGeminiConfigured?.();
     }
 
     function aiInlineEnabled() {
@@ -1637,6 +2502,12 @@
       };
     }
 
+    function dismissInlineGhost(ed) {
+      clearInlineCache(ed);
+      if (!ed) return;
+      ed.trigger('reaper', 'editor.action.inlineSuggest.hide', {});
+    }
+
     function clearInlineCache(ed) {
       aiInlineCache = {
         key: '', text: '', controlSnippet: '',
@@ -1646,9 +2517,11 @@
     }
 
     function setInlineCache(ed, cacheKey, text, controlSnippet, meta) {
+      const path = meta?.path ?? helpers.getActivePath?.() || '';
+      const linePrefix = meta?.linePrefix ?? '';
       const clean = capInlineText(sanitizeInlineGhostText(text));
       const snippet = controlSnippet || '';
-      if (!clean) {
+      if (!clean || shouldSuppressInlineGhost(path, linePrefix, clean)) {
         if (aiInlineCache.text) {
           clearInlineCache(ed);
         }
@@ -1768,73 +2641,150 @@
       return false;
     }
 
-    function scheduleAutocompleteSuggest(ed, force) {
-      clearTimeout(ed._reaperSuggestTimer);
-      const delay = force ? 40 : 120;
-      ed._reaperSuggestTimer = setTimeout(() => {
-        const model = ed.getModel();
-        const position = ed.getPosition();
-        if (!model || !position) return;
-        const path = helpers.getActivePath?.() || '';
-        const content = editorContent(ed, model);
-        if (!shouldAutoOpenSuggest(model, position, path, content)) return;
-        ed.trigger('reaper', 'editor.action.triggerSuggest', {});
-      }, delay);
-    }
-
-    // Instant local suggestions — never blocks on network.
-    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
+    // Local + index completions — member access returns instantly (no loading spinner).
+    monaco.languages.registerCompletionItemProvider(REAPER_DOC_SELECTOR, {
       triggerCharacters: ['.', '@', ':', '-', '<', '"', "'", '/', '#', '*', '=', '(', '[', '{'],
-      provideCompletionItems(model, position) {
+      provideCompletionItems(model, position, context) {
         const path = helpers.getActivePath?.() || '';
-        if (!path) return { suggestions: [] };
-        const content = editorContent(editor, model);
-        const { suggestions } = buildLocalCompletionSuggestions(model, position, path, helpers, content);
-        return { suggestions };
-      },
-    });
+        if (!path) {
+          completionDebug(helpers, ['provider', completionTriggerLabel(context), 'skip: no active path']);
+          return { suggestions: [], incomplete: false };
+        }
 
-    // Index / workspace symbols — all languages, from 1st character or after `.`
-    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
-      triggerCharacters: ['.', '@', ':', '<', '"', "'", '(', '[', '#'],
-      async provideCompletionItems(model, position, context) {
-        const path = helpers.getActivePath?.() || '';
-        if (!path || !helpers.repoApi || !helpers.getRepo()) return { suggestions: [] };
+        const linePrefixRaw = editorLinePrefix(model, position);
+        const trig = monaco.languages.CompletionTriggerKind;
+        // Monaco fires on '.' before the dot is in the model — filters against "System".
+        if (
+          context.triggerKind === trig.TriggerCharacter
+          && context.triggerCharacter === '.'
+          && !linePrefixRaw.trimEnd().endsWith('.')
+        ) {
+          return { suggestions: [], incomplete: false };
+        }
 
-        const { linePrefix, prefix, range, seen } = completionContext(model, position);
+        const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
         const manual = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
-        const memberContext = dotQualifierFromLinePrefix(linePrefix);
-        if (!shouldFetchIndexCompletions(linePrefix, prefix) && !manual) {
-          return { suggestions: [] };
+        const memberContext = memberCtx || dotQualifierFromLinePrefix(linePrefix);
+        const completionPrefix = memberContext
+          ? (memberContext.memberPrefix || prefix || '')
+          : (prefix || '');
+        if (!memberContext && !shouldFetchIndexCompletions(linePrefix, completionPrefix) && !manual) {
+          completionDebug(helpers, [
+            'provider', completionTriggerLabel(context), 'skip: fetch gate',
+            `line=…${linePrefix.slice(-24)}`,
+          ]);
+          return { suggestions: [], incomplete: false };
+        }
+
+        const ed = activeEditor();
+        const content = editorContent(ed, model);
+        const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
+        const suggestions = [...local.suggestions];
+        const seen = new Set(suggestions.map((s) => s.label));
+
+        const report = (tag, extra = '') => {
+          const labels = suggestions.slice(0, 6).map((s) => s.label).join(', ');
+          completionDebug(helpers, [
+            'provider', completionTriggerLabel(context), tag,
+            memberContext ? `member=${memberContext.qualifier}` : '',
+            `n=${suggestions.length}`,
+            labels ? `items=${labels}` : 'items=(none)',
+            path.split('/').pop(),
+            extra,
+          ], { warn: !!(memberContext && suggestions.length === 0) });
+        };
+
+        if (!helpers.repoApi || !helpers.getRepo?.()) {
+          if (memberContext) {
+            if (suggestions.length > 0 && ed) {
+              showMemberSuggestFallback(ed, suggestions);
+            }
+            report('member no repo');
+            return { suggestions: [], incomplete: false };
+          }
+          report('no repo');
+          return { suggestions, incomplete: false };
+        }
+
+        const cached = readCachedIndexCompletions(helpers, model, position, completionPrefix);
+        if (cached) {
+          mergeIndexItemsIntoSuggestions(cached, range, seen, memberContext, suggestions);
         }
 
         if (memberContext) {
-          void fetchCompletions(helpers, model, position, prefix || memberContext.memberPrefix || '');
+          const ed = activeEditor();
+          if (!cached) {
+            void fetchCompletionsWithTimeout(helpers, model, position, completionPrefix)
+              .then((items) => {
+                const n = Array.isArray(items) ? items.length : 0;
+                completionDebug(helpers, [
+                  'index fetch done',
+                  `member=${memberContext.qualifier}`,
+                  `n=${n}`,
+                ], { warn: n === 0 });
+                if (n > 0 && ed) {
+                  const fromIndex = [];
+                  const idxSeen = new Set(suggestions.map((s) => s.label));
+                  mergeIndexItemsIntoSuggestions(items, range, idxSeen, memberContext, fromIndex);
+                  if (fromIndex.length > 0) {
+                    const merged = suggestions.length > 0
+                      ? [...suggestions, ...fromIndex.filter((i) => !suggestions.some((s) => s.label === i.label))]
+                      : fromIndex;
+                    showMemberSuggestFallback(ed, merged);
+                  }
+                }
+              })
+              .catch((err) => {
+                completionDebug(helpers, [
+                  'index fetch failed',
+                  memberContext.qualifier,
+                  String(err?.message || err),
+                ], { warn: true });
+              });
+          }
+          if (suggestions.length > 0 && ed) {
+            showMemberSuggestFallback(ed, suggestions);
+          }
+          report(cached ? 'member+cache' : 'member');
+          return { suggestions: [], incomplete: false };
         }
 
-        try {
-          const items = await fetchCompletions(helpers, model, position, prefix);
-          const suggestions = [];
-          for (const item of items) {
-            const mapped = mapIndexItemToSuggestion(item, range, seen, memberContext);
-            if (mapped) suggestions.push(mapped);
-            if (suggestions.length >= 80) break;
-          }
-          return { suggestions };
-        } catch {
-          return { suggestions: [] };
+        if (manual) {
+          report('manual');
+          return { suggestions, incomplete: false };
         }
+
+        return (async () => {
+          try {
+            const budget = suggestions.length > 0
+              ? INDEX_COMPLETION_BUDGET_MS
+              : COMPLETION_FETCH_TIMEOUT_MS;
+            const items = await Promise.race([
+              fetchCompletionsWithTimeout(
+                helpers, model, position, completionPrefix, COMPLETION_FETCH_TIMEOUT_MS,
+              ),
+              new Promise((resolve) => setTimeout(() => resolve(null), budget)),
+            ]);
+            if (items) {
+              mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions);
+            }
+            report('async index');
+          } catch {
+            /* index completions are best-effort */
+          }
+          return { suggestions, incomplete: false };
+        })();
       },
     });
 
     // AI completions — Ctrl+Space only (Gemini is too slow for every keystroke).
-    monaco.languages.registerCompletionItemProvider(ALL_EDITOR_LANGS, {
+    monaco.languages.registerCompletionItemProvider(REAPER_DOC_SELECTOR, {
       async provideCompletionItems(model, position, context) {
         if (context.triggerKind !== monaco.languages.CompletionTriggerKind.Invoke) {
-          return { suggestions: [] };
+          return { suggestions: [], incomplete: false };
         }
         if (!helpers.getAiInlineComplete?.() || !helpers.getGeminiConfigured?.()) {
-          return { suggestions: [] };
+          return { suggestions: [], incomplete: false };
         }
         const path = helpers.getActivePath?.() || '';
         if (!path) return { suggestions: [] };
@@ -1874,12 +2824,13 @@
             suggestions.push(suggestion);
             if (suggestions.length >= 12) break;
           }
-          return { suggestions };
+          return { suggestions, incomplete: false };
         } catch {
-          return { suggestions: [] };
+          return { suggestions: [], incomplete: false };
         }
       },
     });
+    completionDebug(helpers, ['setup', 'completion providers OK', `rev=${REAPER_COMPLETION_REV}`]);
 
     function scheduleEmptyLineInline(ed) {
       if (!helpers.getAiInlineComplete?.()) return;
@@ -1943,11 +2894,18 @@
     }
 
     function scheduleAiInlineFetch() {
-      if (!aiInlineEnabled()) return;
-      clearTimeout(aiInlineTimer);
-      const seq = ++aiInlineSeq;
+      if (!aiInlineFetchEnabled()) return;
       const model = editor.getModel();
       const position = editor.getPosition();
+      if (model && position) {
+        const linePrefix = editorLinePrefix(model, position);
+        if (dotQualifierFromLinePrefix(linePrefix)) {
+          clearTimeout(aiInlineTimer);
+          return;
+        }
+      }
+      clearTimeout(aiInlineTimer);
+      const seq = ++aiInlineSeq;
       let debounceMs = AI_INLINE_DEBOUNCE_MS;
       if (model && position) {
         const path = helpers.getActivePath?.() || '';
@@ -1970,7 +2928,9 @@
         const path = helpers.getActivePath?.() || '';
         if (!repo || !path) return;
         const linePrefix = editorLinePrefix(model, position);
+        if (dotQualifierFromLinePrefix(linePrefix)) return;
         if (!inlineTypingReady()) return;
+        if (isJavaDeclarationTyping(path, linePrefix)) return;
         const cacheKey = buildInlineCacheKey(
           repo, path, position.lineNumber, position.column, linePrefix,
         );
@@ -1987,12 +2947,8 @@
           const text = await fetchInlineComplete(model, position, linePrefix);
           if (!text || seq !== aiInlineSeq) return;
           setInlineCache(editor, cacheKey, text, '', meta);
-        } catch (err) {
-          if (!aiInlineErrorShown) {
-            aiInlineErrorShown = true;
-            helpers.toast?.(err?.message || 'Inline completion failed', 'error');
-            setTimeout(() => { aiInlineErrorShown = false; }, 8000);
-          }
+        } catch {
+          // Inline completion is best-effort; network errors (e.g. "Load failed") are not user-actionable.
         }
       }, debounceMs);
     }
@@ -2005,13 +2961,18 @@
 
         const linePrefix = editorLinePrefix(model, position);
         if (!inlineTypingReady()) return { items: [] };
+        if (isJavaDeclarationTyping(path, linePrefix)) {
+          clearInlineCache(editor);
+          return { items: [] };
+        }
 
         const cacheKey = buildInlineCacheKey(
           repo, path, position.lineNumber, position.column, linePrefix,
         );
         const javaLevel = inlineJavaLevel(helpers);
         const content = editorContent(editor, model);
-        const preferAi = shouldPreferAiStatementInline(
+        const memberContext = dotQualifierFromLinePrefix(linePrefix);
+        const preferAi = !memberContext && shouldPreferAiStatementInline(
           path, linePrefix, content, position.lineNumber,
         );
 
@@ -2026,7 +2987,7 @@
 
         if (!preferAi) {
           const local = inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
-          if (local) {
+          if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
             const meta = inlineCacheMeta(repo, path, position, linePrefix);
             setInlineCache(editor, cacheKey, local, '', meta);
             editor._reaperPendingControlSnippet = null;
@@ -2035,7 +2996,7 @@
           }
         }
 
-        if (!aiInlineEnabled()) {
+        if (!aiInlineFetchEnabled()) {
           return { items: [] };
         }
 
@@ -2053,8 +3014,11 @@
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
       let preferAi = false;
+      let linePrefix = '';
+      if (model && position) {
+        linePrefix = editorLinePrefix(model, position);
+      }
       if (model && position && repo && path) {
-        const linePrefix = editorLinePrefix(model, position);
         const cacheKey = buildInlineCacheKey(
           repo, path, position.lineNumber, position.column, linePrefix,
         );
@@ -2064,44 +3028,66 @@
         preferAi = shouldPreferAiStatementInline(
           path, linePrefix, content, position.lineNumber,
         );
-        const local = preferAi
-          ? ''
-          : inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
-        if (local) {
-          setInlineCache(editor, cacheKey, local, '', meta);
-          if (aiInlineEnabled() && local.length >= 4) {
-            scheduleAiInlineFetch();
-          }
+        if (isJavaDeclarationTyping(path, linePrefix)) {
+          clearInlineCache(editor);
         } else {
-          const stale = inlineGhostFromCache(
-            aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
-          );
-          if (stale) {
-            aiInlineCache = {
-              key: cacheKey,
-              text: stale,
-              controlSnippet: '',
-              repo,
-              path,
-              lineNumber: position.lineNumber,
-              column: position.column,
-              linePrefix,
-            };
-            queueInlineSuggestion(editor);
-            if (aiInlineEnabled()) scheduleAiInlineFetch();
-          } else {
-            if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
-              clearInlineCache(editor);
+          const local = preferAi
+            ? ''
+            : inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
+          if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
+            setInlineCache(editor, cacheKey, local, '', meta);
+            if (aiInlineFetchEnabled() && local.length >= 4) {
+              scheduleAiInlineFetch();
             }
-            if (aiInlineEnabled()) scheduleAiInlineFetch();
+          } else {
+            const stale = inlineGhostFromCache(
+              aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
+            );
+            if (stale) {
+              aiInlineCache = {
+                key: cacheKey,
+                text: stale,
+                controlSnippet: '',
+                repo,
+                path,
+                lineNumber: position.lineNumber,
+                column: position.column,
+                linePrefix,
+              };
+              queueInlineSuggestion(editor);
+              if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
+            } else {
+              if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+                clearInlineCache(editor);
+              }
+              if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
+            }
           }
         }
       } else {
         clearInlineCache(editor);
       }
 
-      if (!preferAi) {
+      if (dotQualifierFromLinePrefix(linePrefix)) {
+        const memberGhost = inlineGhostSuffix(path, linePrefix, editor._reaperContent, position.lineNumber, inlineJavaLevel(helpers));
+        if (memberGhost) {
+          const cacheKey = buildInlineCacheKey(
+            repo, path, position.lineNumber, position.column, linePrefix,
+          );
+          setInlineCache(editor, cacheKey, memberGhost, '', inlineCacheMeta(repo, path, position, linePrefix));
+        }
+        scheduleMemberCompletions(editor);
+      } else if (!preferAi && !isJavaDeclarationTyping(path, linePrefix)) {
         scheduleAutocompleteSuggest(editor);
+      }
+    });
+
+    editor.onKeyDown((e) => {
+      const ev = e.browserEvent;
+      if (ev?.key === ' ' && ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
       }
     });
 
@@ -2158,6 +3144,17 @@
       run: async () => {
         await editor.getAction('editor.action.formatDocument')?.run();
       },
+    });
+
+    editor.addAction({
+      id: 'reaper.triggerSuggest',
+      label: 'Trigger Suggest',
+      keybindings: [
+        monaco.KeyMod.Ctrl | monaco.KeyCode.Space,
+        monaco.KeyMod.WinCtrl | monaco.KeyCode.Space,
+        monaco.KeyMod.Alt | monaco.KeyCode.Space,
+      ],
+      run: (ed) => fireCompletionsSuggest(ed, { force: true }),
     });
 
     editor.addAction({
@@ -2226,6 +3223,12 @@
       const lang = editor.getModel()?.getLanguageId() || 'plaintext';
       helpers.setLanguageStatus?.(langLabel(lang));
     });
+
+    if (reaperDotCompletionHandler) {
+      helpers.setCompleteDebugStatus?.(`c${REAPER_COMPLETION_REV} · dot handler ready`);
+    } else {
+      helpers.setCompleteDebugStatus?.('dot handler MISSING');
+    }
   }
 
   function isDiagnosablePath(path) {
@@ -2237,7 +3240,31 @@
     return langForPath(path) !== 'plaintext';
   }
 
-  window.ReaperLang = {
+  function ensureMonacoBasicLanguage(lang) {
+    if (typeof require === 'undefined' || !lang || lang === 'plaintext') return;
+    const safe = String(lang).replace(/[^a-z0-9_-]/gi, '');
+    if (!safe) return;
+    try {
+      require([`vs/basic-languages/${safe}/${safe}`], () => {});
+    } catch {
+      /* optional tokenizer module */
+    }
+  }
+
+  Object.assign(window.ReaperLang || {}, {
+    completionRev: () => REAPER_COMPLETION_REV,
+    coreOnly: false,
+    jdkMemberPreview: (qualifier, memberPrefix = '', content = '', path = '', model = null) => {
+      if (!qualifier) return [];
+      if (qualifier.includes('.') || content) {
+        return memberPreviewItems(content, qualifier, memberPrefix, path, model);
+      }
+      return jdkStaticMemberItems(qualifier, memberPrefix, content);
+    },
+    memberPreview: memberPreviewItems,
+    dotQualifierFromLinePrefix,
+    memberDotContext,
+    editorLinePrefix,
     langForPath,
     langLabel,
     compilerToolIdsForPath,
@@ -2246,5 +3273,12 @@
     registerGroovy,
     setupEditorFeatures,
     extractSymbols,
-  };
+    ensureMonacoBasicLanguage,
+    handleDotCompletion: (ed) => {
+      if (typeof reaperDotCompletionHandler === 'function') {
+        return reaperDotCompletionHandler(ed);
+      }
+      return window.ReaperLang?.handleDotCompletion?.(ed) ?? -1;
+    },
+  });
 })();

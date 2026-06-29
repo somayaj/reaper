@@ -39,6 +39,11 @@
     'editorSuggestWidget.selectedForeground': '#FFFFFF',
     'editorSuggestWidget.highlightForeground': '#FFFFFF',
     'editorSuggestWidget.focusHighlightForeground': '#FFFFFF',
+    'editorHoverWidget.background': '#3C3F41',
+    'editorHoverWidget.foreground': '#BBBBBB',
+    'editorHoverWidget.border': '#515658',
+    'editorHoverWidget.highlightForeground': '#6BA6F7',
+    'editorHoverWidget.statusBarBackground': '#313335',
   };
 
   const MONACO_THEMES = {
@@ -299,10 +304,34 @@
     root.classList.toggle('theme-light', !theme.dark);
     localStorage.setItem(THEME_KEY, theme.id);
     syncThemeSelects(theme.id);
+    syncMonacoOverflowWidgetTheme(theme.dark);
 
     if (typeof monaco !== 'undefined' && window.__reaperMonacoThemesDefined) {
       monaco.editor.setTheme(theme.monaco);
     }
+  }
+
+  /** Hover/suggest widgets render in #editor-overflow-root, outside .monaco-editor. */
+  function syncMonacoOverflowWidgetTheme(dark = true) {
+    const el = document.getElementById('editor-overflow-root');
+    if (!el) return;
+    const panel = dark ? '#3C3F41' : '#FFFFFF';
+    const text = dark ? '#BBBBBB' : '#1E1E1E';
+    const border = dark ? '#515658' : '#C8C8C8';
+    const selected = dark ? '#214283' : '#0060C0';
+    const vars = {
+      '--vscode-editorSuggestWidget-background': panel,
+      '--vscode-editorSuggestWidget-foreground': text,
+      '--vscode-editorSuggestWidget-border': border,
+      '--vscode-editorSuggestWidget-selectedBackground': selected,
+      '--vscode-editorSuggestWidget-selectedForeground': '#FFFFFF',
+      '--vscode-editorSuggestWidget-highlightForeground': '#FFFFFF',
+      '--vscode-editorHoverWidget-background': panel,
+      '--vscode-editorHoverWidget-foreground': text,
+      '--vscode-editorHoverWidget-border': border,
+      '--vscode-widget-shadow': 'rgba(0, 0, 0, 0.36)',
+    };
+    Object.entries(vars).forEach(([key, value]) => el.style.setProperty(key, value));
   }
 
   function defineMonacoThemes() {
@@ -340,7 +369,8 @@
   }
 
   function initThemes() {
-    applyTheme(getStoredTheme());
+    const id = getStoredTheme();
+    applyTheme(id);
     populateThemeSelect();
   }
 
@@ -352,6 +382,7 @@
     applyTheme,
     defineMonacoThemes,
     getMonacoThemeId,
+    syncMonacoOverflowWidgetTheme,
     initThemes,
   };
 
