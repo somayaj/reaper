@@ -143,9 +143,37 @@ pub fn effective_java_home() -> Result<PathBuf> {
 
 /// JVM used to run Gradle (classpath resolution, tests, build). Gradle 8+ needs Java 17+.
 pub fn gradle_java_home() -> Result<PathBuf> {
+    gradle_java_home_with_max(25)
+}
+
+/// Pick a JDK whose major version is compatible with the project's Gradle wrapper.
+pub fn gradle_java_home_with_max(max_major: u32) -> Result<PathBuf> {
     if let Ok(home) = effective_java_home() {
-        if java_major_version(&home).is_some_and(|major| major >= 17) {
-            return Ok(home);
+        if let Some(major) = java_major_version(&home) {
+            if major >= 11 && major <= max_major {
+                return Ok(home);
+            }
+        }
+    }
+    detect_java_home_for_max(max_major)
+}
+
+fn detect_java_home_for_max(max_major: u32) -> Result<PathBuf> {
+    let mut versions = Vec::new();
+    if max_major >= 21 {
+        versions.extend(["21", "17", "11"]);
+    } else if max_major >= 19 {
+        versions.extend(["17", "11", "19"]);
+    } else {
+        versions.extend(["17", "11"]);
+    }
+    for v in versions {
+        if let Ok(major) = v.parse::<u32>() {
+            if major <= max_major {
+                if let Ok(home) = detect_java_home_for_versions(&[v]) {
+                    return Ok(home);
+                }
+            }
         }
     }
     detect_gradle_java_home()
@@ -252,13 +280,7 @@ pub fn apply_java_env(cmd: &mut Command) {
     }
 }
 
-pub fn apply_gradle_java_env(cmd: &mut Command) {
-    if let Ok(home) = gradle_java_home() {
-        apply_java_home(cmd, &home);
-    }
-}
-
-fn apply_java_home(cmd: &mut Command, home: &Path) {
+pub fn apply_java_home(cmd: &mut Command, home: &Path) {
     cmd.env("JAVA_HOME", home);
     let bin = home.join("bin");
     if bin.is_dir() {

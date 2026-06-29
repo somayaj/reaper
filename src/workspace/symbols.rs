@@ -429,6 +429,77 @@ pub(crate) fn infer_java_receiver_type(content: &str, var_name: &str) -> Option<
     best.map(|(_, t)| t)
 }
 
+/// Infer type for a dotted receiver expression (`items`, `args[0]`, `list.get(0)` base forms).
+pub(crate) fn infer_java_receiver_type_from_expr(content: &str, expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    if let Some(bracket) = expr.find('[') {
+        if expr.ends_with(']') && bracket > 0 {
+            let base = expr[..bracket].trim();
+            if let Some(ty) = infer_java_receiver_type(content, base) {
+                let ty = ty.trim();
+                if ty.ends_with("[]") {
+                    return Some(ty[..ty.len() - 2].trim().to_string());
+                }
+                if let Some(start) = ty.find('<') {
+                    if ty.ends_with('>') {
+                        let inner = ty[start + 1..ty.len() - 1].trim();
+                        let first = inner.split(',').next()?.trim();
+                        if !first.is_empty() {
+                            return Some(first.to_string());
+                        }
+                    }
+                }
+                return Some(ty.to_string());
+            }
+        }
+    }
+    infer_java_receiver_type(content, expr)
+}
+
+fn is_valid_java_dot_receiver(receiver: &str) -> bool {
+    let r = receiver.trim();
+    if r.is_empty() {
+        return false;
+    }
+    if r == "this" || r == "super" {
+        return true;
+    }
+    let ident_ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    if ident_ok(r) {
+        return true;
+    }
+    if r.contains('.') {
+        return r.split('.').all(|seg| {
+            let seg = seg.trim();
+            seg == "this" || seg == "super" || ident_ok(seg)
+        });
+    }
+    if let Some(bracket) = r.find('[') {
+        if !r.ends_with(']') {
+            return false;
+        }
+        let base = r[..bracket].trim();
+        let index = r[bracket + 1..r.len() - 1].trim();
+        if base.is_empty() || index.is_empty() {
+            return false;
+        }
+        let base_ok = base == "this" || base == "super" || ident_ok(base);
+        let index_ok = index.chars().all(|c| c.is_ascii_digit())
+            || ident_ok(index);
+        return base_ok && index_ok;
+    }
+    false
+}
+
 fn java_var_decl_matches(rest: &str, var_name: &str) -> bool {
     let rest = rest.trim_start();
     if !rest.starts_with(var_name) {
@@ -499,17 +570,15 @@ pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Optio
     let dot_pos = trimmed_end.rfind('.')?;
     let qual_part = trimmed_end[..dot_pos].trim();
     let member_part = trimmed_end[dot_pos + 1..].trim().to_string();
-    let simple = if let Some(paren) = qual_part.rfind('(') {
-        qual_part[paren + 1..].trim().rsplit('.').next()?.trim()
+    let receiver_expr = if let Some(paren) = qual_part.rfind('(') {
+        qual_part[paren + 1..].trim()
     } else {
-        qual_part.rsplit('.').next()?.trim()
+        qual_part
     };
-    if simple.is_empty()
-        || (is_keyword(simple) && simple != "this" && simple != "super")
-    {
+    if !is_valid_java_dot_receiver(receiver_expr) {
         return None;
     }
-    Some((simple.to_string(), member_part))
+    Some((receiver_expr.to_string(), member_part))
 }
 
 /// FQCN fragment typed after `import` / `import static` on the current line.
@@ -558,10 +627,156 @@ pub(crate) fn is_java_type_reference_context(content: &str, line: u32, column: u
                 || trimmed_end.ends_with("implements ")
                 || trimmed_end.ends_with("throws ")
                 || trimmed_end.ends_with("catch (")
+                || trimmed_end.ends_with("for (")
+                || trimmed_end.ends_with("for(")
                 || trimmed_end.ends_with("<")
         }
         None => false,
     }
+}
+
+/// Cursor at the start of a `for (` / `for(` header (type or init position).
+pub(crate) fn is_java_for_type_start(content: &str, line: u32, column: u32) -> bool {
+    let Some(line_text) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let col = column.saturating_sub(1) as usize;
+    let before = line_text.get(..col.min(line_text.len())).unwrap_or(line_text);
+    let trimmed = before.trim_end();
+    trimmed.ends_with("for (") || trimmed.ends_with("for(")
+}
+
+/// Cursor after `:` in an enhanced `for (Type x : …)` on the same line.
+pub(crate) fn is_java_for_iterable_context(content: &str, line: u32, column: u32) -> bool {
+    let Some(line_text) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let col = column.saturating_sub(1) as usize;
+    let before = line_text.get(..col.min(line_text.len())).unwrap_or(line_text);
+    let Some(for_pos) = before.rfind("for") else {
+        return false;
+    };
+    let tail = &before[for_pos..];
+    if !(tail.starts_with("for (") || tail.starts_with("for(")) {
+        return false;
+    }
+    let Some(paren) = tail.find('(') else {
+        return false;
+    };
+    let inside = &tail[paren + 1..];
+    !inside.contains(')') && inside.contains(':')
+}
+
+fn parse_java_local_segment(seg: &str) -> Option<(String, String)> {
+    const MODS: &[&str] = &[
+        "public", "private", "protected", "static", "final", "volatile", "transient",
+    ];
+    let decl = seg.split('=').next()?.trim().trim_end_matches(',');
+    if decl.contains('(')
+        || decl.contains("class ")
+        || decl.contains("interface ")
+        || decl.contains("enum ")
+        || decl.contains("record ")
+    {
+        return None;
+    }
+    let mut parts: Vec<&str> = decl.split_whitespace().collect();
+    while parts.len() > 2 && MODS.contains(&parts[0]) {
+        parts.remove(0);
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.last()?.to_string();
+    if is_keyword(&name) {
+        return None;
+    }
+    let ty = parts[..parts.len() - 1].join(" ");
+    if ty.is_empty() {
+        return None;
+    }
+    Some((normalize_java_type_token(&ty), name))
+}
+
+fn parse_java_local_declarations_on_line(line: &str) -> Vec<(String, String)> {
+    if line.starts_with("import ")
+        || line.starts_with("package ")
+        || line.starts_with('@')
+        || line.starts_with("//")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for segment in line.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty()
+            || seg.starts_with("for ")
+            || seg.starts_with("if ")
+            || seg.starts_with("while ")
+            || seg.starts_with("switch ")
+            || seg.starts_with("return ")
+        {
+            continue;
+        }
+        if let Some(pair) = parse_java_local_segment(seg) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+pub(crate) fn is_java_iterable_type_hint(ty: &str) -> bool {
+    let t = ty.trim();
+    t.contains('[')
+        || t.starts_with("List")
+        || t.starts_with("Set")
+        || t.starts_with("Collection")
+        || t.starts_with("Iterable")
+        || t.starts_with("Queue")
+        || t.starts_with("Deque")
+        || t.starts_with("ArrayList")
+        || t.starts_with("LinkedList")
+        || t.starts_with("HashSet")
+}
+
+/// Parameters and locals visible before `through_line` (1-based).
+pub(crate) fn collect_java_scope_variables(content: &str, through_line: u32) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let limit = through_line as usize;
+
+    for (idx, line_text) in content.lines().enumerate() {
+        if idx >= limit {
+            break;
+        }
+        let trimmed = line_text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains('(') {
+            if let Some(open) = trimmed.find('(') {
+                if let Some(rel_close) = trimmed[open + 1..].find(')') {
+                    let close = open + 1 + rel_close;
+                    if close > open {
+                        for param in split_java_param_list(&trimmed[open + 1..close]) {
+                            if let Some((ty, name)) = parse_java_parameter(&param) {
+                                if seen.insert(name.clone()) {
+                                    out.push((name, ty));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (ty, name) in parse_java_local_declarations_on_line(trimmed) {
+            if seen.insert(name.clone()) {
+                out.push((name, ty));
+            }
+        }
+    }
+    out
 }
 
 fn word_before(line: &str, col: usize) -> Option<String> {
@@ -1025,8 +1240,7 @@ pub fn format_content(ws: &Path, rel_path: &str, content: &str) -> Result<String
             .or_else(|_| try_stdin_command(ws, "ktlint", &["format", "-"], content));
     }
     if ext == "java" {
-        return try_stdin_command(ws, "google-java-format", &["-"], content)
-            .or_else(|_| try_stdin_command(ws, "clang-format", &["-assume-filename=file.java"], content));
+        return super::java_format::format_java(ws, content);
     }
     if ext == "rs" {
         return try_stdin_command(ws, "rustfmt", &["--emit", "stdout"], content);
@@ -1253,6 +1467,9 @@ pub(crate) fn member_completions_from_content(
                             column: None,
                         });
                     }
+                }
+                if start >= line_text.len() {
+                    break;
                 }
                 search = start + 1;
             }
@@ -1486,6 +1703,19 @@ fn path_score_bonus(rel_path: &str) -> u32 {
 }
 
 const WORKSPACE_SYMBOLS_VERSION: u32 = 2;
+
+pub fn workspace_symbol_cache_count(ws: &Path) -> usize {
+    let path = ws.join(WORKSPACE_SYMBOLS_PATH);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    if let Ok(cache) = serde_json::from_str::<WorkspaceSymbolCache>(&text) {
+        if cache.version == WORKSPACE_SYMBOLS_VERSION && cache.symbol_count > 0 {
+            return cache.symbol_count;
+        }
+    }
+    text.matches("\"name\"").count()
+}
 
 #[derive(Serialize, Deserialize)]
 struct WorkspaceSymbolCache {
@@ -2214,6 +2444,27 @@ mod tests {
     }
 
     #[test]
+    fn infers_field_type_for_member_completion() {
+        let src = "package com.helloworld;\n\npublic class HelloWorld {\n    String a;\n    public static void main(String[] args) {\n        a.";
+        assert_eq!(
+            infer_java_receiver_type(src, "a"),
+            Some("String".into())
+        );
+    }
+
+    #[test]
+    fn parses_dot_qualifier_chained_receiver() {
+        assert_eq!(
+            java_dot_qualifier("        System.out.", 1, 20),
+            Some(("System.out".into(), "".into()))
+        );
+        assert_eq!(
+            java_dot_qualifier("        System.", 1, 16),
+            Some(("System".into(), "".into()))
+        );
+    }
+
+    #[test]
     fn parses_dot_qualifier() {
         assert_eq!(
             java_dot_qualifier("foo.", 1, 5),
@@ -2254,10 +2505,46 @@ mod tests {
     }
 
     #[test]
+    fn for_type_start_and_scope_vars() {
+        let src = "public static void main(String[] args) {\n    for(";
+        assert!(is_java_for_type_start(src, 2, 9));
+        let vars = collect_java_scope_variables(src, 2);
+        assert!(vars.iter().any(|(n, _)| n == "args"));
+        let iter_src = "public static void main(String[] args) {\n    for (String s : ";
+        assert!(is_java_for_iterable_context(
+            iter_src,
+            2,
+            iter_src.lines().nth(1).unwrap().len() as u32 + 1,
+        ));
+    }
+
+    #[test]
     fn parses_dot_qualifier_inside_while_paren() {
         assert_eq!(
             java_dot_qualifier("while(args.", 1, 11),
             Some(("args".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn parses_dot_qualifier_after_array_index() {
+        assert_eq!(
+            java_dot_qualifier("args[0].", 1, 9),
+            Some(("args[0]".into(), "".into()))
+        );
+        let src = "System.out.println(args[0].";
+        assert_eq!(
+            java_dot_qualifier(src, 1, src.len() as u32),
+            Some(("args[0]".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn infers_element_type_from_array_index_expr() {
+        let src = "public static void main(String[] args) {\n    args[0].";
+        assert_eq!(
+            infer_java_receiver_type_from_expr(src, "args[0]"),
+            Some("String".into())
         );
     }
 

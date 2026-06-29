@@ -3,9 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
+use super::classpath;
 use super::gradle;
 use super::java_ecosystem;
 use super::languages::{self, merge_languages, push_unique};
+use super::maven;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ProjectProfile {
@@ -26,9 +28,13 @@ pub fn detect(ws: &Path) -> Result<ProjectProfile> {
         && languages
             .iter()
             .any(|l| l == "java" || l == "kotlin" || l == "groovy")
-        && !gradle::find_all_gradle_roots(ws)?.is_empty()
     {
-        push_unique(&mut indexers, "java");
+        let has_java_index_roots = !gradle::find_all_gradle_roots(ws)?.is_empty()
+            || !maven::find_all_maven_roots(ws)?.is_empty()
+            || classpath::workspace_has_plain_java_sources(ws);
+        if has_java_index_roots {
+            push_unique(&mut indexers, "java");
+        }
     }
 
     if !languages.is_empty() {
@@ -153,6 +159,11 @@ fn detect_from_markers(
         push_unique(frameworks, "dotnet");
     }
 
+    if classpath::workspace_has_plain_java_sources(ws) {
+        push_unique(languages, "java");
+        push_unique(indexers, "java");
+    }
+
     Ok(())
 }
 
@@ -172,6 +183,18 @@ fn has_extension_at_root(ws: &Path, ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_plain_java_src() {
+        let ws = std::env::temp_dir().join("reaper-profile-plain-java");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/HelloWorld.java"), "public class HelloWorld {}\n").unwrap();
+        let profile = detect(&ws).unwrap();
+        assert!(profile.languages.contains(&"java".to_string()));
+        assert!(profile.indexers.contains(&"java".to_string()));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 
     #[test]
     fn detects_spring_gradle() {

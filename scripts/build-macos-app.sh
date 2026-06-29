@@ -17,6 +17,8 @@ chmod +x "$APP/Contents/MacOS/reaper"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 
 "$ROOT/scripts/stamp-ui-build.sh"
+"$ROOT/scripts/vendor-monaco.sh"
+"$ROOT/scripts/vendor-google-java-format.sh"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
@@ -28,6 +30,19 @@ if [[ -f "$ROOT/packaging/macos/Reaper.icns" ]]; then
 fi
 
 cp -R "$ROOT/static/." "$APP/Contents/Resources/static/"
+
+if [[ -d "$ROOT/resources/google-java-format" ]]; then
+  mkdir -p "$APP/Contents/Resources/google-java-format"
+  if [[ -f "$ROOT/resources/google-java-format/google-java-format" ]]; then
+    cp "$ROOT/resources/google-java-format/google-java-format" \
+      "$APP/Contents/Resources/google-java-format/"
+    chmod +x "$APP/Contents/Resources/google-java-format/google-java-format"
+  fi
+  if [[ -f "$ROOT/resources/google-java-format/google-java-format-all-deps.jar" ]]; then
+    cp "$ROOT/resources/google-java-format/google-java-format-all-deps.jar" \
+      "$APP/Contents/Resources/google-java-format/"
+  fi
+fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 if [[ -n "$VERSION" ]]; then

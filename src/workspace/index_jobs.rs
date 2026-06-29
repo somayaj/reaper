@@ -9,6 +9,7 @@ use super::classpath::{self, WarmIndexStatus};
 #[derive(Clone, Serialize, Default, Debug)]
 pub struct JavaIndexStatus {
     pub state: String,
+    pub phase: String,
     pub symbol_count: usize,
     pub dependency_jars: usize,
     pub source_jars: usize,
@@ -50,9 +51,41 @@ impl JavaIndexJobs {
             .unwrap_or_default()
     }
 
+    /// Load Java index counts from disk into memory (no rebuild).
+    pub fn refresh_status_from_disk(&self, repo: &str, ws: &Path) {
+        if !classpath::is_java_indexable_workspace(ws) {
+            return;
+        }
+        if let Ok(peek) = classpath::peek_index_status(ws) {
+            if peek.symbol_count == 0 && !peek.indexed {
+                return;
+            }
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let entry = guard.entry(repo.to_string()).or_default();
+            if entry.building {
+                return;
+            }
+            entry.status = status_from_warm(&peek, None);
+        }
+    }
+
     /// Start a background index build if one is not already running.
     pub fn ensure_building(&self, repo: &str, ws: &Path) {
-        if !classpath::is_gradle_workspace(ws) {
+        if !classpath::is_java_indexable_workspace(ws) {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let entry = guard.entry(repo.to_string()).or_default();
+            if !entry.building {
+                entry.status = JavaIndexStatus {
+                    state: "idle".into(),
+                    ..Default::default()
+                };
+            }
             return;
         }
 
@@ -60,7 +93,7 @@ impl JavaIndexJobs {
         let ws_path = ws.to_path_buf();
 
         if let Ok(peek) = classpath::peek_index_status(&ws_path) {
-            if peek.indexed && peek.cached && peek.symbol_count > 0 {
+            if peek.symbol_count > 0 {
                 let mut guard = match self.inner.lock() {
                     Ok(g) => g,
                     Err(_) => return,
@@ -69,7 +102,7 @@ impl JavaIndexJobs {
                 if !entry.building {
                     entry.status = status_from_warm(&peek, None);
                 }
-                if entry.status.state == "ready" {
+                if peek.cached && entry.status.state == "ready" {
                     return;
                 }
             }
@@ -105,7 +138,18 @@ impl JavaIndexJobs {
 
         let inner = Arc::clone(&self.inner);
         std::thread::spawn(move || {
-            let result = classpath::warm_index(&ws_path);
+            let progress_inner = Arc::clone(&inner);
+            let progress_repo = repo_key.clone();
+            let progress = Box::new(move |phase: &str, count: usize| {
+                if let Ok(mut guard) = progress_inner.lock() {
+                    if let Some(entry) = guard.get_mut(&progress_repo) {
+                        entry.status.state = "running".into();
+                        entry.status.phase = phase.to_string();
+                        entry.status.symbol_count = count;
+                    }
+                }
+            });
+            let result = classpath::warm_index_with_progress(&ws_path, Some(progress));
             let mut guard = match inner.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -135,10 +179,17 @@ impl JavaIndexJobs {
 
 fn status_from_warm(warm: &WarmIndexStatus, error: Option<String>) -> JavaIndexStatus {
     JavaIndexStatus {
-        state: if warm.indexed {
+        state: if warm.symbol_count > 0 {
             "ready".into()
+        } else if warm.indexed {
+            "idle".into()
         } else {
             "idle".into()
+        },
+        phase: if warm.symbol_count > 0 {
+            "ready".into()
+        } else {
+            String::new()
         },
         symbol_count: warm.symbol_count,
         dependency_jars: warm.dependency_jars,
