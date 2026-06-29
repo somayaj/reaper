@@ -3,7 +3,7 @@
 (function () {
   'use strict';
 
-  const REAPER_COMPLETION_REV = '245';
+  const REAPER_COMPLETION_REV = '246';
 
   function langForPath(path) {
     const base = (path.split('/').pop() || '').toLowerCase();
