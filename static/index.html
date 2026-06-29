@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="246" />
+  <meta name="reaper-ui-build" content="274" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -69,7 +69,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=246" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=274" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -249,7 +249,7 @@
       <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon" aria-label="Repository details">
         <span class="ij-header-icon" data-icon="gitRepo"></span>
       </button>
-      <button id="btn-open-agent" title="Cursor Agent" class="ij-header-btn ghost text-accent border-accent/30">
+      <button id="btn-open-agent" title="AI Agent" class="ij-header-btn ghost text-accent border-accent/30">
         <span class="ij-header-icon" data-icon="agent"></span>
         <span>Agent</span>
       </button>
@@ -420,14 +420,14 @@
 
         <div id="agent-config-banner" class="hidden px-2 py-2 border-b border-surface-700/60 bg-surface-850 shrink-0">
           <p class="text-[11px] text-gray-500 leading-relaxed">
-            Add your Cursor API key in
-            <button type="button" id="btn-agent-open-settings" class="text-accent hover:underline">Settings → Cursor agent</button>
+            Add an agent API key in
+            <button type="button" id="btn-agent-open-settings" class="text-accent hover:underline">Settings</button>
             to enable chat.
           </p>
         </div>
 
         <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-2 space-y-2 min-h-0">
-          <div class="agent-msg-system text-center py-4 px-2">
+          <div id="agent-welcome-msg" class="agent-msg-system text-center py-4 px-2">
             Ask the Cursor agent to edit files, run git commands, or explain the codebase.
           </div>
         </div>
@@ -437,17 +437,9 @@
         </div>
 
         <div class="p-2 border-t border-surface-700/80 bg-surface-900 shrink-0 space-y-1.5">
-          <div class="flex items-center gap-2 flex-wrap">
-            <div class="flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0" title="Conversation mode">
-              <button type="button" data-agent-mode="agent" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Agent — edit files and run tools">Agent</button>
-              <button type="button" data-agent-mode="plan" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Plan — design before implementing">Plan</button>
-              <button type="button" data-agent-mode="ask" class="agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Ask — read-only Q&amp;A">Ask</button>
-            </div>
-            <select id="agent-model" class="ij-theme-menu-select flex-1 min-w-0 text-[11px]" title="Cursor model" disabled>
-              <option value="composer-2.5">Composer 2.5</option>
-            </select>
-          </div>
-          <textarea id="agent-input" rows="3" placeholder="Ask Cursor… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
+          <div id="agent-provider-picker" class="agent-provider-picker" role="tablist" aria-label="AI agent"></div>
+          <div id="agent-provider-controls" class="agent-provider-controls flex items-center gap-2 flex-wrap"></div>
+          <textarea id="agent-input" rows="3" placeholder="Ask the agent… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
           <div class="flex items-center justify-between gap-2">
             <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
             <div class="flex items-center gap-1.5 shrink-0">
@@ -583,6 +575,7 @@
   <footer class="ij-statusbar flex items-stretch shrink-0">
     <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
       <span id="status-message">Ready</span>
+      <span id="status-diag-hint" class="ij-status-diag-hint hidden" title=""></span>
       <span id="status-complete-debug" class="ij-status-complete-debug shrink-0" title="Completion debug"></span>
       <span id="status-version" class="ij-status-version shrink-0" title="Reaper version"></span>
     </div>
@@ -591,6 +584,7 @@
       <button id="status-diagnostics" type="button" class="ij-status-segment ij-status-diagnostics hidden" title="No problems">
         <svg class="ij-diag-flag" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5v11h1v-4h8.5L11 6.5 12.5 2.5H3z"/></svg>
         <span id="status-diag-count"></span>
+        <span id="status-diag-primary" class="ij-diag-primary-msg"></span>
       </button>
       <button id="status-ai-fix" type="button" class="ij-status-segment ij-status-ai-fix ij-ai-bulb-btn ij-ai-bulb-btn--compact hidden" title="AI quick fix (Ctrl+.)" aria-label="AI quick fix">
         <svg class="ij-ai-bulb-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -918,8 +912,8 @@
           </section>
           <section id="settings-panel-ai" class="ij-settings-panel hidden space-y-4">
             <div>
-              <h4 class="text-sm font-semibold text-white">Gemini (commit messages & inline completions)</h4>
-              <p class="text-xs text-gray-500 mt-1">Powers the <strong class="text-gray-400 font-normal">AI</strong> button in the Commit panel. Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="text-accent hover:underline">Google AI Studio</a>.</p>
+              <h4 class="text-sm font-semibold text-white">Gemini (Gemini agent, commit messages & inline completions)</h4>
+              <p class="text-xs text-gray-500 mt-1">Powers the <strong class="text-gray-400 font-normal">Gemini agent</strong> in the Agent panel, the <strong class="text-gray-400 font-normal">AI</strong> commit button, and inline completions. Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" class="text-accent hover:underline">Google AI Studio</a>.</p>
             </div>
             <div id="settings-gemini-status" class="ij-settings-status"></div>
             <div class="space-y-2 border-t border-surface-700 pt-4">
@@ -1013,9 +1007,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=2"></script>
-  <script src="/reaper-lang-core.js?v=246"></script>
-  <script src="/monaco-languages.js?v=246" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=274"></script>
+  <script src="/monaco-languages.js?v=274" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=246"></script>
+  <script src="/app.js?v=274"></script>
 </body>
 </html>

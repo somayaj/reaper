@@ -1516,6 +1516,62 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   background: rgba(255, 200, 60, 0.18);
 }
 
+/* Monaco gutter lightbulb — IntelliJ-style yellow (not blue accent) */
+.monaco-editor .lightBulbWidget.codicon-light-bulb,
+.monaco-editor .lightBulbWidget.codicon-lightbulb-sparkle,
+.monaco-editor .lightBulbWidget.codicon-light-bulb-autofix {
+  color: #ffcc33 !important;
+}
+
+.monaco-editor .lightBulbWidget:hover {
+  filter: drop-shadow(0 0 4px rgba(255, 204, 51, 0.55));
+}
+
+/* Reaper glyph-margin quick-fix bulb (replaces Monaco lightbulb) */
+.ij-quickfix-glyph-bulb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: #ffcc33;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.ij-quickfix-glyph-bulb .ij-ai-bulb-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.ij-quickfix-glyph-bulb.is-glowing {
+  filter: drop-shadow(0 0 3px rgba(255, 204, 51, 0.45));
+}
+
+.ij-quickfix-glyph-bulb.is-glowing .ij-ai-bulb-icon {
+  animation: ij-bulb-flicker 2.2s ease-in-out infinite;
+}
+
+.ij-quickfix-glyph-bulb.is-glowing .ij-ai-bulb-glass {
+  fill-opacity: 0.42;
+}
+
+.ij-quickfix-glyph-bulb:hover {
+  filter: drop-shadow(0 0 6px rgba(255, 210, 60, 0.75));
+  color: #ffe066;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ij-quickfix-glyph-bulb.is-glowing .ij-ai-bulb-icon {
+    animation: none;
+    filter: drop-shadow(0 0 4px rgba(255, 220, 80, 0.7));
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ij-ai-bulb-btn.is-glowing .ij-ai-bulb-icon,
   .ij-ai-bulb-btn.is-glowing .ij-ai-sparkle {
@@ -2285,8 +2341,9 @@ main { background: var(--ij-bg); }
 
 .ij-status-diagnostics {
   cursor: pointer;
-  gap: 4px;
+  gap: 6px;
   font-variant-numeric: tabular-nums;
+  max-width: min(42vw, 480px);
 }
 
 .ij-status-diagnostics.hidden { display: none; }
@@ -2344,6 +2401,17 @@ main { background: var(--ij-bg); }
 .ij-quickfix-item:hover {
   background: rgba(110, 181, 255, 0.14);
   color: #fff;
+}
+
+.ij-quickfix-item--loading {
+  cursor: default;
+  opacity: 0.65;
+  font-style: italic;
+}
+
+.ij-quickfix-item--loading:hover {
+  background: transparent;
+  color: var(--ij-text, #bcbec4);
 }
 
 /* ── Modals ────────────────────────────────────────────── */
@@ -4187,45 +4255,417 @@ main { background: var(--ij-bg); }
 /* Hover + suggest — must work inside .monaco-editor (native overflow widgets) */
 .monaco-editor .monaco-hover,
 .monaco-hover {
-  background-color: var(--vscode-editorHoverWidget-background, #3C3F41) !important;
-  color: var(--vscode-editorHoverWidget-foreground, #BBBBBB) !important;
-  border: 1px solid var(--vscode-editorHoverWidget-border, #515658) !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36);
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--ij-panel, #3C3F41) 96%, #fff) 0%,
+    var(--ij-panel, #3C3F41) 48%,
+    color-mix(in srgb, var(--ij-panel, #3C3F41) 94%, #000) 100%
+  ) !important;
+  color: var(--ij-text, #bcbec4) !important;
+  border: 1px solid color-mix(in srgb, var(--ij-border, #515658) 88%, #fff 12%) !important;
+  border-radius: 8px !important;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset !important;
+  padding: 0 !important;
+  max-width: 560px !important;
+  max-height: min(440px, 58vh) !important;
   z-index: 10001 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #606366 transparent;
 }
 
-.monaco-editor .monaco-hover .markdown-hover .rendered-markdown p,
-.monaco-editor .monaco-hover .markdown-hover .rendered-markdown code,
-.monaco-editor .monaco-hover .markdown-hover .rendered-markdown span,
-.monaco-hover .markdown-hover .rendered-markdown p,
-.monaco-hover .markdown-hover .rendered-markdown code,
-.monaco-hover .markdown-hover .rendered-markdown span {
-  color: inherit !important;
+.monaco-editor .monaco-hover::-webkit-scrollbar,
+.monaco-hover::-webkit-scrollbar {
+  width: 7px;
+}
+
+.monaco-editor .monaco-hover::-webkit-scrollbar-thumb,
+.monaco-hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, #606366 85%, transparent);
+  border-radius: 4px;
+}
+
+.monaco-editor .monaco-hover .hover-row,
+.monaco-hover .hover-row {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.monaco-editor .monaco-hover .hover-row .hover-contents,
+.monaco-hover .hover-row .hover-contents,
+.monaco-editor .monaco-hover .markdown-hover,
+.monaco-hover .markdown-hover {
+  padding: 10px 12px !important;
 }
 
 .monaco-editor .monaco-hover .hover-row:not(:first-child):not(:empty),
 .monaco-hover .hover-row:not(:first-child):not(:empty) {
-  border-top: 1px solid var(--vscode-editorHoverWidget-border, #515658) !important;
+  border-top: none !important;
+}
+
+.monaco-editor .monaco-hover .markdown-hover .rendered-markdown,
+.monaco-hover .markdown-hover .rendered-markdown {
+  padding: 0 !important;
+}
+
+.monaco-editor .monaco-hover .hover-row.status-bar,
+.monaco-hover .hover-row.status-bar {
+  border-top: 1px solid color-mix(in srgb, var(--ij-border, #515658) 75%, transparent) !important;
+  background: color-mix(in srgb, var(--ij-panel, #3C3F41) 88%, #000) !important;
+  padding: 0 !important;
+  position: sticky;
+  bottom: 0;
+}
+
+.monaco-editor .monaco-hover:has(.hover-row.status-bar),
+.monaco-hover:has(.hover-row.status-bar) {
+  min-width: 300px !important;
+}
+
+.monaco-editor .monaco-hover .hover-row.status-bar .actions-container,
+.monaco-hover .hover-row.status-bar .actions-container {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 14px !important;
+  padding: 6px 12px !important;
+  font-size: 11px !important;
+  width: auto !important;
+  min-width: 0 !important;
+}
+
+.monaco-editor .monaco-hover .hover-row.status-bar .action-item,
+.monaco-hover .hover-row.status-bar .action-item {
+  flex: 0 0 auto !important;
+  max-width: none !important;
+}
+
+.monaco-editor .monaco-hover .hover-row.status-bar .action-label,
+.monaco-hover .hover-row.status-bar .action-label {
+  display: inline !important;
+  white-space: nowrap !important;
+  color: var(--ij-accent, #6897bb) !important;
+  font-weight: 500;
+  padding: 2px 4px !important;
+}
+
+/* Hide Monaco's plain duplicate marker rows when Reaper renders its own card */
+.monaco-editor .monaco-hover:has(.reaper-editor-hover-problems) .hover-row:not(.status-bar):not(:has(.reaper-editor-hover)),
+.monaco-hover:has(.reaper-editor-hover-problems) .hover-row:not(.status-bar):not(:has(.reaper-editor-hover)) {
+  display: none !important;
+}
+
+/* Hide Monaco's async "Loading..." placeholder (symbol docs fetching) */
+.monaco-editor .monaco-hover .hover-row:not(.status-bar) .rendered-markdown,
+.monaco-hover .hover-row:not(.status-bar) .rendered-markdown {
+  font-size: 11.5px !important;
+  line-height: 1.45 !important;
+}
+
+.monaco-editor .monaco-hover .hover-row:not(.status-bar):not(:has(.reaper-editor-hover)) .rendered-markdown:empty,
+.monaco-hover .hover-row:not(.status-bar):not(:has(.reaper-editor-hover)) .rendered-markdown:empty {
+  display: none !important;
 }
 
 #editor-overflow-root .monaco-hover,
 #editor-overflow-root .monaco-hover-content,
 #editor-overflow-root .hover-contents,
 .ij-editor-overflow-root .monaco-hover {
-  background-color: var(--vscode-editorHoverWidget-background, var(--ij-panel, #3C3F41)) !important;
-  color: var(--vscode-editorHoverWidget-foreground, var(--ij-text, #BBBBBB)) !important;
-  border: 1px solid var(--vscode-editorHoverWidget-border, var(--ij-border, #515658)) !important;
-  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+  background: var(--ij-panel, #3C3F41) !important;
+  color: var(--ij-text, #bcbec4) !important;
+  border: 1px solid var(--ij-border, #515658) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45) !important;
+  max-height: min(440px, 58vh) !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
 }
 
-#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown p,
-#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown code,
-#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown span {
-  color: inherit !important;
+.reaper-editor-hover {
+  font-family: var(--ij-ui-font, system-ui, sans-serif);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ij-text, #bcbec4);
 }
 
-#editor-overflow-root .monaco-hover .hover-row:not(:first-child):not(:empty) {
-  border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--ij-border, #515658)) !important;
+.reaper-editor-hover-diagnostics {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--ij-border, #515658) 55%, transparent);
+}
+
+.reaper-editor-hover--problems-only {
+  padding: 0;
+}
+
+.reaper-editor-hover-problems {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.reaper-editor-hover-problems-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+}
+
+.reaper-editor-hover-problems-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  line-height: 1.35;
+}
+
+.reaper-editor-hover-problems--error .reaper-editor-hover-problems-badge {
+  background: color-mix(in srgb, #bc3f3c 80%, #000);
+  color: #ffeceb;
+}
+
+.reaper-editor-hover-problems--warning .reaper-editor-hover-problems-badge {
+  background: color-mix(in srgb, #c9a227 80%, #000);
+  color: #fff8e6;
+}
+
+.reaper-editor-hover-problems-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ij-text, #bcbec4);
+}
+
+.reaper-editor-hover-problems-loc {
+  margin-left: auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ij-text-dim, #808488);
+}
+
+.reaper-editor-hover-problems-list {
+  margin: 0;
+  padding: 0 10px 8px 24px;
+  list-style: disc;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ij-text, #bcbec4);
+}
+
+.reaper-editor-hover-problems-list li + li {
+  margin-top: 4px;
+}
+
+.reaper-editor-hover-problems--error .reaper-editor-hover-problems-list {
+  color: #ffb4b0;
+}
+
+.reaper-editor-hover-problems--warning .reaper-editor-hover-problems-list {
+  color: #e8d08a;
+}
+
+.reaper-editor-hover-problems-foot {
+  padding: 6px 10px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--ij-border, #515658) 50%, transparent);
+  font-size: 10px;
+  color: var(--ij-text-dim, #808488);
+}
+
+.reaper-editor-hover-diag {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  margin: 4px 0;
+  font-size: 11px;
+  line-height: 1.45;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ij-panel, #3C3F41) 80%, #000);
+  border: 1px solid color-mix(in srgb, var(--ij-border, #515658) 60%, transparent);
+}
+
+.reaper-editor-hover-diag--error {
+  border-color: color-mix(in srgb, #bc3f3c 35%, var(--ij-border, #515658));
+  background: color-mix(in srgb, #bc3f3c 8%, var(--ij-panel, #3C3F41));
+}
+
+.reaper-editor-hover-diag--warning {
+  border-color: color-mix(in srgb, #c9a227 35%, var(--ij-border, #515658));
+  background: color-mix(in srgb, #c9a227 8%, var(--ij-panel, #3C3F41));
+}
+
+.reaper-editor-hover-diag-chip {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  line-height: 1.3;
+}
+
+.reaper-editor-hover-diag--error .reaper-editor-hover-diag-chip {
+  background: color-mix(in srgb, #bc3f3c 75%, #000);
+  color: #ffeceb;
+}
+
+.reaper-editor-hover-diag--warning .reaper-editor-hover-diag-chip {
+  background: color-mix(in srgb, #c9a227 75%, #000);
+  color: #fff8e6;
+}
+
+.reaper-editor-hover-diag-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ij-text, #bcbec4);
+}
+
+.reaper-editor-hover-diag-loc {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  padding-top: 1px;
+}
+
+.ij-status-diag-hint {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: min(52vw, 640px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 0 8px;
+  border-left: 1px solid color-mix(in srgb, var(--ij-border, #515658) 70%, transparent);
+}
+
+.ij-status-diag-hint.hidden { display: none; }
+
+.ij-status-diag-hint.is-error {
+  color: #ff7070;
+}
+
+.ij-status-diag-hint.is-warning {
+  color: #c9a020;
+}
+
+.ij-diag-primary-msg {
+  max-width: min(28vw, 320px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.92;
+  font-size: 11px;
+}
+
+.ij-diag-primary-msg:empty { display: none; }
+
+.reaper-editor-hover-diag-label {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.reaper-doc-loading {
+  color: var(--ij-text-muted, #808488);
+  font-size: 11px;
+  font-style: italic;
+  padding: 6px 0;
+}
+
+/* Shared Java doc panel — autocomplete right pane + editor hover */
+.reaper-java-hover {
+  font-family: var(--ij-ui-font, system-ui, sans-serif);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ij-text, #bcbec4);
+}
+
+.reaper-java-hover-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.reaper-java-hover-kind-pill {
+  align-self: flex-start;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #dfe1e5;
+  background: color-mix(in srgb, var(--ij-accent, #6897bb) 55%, #2d2f31);
+  border: 1px solid color-mix(in srgb, var(--ij-accent, #6897bb) 40%, transparent);
+}
+
+.reaper-java-hover-sig,
+.reaper-member-suggest-doc-sig {
+  font-family: var(--ij-mono-font, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: #c5d4e3;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #1e1f22 88%, var(--ij-accent, #6897bb) 12%);
+  border: 1px solid color-mix(in srgb, var(--ij-border, #515658) 70%, transparent);
+  word-break: break-word;
+  margin-bottom: 0;
+  padding-bottom: 7px;
+  border-bottom: none;
+}
+
+.reaper-java-hover-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ij-border, #515658) 50%, transparent);
+}
+
+.reaper-java-hover-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ij-text-bright, #dfe1e5);
+}
+
+.reaper-java-hover-kind {
+  font-size: 10px;
+  color: var(--ij-text-muted, #808488);
+  text-transform: lowercase;
+}
+
+.reaper-java-hover-doc,
+.reaper-member-suggest-doc-body {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--ij-text, #bcbec4) 92%, #fff);
+  max-height: min(280px, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.reaper-java-hover-empty,
+.reaper-member-suggest-doc-empty {
+  color: var(--ij-text-muted, #808488);
+  font-style: italic;
+  font-size: 11px;
+  padding: 4px 0;
 }
 
 .monaco-editor .margin-view-overlays .codicon-error,
@@ -4276,6 +4716,32 @@ main { background: var(--ij-bg); }
 .agent-msg-assistant {
   background: var(--ij-agent-assistant-bg);
   border: 1px solid var(--ij-border);
+}
+
+.agent-msg-assistant.agent-provider-gemini {
+  background: color-mix(in srgb, #4285f4 6%, var(--ij-agent-assistant-bg));
+  border-color: color-mix(in srgb, #4285f4 22%, var(--ij-border));
+}
+
+.agent-msg-assistant.agent-provider-anthropic {
+  background: color-mix(in srgb, #d97757 6%, var(--ij-agent-assistant-bg));
+  border-color: color-mix(in srgb, #d97757 22%, var(--ij-border));
+}
+
+.agent-msg-label-anthropic {
+  color: color-mix(in srgb, #e8a88a 88%, var(--ij-text-dim));
+}
+
+.agent-msg-label {
+  color: var(--ij-text-dim);
+}
+
+.agent-msg-label-cursor {
+  color: var(--ij-text-dim);
+}
+
+.agent-msg-label-gemini {
+  color: color-mix(in srgb, #8ab4f8 88%, var(--ij-text-dim));
 }
 
 .agent-msg-system {
@@ -4476,8 +4942,97 @@ main { background: var(--ij-bg); }
   background: var(--ij-toolwindow-active);
 }
 
-#agent-model {
+.agent-provider-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.agent-provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--ij-border);
+  border-radius: 6px;
+  background: var(--ij-surface-900);
+  color: var(--ij-text-dim);
+  font-size: 10px;
+  line-height: 1.2;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.agent-provider-chip:hover {
+  color: var(--ij-accent);
+  background: var(--ij-surface-800);
+}
+
+.agent-provider-chip.active {
+  color: var(--ij-accent);
+  background: var(--ij-toolwindow-active);
+  border-color: color-mix(in srgb, var(--ij-accent) 35%, var(--ij-border));
+}
+
+.agent-provider-chip[data-status="needs-key"] {
+  opacity: 0.55;
+}
+
+.agent-provider-chip-label {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.agent-provider-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ij-text-dim);
+}
+
+.agent-provider-chip[data-status="ready"] .agent-provider-status-dot {
+  background: #3d9970;
+}
+
+.agent-provider-chip[data-status="waiting"] .agent-provider-status-dot {
+  background: #c9a227;
+}
+
+.agent-provider-chip[data-status="needs-key"] .agent-provider-status-dot {
+  background: var(--ij-text-dim);
+}
+
+.agent-provider-chip[data-status="soon"] .agent-provider-status-dot {
+  background: color-mix(in srgb, var(--ij-accent) 60%, var(--ij-text-dim));
+}
+
+.agent-provider-soon {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ij-text-dim);
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ij-border) 50%, transparent);
+}
+
+.agent-provider-controls {
+  min-height: 28px;
+}
+
+#agent-provider-model {
   max-width: 100%;
+}
+
+.agent-provider-btn.active {
+  color: var(--ij-accent);
+  background: var(--ij-toolwindow-active);
 }
 
 .terminal-dock-btn.active {
@@ -5257,34 +5812,193 @@ main { background: var(--ij-bg); }
   opacity: 0.85;
 }
 
+.monaco-editor .suggest-details,
+.monaco-editor .suggest-details-container,
+#editor-overflow-root .suggest-details,
+#editor-overflow-root .suggest-details-container {
+  border-left: 1px solid var(--ij-border, #515658) !important;
+  background: var(--ij-panel, #3C3F41) !important;
+  color: var(--ij-text, #bcbec4) !important;
+  padding: 8px 10px !important;
+  max-width: 420px !important;
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+}
+
+.monaco-editor .suggest-details .monaco-scrollable-element,
+#editor-overflow-root .suggest-details .monaco-scrollable-element {
+  font-family: var(--ij-ui-font, system-ui, sans-serif) !important;
+}
+
+.monaco-editor .suggest-details .rendered-markdown,
+#editor-overflow-root .suggest-details .rendered-markdown {
+  color: var(--ij-text, #bcbec4) !important;
+}
+
 /* Reaper member-completion fallback (WKWebView Monaco suggest filter workaround) */
 .reaper-member-suggest {
   position: absolute;
   z-index: 10001;
-  min-width: 220px;
-  max-width: 480px;
-  max-height: 280px;
-  overflow-y: auto;
-  border-radius: 6px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-  border: 1px solid var(--ij-border, #515658);
-  background: var(--ij-panel, #3C3F41);
+  pointer-events: none;
+  min-width: 440px;
+  max-width: min(820px, 94vw);
+  border-radius: 8px;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+  border: 1px solid color-mix(in srgb, var(--ij-border, #515658) 88%, #fff 12%);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ij-panel, #3C3F41) 97%, #fff) 0%,
+    var(--ij-panel, #3C3F41) 100%
+  );
   color: var(--ij-text, #bcbec4);
   font-family: var(--ij-ui-font, system-ui, sans-serif);
-  font-size: 13px;
-  padding: 2px 0;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.reaper-member-suggest-panel {
+  display: flex;
+  align-items: stretch;
+  pointer-events: auto;
+  min-height: 200px;
+  max-height: min(360px, 52vh);
+}
+
+.reaper-member-suggest-list {
+  flex: 0 0 228px;
+  width: 228px;
+  overflow-y: auto;
+  padding: 4px 0;
+  border-right: 1px solid color-mix(in srgb, var(--ij-border, #515658) 70%, transparent);
+  background: color-mix(in srgb, var(--ij-panel, #3C3F41) 92%, #000);
+  scrollbar-width: thin;
+  scrollbar-color: #606366 transparent;
 }
 
 .reaper-member-suggest-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   padding: 4px 10px;
   cursor: default;
+  min-height: 24px;
+  line-height: 1.35;
+  border-left: 2px solid transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.reaper-member-suggest-kind {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-family: var(--ij-mono-font, ui-monospace, monospace);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.reaper-member-suggest-kind.method {
+  background: linear-gradient(145deg, #a889bc, #9876aa);
+  color: #fff;
+}
+
+.reaper-member-suggest-kind.field {
+  background: linear-gradient(145deg, #d88a42, #cc7832);
+  color: #fff;
+}
+
+.reaper-member-suggest-kind.member {
+  background: linear-gradient(145deg, #7aaed4, #6897bb);
+  color: #fff;
+}
+
+.reaper-member-suggest-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+  color: var(--ij-text-bright, #dfe1e5);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.reaper-member-suggest-detail {
+  display: none;
+}
+
 .reaper-member-suggest-row.focused,
 .reaper-member-suggest-row:hover {
-  background: color-mix(in srgb, var(--ij-selection, #214283) 75%, transparent);
+  background: color-mix(in srgb, var(--ij-selection, #214283) 88%, transparent);
+  border-left-color: var(--ij-accent, #6897bb);
+}
+
+.reaper-member-suggest-row.focused .reaper-member-suggest-name,
+.reaper-member-suggest-row:hover .reaper-member-suggest-name {
   color: #fff;
+}
+
+.reaper-member-suggest-doc {
+  flex: 1 1 auto;
+  min-width: 280px;
+  padding: 0;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--ij-panel, #3C3F41) 96%, #000);
+  display: flex;
+  flex-direction: column;
+}
+
+.reaper-member-suggest-doc-head {
+  flex-shrink: 0;
+  padding: 8px 12px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ij-text-muted, #808488);
+  border-bottom: 1px solid color-mix(in srgb, var(--ij-border, #515658) 55%, transparent);
+}
+
+.reaper-member-suggest-doc-sig {
+  flex-shrink: 0;
+  margin: 8px 12px 0;
+}
+
+.reaper-member-suggest-doc-body {
+  flex: 1 1 auto;
+  padding: 8px 12px 12px;
+  min-height: 0;
+}
+
+.reaper-member-suggest-doc-body.reaper-member-suggest-doc-empty,
+.reaper-member-suggest-doc-empty {
+  color: var(--ij-text-muted, #808488);
+  font-style: italic;
+}
+
+.reaper-javadoc-line {
+  margin-bottom: 5px;
+}
+
+.reaper-javadoc-spacer {
+  height: 6px;
+}
+
+.reaper-javadoc-tag {
+  margin-top: 8px;
+  margin-bottom: 3px;
+  padding: 4px 0 2px;
+  color: var(--ij-text-dim, #808488);
+  border-top: 1px dashed color-mix(in srgb, var(--ij-border, #515658) 45%, transparent);
+}
+
+.reaper-javadoc-tag-name {
+  color: #b89fd4;
+  font-weight: 600;
+  font-family: var(--ij-mono-font, ui-monospace, monospace);
+  font-size: 10px;
 }

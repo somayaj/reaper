@@ -412,6 +412,142 @@ impl GeminiClient {
 
         Ok(text)
     }
+
+    pub async fn chat_with_history(
+        &self,
+        system: &str,
+        history: &[(String, String)],
+        prompt: &str,
+    ) -> Result<String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let mut contents: Vec<Content<'_>> = history
+            .iter()
+            .map(|(role, text)| Content {
+                role: if role == "model" { "model" } else { "user" },
+                parts: vec![TextPart { text }],
+            })
+            .collect();
+        contents.push(Content {
+            role: "user",
+            parts: vec![TextPart { text: prompt }],
+        });
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents,
+            generation_config: Self::generation_config(0.35, "text/plain", Some(8192), false),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini request failed")?;
+
+        let status = resp.status();
+        let parsed: GenerateResponse = resp.json().await.context("parse gemini response")?;
+
+        if let Some(err) = parsed.error {
+            bail!(
+                "gemini error ({}): {}",
+                status,
+                err.message.unwrap_or_else(|| "unknown".into())
+            );
+        }
+
+        Self::extract_response_text(&parsed)
+            .ok_or_else(|| anyhow::anyhow!("empty gemini response"))
+    }
+
+    pub async fn chat_stream_with_history(
+        &self,
+        system: &str,
+        history: &[(String, String)],
+        prompt: &str,
+    ) -> Result<reqwest::Response> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+            self.model, self.api_key
+        );
+
+        let mut contents: Vec<Content<'_>> = history
+            .iter()
+            .map(|(role, text)| Content {
+                role: if role == "model" { "model" } else { "user" },
+                parts: vec![TextPart { text }],
+            })
+            .collect();
+        contents.push(Content {
+            role: "user",
+            parts: vec![TextPart { text: prompt }],
+        });
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents,
+            generation_config: Self::generation_config(0.35, "text/plain", Some(8192), false),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini stream request failed")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let parsed: GenerateResponse = resp.json().await.unwrap_or(GenerateResponse {
+                candidates: None,
+                error: Some(GeminiError {
+                    message: Some("gemini stream failed".into()),
+                }),
+            });
+            if let Some(err) = parsed.error {
+                bail!(
+                    "gemini error ({}): {}",
+                    status,
+                    err.message.unwrap_or_else(|| "unknown".into())
+                );
+            }
+            bail!("gemini stream failed ({status})");
+        }
+
+        Ok(resp)
+    }
+
+    pub fn parse_stream_payload(payload: &str) -> Result<String, String> {
+        let parsed: GenerateResponse =
+            serde_json::from_str(payload).map_err(|e| format!("parse stream chunk: {e}"))?;
+        if let Some(err) = parsed.error {
+            return Err(err.message.unwrap_or_else(|| "gemini error".into()));
+        }
+        Ok(Self::extract_stream_chunk_text(&parsed))
+    }
+
+    pub fn extract_stream_chunk_text(chunk: &GenerateResponse) -> String {
+        let Some(parts) = chunk
+            .candidates
+            .as_ref()
+            .and_then(|c| c.first())
+            .and_then(|c| c.content.as_ref())
+            .and_then(|c| c.parts.as_ref())
+        else {
+            return String::new();
+        };
+        Self::extract_non_thought_text(parts)
+    }
 }
 
 fn strip_between_tags(text: &str, open: &str, close: &str) -> String {

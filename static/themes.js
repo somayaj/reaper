@@ -44,6 +44,9 @@
     'editorHoverWidget.border': '#515658',
     'editorHoverWidget.highlightForeground': '#6BA6F7',
     'editorHoverWidget.statusBarBackground': '#313335',
+    'editorLightBulb.foreground': '#FFCC33',
+    'editorLightBulbAi.foreground': '#FFCC33',
+    'editorLightBulbAutoFix.foreground': '#FFCC33',
   };
 
   const MONACO_THEMES = {

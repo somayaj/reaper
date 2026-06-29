@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct QuickFix {
     pub title: String,
     pub edits: Vec<QuickFixEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
