@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="185" />
+  <meta name="reaper-ui-build" content="245" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -69,7 +69,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=185" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=245" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -90,9 +90,13 @@
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
-    <div class="flex flex-col items-center gap-4">
+    <div class="flex flex-col items-center gap-4 max-w-sm w-full px-6">
       <span data-reaper-logo="xl" data-reaper-logo-pulse="true" class="logo-mark loading-dot"></span>
-      <p id="loading-text" class="text-sm text-gray-500">Loading…</p>
+      <p id="loading-text" class="text-sm text-gray-500 text-center">Loading…</p>
+      <div id="loading-index-progress" class="ij-index-progress hidden w-full">
+        <div class="ij-index-progress-track"><div id="loading-index-progress-fill" class="ij-index-progress-fill"></div></div>
+        <p id="loading-index-progress-detail" class="ij-index-progress-detail"></p>
+      </div>
     </div>
   </div>
 
@@ -390,11 +394,7 @@
             <button type="button" data-terminal-dock="bottom" class="terminal-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors border-l border-surface-700" title="Dock bottom">Bottom</button>
           </div>
         </div>
-        <div id="terminal-output" class="flex-1 overflow-auto panel-scroll p-3 font-mono text-[11px] leading-relaxed text-gray-500"></div>
-        <div class="flex items-center border-t border-surface-700 bg-surface-900">
-          <span id="terminal-cwd" class="pl-3 pr-1 text-git-added font-mono text-[11px] truncate max-w-[45%] shrink-0" title="Working directory">repo ❯</span>
-          <input id="terminal-input" type="text" placeholder="bash — ls, ./gradlew build, git status…" disabled class="flex-1 bg-transparent py-2.5 pr-3 text-sm font-mono text-gray-200 placeholder-gray-600 focus:outline-none" />
-        </div>
+        <div id="terminal-xterm-host" class="ij-terminal-xterm-host flex-1 min-h-0 min-w-0"></div>
       </div>
 
       <div id="panel-agent" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden h-full">
@@ -498,17 +498,42 @@
           </button>
         </div>
       </div>
-      <div id="java-index-banner" class="hidden ij-java-index-banner shrink-0">
-        <span class="ij-java-index-spinner" aria-hidden="true"></span>
-        <span id="java-index-banner-text">Indexing project…</span>
+      <div id="java-index-banner" class="hidden ij-index-strip shrink-0" role="status" aria-live="polite">
+        <div class="ij-index-strip-row">
+          <span class="ij-index-strip-pulse" aria-hidden="true"></span>
+          <span id="java-index-banner-label" class="ij-index-strip-label">Indexing</span>
+          <span id="java-index-banner-text" class="ij-index-strip-text">Preparing workspace…</span>
+          <span id="java-index-banner-pct" class="ij-index-strip-pct"></span>
+        </div>
+        <div class="ij-index-strip-track" aria-hidden="true">
+          <div id="banner-index-progress-fill" class="ij-index-strip-fill"></div>
+        </div>
       </div>
       <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
         <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto"></div>
       </div>
       <div id="editor-breadcrumbs" class="ij-breadcrumbs hidden"></div>
       <div id="editor-stage" class="ij-editor-stage flex-1 flex flex-col min-h-0 min-w-0">
+        <div id="editor-index-overlay" class="ij-index-veil hidden" aria-hidden="true">
+          <div class="ij-index-card" role="dialog" aria-labelledby="editor-index-overlay-title">
+            <div class="ij-index-card-header">
+              <span class="ij-index-orbit" aria-hidden="true"></span>
+              <div class="ij-index-card-heading">
+                <p id="editor-index-overlay-title" class="ij-index-card-title">Indexing workspace</p>
+                <p id="editor-index-overlay-text" class="ij-index-card-phase">Preparing…</p>
+              </div>
+              <span id="editor-index-overlay-pct" class="ij-index-card-pct"></span>
+            </div>
+            <div class="ij-index-card-track" aria-hidden="true">
+              <div id="editor-index-progress-fill" class="ij-index-card-fill"></div>
+            </div>
+            <p id="editor-index-progress-detail" class="ij-index-card-stats"></p>
+            <p class="ij-index-card-hint">You can keep editing — completions improve as indexing finishes.</p>
+          </div>
+        </div>
         <div id="empty-state" class="ij-welcome"></div>
         <div id="editor-container" class="flex-1 min-h-0 relative">
+          <div id="editor-overflow-root" class="ij-editor-overflow-root" aria-hidden="true"></div>
           <div id="editor" class="h-full w-full"></div>
         </div>
         <div id="diff-panel" class="hidden flex-1 flex flex-col min-h-0">
@@ -558,6 +583,7 @@
   <footer class="ij-statusbar flex items-stretch shrink-0">
     <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
       <span id="status-message">Ready</span>
+      <span id="status-complete-debug" class="ij-status-complete-debug shrink-0" title="Completion debug"></span>
       <span id="status-version" class="ij-status-version shrink-0" title="Reaper version"></span>
     </div>
     <div class="flex-1"></div>
@@ -855,10 +881,10 @@
             </div>
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
-                <input id="settings-new-window-on-repo" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
+                <input id="settings-new-window-on-repo" type="checkbox" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
                 Open a new window when switching repos
               </label>
-              <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one.</p>
+              <p class="text-[11px] text-gray-600 mt-2">When enabled, picking a different repo from the header opens it in a separate Reaper window instead of replacing the current one — keeps each repo’s editor and Agent chat separate.</p>
             </div>
           </section>
           <section id="settings-panel-compilers" class="ij-settings-panel hidden space-y-3">
@@ -968,11 +994,28 @@
   <!-- Toast -->
   <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script>
+    (function () {
+      var base = '/vendor/monaco-editor/min';
+      var workerMain = base + '/vs/base/worker/workerMain.js';
+      window.MonacoEnvironment = {
+        getWorkerUrl: function () {
+          return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
+            "self.MonacoEnvironment = { baseUrl: '" + base + "' };importScripts('" + workerMain + "');",
+          );
+        },
+      };
+    })();
+  </script>
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+  <script src="/vendor/xterm/xterm.js"></script>
+  <script src="/vendor/xterm/addon-fit.js"></script>
+  <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=2"></script>
-  <script src="/monaco-languages.js?v=185"></script>
+  <script src="/reaper-lang-core.js?v=245"></script>
+  <script src="/monaco-languages.js?v=245" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=185"></script>
+  <script src="/app.js?v=245"></script>
 </body>
 </html>

@@ -12,6 +12,7 @@ use super::symbols;
 #[derive(Clone, Serialize, Default, Debug)]
 pub struct ProjectIndexStatus {
     pub state: String,
+    pub phase: String,
     pub profile: ProjectProfile,
     pub label: String,
     pub java: JavaIndexStatus,
@@ -53,6 +54,10 @@ impl ProjectIndexJobs {
     /// Scan the repo and start background indexers (called when a workspace opens).
     pub fn on_open(&self, repo: &str, ws: &Path) {
         let profile = project_profile::detect(ws).unwrap_or_default();
+        if profile.indexers.iter().any(|i| i == "java") {
+            self.java.refresh_status_from_disk(repo, ws);
+            self.java.ensure_building(repo, ws);
+        }
         self.start(repo, ws, profile, false);
     }
 
@@ -83,7 +88,10 @@ impl ProjectIndexJobs {
         }
 
         if !force && self.caches_warm(ws, repo, &profile) {
-            return;
+            let java = self.java.status(repo);
+            if java.state != "running" {
+                return;
+            }
         }
 
         let should_spawn = {
@@ -99,6 +107,7 @@ impl ProjectIndexJobs {
             entry.profile = profile.clone();
             entry.status = ProjectIndexStatus {
                 state: "running".into(),
+                phase: "starting".into(),
                 profile: profile.clone(),
                 label: project_profile::indexing_label(&profile),
                 java: JavaIndexStatus {
@@ -129,16 +138,23 @@ impl ProjectIndexJobs {
             let mut error: Option<String> = None;
 
             if profile_clone.indexers.iter().any(|i| i == "workspace-symbols") {
+                touch_project_phase(&inner, &repo_key, "workspace-symbols", 0);
                 match symbols::warm_symbol_cache(&ws_path) {
                     Ok(n) => workspace_symbols = n,
                     Err(e) => error = Some(format!("workspace symbols: {e:#}")),
                 }
+                touch_project_phase(&inner, &repo_key, "workspace-symbols", workspace_symbols);
             }
 
             if profile_clone.indexers.iter().any(|i| i == "java") {
+                touch_project_phase(&inner, &repo_key, "java-index", workspace_symbols);
                 for _ in 0..600 {
                     let status = java_jobs.status(&repo_key);
-                    if status.state == "ready" || status.state == "error" || status.state == "idle" {
+                    if status.state.is_empty()
+                        || status.state == "ready"
+                        || status.state == "error"
+                        || status.state == "idle"
+                    {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -146,8 +162,11 @@ impl ProjectIndexJobs {
             }
 
             let java = java_jobs.status(&repo_key);
+            let needs_java = profile_clone.indexers.iter().any(|i| i == "java");
             let state = if error.is_some() || java.state == "error" {
                 "error".into()
+            } else if needs_java && java.state == "running" {
+                "running".into()
             } else if java.state == "ready" || workspace_symbols > 0 {
                 "ready".into()
             } else if java.state == "running" {
@@ -164,8 +183,16 @@ impl ProjectIndexJobs {
                 return;
             };
             entry.building = false;
+            let phase = if state == "ready" {
+                "ready".to_string()
+            } else if state == "error" {
+                "error".to_string()
+            } else {
+                java.phase.clone()
+            };
             entry.status = ProjectIndexStatus {
                 state,
+                phase,
                 profile: profile_clone.clone(),
                 label: project_profile::indexing_label(&profile_clone),
                 java,
@@ -181,11 +208,11 @@ impl ProjectIndexJobs {
 
         let java_ok = !needs_java || {
             classpath::peek_index_status(ws)
-                .map(|p| p.indexed && p.cached && p.symbol_count > 0)
+                .map(|p| p.indexed && p.symbol_count > 0)
                 .unwrap_or(false)
-                && self.java.status(repo).state == "ready"
         };
-        let symbols_ok = !needs_symbols || ws.join(".reaper/workspace-symbols.json").is_file();
+        let symbols_ok =
+            !needs_symbols || super::symbols::workspace_symbol_cache_count(ws) > 0;
 
         if java_ok && symbols_ok {
             let mut guard = match self.inner.lock() {
@@ -194,23 +221,48 @@ impl ProjectIndexJobs {
             };
             let entry = guard.entry(repo.to_string()).or_default();
             entry.profile = profile.clone();
+            let java = self.java.status(repo);
+            let java_running = java.state == "running";
+            let java_ready = java.state == "ready" && java.symbol_count > 0;
             entry.status = ProjectIndexStatus {
-                state: "ready".into(),
+                state: if java_running {
+                    "running".into()
+                } else {
+                    "ready".into()
+                },
+                phase: if java_ready {
+                    "ready".into()
+                } else {
+                    String::new()
+                },
                 profile: profile.clone(),
                 label: project_profile::indexing_label(profile),
-                java: self.java.status(repo),
+                java,
                 workspace_symbols: self.symbol_cache_count(ws),
                 ..Default::default()
             };
-            return true;
+            return !java_running;
         }
         false
     }
 
     fn symbol_cache_count(&self, ws: &Path) -> usize {
-        let Ok(text) = std::fs::read_to_string(ws.join(".reaper/workspace-symbols.json")) else {
-            return 0;
-        };
-        text.matches("\"name\"").count()
+        super::symbols::workspace_symbol_cache_count(ws)
     }
+}
+
+fn touch_project_phase(
+    inner: &Arc<Mutex<HashMap<String, JobEntry>>>,
+    repo_key: &str,
+    phase: &str,
+    workspace_symbols: usize,
+) {
+    let mut guard = match inner.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let entry = guard.entry(repo_key.to_string()).or_default();
+    entry.status.state = "running".into();
+    entry.status.phase = phase.into();
+    entry.status.workspace_symbols = workspace_symbols;
 }
