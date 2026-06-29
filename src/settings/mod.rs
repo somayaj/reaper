@@ -27,6 +27,9 @@ struct SettingsFile {
     /// Repos hidden from the IDE list (bare repo data is kept on disk).
     #[serde(default)]
     hidden_repos: Vec<String>,
+    /// Repository opened automatically on startup when no URL repo is set.
+    #[serde(default)]
+    default_repo: Option<String>,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,11 @@ pub struct GeminiSettingsView {
     pub masked: Option<String>,
     pub model: String,
     pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneralSettingsView {
+    pub default_repo: Option<String>,
 }
 
 impl SettingsStore {
@@ -304,6 +312,22 @@ impl SettingsStore {
         guard.hidden_repos.push(name.to_string());
         self.save(&guard)?;
         Ok(())
+    }
+
+    pub fn general_view(&self) -> GeneralSettingsView {
+        let default_repo = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|guard| guard.default_repo.clone())
+            .filter(|name| !name.is_empty());
+        GeneralSettingsView { default_repo }
+    }
+
+    pub fn set_default_repo(&self, name: Option<String>) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.default_repo = name.filter(|n| !n.trim().is_empty());
+        self.save(&guard)
     }
 
     pub fn set_token(&self, host: &str, token: String) -> Result<()> {

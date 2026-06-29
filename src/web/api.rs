@@ -250,12 +250,15 @@ async fn get_log(
     Path(name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> impl IntoResponse {
-    let path = state.config.repo_path(&name);
     if !state.config.repo_exists(&name) {
         return api_error(StatusCode::NOT_FOUND, anyhow::anyhow!("not found"));
     }
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
     let limit = q.limit.unwrap_or(50).min(200);
-    match git::log(&path, limit) {
+    match git::log(&ws, limit) {
         Ok(commits) => Json(commits).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
