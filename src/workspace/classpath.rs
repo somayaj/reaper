@@ -442,6 +442,8 @@ pub struct CompletionItem {
     pub path: Option<String>,
     pub line: Option<u32>,
     pub column: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -923,6 +925,7 @@ pub fn java_completions(
                         path: None,
                         line: None,
                         column: None,
+                        documentation: None,
                     });
                 }
             }
@@ -954,6 +957,7 @@ pub fn java_completions(
                         path: Some(from_path.to_string()),
                         line: None,
                         column: None,
+                        documentation: None,
                     });
                 }
             }
@@ -968,6 +972,7 @@ pub fn java_completions(
                             path: Some(from_path.to_string()),
                             line: None,
                             column: None,
+                            documentation: None,
                         });
                     }
                 }
@@ -1046,6 +1051,68 @@ fn symbol_to_completion_item(
         path: Some(normalize_index_path(ws, root, &sym.path)),
         line: Some(sym.line),
         column: Some(sym.column),
+        documentation: None,
+    }
+}
+
+fn enrich_java_completion_from_source(item: &mut CompletionItem, content: &str) {
+    let Some(line) = item.line else {
+        return;
+    };
+    let line_idx = line.saturating_sub(1) as usize;
+    let Some(source_line) = content.lines().nth(line_idx) else {
+        return;
+    };
+
+    if let Some(sig) = super::symbols::java_member_signature_on_line(source_line, &item.label) {
+        item.detail = Some(sig);
+    } else if item.kind == "field" {
+        let trimmed = source_line.split("//").next().unwrap_or(source_line).trim();
+        if !trimmed.is_empty() {
+            item.detail = Some(trimmed.to_string());
+        }
+    }
+
+    if item.kind == "method" || item.kind == "field" {
+        item.documentation = super::symbols::java_javadoc_before_line(content, line);
+    }
+}
+
+fn read_source_for_completion(
+    ws: &Path,
+    root: &Path,
+    rel_path: &str,
+    cache: &mut HashMap<String, String>,
+) -> Option<String> {
+    if let Some(content) = cache.get(rel_path) {
+        return Some(content.clone());
+    }
+    let mut candidates = vec![ws.join(rel_path)];
+    if let Ok(stripped) = Path::new(rel_path).strip_prefix("./") {
+        candidates.push(ws.join(stripped));
+    }
+    candidates.push(root.join(rel_path));
+    for abs in candidates {
+        if abs.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&abs) {
+                cache.insert(rel_path.to_string(), content.clone());
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
+fn enrich_completion_items_from_sources(ws: &Path, root: &Path, items: &mut [CompletionItem]) {
+    let mut cache = HashMap::new();
+    for item in items.iter_mut() {
+        let Some(path) = item.path.clone() else {
+            continue;
+        };
+        let Some(content) = read_source_for_completion(ws, root, &path, &mut cache) else {
+            continue;
+        };
+        enrich_java_completion_from_source(item, &content);
     }
 }
 
@@ -1075,6 +1142,7 @@ fn import_fqcn_completions(
             path: Some(normalize_index_path(ws, root, &sym.path)),
             line: Some(sym.line),
             column: Some(sym.column),
+            documentation: None,
         });
     }
     items
@@ -1169,6 +1237,8 @@ fn member_completions_for_qualifier(
 
     push_known_jdk_static_members(&mut items, &mut seen, qualifier, member_prefix);
 
+    enrich_completion_items_from_sources(ws, root, &mut items);
+
     Ok(items)
 }
 
@@ -1219,7 +1289,7 @@ fn members_from_type_source(
         if !member_prefix.is_empty() && !sym.name.to_lowercase().starts_with(&member_prefix_lower) {
             continue;
         }
-        items.push(CompletionItem {
+        let mut item = CompletionItem {
             label: sym.name.clone(),
             kind: sym.kind.clone(),
             detail: Some(fqcn.to_string()),
@@ -1227,7 +1297,10 @@ fn members_from_type_source(
             path: Some(normalize_index_path(ws, gradle_root, &sym.path)),
             line: Some(sym.line),
             column: Some(sym.column),
-        });
+            documentation: None,
+        };
+        enrich_java_completion_from_source(&mut item, &content);
+        items.push(item);
         if items.len() >= 80 {
             break;
         }
@@ -1350,6 +1423,7 @@ fn push_builtin_array_members(
                 path: None,
                 line: None,
                 column: None,
+                documentation: None,
             });
         }
     }
@@ -1384,6 +1458,7 @@ fn push_known_jdk_static_members(
                     path: None,
                     line: None,
                     column: None,
+                    documentation: None,
                 });
             }
         }

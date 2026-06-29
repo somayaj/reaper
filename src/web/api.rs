@@ -72,6 +72,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/gradle/info", get(gradle_project_info_handler))
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
+        .route("/api/repos/{name}/workspace/hover", get(workspace_hover).post(workspace_hover_post))
         .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
         .route("/api/repos/{name}/workspace/completions", get(workspace_completions).post(workspace_completions_post))
         .route("/api/repos/{name}/workspace/ai-completions", post(workspace_ai_completions))
@@ -874,6 +875,10 @@ struct DefinitionQuery {
     path: String,
     line: u32,
     column: u32,
+    #[serde(default)]
+    member: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
 }
 
 async fn workspace_definition(
@@ -902,6 +907,10 @@ struct DefinitionBody {
     column: u32,
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    member: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
 }
 
 async fn workspace_definition_post(
@@ -924,6 +933,78 @@ async fn workspace_definition_post(
         body.column,
         body.content.as_deref(),
     ) {
+        Ok(hit) => Json(hit).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_hover(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<DefinitionQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let from_path = q.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    let result = if let Some(member) = q.member.as_deref().filter(|m| !m.is_empty()) {
+        workspace::find_member_hover_with_content(&ws, from_path, q.line, q.column, member, None)
+    } else if let Some(symbol) = q.symbol.as_deref().filter(|s| !s.is_empty()) {
+        workspace::find_symbol_hover_with_content(&ws, from_path, q.line, q.column, symbol, None)
+    } else {
+        workspace::find_hover_with_content(&ws, from_path, q.line, q.column, None)
+    };
+    match result {
+        Ok(hit) => Json(hit).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_hover_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DefinitionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let from_path = body.path.trim();
+    if workspace::definition_uses_java_index(from_path) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    let result = if let Some(member) = body.member.as_deref().filter(|m| !m.is_empty()) {
+        workspace::find_member_hover_with_content(
+            &ws,
+            from_path,
+            body.line,
+            body.column,
+            member,
+            body.content.as_deref(),
+        )
+    } else if let Some(symbol) = body.symbol.as_deref().filter(|s| !s.is_empty()) {
+        workspace::find_symbol_hover_with_content(
+            &ws,
+            from_path,
+            body.line,
+            body.column,
+            symbol,
+            body.content.as_deref(),
+        )
+    } else {
+        workspace::find_hover_with_content(
+            &ws,
+            from_path,
+            body.line,
+            body.column,
+            body.content.as_deref(),
+        )
+    };
+    match result {
         Ok(hit) => Json(hit).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1224,12 +1305,13 @@ async fn workspace_quick_fixes(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-  match git_agent::suggest_quick_fixes(
+    match git_agent::suggest_quick_fixes(
         &state.settings,
         &ws,
         body.path.trim(),
         &body.content,
         &body.diagnostics,
+        Some(&state.cursor_bridge),
     )
     .await
     {
