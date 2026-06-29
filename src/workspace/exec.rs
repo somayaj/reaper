@@ -98,6 +98,39 @@ pub fn ensure_developer_path() {
     }
 }
 
+/// Run a formatter/linter via login shell (Homebrew PATH in GUI apps).
+pub fn try_shell_stdin_command(cwd: &Path, program: &str, args: &[&str], content: &str) -> Result<String> {
+    use std::io::Write;
+
+    let mut command = shell_quote(program);
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let mut child = Command::new(&shell)
+        .arg("-lc")
+        .arg(&command)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run shell formatter: {command}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(content.as_bytes())?;
+    }
+
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("{program} failed: {err}");
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Run a formatter/linter that reads stdin and writes stdout.
 pub fn try_stdin_command(cwd: &Path, program: &str, args: &[&str], content: &str) -> Result<String> {
     use std::io::Write;

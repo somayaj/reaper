@@ -3,7 +3,10 @@ use std::sync::Arc;
 use axum::{
     Json,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{
+        Path, Query, State,
+        ws::{WebSocket, WebSocketUpgrade},
+    },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -62,6 +65,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/git", post(run_workspace_git))
         .route("/api/repos/{name}/workspace/shell", post(run_workspace_shell))
         .route("/api/repos/{name}/workspace/shell/cd", post(workspace_shell_cd))
+        .route("/api/repos/{name}/workspace/terminal", get(workspace_terminal_ws))
         .route("/api/repos/{name}/workspace/java/info", get(java_main_info))
         .route("/api/repos/{name}/workspace/java/run", post(run_java_main_handler))
         .route("/api/repos/{name}/workspace/java/test-methods", get(java_test_methods_handler).post(java_test_methods_post))
@@ -291,10 +295,11 @@ async fn open_workspace(
         Ok(ws) => {
             let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
             state.project_index_jobs.on_open(&name, &ws);
+            let index_status = state.project_index_jobs.status(&name);
             Json(serde_json::json!({
                 "path": ws.display().to_string(),
                 "profile": profile,
-                "indexing": !profile.indexers.is_empty(),
+                "indexing": index_status.state == "running",
             }))
             .into_response()
         }
@@ -682,6 +687,29 @@ async fn workspace_shell_cd(
     }
 }
 
+#[derive(Deserialize)]
+struct TerminalWsQuery {
+    cwd: Option<String>,
+}
+
+async fn workspace_terminal_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<TerminalWsQuery>,
+) -> Response {
+    let workspace_path = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let cwd = query.cwd;
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = workspace::terminal::run_terminal_websocket(socket, &workspace_path, cwd.as_deref()).await {
+            tracing::warn!("terminal session ended: {e:#}");
+        }
+    })
+}
+
 async fn java_main_info(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -950,7 +978,27 @@ async fn workspace_completions(
         state.java_index_jobs.ensure_building(&name, &ws);
     }
     match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None) {
-        Ok(items) => Json(items).into_response(),
+        Ok(items) => {
+            if items.is_empty() {
+                tracing::debug!(
+                    "completions empty for {}:{}:{} prefix={:?}",
+                    from_path,
+                    q.line,
+                    q.column,
+                    prefix
+                );
+            } else {
+                tracing::debug!(
+                    "completions {}:{}:{} → {} items (first: {})",
+                    from_path,
+                    q.line,
+                    q.column,
+                    items.len(),
+                    items.first().map(|i| i.label.as_str()).unwrap_or("")
+                );
+            }
+            Json(items).into_response()
+        },
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -988,7 +1036,23 @@ async fn workspace_completions_post(
         &prefix,
         body.content.as_deref(),
     ) {
-        Ok(items) => Json(items).into_response(),
+        Ok(items) => {
+            tracing::info!(
+                "completions POST {}:{}:{} prefix={:?} → {} items [{}]",
+                from_path,
+                body.line,
+                body.column,
+                prefix,
+                items.len(),
+                items
+                    .iter()
+                    .take(6)
+                    .map(|i| i.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Json(items).into_response()
+        },
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }

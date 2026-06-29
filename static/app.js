@@ -12,7 +12,7 @@ const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
 const AUTO_SAVE_DELAY_MS = 800;
 const DIAG_DELAY_MS = 150;
-const PROJECT_INDEX_POLL_MS = 2000;
+const PROJECT_INDEX_POLL_MS = 750;
 const DEFAULT_EDITOR_FONT_SIZE = 13;
 const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 28;
@@ -127,6 +127,9 @@ const state = {
   projectIndexRunning: false,
   projectIndexReady: false,
   projectIndexStartedAt: 0,
+  editorIndexFrozen: false,
+  editorIndexFrozenPrevReadOnly: undefined,
+  indexFreezeActive: false,
   projectProfile: null,
   repoPickerUnregisterName: null,
   treeNavAnchor: null,
@@ -194,12 +197,32 @@ function repoApi(name, suffix = '') {
 
 function toast(msg, type = 'info', { duration } = {}) {
   const el = $('#toast');
+  if (!el) {
+    console.error('[toast missing]', msg);
+    setCompleteDebugStatus(String(msg));
+    return;
+  }
   el.textContent = msg;
   el.className = `ij-toast ${type}`;
   el.classList.remove('hidden');
+  el.style.display = 'block';
+  el.style.opacity = '1';
+  el.style.pointerEvents = 'auto';
   clearTimeout(toast._timer);
   const ms = duration ?? (type === 'error' ? 9000 : 3500);
-  toast._timer = setTimeout(() => el.classList.add('hidden'), ms);
+  toast._timer = setTimeout(() => {
+    el.classList.add('hidden');
+    el.style.display = '';
+  }, ms);
+}
+
+function setCompleteDebugStatus(msg) {
+  const line = String(msg || '');
+  const dbg = $('#status-complete-debug');
+  const sm = $('#status-message');
+  if (dbg) dbg.textContent = line;
+  if (sm && line) sm.textContent = line;
+  console.log('[Reaper complete]', line);
 }
 
 function setGlobalLoading(on, text = 'Loading…') {
@@ -429,7 +452,8 @@ async function initStatusFooter() {
   try {
     const info = await api('/api/version');
     if (info) {
-      apply(info.version || version, info.build || metaBuild);
+      // Prefer meta tag (loaded static bundle) over compile-time API build.
+      apply(info.version || version, metaBuild || info.build);
     }
   } catch {
     /* server still starting */
@@ -438,7 +462,7 @@ async function initStatusFooter() {
 
 function getAiInlineCompleteEnabled() {
   const stored = localStorage.getItem(AI_INLINE_COMPLETE_KEY);
-  if (stored === null) return state.geminiConfigured;
+  if (stored === null) return true;
   return stored === '1';
 }
 
@@ -468,6 +492,7 @@ function setShowDotfiles(show) {
 
 function getNewWindowOnRepoChange() {
   const stored = localStorage.getItem(NEW_WINDOW_ON_REPO_KEY);
+  if (stored === null) return true;
   return stored === '1' || stored === 'true';
 }
 
@@ -1479,7 +1504,122 @@ function stopProjectIndexPolling() {
     clearInterval(state.projectIndexPoll);
     state.projectIndexPoll = null;
   }
+  clearIndexingProgressUi();
+}
+
+function projectIndexNeedsFreeze(status) {
+  if (!status) return false;
+  const indexers = status.profile?.indexers || [];
+  const needsJava = indexers.includes('java');
+  const javaRunning = status.java?.state === 'running';
+  return status.state === 'running' || (needsJava && javaRunning);
+}
+
+function indexingPhaseLabel(phase) {
+  switch (phase) {
+    case 'workspace-symbols': return 'Scanning workspace symbols';
+    case 'java-index': return 'Building Java index';
+    case 'classpath': return 'Resolving dependencies';
+    case 'sources': return 'Loading library sources';
+    case 'indexing': return 'Indexing Java symbols';
+    case 'writing': return 'Saving index';
+    case 'starting': return 'Starting';
+    case 'ready': return 'Ready';
+    default: return phase ? phase.replace(/-/g, ' ') : 'Indexing';
+  }
+}
+
+function indexingProgressPercent(status) {
+  if (!status) return 0;
+  if (status.state === 'ready') return 100;
+  const java = status.java || {};
+  const phase = status.phase || java.phase || '';
+  const wsN = status.workspace_symbols || 0;
+  const javaN = java.symbol_count || 0;
+
+  if (phase === 'writing') return 96;
+  if (phase === 'indexing' || javaN > 0) {
+    return Math.min(95, 35 + Math.round((javaN / 220000) * 60));
+  }
+  if (phase === 'sources') return 28;
+  if (phase === 'classpath') return 18;
+  if (phase === 'java-index') return 30;
+  if (phase === 'workspace-symbols') return wsN > 0 ? 22 : 12;
+  if (wsN > 0) return 25;
+  return 8;
+}
+
+function formatIndexingProgress(status) {
+  const label = status?.label || indexingLabelFromProfile(status?.profile) || 'project';
+  const java = status?.java || {};
+  const phase = java.phase || status?.phase || 'starting';
+  const phaseLabel = indexingPhaseLabel(phase);
+  const wsN = status?.workspace_symbols || 0;
+  const javaN = java.symbol_count || 0;
+  const parts = [];
+  if (wsN > 0) parts.push(`${wsN.toLocaleString()} workspace`);
+  if (javaN > 0) parts.push(`${javaN.toLocaleString()} Java`);
+  if (java.spring_symbols > 0) parts.push(`${java.spring_symbols.toLocaleString()} Spring`);
+  const detail = parts.length ? parts.join(' · ') : phaseLabel;
+  const pct = indexingProgressPercent(status);
+  return {
+    title: `Indexing ${label}…`,
+    phase: phaseLabel,
+    stats: parts.join(' · '),
+    detail,
+    percent: pct,
+  };
+}
+
+function applyIndexingProgressUi({ title, phase, stats, percent, show, label }) {
+  const pct = Math.max(0, Math.min(100, percent || 0));
+  const pctText = `${pct}%`;
+  const fillBanner = $('#banner-index-progress-fill');
+  const fillCard = $('#editor-index-progress-fill');
+  const pctBanner = $('#java-index-banner-pct');
+  const pctCard = $('#editor-index-overlay-pct');
+  const overlay = $('#editor-index-overlay');
+  const overlayTitle = $('#editor-index-overlay-title');
+  const overlayPhase = $('#editor-index-overlay-text');
+  const overlayStats = $('#editor-index-progress-detail');
+  const bannerLabel = $('#java-index-banner-label');
+  const bannerText = $('#java-index-banner-text');
+
+  if (fillBanner) fillBanner.style.width = `${pct}%`;
+  if (fillCard) fillCard.style.width = `${pct}%`;
+  if (pctBanner) pctBanner.textContent = show ? pctText : '';
+  if (pctCard) pctCard.textContent = show ? pctText : '';
+  if (overlayTitle && title) overlayTitle.textContent = title;
+  if (overlayPhase) overlayPhase.textContent = phase || '';
+  if (overlayStats) overlayStats.textContent = stats || '';
+  if (bannerLabel) bannerLabel.textContent = show && label ? label : 'Indexing';
+  if (bannerText) {
+    bannerText.textContent = stats
+      ? `${phase || ''}${phase && stats ? ' — ' : ''}${stats}`
+      : (phase || 'Preparing workspace…');
+  }
+  // Banner only — never cover the editor; the veil blocks Monaco suggest widgets.
+  overlay?.classList.add('hidden');
+  overlay?.setAttribute('aria-hidden', 'true');
+}
+
+function clearIndexingProgressUi() {
   $('#java-index-banner')?.classList.add('hidden');
+  applyIndexingProgressUi({ show: false });
+  state.editorIndexFrozen = false;
+  state.indexFreezeActive = false;
+  if (state.editor && window.monaco) {
+    state.editor.updateOptions({ readOnly: false });
+    state.editorIndexFrozenPrevReadOnly = undefined;
+  }
+}
+
+function indexingLabelFromProfile(profile) {
+  const langs = (profile?.languages || []).join(', ');
+  const frameworks = (profile?.frameworks || []).filter((f) => f !== 'gradle' && f !== 'maven');
+  if (frameworks.length) return frameworks.join(', ');
+  if (langs) return langs;
+  return 'project';
 }
 
 function startProjectIndexPolling() {
@@ -1492,29 +1632,32 @@ function startProjectIndexPolling() {
 
 function updateProjectIndexUi(status) {
   const banner = $('#java-index-banner');
-  const bannerText = $('#java-index-banner-text');
-  banner?.classList.add('hidden');
 
-  state.projectIndexRunning = status?.state === 'running';
-  const javaReady = status?.java?.state === 'ready' && (status?.java?.dependency_jars || 0) > 0;
-  state.projectIndexReady = status?.state === 'ready' && (javaReady || (status?.workspace_symbols || 0) > 0);
+  state.projectIndexRunning = projectIndexNeedsFreeze(status);
+  const javaReady = status?.java?.state === 'ready'
+    && (status?.java?.symbol_count || 0) > 0;
+  const javaHasSymbols = (status?.java?.symbol_count || 0) > 0;
+  state.projectIndexReady = status?.state === 'ready'
+    && (javaReady || (status?.workspace_symbols || 0) > 0)
+    || javaHasSymbols;
   state.projectProfile = status?.profile || null;
 
-  if (status?.state === 'running') {
-    const label = status.label || 'project';
-    const parts = [];
-    if (status.java?.symbol_count > 0) {
-      parts.push(`${Number(status.java.symbol_count).toLocaleString()} Java symbols`);
-    }
-    if (status.workspace_symbols > 0) {
-      parts.push(`${Number(status.workspace_symbols).toLocaleString()} workspace symbols`);
-    }
-    const detail = parts.length ? ` (${parts.join(', ')})` : '';
-    setStatusMessage(`Indexing ${label}${detail}…`);
-    if (bannerText) bannerText.textContent = `Indexing ${label}…`;
+  if (projectIndexNeedsFreeze(status)) {
+    const progress = formatIndexingProgress(status);
+    setStatusMessage(`${progress.title} — ${progress.detail}`);
     banner?.classList.remove('hidden');
+    applyIndexingProgressUi({
+      title: progress.title,
+      label: status?.label || indexingLabelFromProfile(status?.profile),
+      phase: progress.phase,
+      stats: progress.stats,
+      percent: progress.percent ?? 5,
+      show: true,
+    });
     return;
   }
+
+  clearIndexingProgressUi();
 
   if (status?.state === 'ready' && !state.projectIndexNotified) {
     state.projectIndexNotified = true;
@@ -1526,6 +1669,8 @@ function updateProjectIndexUi(status) {
     const total = javaN + wsN;
     const langs = (status.profile?.languages || []).join(', ') || label.toLowerCase();
     const detail = [
+      javaN ? `${javaN.toLocaleString()} Java` : '',
+      wsN ? `${wsN.toLocaleString()} workspace` : '',
       springN ? `${springN.toLocaleString()} Spring` : '',
       jdkN ? `${jdkN.toLocaleString()} JDK` : '',
     ].filter(Boolean).join(', ');
@@ -1547,14 +1692,16 @@ async function pollProjectIndexStatus() {
     const status = await api(repoApi(state.repo, '/workspace/project/index-status'));
     updateProjectIndexUi(status);
     const elapsed = Date.now() - (state.projectIndexStartedAt || Date.now());
-    const timedOut = status?.state === 'running' && elapsed > 5 * 60 * 1000;
+    const timedOut = projectIndexNeedsFreeze(status) && elapsed > 5 * 60 * 1000;
     if (timedOut && !state.projectIndexNotified) {
       state.projectIndexNotified = true;
+      clearIndexingProgressUi();
       toast('Indexing is taking longer than expected — you can keep working; check Settings → Java if Gradle is stuck', 'warning', { duration: 12000 });
       stopProjectIndexPolling();
       return;
     }
-    if (status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') {
+    const javaStillRunning = status?.profile?.indexers?.includes('java') && status?.java?.state === 'running';
+    if ((status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') && !javaStillRunning) {
       stopProjectIndexPolling();
     }
   } catch {
@@ -3057,18 +3204,43 @@ async function openConflictFile(path) {
 }
 
 // --- Monaco ---
+let pendingEditorPath = null;
+let pendingEditorContent = null;
+
 function setEditorContent(path, content) {
-  if (!state.editor) return;
+  const text = content ?? '';
+  if (!state.editor) {
+    pendingEditorPath = path;
+    pendingEditorContent = text;
+    return;
+  }
+  pendingEditorPath = null;
+  pendingEditorContent = null;
   state.suppressEditorChange = true;
-  state.editor.setValue(content ?? '');
-  monaco.editor.setModelLanguage(state.editor.getModel(), langForPath(path));
-  state.suppressEditorChange = false;
+  try {
+    state.editor.setValue(text);
+    const lang = langForPath(path);
+    window.ReaperLang?.ensureMonacoBasicLanguage?.(lang);
+    monaco.editor.setModelLanguage(state.editor.getModel(), lang);
+  } finally {
+    state.suppressEditorChange = false;
+  }
   applyTestRunDecorations();
+}
+
+function flushPendingEditorContent() {
+  if (!state.editor || pendingEditorPath == null) return;
+  const path = pendingEditorPath;
+  const content = pendingEditorContent;
+  pendingEditorPath = null;
+  pendingEditorContent = null;
+  setEditorContent(path, content);
 }
 
 function syncEditorFromActiveTab() {
   if (!state.editor || !state.activeTab || !state.tabContents.has(state.activeTab)) return;
   setEditorContent(state.activeTab, state.tabContents.get(state.activeTab));
+  flushPendingEditorContent();
 }
 
 function defaultReadmeContent(path) {
@@ -3078,8 +3250,32 @@ function defaultReadmeContent(path) {
   return `# ${title}\n\nManaged by Reaper.\n`;
 }
 
+const MONACO_LOCAL_BASE = '/vendor/monaco-editor/min';
+
+function monacoBaseUrl() {
+  return MONACO_LOCAL_BASE;
+}
+
+function monacoVsBaseUrl() {
+  return `${monacoBaseUrl()}/vs`;
+}
+
+function configureMonacoEnvironment() {
+  const base = monacoBaseUrl();
+  const workerMain = `${base}/vs/base/worker/workerMain.js`;
+  window.MonacoEnvironment = {
+    getWorkerUrl() {
+      // WKWebView blocks cross-origin Worker URLs; bootstrap via data URL + same-origin or CDN importScripts.
+      return `data:text/javascript;charset=utf-8,${encodeURIComponent(
+        `self.MonacoEnvironment = { baseUrl: '${base}' };importScripts('${workerMain}');`,
+      )}`;
+    },
+  };
+}
+
 function initEditor() {
-  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+  configureMonacoEnvironment();
+  require.config({ paths: { vs: monacoVsBaseUrl() } });
   require(['vs/editor/editor.main'], () => {
     ensureGeminiReady().finally(() => {
     void refreshJavaLanguageLevel();
@@ -3091,6 +3287,8 @@ function initEditor() {
       value: '',
       language: 'plaintext',
       theme: window.ReaperThemes?.getMonacoThemeId() || 'reaper-navy',
+      fixedOverflowWidgets: true,
+      overflowWidgetsDomNode: document.getElementById('editor-overflow-root'),
       fontFamily: fontSpec.family,
       fontSize,
       lineHeight: editorLineHeightFor(fontSize),
@@ -3108,22 +3306,25 @@ function initEditor() {
       cursorStyle: 'line',
       smoothScrolling: true,
       links: true,
-      wordBasedSuggestions: getAiInlineCompleteEnabled() ? 'off' : 'currentDocument',
-      quickSuggestions: { other: true, strings: false, comments: false },
-      quickSuggestionsDelay: 200,
+      hover: { enabled: true, delay: 300, sticky: true },
+      wordBasedSuggestions: 'off',
+      quickSuggestions: { other: true, strings: true, comments: false },
+      quickSuggestionsDelay: 120,
       suggestOnTriggerCharacters: true,
       suggest: {
-        preview: false,
+        preview: true,
         showIcons: true,
         snippetsPreventQuickSuggestions: false,
         filterGraceful: true,
         localityBonus: true,
         showStatusBar: false,
+        shareSuggestSelections: true,
       },
       inlineSuggest: {
         enabled: true,
         showToolbar: false,
-        suppressSuggestions: getAiInlineCompleteEnabled(),
+        suppressSuggestions: false,
+        mode: 'subwordSmart',
       },
       lightbulb: {
         enabled: monaco.editor.ShowLightbulbIconMode?.On
@@ -3141,22 +3342,12 @@ function initEditor() {
       overviewRulerBorder: false,
       overviewRulerLanes: 2,
     });
-    state.editor.onDidChangeModelContent(() => {
-      if (state.suppressEditorChange || !state.activeTab) return;
-      state.tabContents.set(state.activeTab, state.editor.getValue());
-      state.dirty.add(state.activeTab);
-      updateSaveButton();
-      if (isGradleFilePath(state.activeTab)) refreshGradleInfo();
-      else if (state.activeTab?.endsWith('.java')) updateRunButtons();
-      renderTabs();
-      scheduleAutoSave();
-      scheduleDiagnostics();
-      updateConflictUi();
-      applyTestRunDecorations();
-    });
-    state.editor.onDidChangeCursorPosition((e) => updateEditorStatus(e.position));
     setupDiagnosticNavigation(state.editor);
-    window.ReaperLang?.setupEditorFeatures(state.editor, {
+    try {
+      if (!window.ReaperLang?.setupEditorFeatures) {
+        throw new Error('ReaperLang.setupEditorFeatures missing');
+      }
+      window.ReaperLang.setupEditorFeatures(state.editor, {
       api,
       repoApi,
       getRepo: () => state.repo,
@@ -3169,6 +3360,9 @@ function initEditor() {
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
       toast,
+      terminalLog,
+      setCompleteDebugStatus,
+      setStatusMessage,
       showQuickFixMenu,
       scheduleDiagnostics: () => scheduleDiagnostics(),
       getDiagnosticsInRange: (model, range) => {
@@ -3188,9 +3382,78 @@ function initEditor() {
         if (el) el.textContent = label;
       },
     });
-    state.editorReady = true;
-    syncEditorFromActiveTab();
+      setCompleteDebugStatus('editor features OK');
+      if (window.__reaperLangBundleError) {
+        toast('Completion bundle failed to load — using core JDK stubs only', 'error', { duration: 15000 });
+      }
+    } catch (err) {
+      const msg = err?.message || String(err);
+      setCompleteDebugStatus(`features ERR: ${msg}`);
+      toast(`Editor features failed: ${msg}`, 'error', { duration: 20000 });
+      console.error('[Reaper] setupEditorFeatures', err);
+    }
+    state.editor.onDidChangeModelContent(() => {
+      if (state.suppressEditorChange || !state.activeTab) return;
+      state.tabContents.set(state.activeTab, state.editor.getValue());
+      state.dirty.add(state.activeTab);
+      updateSaveButton();
+      if (isGradleFilePath(state.activeTab)) refreshGradleInfo();
+      else if (state.activeTab?.endsWith('.java')) updateRunButtons();
+      renderTabs();
+      scheduleAutoSave();
+      scheduleDiagnostics();
+      updateConflictUi();
+      applyTestRunDecorations();
+      const model = state.editor.getModel();
+      const position = state.editor.getPosition();
+      if (model && position) {
+        const ctx = window.ReaperLang?.memberDotContext?.(model, position);
+        const linePrefix = ctx?.linePrefix
+          ?? model.getValueInRange(new monaco.Range(
+            position.lineNumber, 1, position.lineNumber, position.column,
+          ));
+        if (linePrefix.trimEnd().endsWith('.')) {
+          const rev = window.ReaperLang?.completionRev?.() ?? '?';
+          const member = ctx?.member
+            ?? window.ReaperLang?.dotQualifierFromLinePrefix?.(linePrefix);
+          const qual = member?.qualifier;
+          const content = model.getValue();
+          const path = state.activeTab || '';
+          const jdk = qual
+            ? (window.ReaperLang?.memberPreview?.(
+              content, qual, member?.memberPrefix || '', path, model,
+            ) || window.ReaperLang?.jdkMemberPreview?.(
+              qual, member?.memberPrefix || '', content, path, model,
+            ) || [])
+            : [];
+          const tail = linePrefix.slice(-20);
+          const bundle = !window.ReaperLang
+            ? 'missing'
+            : (window.ReaperLang.coreOnly ? 'core' : 'full');
+          const bundleErr = window.__reaperLangBundleError ? ' ERR' : '';
+          setCompleteDebugStatus(
+            qual
+              ? `c${rev} · ${qual}. · jdkN=${jdk.length} · ${jdk.map((x) => x.label).join(',') || 'none'} · ${bundle}${bundleErr}`
+              : `c${rev} · ? · line=…${tail} · ${bundle}${bundleErr}`,
+          );
+          window.ReaperLang?.handleDotCompletion?.(state.editor);
+        }
+      }
     });
+    state.editor.onDidChangeCursorPosition((e) => updateEditorStatus(e.position));
+    window.ReaperThemes?.syncMonacoOverflowWidgetTheme?.(
+      window.ReaperThemes.getTheme(window.ReaperThemes.getStoredTheme()).dark,
+    );
+    state.editorReady = true;
+    flushPendingEditorContent();
+    syncEditorFromActiveTab();
+    setCompleteDebugStatus(`monaco ready · c${window.ReaperLang?.completionRev?.() || '?'}`);
+    });
+  }, (err) => {
+    const msg = err?.requireType || err?.message || String(err);
+    setCompleteDebugStatus(`monaco ERR: ${msg}`);
+    toast(`Monaco failed to load: ${msg}`, 'error', { duration: 25000 });
+    console.error('[Reaper] monaco require', err);
   });
 }
 
@@ -3224,12 +3487,9 @@ async function selectRepo(name) {
 
   state.repo = name;
   resetTerminalCwds();
-  updateTerminalCwdUi();
   const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
   state.projectProfile = opened?.profile || null;
-  if (opened?.indexing) {
-    startProjectIndexPolling();
-  }
+  startProjectIndexPolling();
   const detail = await api(repoApi(name));
   state.branches = detail.branches;
   state.defaultBranch = detail.default_branch || detail.summary?.default_branch || '';
@@ -3238,7 +3498,7 @@ async function selectRepo(name) {
   updateRepoInfo(detail);
   enableControls();
   updateAgentUi();
-  await refreshTree();
+  await refreshTree({ resetExpanded: true });
   await refreshGitStatus();
   await refreshHistory();
   try {
@@ -3274,7 +3534,6 @@ function showNoRepoFileTree() {
 function resetUI() {
   state.treeNavAnchor = null;
   resetTerminalCwds();
-  updateTerminalCwdUi();
   updateTreeBackButton();
   stopProjectIndexPolling();
   showNoRepoFileTree();
@@ -3291,7 +3550,7 @@ function resetUI() {
   $('#branch-picker-btn').disabled = true;
   setBranchLabel('');
   updateDefaultBranchUi();
-  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-rollback', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-rollback', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   closeAllTabs();
@@ -3309,7 +3568,7 @@ function enableControls() {
   $('#branch-picker-btn').disabled = false;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = false;
-  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
   updateRunButtons();
   updateRollbackButton();
   updateMenuState();
@@ -3775,8 +4034,8 @@ async function prefetchTreeLevel(dirPath) {
   }
 }
 
-async function loadTreeRoot() {
-  treeState.expanded.clear();
+async function loadTreeRoot(resetExpanded = false) {
+  if (resetExpanded) treeState.expanded.clear();
   await loadTreeLevel('');
 }
 
@@ -3843,7 +4102,9 @@ async function reloadOpenTabsFromDisk() {
 
 let lastTreeNodes = [];
 
-async function refreshTree() {
+async function refreshTree(options = {}) {
+  const { resetExpanded = false } = options;
+  const savedExpanded = resetExpanded ? null : [...treeState.expanded];
   treeState.children.clear();
   treeState.loading.clear();
   treeState.recursiveNodes = null;
@@ -3852,7 +4113,11 @@ async function refreshTree() {
     treeState.recursiveNodes = await api(repoApi(state.repo, '/workspace/tree?recursive=1'));
     lastTreeNodes = treeState.recursiveNodes;
   } else {
-    await loadTreeRoot();
+    if (resetExpanded) treeState.expanded.clear();
+    await loadTreeLevel('');
+    if (savedExpanded) {
+      for (const dir of savedExpanded) treeState.expanded.add(dir);
+    }
     lastTreeNodes = treeState.children.get('') || [];
   }
   renderFilteredTree();
@@ -4001,7 +4266,7 @@ async function fetchFileContent(path) {
   const promise = api(`${repoApi(state.repo, '/workspace/file')}?path=${encodeURIComponent(path)}`)
     .then((data) => {
       fileFetchInflight.delete(path);
-      return data.content;
+      return data?.content ?? '';
     })
     .catch((err) => {
       fileFetchInflight.delete(path);
@@ -4009,6 +4274,14 @@ async function fetchFileContent(path) {
     });
   fileFetchInflight.set(path, promise);
   return promise;
+}
+
+async function hydrateTabContent(path) {
+  if (state.tabContents.has(path)) return state.tabContents.get(path);
+  const content = await fetchFileContent(path);
+  const text = content ?? '';
+  state.tabContents.set(path, text);
+  return text;
 }
 
 function prefetchFile(path) {
@@ -4077,25 +4350,27 @@ async function goBackToTreeFile() {
 
 async function openFile(path) {
   if (state.tabs.includes(path)) {
+    try {
+      if (!state.tabContents.has(path)) await hydrateTabContent(path);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
     activateTab(path);
     return;
   }
   state.tabs.push(path);
   state.activeTab = path;
   renderTabs();
-  activateTabShell(path);
 
   try {
-    let content = await fetchFileContent(path);
+    let content = await hydrateTabContent(path);
     if (path.split('/').pop()?.toLowerCase() === 'readme.md' && !content.trim()) {
       content = defaultReadmeContent(path);
       state.dirty.add(path);
+      state.tabContents.set(path, content);
     }
-    state.tabContents.set(path, content);
-    if (state.activeTab === path) {
-      setEditorContent(path, content);
-      if (!state.editorReady) syncEditorFromActiveTab();
-    }
+    activateTabShell(path);
+    setEditorContent(path, state.tabContents.get(path));
     renderTabs();
     $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
     scheduleGradleInfoRefresh();
@@ -4171,8 +4446,8 @@ function activateTabShell(path) {
   updateBreadcrumbs(path);
   const langEl = $('#status-language');
   if (langEl) {
-    const lang = window.ReaperLang?.langLabel(langForPath(path)) || 'Plain Text';
-    const compilers = window.ReaperLang?.compilerLabelsForPath(path);
+    const lang = window.ReaperLang?.langLabel?.(langForPath(path)) || 'Plain Text';
+    const compilers = window.ReaperLang?.compilerLabelsForPath?.(path);
     langEl.textContent = compilers ? `${lang} · ${compilers}` : lang;
     langEl.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
   }
@@ -4193,6 +4468,9 @@ function activateTabShell(path) {
 
 function activateTab(path) {
   activateTabShell(path);
+  if (state.tabContents.has(path)) {
+    setEditorContent(path, state.tabContents.get(path));
+  }
   renderTabs();
 }
 
@@ -4773,7 +5051,6 @@ function scheduleAutoSave() {
   state.autoSaveTimer = setTimeout(async () => {
     if (state.dirty.has(state.activeTab)) {
       await saveFile({ silent: true });
-      await refreshTree();
       await refreshGitStatus();
     }
   }, AUTO_SAVE_DELAY_MS);
@@ -5479,8 +5756,15 @@ async function checkoutBranch(branch) {
   startProjectIndexPolling();
 }
 
-// --- Terminal ---
+// --- Terminal (xterm + PTY WebSocket) ---
 let terminalNextNum = 1;
+
+function xtermApi() {
+  const Terminal = globalThis.Terminal;
+  const FitAddon = globalThis.FitAddon?.FitAddon;
+  if (!Terminal || !FitAddon) return null;
+  return { Terminal, FitAddon };
+}
 
 function createTerminalSession(name) {
   const num = terminalNextNum++;
@@ -5488,9 +5772,10 @@ function createTerminalSession(name) {
     id: `term-${num}`,
     name: name || String(num),
     cwd: '',
-    history: [],
-    historyIndex: -1,
-    lines: [],
+    xterm: null,
+    fitAddon: null,
+    ws: null,
+    streamLine: null,
   };
 }
 
@@ -5506,60 +5791,123 @@ function getActiveTerminal() {
   return state.terminals.find((t) => t.id === state.activeTerminalId) || state.terminals[0];
 }
 
+function terminalForId(id) {
+  return state.terminals.find((t) => t.id === id);
+}
+
 function resetTerminalCwds() {
   state.terminals.forEach((t) => {
     t.cwd = '';
+    disconnectTerminalWs(t);
+    if (t.xterm) connectTerminalWs(t);
   });
 }
 
-function clearTerminalSession(term) {
-  term.lines = [];
-  term.cwd = '';
-  term.history = [];
-  term.historyIndex = -1;
+function fitActiveTerminal() {
+  fitTerminal(getActiveTerminal());
 }
 
-function appendTerminalLine(text, container = $('#terminal-output')) {
-  if (!container) return;
-  const line = document.createElement('div');
-  line.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
-  line.textContent = text;
-  container.appendChild(line);
-  container.scrollTop = container.scrollHeight;
+function fitTerminal(term) {
+  if (!term?.fitAddon || !term.xterm) return;
+  try {
+    term.fitAddon.fit();
+    sendTerminalResize(term);
+  } catch {
+    /* host may be hidden */
+  }
 }
 
-function appendTerminalEntry(entry, container = $('#terminal-output')) {
-  if (!container) return;
-  if (typeof entry === 'string') {
-    appendTerminalLine(entry, container);
+function sendTerminalResize(term) {
+  if (!term?.ws || term.ws.readyState !== WebSocket.OPEN || !term.xterm) return;
+  term.ws.send(JSON.stringify({
+    type: 'resize',
+    cols: term.xterm.cols,
+    rows: term.xterm.rows,
+  }));
+}
+
+function terminalWsUrl(term) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let url = `${proto}//${location.host}/api/repos/${encodeURIComponent(state.repo)}/workspace/terminal`;
+  if (term.cwd) url += `?cwd=${encodeURIComponent(term.cwd)}`;
+  return url;
+}
+
+function disconnectTerminalWs(term) {
+  if (!term?.ws) return;
+  try { term.ws.close(); } catch { /* ignore */ }
+  term.ws = null;
+}
+
+function connectTerminalWs(term) {
+  if (!state.repo || !term) return;
+  disconnectTerminalWs(term);
+  const ws = new WebSocket(terminalWsUrl(term));
+  term.ws = ws;
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => fitTerminal(term);
+  ws.onmessage = (ev) => {
+    if (!term.xterm) return;
+    if (ev.data instanceof ArrayBuffer) {
+      term.xterm.write(new Uint8Array(ev.data));
+    } else if (typeof ev.data === 'string') {
+      term.xterm.write(ev.data);
+    }
+  };
+  ws.onclose = () => {
+    if (term.xterm) {
+      term.xterm.write('\r\n\x1b[90m[session ended]\x1b[0m\r\n');
+    }
+  };
+}
+
+function initTerminalXterm(term) {
+  const api = xtermApi();
+  const host = $('#terminal-xterm-host');
+  if (!api || !host || !term) return;
+
+  const xterm = new api.Terminal({
+    cursorBlink: true,
+    fontSize: 12,
+    lineHeight: 1.25,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    theme: {
+      background: '#0a0e14',
+      foreground: '#c8d1dc',
+      cursor: '#7eb8da',
+      selectionBackground: '#2a4560',
+    },
+    scrollback: 4000,
+  });
+  const fitAddon = new api.FitAddon();
+  xterm.loadAddon(fitAddon);
+  xterm.open(host);
+  xterm.onData((data) => {
+    if (term.ws?.readyState === WebSocket.OPEN) {
+      term.ws.send(data);
+    }
+  });
+  term.xterm = xterm;
+  term.fitAddon = fitAddon;
+  fitTerminal(term);
+  connectTerminalWs(term);
+}
+
+function mountActiveTerminal() {
+  ensureTerminals();
+  const term = getActiveTerminal();
+  const host = $('#terminal-xterm-host');
+  if (!host || !term) return;
+  if (!term.xterm) {
+    initTerminalXterm(term);
     return;
   }
-  if (entry?.kind === 'cmd-start') {
-    const head = document.createElement('div');
-    head.className = 'ij-terminal-cmd-head';
-    head.textContent = entry.label;
-    container.appendChild(head);
-  } else if (entry?.kind === 'cmd-end') {
-    const foot = document.createElement('div');
-    foot.className = 'ij-terminal-cmd-foot';
-    if (entry.exitCode != null && entry.exitCode !== 0) {
-      foot.classList.add('ij-terminal-cmd-foot--failed');
-      const label = document.createElement('span');
-      label.className = 'ij-terminal-cmd-foot-label';
-      label.textContent = `exit ${entry.exitCode}`;
-      foot.appendChild(label);
-    }
-    container.appendChild(foot);
+  term.xterm.open(host);
+  fitTerminal(term);
+  if (!term.ws || term.ws.readyState === WebSocket.CLOSED) {
+    connectTerminalWs(term);
   }
-  container.scrollTop = container.scrollHeight;
-}
-
-function renderTerminalOutput() {
-  const out = $('#terminal-output');
-  const term = getActiveTerminal();
-  if (!out || !term) return;
-  out.replaceChildren();
-  term.lines.forEach((entry) => appendTerminalEntry(entry, out));
+  term.xterm.focus();
 }
 
 function renderTerminalTabs() {
@@ -5596,9 +5944,7 @@ function switchTerminal(id) {
   if (!state.terminals.some((t) => t.id === id)) return;
   state.activeTerminalId = id;
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
-  setTimeout(() => $('#terminal-input')?.focus(), 30);
+  mountActiveTerminal();
 }
 
 function newTerminal({ focus = true } = {}) {
@@ -5607,24 +5953,24 @@ function newTerminal({ focus = true } = {}) {
   state.terminals.push(term);
   state.activeTerminalId = term.id;
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
-  if (focus) {
-    showTerminal();
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
-  }
+  if (focus) showTerminal();
+  mountActiveTerminal();
 }
 
 function closeTerminal(id) {
   ensureTerminals();
-  const term = state.terminals.find((t) => t.id === id);
+  const term = terminalForId(id);
   if (!term) return;
   if (state.terminals.length <= 1) {
-    clearTerminalSession(term);
-    renderTerminalOutput();
-    updateTerminalCwdUi();
+    disconnectTerminalWs(term);
+    if (term.xterm) {
+      term.xterm.clear();
+      connectTerminalWs(term);
+    }
     return;
   }
+  disconnectTerminalWs(term);
+  if (term.xterm) term.xterm.dispose();
   const idx = state.terminals.findIndex((t) => t.id === id);
   state.terminals.splice(idx, 1);
   if (state.activeTerminalId === id) {
@@ -5632,126 +5978,70 @@ function closeTerminal(id) {
     state.activeTerminalId = next.id;
   }
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
+  mountActiveTerminal();
 }
 
-function terminalPromptFor(term = getActiveTerminal()) {
-  const repo = state.repo || 'repo';
-  const cwd = term?.cwd ? `${repo}/${term.cwd}` : repo;
-  return `${cwd} ❯`;
-}
-
-function updateTerminalCwdUi() {
-  const el = $('#terminal-cwd');
-  if (el) el.textContent = terminalPromptFor();
+function terminalWrite(term, text) {
+  if (!text) return;
+  const t = term || getActiveTerminal();
+  if (!t?.xterm) return;
+  const normalized = String(text).replace(/\r?\n/g, '\r\n');
+  t.xterm.write(normalized + (normalized.endsWith('\r\n') ? '' : '\r\n'));
 }
 
 function terminalLog(text, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  term.streamLine = null;
-  term.lines.push(text);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalLine(text);
-  }
+  terminalWrite(terminalForId(terminalId) || getActiveTerminal(), text);
 }
 
 function terminalCommandBegin(label, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  const entry = {
-    kind: 'cmd-start',
-    label: String(label || '').trim() || 'command',
-  };
-  term.lines.push(entry);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalEntry(entry);
-  }
+  const labelText = String(label || '').trim() || 'command';
+  terminalWrite(
+    terminalForId(terminalId) || getActiveTerminal(),
+    `\x1b[90m${labelText}\x1b[0m`,
+  );
 }
 
 function terminalCommandEnd(exitCode, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  const entry = {
-    kind: 'cmd-end',
-    exitCode: typeof exitCode === 'number' ? exitCode : null,
-  };
-  term.lines.push(entry);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalEntry(entry);
+  if (typeof exitCode === 'number' && exitCode !== 0) {
+    terminalWrite(
+      terminalForId(terminalId) || getActiveTerminal(),
+      `\x1b[31mexit ${exitCode}\x1b[0m`,
+    );
   }
 }
 
 function beginTerminalStream(terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = terminalForId(terminalId) || getActiveTerminal();
   if (!term) return;
   term.streamLine = '';
-  term.lines.push('');
 }
 
 function terminalStreamChunk(text, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = terminalForId(terminalId) || getActiveTerminal();
   if (!term || term.streamLine == null) return;
   term.streamLine += text;
-  term.lines[term.lines.length - 1] = term.streamLine;
-  if (term.id === state.activeTerminalId) {
-    updateTerminalStreamLine(term);
-  }
+  if (term.xterm) term.xterm.write(text);
 }
 
 function finalizeTerminalStream(terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = terminalForId(terminalId) || getActiveTerminal();
   if (!term) return;
   term.streamLine = null;
-  const out = $('#terminal-output');
-  const last = out?.lastElementChild;
-  if (last?.dataset?.streaming) delete last.dataset.streaming;
 }
 
-function updateTerminalStreamLine(term) {
-  const out = $('#terminal-output');
-  if (!out) return;
-  let el = out.lastElementChild;
-  if (!el?.dataset?.streaming) {
-    el = document.createElement('div');
-    el.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
-    el.dataset.streaming = '1';
-    out.appendChild(el);
-  }
-  el.textContent = term.streamLine || '';
-  out.scrollTop = out.scrollHeight;
-}
-
-async function handleTerminalCd(cmd) {
-  const term = getActiveTerminal();
-  const target = cmd.trim() === 'cd' ? '' : cmd.trim().slice(2).trim();
-  try {
-    const body = { target };
-    if (term.cwd) body.cwd = term.cwd;
-    const res = await api(repoApi(state.repo, '/workspace/shell/cd'), {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
-    term.cwd = res.cwd || '';
-    updateTerminalCwdUi();
-    return true;
-  } catch (e) {
-    terminalLog(`cd: ${e.message}`);
-    return false;
-  }
+function bindTerminalTabs() {
+  $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
+  $('#terminal-tabs')?.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('.ij-terminal-tab-close');
+    const tab = e.target.closest('.ij-terminal-tab');
+    if (!tab) return;
+    if (closeBtn) {
+      e.stopPropagation();
+      closeTerminal(tab.dataset.terminalId);
+      return;
+    }
+    switchTerminal(tab.dataset.terminalId);
+  });
 }
 
 async function consumeWorkspaceExecStream(res, terminalId) {
@@ -5810,78 +6100,6 @@ async function runWorkspaceCommandStream(path, body, { label, terminalId } = {})
     if (termId) terminalCommandEnd(-1, termId);
     throw e;
   }
-}
-
-async function runTerminalCommand(raw) {
-  if (!state.repo) return;
-  const term = getActiveTerminal();
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-
-  if (!term.history.length || term.history[0] !== trimmed) {
-    term.history.unshift(trimmed);
-    if (term.history.length > 100) term.history.pop();
-  }
-  term.historyIndex = -1;
-
-  const label = `${terminalPromptFor(term)} ${trimmed}`;
-
-  if (trimmed === 'cd' || trimmed.startsWith('cd ') || trimmed.startsWith('cd\t')) {
-    terminalCommandBegin(label, term.id);
-    const ok = await handleTerminalCd(trimmed);
-    terminalCommandEnd(ok ? 0 : 1, term.id);
-    return;
-  }
-
-  try {
-    const body = { command: trimmed };
-    if (term.cwd) body.cwd = term.cwd;
-    const exitCode = await runWorkspaceCommandStream('/workspace/shell', body, {
-      label,
-      terminalId: term.id,
-    });
-    if (/^git\b/.test(trimmed)) {
-      await refreshGitStatus();
-      await refreshHistory();
-    }
-    return exitCode;
-  } catch (e) {
-    terminalLog(`error: ${e.message}`, term.id);
-  }
-}
-
-function terminalHistoryUp(input) {
-  const term = getActiveTerminal();
-  if (!term.history.length) return;
-  term.historyIndex = Math.min(
-    term.historyIndex + 1,
-    term.history.length - 1,
-  );
-  input.value = term.history[term.historyIndex] || '';
-}
-
-function terminalHistoryDown(input) {
-  const term = getActiveTerminal();
-  if (!term.history.length) return;
-  term.historyIndex = Math.max(term.historyIndex - 1, -1);
-  input.value = term.historyIndex < 0
-    ? ''
-    : term.history[term.historyIndex] || '';
-}
-
-function bindTerminalTabs() {
-  $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
-  $('#terminal-tabs')?.addEventListener('click', (e) => {
-    const closeBtn = e.target.closest('.ij-terminal-tab-close');
-    const tab = e.target.closest('.ij-terminal-tab');
-    if (!tab) return;
-    if (closeBtn) {
-      e.stopPropagation();
-      closeTerminal(tab.dataset.terminalId);
-      return;
-    }
-    switchTerminal(tab.dataset.terminalId);
-  });
 }
 
 // --- Cursor Agent ---
@@ -6246,6 +6464,7 @@ function initTerminalBottomResize() {
     document.body.style.userSelect = '';
     const h = applyTerminalBottomHeight($('#terminal-dock-bottom')?.getBoundingClientRect().height);
     if (h) localStorage.setItem(TERMINAL_BOTTOM_HEIGHT_KEY, String(h));
+    fitActiveTerminal();
   };
 
   handle.addEventListener('mousedown', (e) => {
@@ -6321,6 +6540,9 @@ function applyTerminalDock() {
 
   syncActivityButtons();
   updateStatusBar();
+  if (showTerminal) {
+    requestAnimationFrame(() => fitActiveTerminal());
+  }
 }
 
 function showTerminal() {
@@ -6338,8 +6560,7 @@ function openTerminal() {
   }
   state.terminalOpen = true;
   applyTerminalDock();
-  updateTerminalCwdUi();
-  setTimeout(() => $('#terminal-input')?.focus(), 50);
+  mountActiveTerminal();
 }
 
 function toggleTerminal() {
@@ -6350,7 +6571,7 @@ function toggleTerminal() {
   state.terminalOpen = !state.terminalOpen;
   applyTerminalDock();
   if (state.terminalOpen) {
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
+    mountActiveTerminal();
   }
 }
 
@@ -6661,7 +6882,7 @@ function switchPanel(name) {
     setTimeout(() => $('#agent-input')?.focus(), 50);
   }
   if (name === 'terminal') {
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
+    mountActiveTerminal();
   }
 }
 
@@ -6842,6 +7063,11 @@ function bindEvents() {
     btn.addEventListener('click', () => setTerminalDock(btn.dataset.terminalDock));
   });
   bindTerminalTabs();
+  window.addEventListener('resize', () => {
+    if (state.terminalOpen || state.activePanel === 'terminal') {
+      fitActiveTerminal();
+    }
+  });
 
   $('#agent-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -6863,23 +7089,6 @@ function bindEvents() {
         switchPanel(btn.dataset.panel);
       }
     });
-  });
-
-  $('#terminal-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      runTerminalCommand(e.target.value);
-      e.target.value = '';
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      terminalHistoryUp(e.target);
-      return;
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      terminalHistoryDown(e.target);
-    }
   });
 
   document.addEventListener('keydown', (e) => {
@@ -7019,6 +7228,10 @@ function bindEvents() {
 }
 
 async function init() {
+  const uiBuild = document.querySelector('meta[name="reaper-ui-build"]')?.content || '?';
+  const cRev = window.ReaperLang?.completionRev?.() || '?';
+  setStatusMessage(`Ready · build ${uiBuild} · c${cRev}`);
+  setCompleteDebugStatus(`init · build ${uiBuild} · c${cRev}`);
   if (!window.ReaperAgentMarkdown?.libsReady?.()) {
     console.error('[Reaper] Agent markdown not ready — tables/diagrams will show as plain text until scripts load.');
   }
@@ -7031,7 +7244,6 @@ async function init() {
   syncAgentFontControls();
   ensureTerminals();
   renderTerminalTabs();
-  renderTerminalOutput();
   syncDotfilesControls(getShowDotfiles());
   await ensureGeminiReady();
   initEditor();

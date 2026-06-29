@@ -1883,7 +1883,22 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 
 /* ── Editor area ───────────────────────────────────────── */
 
-#editor-container { background: var(--ij-editor); }
+#editor-container {
+  background: var(--ij-editor);
+  position: relative;
+  z-index: 1;
+}
+
+.ij-editor-overflow-root {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.ij-editor-overflow-root > * {
+  pointer-events: auto;
+}
 
 .ij-editor-stage {
   position: relative;
@@ -1996,18 +2011,224 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 }
 main { background: var(--ij-bg); }
 
-.ij-java-index-banner {
+.ij-index-strip {
+  position: relative;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ij-panel-header) 88%, var(--ij-accent) 12%) 0%,
+    var(--ij-panel-header) 100%
+  );
+  border-bottom: 1px solid var(--ij-border-light);
+  padding: 0 12px;
+}
+
+.ij-index-strip.hidden { display: none; }
+
+.ij-index-strip-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--ij-text-dim);
-  background: var(--ij-toolwindow);
-  border-bottom: 1px solid var(--ij-border);
+  min-height: 28px;
 }
 
-.ij-java-index-banner.hidden { display: none; }
+.ij-index-strip-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ij-accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ij-accent) 55%, transparent);
+  animation: ij-index-pulse 2.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes ij-index-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.ij-index-strip-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ij-text-dim);
+  flex-shrink: 0;
+}
+
+.ij-index-strip-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ij-text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ij-index-strip-pct {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--ij-mono);
+  color: var(--ij-text-dim);
+  flex-shrink: 0;
+}
+
+.ij-index-strip-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--ij-border-light);
+}
+
+.ij-index-strip-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--ij-tab-border-active), var(--ij-accent));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--ij-accent) 45%, transparent);
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ij-index-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px;
+  background: color-mix(in srgb, var(--ij-editor) 52%, transparent);
+  backdrop-filter: blur(10px) saturate(1.15);
+  pointer-events: none;
+  animation: ij-index-veil-in 0.4s ease;
+}
+
+@keyframes ij-index-veil-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.ij-index-veil.hidden { display: none; }
+
+.ij-index-card {
+  width: min(100%, 400px);
+  padding: 20px 22px 16px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--ij-border) 75%, var(--ij-accent) 25%);
+  background: color-mix(in srgb, var(--ij-panel) 94%, var(--ij-bg) 6%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ij-accent) 10%, transparent),
+    0 20px 50px rgba(0, 0, 0, 0.42),
+    0 0 72px color-mix(in srgb, var(--ij-accent) 8%, transparent);
+}
+
+.ij-index-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.ij-index-orbit {
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--ij-accent) 22%, transparent);
+  border-top-color: var(--ij-accent);
+  animation: ij-spin 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  flex-shrink: 0;
+}
+
+.ij-index-card-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.ij-index-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ij-text-heading);
+  letter-spacing: -0.01em;
+}
+
+.ij-index-card-phase {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ij-text-bright);
+  line-height: 1.35;
+}
+
+.ij-index-card-pct {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--ij-mono);
+  color: var(--ij-accent);
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.ij-index-card-track {
+  margin-top: 16px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ij-border) 60%, transparent);
+  overflow: hidden;
+}
+
+.ij-index-card-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--ij-tab-border-active), var(--ij-accent));
+  box-shadow: 0 0 16px color-mix(in srgb, var(--ij-accent) 50%, transparent);
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ij-index-card-stats {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ij-text-dim);
+}
+
+.ij-index-card-hint {
+  margin: 12px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--ij-text-dim) 85%, transparent);
+}
+
+.ij-index-progress {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.ij-index-progress.hidden { display: none; }
+
+.ij-index-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ij-border);
+  overflow: hidden;
+}
+
+.ij-index-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--ij-accent, #6897bb), color-mix(in srgb, var(--ij-accent, #6897bb) 70%, #8bc4e8));
+  transition: width 0.35s ease;
+}
+
+.ij-index-progress-detail {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ij-text-dim);
+  text-align: center;
+}
 
 .ij-java-index-spinner {
   width: 12px;
@@ -2913,6 +3134,55 @@ main { background: var(--ij-bg); }
   bottom: calc(var(--ij-status-h) + 8px);
   border-radius: 6px;
   font-size: 12px;
+  max-width: min(520px, calc(100vw - 24px));
+  line-height: 1.35;
+}
+
+#toast.ij-toast {
+  background: var(--ij-panel);
+  color: var(--ij-text-bright);
+  border-color: var(--ij-border);
+}
+
+#toast.ij-toast.info {
+  border-color: var(--ij-accent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+#toast.ij-toast.warning {
+  background: color-mix(in srgb, var(--ij-modified) 18%, var(--ij-panel));
+  color: var(--ij-text-heading);
+  border-color: var(--ij-modified);
+}
+
+#toast.ij-toast.error {
+  background: color-mix(in srgb, var(--ij-deleted) 22%, var(--ij-panel));
+  color: var(--ij-text-heading);
+  border-color: var(--ij-deleted);
+}
+
+#toast.ij-toast.success {
+  background: color-mix(in srgb, var(--ij-added) 18%, var(--ij-panel));
+  color: var(--ij-text-heading);
+  border-color: var(--ij-added);
+}
+
+.ij-status-complete-debug {
+  color: var(--ij-modified);
+  font-size: 11px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#status-left #status-message {
+  flex-shrink: 0;
+  max-width: 38%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logo-mark {
@@ -3870,31 +4140,92 @@ main { background: var(--ij-bg); }
   background: color-mix(in srgb, var(--ij-deleted) 10%, transparent) !important;
 }
 
-/* Diagnostic squiggles — SVG wave aligned under text (not line-box bottom) */
+/* Diagnostic squiggles — wave under text baseline (not over glyphs) */
 .monaco-editor .squiggly-error::before,
 .monaco-editor .squiggly-warning::before,
 .monaco-editor .squiggly-info::before {
-  display: none !important;
+  background: transparent !important;
+  pointer-events: none;
 }
 
 .monaco-editor .squiggly-error {
   border-bottom: none !important;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3' enable-background='new 0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%23FF5555' stroke-width='.7'/%3E%3C/svg%3E") repeat-x left 1.35em / auto 3px !important;
+  background-color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%23FF5555' stroke-width='.7'/%3E%3C/svg%3E") !important;
+  background-repeat: repeat-x !important;
+  background-position: left bottom !important;
+  background-size: 6px 3px !important;
 }
 
 .monaco-editor .squiggly-warning {
   border-bottom: none !important;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3' enable-background='new 0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%23FBBF24' stroke-width='.7'/%3E%3C/svg%3E") repeat-x left 1.35em / auto 3px !important;
+  background-color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%23FBBF24' stroke-width='.7'/%3E%3C/svg%3E") !important;
+  background-repeat: repeat-x !important;
+  background-position: left bottom !important;
+  background-size: 6px 3px !important;
 }
 
 .monaco-editor .squiggly-info {
   border-bottom: none !important;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3' enable-background='new 0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%2360A5FA' stroke-width='.7'/%3E%3C/svg%3E") repeat-x left 1.35em / auto 3px !important;
+  background-color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%2360A5FA' stroke-width='.7'/%3E%3C/svg%3E") !important;
+  background-repeat: repeat-x !important;
+  background-position: left bottom !important;
+  background-size: 6px 3px !important;
 }
 
 .monaco-editor .squiggly-hint {
   border-bottom: none !important;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3' enable-background='new 0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%2394A3B8' stroke-width='.7'/%3E%3C/svg%3E") repeat-x left 1.35em / auto 3px !important;
+  background-color: transparent !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3'%3E%3Cpath d='m0 2.5 l2 -2 l1 0 l2 2' fill='none' stroke='%2394A3B8' stroke-width='.7'/%3E%3C/svg%3E") !important;
+  background-repeat: repeat-x !important;
+  background-position: left bottom !important;
+  background-size: 6px 3px !important;
+}
+
+/* Hover + suggest — must work inside .monaco-editor (native overflow widgets) */
+.monaco-editor .monaco-hover,
+.monaco-hover {
+  background-color: var(--vscode-editorHoverWidget-background, #3C3F41) !important;
+  color: var(--vscode-editorHoverWidget-foreground, #BBBBBB) !important;
+  border: 1px solid var(--vscode-editorHoverWidget-border, #515658) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36);
+  z-index: 10001 !important;
+}
+
+.monaco-editor .monaco-hover .markdown-hover .rendered-markdown p,
+.monaco-editor .monaco-hover .markdown-hover .rendered-markdown code,
+.monaco-editor .monaco-hover .markdown-hover .rendered-markdown span,
+.monaco-hover .markdown-hover .rendered-markdown p,
+.monaco-hover .markdown-hover .rendered-markdown code,
+.monaco-hover .markdown-hover .rendered-markdown span {
+  color: inherit !important;
+}
+
+.monaco-editor .monaco-hover .hover-row:not(:first-child):not(:empty),
+.monaco-hover .hover-row:not(:first-child):not(:empty) {
+  border-top: 1px solid var(--vscode-editorHoverWidget-border, #515658) !important;
+}
+
+#editor-overflow-root .monaco-hover,
+#editor-overflow-root .monaco-hover-content,
+#editor-overflow-root .hover-contents,
+.ij-editor-overflow-root .monaco-hover {
+  background-color: var(--vscode-editorHoverWidget-background, var(--ij-panel, #3C3F41)) !important;
+  color: var(--vscode-editorHoverWidget-foreground, var(--ij-text, #BBBBBB)) !important;
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--ij-border, #515658)) !important;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown p,
+#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown code,
+#editor-overflow-root .monaco-hover .markdown-hover .rendered-markdown span {
+  color: inherit !important;
+}
+
+#editor-overflow-root .monaco-hover .hover-row:not(:first-child):not(:empty) {
+  border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--ij-border, #515658)) !important;
 }
 
 .monaco-editor .margin-view-overlays .codicon-error,
@@ -4275,6 +4606,19 @@ main { background: var(--ij-bg); }
   height: 100%;
   min-height: 0;
   width: 100%;
+}
+
+.ij-terminal-xterm-host {
+  padding: 4px 6px 6px;
+  background: var(--ij-panel, #0a0e14);
+}
+
+.ij-terminal-xterm-host .xterm {
+  height: 100%;
+}
+
+.ij-terminal-xterm-host .xterm-viewport {
+  border-radius: 4px;
 }
 
 #terminal-dock-bottom .ij-dock-resize-handle {
@@ -4842,18 +5186,105 @@ main { background: var(--ij-bg); }
   color: #808080 !important;
   opacity: 0.82;
 }
-.monaco-editor .suggest-widget {
-  z-index: 50;
+#editor-overflow-root .suggest-widget.visible,
+.monaco-editor .suggest-widget.visible {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  min-width: 220px;
+  min-height: 28px;
+}
+
+.monaco-editor .suggest-widget,
+#editor-overflow-root .suggest-widget,
+.suggest-widget {
+  z-index: 10000;
   border-radius: 6px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   padding: 2px 0;
+  border: 1px solid var(--vscode-editorSuggestWidget-border, var(--ij-border, #515658));
+  background-color: var(--vscode-editorSuggestWidget-background, var(--ij-panel, #3C3F41));
+  color: var(--vscode-editorSuggestWidget-foreground, var(--ij-text, #bcbec4));
 }
-.monaco-editor .suggest-widget .monaco-list-row {
+
+.monaco-editor .suggest-widget .monaco-list-row,
+#editor-overflow-root .suggest-widget .monaco-list-row,
+.suggest-widget .monaco-list-row {
   border-radius: 4px;
+  color: var(--vscode-editorSuggestWidget-foreground, var(--ij-text, #bcbec4));
 }
-.monaco-editor .suggest-widget .monaco-list-row.focused {
-  background: transparent;
+
+.monaco-editor .suggest-widget .monaco-list,
+.suggest-widget .monaco-list {
+  min-height: 24px;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .monaco-icon-label,
+.suggest-widget .monaco-list-row .monaco-icon-label,
+.monaco-editor .suggest-widget .monaco-list-row .label-description,
+.suggest-widget .monaco-list-row .label-description {
+  color: inherit !important;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .label-name,
+.suggest-widget .monaco-list-row .label-name {
+  color: inherit !important;
+  opacity: 1 !important;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row.focused,
+#editor-overflow-root .suggest-widget .monaco-list-row.focused,
+.suggest-widget .monaco-list-row.focused {
+  background: var(
+    --vscode-editorSuggestWidget-selectedBackground,
+    color-mix(in srgb, var(--ij-selection, #214283) 75%, transparent)
+  );
+  color: var(--vscode-editorSuggestWidget-selectedForeground, #FFFFFF);
+}
+
+#editor-overflow-root .suggest-widget .message,
+#editor-overflow-root .suggest-widget .monaco-list-row .label-name,
+#editor-overflow-root .suggest-widget .monaco-list-row .label-description,
+#editor-overflow-root .suggest-widget .details-label,
+.suggest-widget .message {
+  color: inherit;
+}
+.monaco-editor .overflowingContentWidgets {
+  z-index: 10000;
+  position: relative;
 }
 .monaco-editor .suggest-widget .details-label {
   opacity: 0.85;
+}
+
+/* Reaper member-completion fallback (WKWebView Monaco suggest filter workaround) */
+.reaper-member-suggest {
+  position: absolute;
+  z-index: 10001;
+  min-width: 220px;
+  max-width: 480px;
+  max-height: 280px;
+  overflow-y: auto;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--ij-border, #515658);
+  background: var(--ij-panel, #3C3F41);
+  color: var(--ij-text, #bcbec4);
+  font-family: var(--ij-ui-font, system-ui, sans-serif);
+  font-size: 13px;
+  padding: 2px 0;
+}
+
+.reaper-member-suggest-row {
+  padding: 4px 10px;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reaper-member-suggest-row.focused,
+.reaper-member-suggest-row:hover {
+  background: color-mix(in srgb, var(--ij-selection, #214283) 75%, transparent);
+  color: #fff;
 }

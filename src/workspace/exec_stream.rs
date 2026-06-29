@@ -215,7 +215,9 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
 
     let mut command = Command::new(&cmd.program);
     command.args(&arg_refs).current_dir(&cmd.cwd);
-    jdk::apply_gradle_java_env(&mut command);
+    if let Ok(home) = super::gradle::gradle_java_home_for_project(&cmd.cwd) {
+        jdk::apply_java_home(&mut command, &home);
+    }
     let code = stream_process(&mut command, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),

@@ -69,11 +69,16 @@ impl Config {
         is_bare_repo(&self.repo_path(name))
     }
 
-    /// Default data root (`~/reaper`), or `REAPER_DATA_DIR` when set.
+    /// Default data root: `~/reaper`, or `REAPER_DATA_DIR` when set.
     pub fn resolve_data_dir() -> PathBuf {
         std::env::var("REAPER_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir())
+    }
+
+    /// Server log file: `{data_dir}/reaper.log`
+    pub fn resolve_log_path() -> PathBuf {
+        Self::resolve_data_dir().join("reaper.log")
     }
 }
 
