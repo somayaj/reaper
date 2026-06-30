@@ -357,6 +357,63 @@ impl GeminiClient {
         Ok(text)
     }
 
+    pub async fn classify_java_run_target(&self, context: &str) -> Result<String> {
+        let system = "You classify a Java source file for IDE Run (F5) behavior.\n\
+            Return one JSON object with:\n\
+            - class_type: spring-boot-app | spring-boot-test | junit-test | plain-main | quarkus-app | spring-component | library | interface | enum | record\n\
+            - mode: none | test | spring-boot | main | project-task\n\
+            - runnable: boolean\n\
+            - qualified_name: optional fully qualified class name\n\
+            - test_filter: optional Gradle/Maven test filter (ClassName or ClassName.method)\n\
+            - task: optional build task/goal when mode is spring-boot or project-task (e.g. bootRun, spring-boot:run, quarkusDev)\n\
+            - frameworks: array of strings (junit, spring-boot, spring-test, mockito, lombok, slf4j, quarkus, etc.)\n\
+            - reason: optional short explanation when runnable is false\n\
+            RULES:\n\
+            - @SpringBootApplication + Spring Boot project context => spring-boot-app, mode spring-boot, runnable true\n\
+            - @Test / @SpringBootTest => junit-test or spring-boot-test, mode test when project has build tool\n\
+            - public static void main => plain-main, mode main, runnable true\n\
+            - Spring @Component/@Service without main => not runnable\n\
+            - Prefer heuristic hints when they match the source.\n\
+            - JSON only, no markdown.";
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents: vec![Content {
+                role: "user",
+                parts: vec![TextPart { text: context }],
+            }],
+            generation_config: Self::generation_config(0.1, "application/json", Some(512), true),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini request failed")?;
+
+        let status = resp.status();
+        let parsed: GenerateResponse = resp.json().await.context("parse gemini response")?;
+
+        if let Some(err) = parsed.error {
+            bail!(
+                "gemini error ({}): {}",
+                status,
+                err.message.unwrap_or_else(|| "unknown".into())
+            );
+        }
+
+        Ok(Self::extract_response_text(&parsed).unwrap_or_default())
+    }
+
     pub async fn suggest_quick_fixes(&self, context: &str) -> Result<String> {
         let system = "You are an IDE quick-fix engine.\n\
             The user has compiler/linter errors in a source file. Propose concrete fixes they can apply.\n\

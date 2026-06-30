@@ -219,6 +219,7 @@ fn append_java_member_hints(
             column,
             &member_prefix,
             Some(content),
+            &[],
         ) {
             if !items.is_empty() {
                 writeln!(out, "Members of `{qualifier}` (type-aware):").ok();
@@ -841,7 +842,7 @@ pub fn inline_completion_fallback(
     if !prefix.is_empty() {
         if classpath::is_java_like(path) || path.ends_with(".java") {
             if let Ok(items) =
-                super::java_completions(ws, path, line, column, &prefix, Some(content))
+                super::java_completions(ws, path, line, column, &prefix, Some(content), &[])
             {
                 if let Some(insert) = items.first().map(|i| {
                     i.insert

@@ -68,6 +68,74 @@
     return map[ext] || 'plaintext';
   }
 
+  function isSpringConfigFile(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    if (base.endsWith('.properties')) {
+      return !base.endsWith('gradle.properties') && !base.endsWith('.gradle.properties');
+    }
+    return base.endsWith('.yml') || base.endsWith('.yaml');
+  }
+
+  function springConfigKeyPrefix(path, linePrefix, content, lineNumber, column) {
+    const line = String(linePrefix || '');
+    const trimmed = line.split('#')[0].trimEnd();
+    if (isSpringConfigFile(path) && path.toLowerCase().endsWith('.properties')) {
+      if (trimmed.includes('=')) {
+        return '';
+      }
+      return trimmed.trim();
+    }
+    if (!isSpringConfigFile(path)) return '';
+    const col = Math.max(0, (column || 1) - 1);
+    const upto = line.slice(0, Math.min(col, line.length));
+    const beforeColon = upto.split(':')[0].trim();
+    if (!beforeColon || beforeColon.startsWith('#')) return '';
+    const lines = String(content || '').split(/\r?\n/);
+    const idx = Math.max(0, (lineNumber || 1) - 1);
+    const current = lines[idx] || '';
+    const currentIndent = current.match(/^[\t ]*/)?.[0]?.length || 0;
+    const segments = [];
+    if (beforeColon && !beforeColon.includes(':')) {
+      segments.push(beforeColon);
+    }
+    let needIndent = currentIndent;
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      const row = lines[i];
+      if (!row.trim() || row.trim().startsWith('#')) continue;
+      const indent = row.match(/^[\t ]*/)?.[0]?.length || 0;
+      if (indent < needIndent) {
+        const key = row.split('#')[0].split(':')[0].trim();
+        if (key) segments.unshift(key);
+        needIndent = indent;
+      }
+      if (needIndent === 0) break;
+    }
+    return segments.join('.');
+  }
+
+  function completionSuffixFromLabel(label, prefix) {
+    const p = prefix || '';
+    if (!label || !p) return '';
+    if (label.startsWith(p)) return label.slice(p.length);
+    if (label.toLowerCase().startsWith(p.toLowerCase())) {
+      return label.slice(p.length);
+    }
+    return '';
+  }
+
+  function springConfigLocalInline(path, linePrefix, content, lineNumber, column) {
+    if (!isSpringConfigFile(path)) return '';
+    const keyPrefix = springConfigKeyPrefix(path, linePrefix, content, lineNumber, column);
+    if (!keyPrefix || keyPrefix.length < 1) return '';
+    const lower = keyPrefix.toLowerCase();
+    for (const kw of clientKeywordsForPath(path)) {
+      if (kw.toLowerCase().startsWith(lower) && kw.length > keyPrefix.length) {
+        return kw.slice(keyPrefix.length);
+      }
+    }
+    return '';
+  }
+
   function compilerToolIdsForPath(path) {
     const lower = (path || '').replace(/\\/g, '/').toLowerCase();
     const base = lower.split('/').pop() || '';
@@ -301,11 +369,10 @@
 
   function completionDebugEnabled() {
     try {
-      if (localStorage.getItem('reaper-complete-debug') === '0') return false;
+      return localStorage.getItem('reaper-complete-debug') === '1';
     } catch {
-      /* ignore */
+      return false;
     }
-    return true;
   }
 
   function completionTriggerLabel(context) {
@@ -318,17 +385,10 @@
   }
 
   function completionDebug(helpers, parts, { warn = false } = {}) {
+    if (!completionDebugEnabled()) return;
     const msg = parts.filter(Boolean).join(' · ');
     console.log(`[Reaper complete] ${msg}`);
-    if (!completionDebugEnabled()) return;
     helpers.setCompleteDebugStatus?.(`[complete] ${msg}`);
-    helpers.setStatusMessage?.(`[complete] ${msg}`);
-    helpers.terminalLog?.(`[complete] ${msg}`);
-    try {
-      helpers.toast?.(msg, warn ? 'warning' : 'info', { duration: warn ? 8000 : 6000 });
-    } catch (err) {
-      console.warn('[Reaper complete] toast failed', err);
-    }
   }
 
   const CLIENT_KEYWORDS = {
@@ -350,7 +410,10 @@
     lua: ['function', 'local', 'if', 'then', 'else', 'end', 'for', 'while', 'return'],
     dart: ['class', 'void', 'Future', 'async', 'await', 'import', 'extends', 'implements', 'factory'],
     sql: ['SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'JOIN', 'ORDER', 'GROUP'],
-    yaml: ['apiVersion', 'kind', 'metadata', 'spec', 'name', 'labels', 'jobs', 'steps', 'uses', 'run', 'on'],
+    yaml: [
+      'apiVersion', 'kind', 'metadata', 'spec', 'name', 'labels', 'jobs', 'steps', 'uses', 'run', 'on',
+      'spring', 'server', 'logging', 'management', 'datasource',
+    ],
     toml: ['true', 'false'],
     dockerfile: ['FROM', 'RUN', 'CMD', 'COPY', 'WORKDIR', 'ENV', 'EXPOSE', 'ENTRYPOINT'],
     makefile: ['ifeq', 'endif', 'include', 'export', '.PHONY'],
@@ -360,7 +423,14 @@
     scss: ['@import', '@mixin', '@include', '@media'],
     protobuf: ['message', 'enum', 'service', 'rpc', 'package', 'import'],
     graphql: ['query', 'mutation', 'type', 'interface', 'input', 'schema'],
-    ini: ['spring.application.name', 'server.port', 'logging.level'],
+    ini: [
+      'spring.application.name', 'spring.profiles.active', 'server.port',
+      'server.servlet.context-path', 'logging.level.root', 'logging.level',
+      'logging.level.org.springframework', 'management.endpoints.web.exposure.include',
+      'spring.datasource.url', 'spring.datasource.username', 'spring.datasource.password',
+      'spring.datasource.driver-class-name', 'spring.jpa.hibernate.ddl-auto',
+      'spring.jpa.show-sql', 'spring.main.banner-mode',
+    ],
   };
 
   function clientKeywordsForPath(path) {
@@ -428,8 +498,8 @@
     return '';
   }
 
-  function inlineGhostSuffix(path, linePrefix, content, lineNumber, javaLevel) {
-    const inline = localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel);
+  function inlineGhostSuffix(path, linePrefix, content, lineNumber, javaLevel, column = 0) {
+    const inline = localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel, column);
     if (!inline) return '';
     if (inline.includes('\n')) return inline.split('\n')[0];
     return inline;
@@ -509,7 +579,11 @@
     return { content: lines.slice(start, end).join('\n'), line: cur - start + 1 };
   }
 
-  function shouldFetchIndexCompletions(linePrefix, prefix) {
+  function shouldFetchIndexCompletions(linePrefix, prefix, path) {
+    if (path && isSpringConfigFile(path)) {
+      const p = prefix || extractInlinePartialToken(linePrefix) || '';
+      return p.length >= 1 || AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '');
+    }
     const p = prefix || '';
     if (p.length >= MIN_AUTOCOMPLETE_CHARS) return true;
     if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '')) return true;
@@ -1004,6 +1078,60 @@
     'Math.PI': 'Ratio of the circumference of a circle to its diameter (π).',
     'Math.E': "Euler's number, the base of natural logarithms.",
   };
+
+  const COMMON_JAVA_IMPORTS = {
+    RestController: 'org.springframework.web.bind.annotation.RestController',
+    Controller: 'org.springframework.stereotype.Controller',
+    Service: 'org.springframework.stereotype.Service',
+    Component: 'org.springframework.stereotype.Component',
+    Repository: 'org.springframework.stereotype.Repository',
+    Autowired: 'org.springframework.beans.factory.annotation.Autowired',
+    Value: 'org.springframework.beans.factory.annotation.Value',
+    RequestMapping: 'org.springframework.web.bind.annotation.RequestMapping',
+    GetMapping: 'org.springframework.web.bind.annotation.GetMapping',
+    PostMapping: 'org.springframework.web.bind.annotation.PostMapping',
+    PutMapping: 'org.springframework.web.bind.annotation.PutMapping',
+    DeleteMapping: 'org.springframework.web.bind.annotation.DeleteMapping',
+    PatchMapping: 'org.springframework.web.bind.annotation.PatchMapping',
+    PathVariable: 'org.springframework.web.bind.annotation.PathVariable',
+    RequestParam: 'org.springframework.web.bind.annotation.RequestParam',
+    RequestBody: 'org.springframework.web.bind.annotation.RequestBody',
+    SpringBootApplication: 'org.springframework.boot.autoconfigure.SpringBootApplication',
+    ResponseEntity: 'org.springframework.http.ResponseEntity',
+    HttpStatus: 'org.springframework.http.HttpStatus',
+  };
+
+  function extractJavacClassSymbol(message) {
+    const msg = String(message || '');
+    const idx = msg.indexOf('symbol:');
+    if (idx < 0) return '';
+    const rest = msg.slice(idx + 'symbol:'.length).trim();
+    const parts = rest.split(/\s+/);
+    if (!parts.length) return '';
+    if (parts[0] === 'class' || parts[0] === 'interface') return parts[1] || '';
+    return parts[0];
+  }
+
+  function javaImportInsertEdit(model, fqcn) {
+    const importLine = `import ${fqcn};`;
+    const lineCount = model.getLineCount();
+    let insertAfter = 0;
+    let lastImport = 0;
+    for (let i = 1; i <= lineCount; i++) {
+      const trimmed = model.getLineContent(i).trim();
+      if (trimmed.startsWith('package ')) insertAfter = i;
+      else if (trimmed.startsWith('import ')) lastImport = i;
+    }
+    const insertLine = lastImport ? lastImport + 1 : Math.max(1, insertAfter + 1);
+    const text = insertLine > 1 ? `\n${importLine}` : `${importLine}\n`;
+    return {
+      start_line: insertLine,
+      start_column: 1,
+      end_line: insertLine,
+      end_column: 1,
+      text,
+    };
+  }
 
   function memberKindFromItem(item) {
     const k = item?.kind;
@@ -1845,7 +1973,9 @@
   }
 
   /** Synchronous local ghost text — single-line suffixes only (blocks go in the suggest menu). */
-  function localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel = 17) {
+  function localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel = 17, column = 0) {
+    const springInline = springConfigLocalInline(path, linePrefix, content, lineNumber, column);
+    if (springInline) return springInline;
     const member = memberInlineSuffix(content, linePrefix, path);
     if (member) return member;
     const syntax = syntaxInlineSuffix(path, linePrefix);
@@ -1862,7 +1992,7 @@
   function isCodeLikeCompletion(label, kind) {
     const k = String(kind || '').toLowerCase();
     if (k === 'keyword' || k === 'method' || k === 'field' || k === 'class' || k === 'interface'
-      || k === 'variable' || k === 'property' || k === 'enum' || k === 'function' || k === 'type'
+      || k === 'variable' || k === 'property' || k === 'value' || k === 'enum' || k === 'function' || k === 'type'
       || k === 'snippet' || k === 'statement') {
       return true;
     }
@@ -1987,6 +2117,24 @@
     return list;
   }
 
+  function clearIndexCompleteCache() {
+    indexCompleteCache.clear();
+  }
+
+  function overlayFingerprint(helpers, excludePath) {
+    const overlays = helpers.getJavaSourceOverlays?.(excludePath) || [];
+    let hash = 2166136261;
+    for (const o of overlays) {
+      for (let i = 0; i < o.path.length; i += 1) {
+        hash ^= o.path.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      hash ^= o.content.length;
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
   async function fetchCompletions(helpers, model, position, prefix) {
     const repo = helpers.getRepo();
     const path = helpers.getActivePath?.() || '';
@@ -1996,9 +2144,10 @@
     const column = position.column;
     const dirty = helpers.isFileDirty?.(path);
     const content = model.getValue();
-    const needsLiveContent = dirty || /\.(java|kt|kts|groovy)$/i.test(path);
+    const needsLiveContent = dirty || /\.(java|kt|kts|groovy)$/i.test(path) || isSpringConfigFile(path);
     const contentLen = content?.length ?? 0;
-    const cacheKey = indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen);
+    const overlayHash = overlayFingerprint(helpers, path);
+    const cacheKey = `${indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen)}:${overlayHash}`;
     const cached = indexCompleteCache.get(cacheKey);
     if (cached && Date.now() - cached.time < INDEX_COMPLETE_CACHE_MS) {
       return cached.items;
@@ -2010,6 +2159,7 @@
     try {
       if (needsLiveContent) {
         const payload = contentForApiPayload(content, line);
+        const overlays = helpers.getJavaSourceOverlays?.(path) || [];
         items = await helpers.api(url, {
           method: 'POST',
           body: JSON.stringify({
@@ -2018,6 +2168,7 @@
             column,
             prefix: prefix || '',
             content: payload.content,
+            overlays,
           }),
         });
       } else {
@@ -2508,10 +2659,11 @@
     }
 
     function suggestPopupShouldStayOpen(model, position) {
+      const path = helpers.getActivePath?.() || '';
       const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
       if (position.lineNumber !== range.startLineNumber) return false;
       if (position.column < range.startColumn) return false;
-      if (!shouldFetchIndexCompletions(linePrefix, prefix)) return false;
+      if (!shouldFetchIndexCompletions(linePrefix, prefix, path)) return false;
       if (memberCtx || dotQualifierFromLinePrefix(linePrefix)) return true;
       const tokenEnd = range.startColumn + Math.max((prefix || '').length, 0);
       return position.column <= tokenEnd;
@@ -2690,7 +2842,7 @@
       if (
         !force
         && !memberContext
-        && !shouldFetchIndexCompletions(linePrefix, completionPrefix)
+        && !shouldFetchIndexCompletions(linePrefix, completionPrefix, path)
       ) {
         return;
       }
@@ -2789,6 +2941,48 @@
       if (localN > 0) {
         showSuggestPopup(localSuggestions);
       }
+    }
+
+    function scheduleSpringConfigInline(ed) {
+      clearTimeout(ed._reaperSpringInlineTimer);
+      ed._reaperSpringInlineTimer = setTimeout(async () => {
+        const model = ed?.getModel?.();
+        const position = ed?.getPosition?.();
+        const path = helpers.getActivePath?.() || '';
+        const repo = helpers.getRepo?.();
+        if (!model || !position || !path || !repo || !isSpringConfigFile(path)) return;
+        if (!helpers.repoApi) return;
+        const linePrefix = editorLinePrefix(model, position);
+        const content = editorContent(ed, model);
+        const keyPrefix = springConfigKeyPrefix(
+          path, linePrefix, content, position.lineNumber, position.column,
+        );
+        if (!keyPrefix || keyPrefix.length < 1) return;
+        const local = springConfigLocalInline(
+          path, linePrefix, content, position.lineNumber, position.column,
+        );
+        const cacheKey = buildInlineCacheKey(
+          repo, path, position.lineNumber, position.column, linePrefix,
+        );
+        const meta = inlineCacheMeta(repo, path, position, linePrefix);
+        if (local) {
+          setInlineCache(ed, cacheKey, local, '', meta);
+          queueInlineSuggestion(ed);
+          return;
+        }
+        try {
+          const items = await fetchCompletionsWithTimeout(
+            helpers, model, position, keyPrefix, 500,
+          );
+          if (!Array.isArray(items) || items.length === 0) return;
+          const suffix = completionSuffixFromLabel(items[0].label, keyPrefix);
+          if (!suffix) return;
+          setInlineCache(ed, cacheKey, suffix, '', meta);
+          queueInlineSuggestion(ed);
+        } catch {
+          // best-effort
+        }
+      }, 120);
     }
 
     function scheduleMemberCompletions(ed) {
@@ -3319,6 +3513,22 @@
                 text: insertText,
               }],
             });
+          }
+        }
+
+        if (msgLower.includes('cannot find symbol')) {
+          const symbol = extractJavacClassSymbol(msg);
+          const fqcn = symbol && COMMON_JAVA_IMPORTS[symbol];
+          if (fqcn && !model.getValue().includes(`import ${fqcn};`)) {
+            const key = `import:${fqcn}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              fixes.push({
+                title: `Add import for ${symbol}`,
+                provider: 'local',
+                edits: [javaImportInsertEdit(model, fqcn)],
+              });
+            }
           }
         }
       }
@@ -4023,7 +4233,8 @@
         const completionPrefix = memberContext
           ? (memberContext.memberPrefix || prefix || '')
           : (prefix || '');
-        if (!memberContext && !shouldFetchIndexCompletions(linePrefix, completionPrefix) && !manual) {
+        const springConfig = isSpringConfigFile(path);
+        if (!memberContext && !shouldFetchIndexCompletions(linePrefix, completionPrefix, path) && !manual) {
           completionDebug(helpers, [
             'provider', completionTriggerLabel(context), 'skip: fetch gate',
             `line=…${linePrefix.slice(-24)}`,
@@ -4100,9 +4311,13 @@
           return { suggestions: [], incomplete: false };
         }
 
-        if (manual) {
+        if (manual && !springConfig) {
           report('manual');
           return { suggestions: [], incomplete: false };
+        }
+
+        if (springConfig && manual && suggestions.length > 0 && ed) {
+          presentCompletionSuggestions(ed, suggestions, { content, path });
         }
 
         if (suggestions.length > 0 && ed) {
@@ -4344,13 +4559,38 @@
         }
 
         if (!preferAi) {
-          const local = inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
+          const local = inlineGhostSuffix(
+            path, linePrefix, content, position.lineNumber, javaLevel, position.column,
+          );
           if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
             const meta = inlineCacheMeta(repo, path, position, linePrefix);
             setInlineCache(editor, cacheKey, local, '', meta);
             editor._reaperPendingControlSnippet = null;
             if (token.isCancellationRequested) return { items: [] };
             return buildInlineItems(model, position, linePrefix, local);
+          }
+        }
+
+        if (isSpringConfigFile(path)) {
+          const keyPrefix = springConfigKeyPrefix(
+            path, linePrefix, content, position.lineNumber, position.column,
+          );
+          if (keyPrefix.length >= 1) {
+            try {
+              const items = await fetchCompletionsWithTimeout(
+                helpers, model, position, keyPrefix, 450,
+              );
+              const suffix = items?.[0]?.label
+                ? completionSuffixFromLabel(items[0].label, keyPrefix)
+                : '';
+              if (suffix && !token.isCancellationRequested) {
+                const meta = inlineCacheMeta(repo, path, position, linePrefix);
+                setInlineCache(editor, cacheKey, suffix, '', meta);
+                return buildInlineItems(model, position, linePrefix, suffix);
+              }
+            } catch {
+              // fall through
+            }
           }
         }
 
@@ -4391,7 +4631,9 @@
         } else {
           const local = preferAi
             ? ''
-            : inlineGhostSuffix(path, linePrefix, content, position.lineNumber, javaLevel);
+            : inlineGhostSuffix(
+              path, linePrefix, content, position.lineNumber, javaLevel, position.column,
+            );
           if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
             setInlineCache(editor, cacheKey, local, '', meta);
             if (aiInlineFetchEnabled() && local.length >= 4) {
@@ -4427,7 +4669,9 @@
       }
 
       if (dotQualifierFromLinePrefix(linePrefix)) {
-        const memberGhost = inlineGhostSuffix(path, linePrefix, editor._reaperContent, position.lineNumber, inlineJavaLevel(helpers));
+        const memberGhost = inlineGhostSuffix(
+          path, linePrefix, editor._reaperContent, position.lineNumber, inlineJavaLevel(helpers), position.column,
+        );
         if (memberGhost) {
           const cacheKey = buildInlineCacheKey(
             repo, path, position.lineNumber, position.column, linePrefix,
@@ -4435,6 +4679,9 @@
           setInlineCache(editor, cacheKey, memberGhost, '', inlineCacheMeta(repo, path, position, linePrefix));
         }
         scheduleMemberCompletions(editor);
+      } else if (isSpringConfigFile(path) && !isJavaDeclarationTyping(path, linePrefix)) {
+        scheduleSpringConfigInline(editor);
+        scheduleAutocompleteSuggest(editor);
       } else if (!preferAi && !isJavaDeclarationTyping(path, linePrefix)) {
         scheduleAutocompleteSuggest(editor);
       }
@@ -4521,24 +4768,12 @@
       keybindings: [monaco.KeyCode.F12],
       run: async () => {
         const pos = editor.getPosition();
-        if (!pos || !helpers.repoApi || !helpers.getRepo) return;
-        const repo = helpers.getRepo();
-        const path = helpers.getActivePath?.() || '';
-        if (!repo || !path) return;
-        try {
-          const q = new URLSearchParams({
-            path,
-            line: String(pos.lineNumber),
-            column: String(pos.column),
-          });
-          const hit = await helpers.api(`${helpers.repoApi(repo, '/workspace/definition')}?${q}`);
-          if (!hit?.path) {
-            helpers.toast?.('No definition found', 'info');
-            return;
-          }
-          await helpers.openFileAt(hit.path, hit.line, hit.column);
-        } catch {
-          helpers.toast?.('No definition found', 'info');
+        if (!pos) return;
+        const model = editor.getModel();
+        if (!model) return;
+        const loc = await lookupDefinition(helpers, model, pos);
+        if (!loc) {
+          helpers.toast?.('No definition found — wait for Java index or add import', 'info');
         }
       },
     });
@@ -4585,7 +4820,7 @@
     if (reaperDotCompletionHandler) {
       helpers.setCompleteDebugStatus?.(`c${REAPER_COMPLETION_REV} · dot handler ready`);
     } else {
-      helpers.setCompleteDebugStatus?.('dot handler MISSING');
+      console.warn('[Reaper] dot handler not attached');
     }
   }
 
@@ -4611,6 +4846,7 @@
 
   Object.assign(window.ReaperLang || {}, {
     completionRev: () => REAPER_COMPLETION_REV,
+    clearCompletionCache: clearIndexCompleteCache,
     coreOnly: false,
     jdkMemberPreview: (qualifier, memberPrefix = '', content = '', path = '', model = null) => {
       if (!qualifier) return [];

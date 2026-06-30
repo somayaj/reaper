@@ -21,6 +21,7 @@ mod languages;
 mod project_jobs;
 mod project_profile;
 mod quick_fix;
+mod run_project;
 mod spring_props;
 mod symbols;
 
@@ -31,12 +32,52 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::git::{self, GitOutput};
+use crate::repos::metadata;
+
+pub fn is_git_checkout(path: &Path) -> bool {
+    path.is_dir() && path.join(".git").exists()
+}
+
+/// Resolved project folder: local import path when set, otherwise the managed workspace clone.
+pub fn project_folder(config: &Config, name: &str) -> Option<PathBuf> {
+    if let Ok(meta) = metadata::load(config, name) {
+        if let Some(ref local) = meta.local_path {
+            let path = PathBuf::from(local);
+            if is_git_checkout(&path) {
+                return path.canonicalize().ok().or(Some(path));
+            }
+        }
+    }
+    let ws = config.workspace_path(name);
+    if is_git_checkout(&ws) {
+        return ws.canonicalize().ok().or(Some(ws));
+    }
+    None
+}
 
 pub fn ensure_workspace(config: &Config, name: &str) -> Result<PathBuf> {
     if !config.repo_exists(name) {
         bail!("repository not found");
     }
     config.ensure_dirs()?;
+
+    if let Ok(meta) = metadata::load(config, name) {
+        if let Some(ref local) = meta.local_path {
+            let path = PathBuf::from(local);
+            if is_git_checkout(&path) {
+                let ws = path
+                    .canonicalize()
+                    .with_context(|| format!("resolve project folder {}", path.display()))?;
+                let _ = ensure_reaper_gitignore(&ws);
+                return Ok(ws);
+            }
+            bail!(
+                "project folder no longer exists or is not a git checkout: {}",
+                local
+            );
+        }
+    }
+
     let bare = config.repo_path(name);
     let ws = config.workspace_path(name);
 
@@ -53,6 +94,7 @@ pub fn ensure_workspace(config: &Config, name: &str) -> Result<PathBuf> {
             bail!("clone failed: {}", out.stderr.trim());
         }
     }
+    let _ = ensure_reaper_gitignore(&ws);
     Ok(ws)
 }
 
@@ -186,7 +228,11 @@ pub fn write_file(ws: &Path, rel_path: &str, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+    if rel_path.ends_with(".java") {
+        let _ = classpath::patch_java_index_file(ws, rel_path, content);
+    }
+    Ok(())
 }
 
 pub fn create_file(ws: &Path, rel_path: &str, content: &str) -> Result<()> {
@@ -206,6 +252,83 @@ pub fn delete_path(ws: &Path, rel_path: &str) -> Result<()> {
     } else {
         bail!("path not found");
     }
+    Ok(())
+}
+
+pub fn create_dir(ws: &Path, rel_path: &str) -> Result<()> {
+    let path = safe_join(ws, rel_path)?;
+    if path.exists() {
+        bail!("path already exists");
+    }
+    std::fs::create_dir_all(&path).with_context(|| format!("mkdir {}", path.display()))
+}
+
+pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
+    let ws_canon = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let target = if rel_path.is_empty() {
+        ws_canon
+    } else {
+        let path = safe_join(ws, rel_path)?;
+        if !path.exists() {
+            bail!("path not found");
+        }
+        path
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let status = if target.is_dir() {
+            Command::new("open").arg(&target).status()
+        } else {
+            Command::new("open").arg("-R").arg(&target).status()
+        }
+        .context("open in Finder")?;
+        if !status.success() {
+            bail!("failed to reveal in Finder");
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let status = if target.is_dir() {
+            Command::new("explorer").arg(&target).status()
+        } else {
+            Command::new("explorer")
+                .arg(format!("/select,{}", target.display()))
+                .status()
+        }
+        .context("open in Explorer")?;
+        if !status.success() {
+            bail!("failed to reveal in Explorer");
+        }
+        return Ok(());
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        use std::process::Command;
+        let open_target = if target.is_dir() {
+            target
+        } else {
+            target
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(ws_canon)
+        };
+        let status = Command::new("xdg-open")
+            .arg(&open_target)
+            .status()
+            .context("open in file manager")?;
+        if !status.success() {
+            bail!("failed to reveal in file manager");
+        }
+    }
+
     Ok(())
 }
 
@@ -254,7 +377,7 @@ pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
     let branch_out = git::run_git(Some(ws), &["branch", "--show-current"])?;
     let branch = branch_out.stdout.trim().to_string();
 
-    let out = git::run_git(Some(ws), &["status", "--porcelain", "-b"])?;
+    let out = git::run_git(Some(ws), &["status", "--porcelain", "-b", "-uall"])?;
     let merge = conflict::merge_state(ws);
     let mut files = Vec::new();
     let mut conflict_count = 0usize;
@@ -266,7 +389,19 @@ pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
             continue;
         }
         let code = &line[..2];
-        let path = line[3..].trim().to_string();
+        let path = parse_porcelain_path(&line[3..]);
+        if path.ends_with('/') {
+            continue;
+        }
+        if is_reaper_internal_path(&path) {
+            continue;
+        }
+        if is_ignored_status_path(&path) {
+            continue;
+        }
+        if is_workspace_directory(ws, &path) {
+            continue;
+        }
         if conflict::is_unmerged(code) {
             conflict_count += 1;
             files.push(StatusFile {
@@ -314,6 +449,97 @@ fn unpushed_commit_count(ws: &Path) -> usize {
     0
 }
 
+/// Reaper writes indexes, build scratch, and diagnostics under `.reaper/` — not user changes.
+fn is_reaper_internal_path(path: &str) -> bool {
+    path == ".reaper" || path.starts_with(".reaper/")
+}
+
+/// Maven/Gradle build output and wrapper scripts — not user source edits.
+fn is_ignored_status_path(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    if path == "target" || path.starts_with("target/") {
+        return true;
+    }
+    if path.split('/').any(|seg| seg == "target") {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, "mvnw" | "mvnw.cmd" | "gradlew" | "gradlew.bat")
+}
+
+fn is_workspace_directory(ws: &Path, rel: &str) -> bool {
+    ws.join(rel).is_dir()
+}
+
+const DEFAULT_GITIGNORE_LINES: &[&str] = &[".reaper/", "target/"];
+
+fn gitignore_has_entry(content: &str, entry: &str) -> bool {
+    let key = entry.trim_end_matches('/');
+    content.lines().any(|line| {
+        let t = line.trim();
+        match key {
+            ".reaper" => matches!(t, ".reaper" | ".reaper/" | "/.reaper/" | "**/.reaper/"),
+            "target" => matches!(t, "target" | "target/" | "/target/" | "**/target/"),
+            _ => t == entry || t == key || t == format!("/{key}/"),
+        }
+    })
+}
+
+/// Append Reaper/build defaults to `.gitignore` when missing.
+pub fn ensure_reaper_gitignore(ws: &Path) -> Result<()> {
+    if !is_git_checkout(ws) {
+        return Ok(());
+    }
+    let ignore_path = ws.join(".gitignore");
+    let content = if ignore_path.exists() {
+        std::fs::read_to_string(&ignore_path)?
+    } else {
+        String::new()
+    };
+    let missing: Vec<&str> = DEFAULT_GITIGNORE_LINES
+        .iter()
+        .copied()
+        .filter(|line| !gitignore_has_entry(&content, line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let sep = if content.is_empty() || content.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let block = missing.join("\n");
+    if content.is_empty() {
+        std::fs::write(&ignore_path, format!("{block}\n"))?;
+    } else {
+        std::fs::write(&ignore_path, format!("{content}{sep}{block}\n"))?;
+    }
+    Ok(())
+}
+
+fn parse_porcelain_path(raw: &str) -> String {
+    let s = raw.trim();
+    let path = if let Some((_old, new)) = s.split_once(" -> ") {
+        new.trim()
+    } else {
+        s
+    };
+    unquote_git_path(path)
+}
+
+fn unquote_git_path(s: &str) -> String {
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        s[1..s.len() - 1]
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        s.to_string()
+    }
+}
+
 fn status_label(c: char) -> String {
     match c {
         'M' => "modified".into(),
@@ -326,14 +552,50 @@ fn status_label(c: char) -> String {
 }
 
 pub fn workspace_diff(ws: &Path, path: Option<&str>, staged: bool) -> Result<String> {
+    if let Some(rel) = path {
+        return workspace_diff_path(ws, rel, staged);
+    }
     let mut args = vec!["diff", "--no-color", "-U3"];
     if staged {
         args.push("--cached");
     }
-    if let Some(p) = path {
-        args.push(p);
-    }
     let out = git::run_git(Some(ws), &args)?;
+    Ok(out.stdout)
+}
+
+fn workspace_diff_path(ws: &Path, rel: &str, staged: bool) -> Result<String> {
+    let mut args = vec!["diff", "--no-color", "-U3"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push("--");
+    args.push(rel);
+    let out = git::run_git(Some(ws), &args)?;
+    if !out.stdout.trim().is_empty() {
+        return Ok(out.stdout);
+    }
+    if staged {
+        return Ok(String::new());
+    }
+    let full = ws.join(rel);
+    if full.is_file() {
+        return diff_against_empty(ws, rel);
+    }
+    // Deleted tracked file — diff vs last commit.
+    let head = git::run_git(
+        Some(ws),
+        &["diff", "--no-color", "-U3", "HEAD", "--", rel],
+    )?;
+    Ok(head.stdout)
+}
+
+/// Untracked files have no index entry — compare against /dev/null.
+fn diff_against_empty(ws: &Path, rel: &str) -> Result<String> {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let out = git::run_git(
+        Some(ws),
+        &["diff", "--no-color", "-U3", "--no-index", "--", null, rel],
+    )?;
     Ok(out.stdout)
 }
 
@@ -446,6 +708,33 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<gradle::GradlePr
     gradle::gradle_project_info(ws, rel_path)
 }
 
+pub fn run_project_info(ws: &Path, rel_path: &str) -> Result<run_project::RunProjectInfo> {
+    run_project::run_project_info(ws, rel_path)
+}
+
+pub fn run_context(
+    ws: &Path,
+    rel_path: &str,
+    content: Option<&str>,
+    line: u32,
+) -> Result<run_project::RunContext> {
+    run_project::run_context(ws, rel_path, content, line)
+}
+
+pub use run_project::{AiRunTargetHint, JavaRunTarget, RunContext, RunProjectInfo};
+
+pub fn apply_ai_run_target(target: &mut JavaRunTarget, hint: &AiRunTargetHint) {
+    run_project::apply_ai_run_target(target, hint);
+}
+
+pub fn needs_ai_run_classification(target: &JavaRunTarget, content: &str) -> bool {
+    run_project::needs_ai_run_classification(target, content)
+}
+
+pub fn maven_project_info(ws: &Path, rel_path: &str) -> Result<maven::MavenProjectInfo> {
+    maven::maven_project_info(ws, rel_path)
+}
+
 pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
     gradle::run_gradle(ws, rel_path, task)
 }
@@ -457,6 +746,24 @@ pub fn stream_workspace_gradle(
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
     exec_stream::stream_gradle(ws, rel_path, task, tx)
+}
+
+pub fn stream_workspace_run_task(
+    ws: &Path,
+    rel_path: &str,
+    task: &str,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    run_project::stream_run_task(ws, rel_path, task, tx)
+}
+
+pub fn stream_workspace_maven(
+    ws: &Path,
+    rel_path: &str,
+    goal: &str,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    exec_stream::stream_maven(ws, rel_path, goal, tx)
 }
 
 pub fn stream_workspace_java_main(
@@ -497,6 +804,10 @@ pub fn peek_java_index(ws: &Path) -> Result<classpath::WarmIndexStatus> {
     classpath::peek_index_status(ws)
 }
 
+pub fn java_index_needs_refresh(ws: &Path) -> bool {
+    classpath::java_index_needs_refresh(ws)
+}
+
 pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfile> {
     project_profile::detect(ws)
 }
@@ -504,7 +815,7 @@ pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfi
 pub use index_jobs::{JavaIndexJobs, JavaIndexStatus};
 pub use project_jobs::{ProjectIndexJobs, ProjectIndexStatus};
 pub use project_profile::ProjectProfile;
-pub use quick_fix::{QuickFix, QuickFixDiagnostic, QuickFixEdit};
+pub use quick_fix::{QuickFix, QuickFixDiagnostic, QuickFixEdit, suggest_local_quick_fixes};
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
 pub fn ensure_developer_path() {
@@ -514,6 +825,10 @@ pub fn ensure_developer_path() {
 /// Go-to-definition from these paths uses the Gradle/Java index; Ruby and other languages do not.
 pub fn definition_uses_java_index(from_path: &str) -> bool {
     classpath::is_java_like(from_path)
+}
+
+pub fn uses_spring_property_completions(from_path: &str) -> bool {
+    spring_props::is_spring_config_file(from_path)
 }
 
 pub fn search_classes(ws: &Path, query: &str, limit: usize) -> Result<Vec<symbols::ClassSearchHit>> {
@@ -604,7 +919,7 @@ pub fn find_symbol_hover_with_content(
     };
 
     if classpath::is_java_like(from_path) {
-        let items = java_completions(ws, from_path, line, column, "", Some(&content))?;
+        let items = java_completions(ws, from_path, line, column, "", Some(&content), &[])?;
         if let Some(item) = items.into_iter().find(|i| i.label == symbol) {
             let mut info = hover_info_from_completion_item(&item);
             if info.documentation.is_none() {
@@ -659,7 +974,7 @@ pub fn find_member_hover_with_content(
         }
     }
 
-    let items = java_completions(ws, from_path, line, column, "", Some(&content))?;
+    let items = java_completions(ws, from_path, line, column, "", Some(&content), &[])?;
     let Some(item) = items.into_iter().find(|i| i.label == member) else {
         return Ok(None);
     };
@@ -749,6 +1064,7 @@ pub fn java_completions(
     column: u32,
     prefix: &str,
     content: Option<&str>,
+    overlays: &[(String, String)],
 ) -> Result<Vec<classpath::CompletionItem>> {
     let content = match content {
         Some(c) => c.to_string(),
@@ -759,7 +1075,7 @@ pub fn java_completions(
     }
 
     let mut items = if classpath::is_java_like(from_path) {
-        classpath::java_completions(ws, from_path, line, column, &content, prefix)?
+        classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)?
     } else {
         Vec::new()
     };
@@ -791,8 +1107,9 @@ pub fn file_diagnostics(
     ws: &Path,
     rel_path: &str,
     content: &str,
+    overlays: &[(String, String)],
 ) -> Result<Vec<diagnostics::Diagnostic>> {
-    diagnostics::check_file(ws, rel_path, content)
+    diagnostics::check_file(ws, rel_path, content, overlays)
 }
 
 pub fn java_language_level(ws: &Path, rel_path: &str) -> u32 {

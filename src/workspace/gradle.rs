@@ -22,6 +22,7 @@ pub struct GradleProjectInfo {
     pub default_task: String,
     pub application_main: Option<String>,
     pub tasks: Vec<String>,
+    pub is_spring_boot: bool,
     pub has_junit: bool,
     pub has_spring_test: bool,
     pub has_jacoco: bool,
@@ -37,6 +38,7 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task: String::new(),
         application_main: None,
         tasks: Vec::new(),
+        is_spring_boot: false,
         has_junit: false,
         has_spring_test: false,
         has_jacoco: false,
@@ -53,8 +55,11 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     let has_wrapper = root.join("gradlew").exists() || root.join("gradlew.bat").exists();
     let build_content = read_build_file(&root).unwrap_or_default();
     let application_main = find_application_main(&build_content);
+    let is_spring_boot = is_spring_boot_project(&root);
     let has_application = has_application_plugin(&build_content);
-    let default_task = if has_application {
+    let default_task = if is_spring_boot {
+        "bootRun".to_string()
+    } else if has_application {
         "run".to_string()
     } else {
         "build".to_string()
@@ -63,7 +68,9 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     let markers = super::java_ecosystem::scan_gradle_project(&root);
 
     let mut tasks = vec!["build".to_string(), "test".to_string(), "clean".to_string()];
-    if has_application {
+    if is_spring_boot {
+        tasks.insert(0, "bootRun".to_string());
+    } else if has_application {
         tasks.insert(0, "run".to_string());
     }
     if markers.jacoco {
@@ -77,6 +84,7 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task,
         application_main,
         tasks,
+        is_spring_boot,
         has_junit: markers.junit,
         has_spring_test: markers.spring_test,
         has_jacoco: markers.jacoco,
@@ -640,5 +648,11 @@ mod tests {
             .expect("find gradle root should not error for unsaved paths");
         assert!(root.is_none());
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn max_java_for_gradle_8_14() {
+        assert_eq!(max_java_for_gradle(8, 14), 24);
+        assert_eq!(max_java_for_gradle(8, 5), 21);
     }
 }

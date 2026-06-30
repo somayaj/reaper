@@ -201,6 +201,7 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
     let cmd = resolve_gradle_command(&root)?;
     let mut args = cmd.project_args.clone();
     args.push("--no-daemon".into());
+    args.push("--no-configuration-cache".into());
     args.push("--console=plain".into());
     args.extend(parts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -286,6 +287,40 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
         step: Some("java".into()),
     });
     Ok(run_code)
+}
+
+pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    use super::maven::{find_maven_root, parse_maven_goal, resolve_maven_command};
+
+    let parts = parse_maven_goal(goal)?;
+    let root = find_maven_root(ws, rel_path)?
+        .ok_or_else(|| anyhow::anyhow!("not inside a Maven project"))?;
+    let cmd = resolve_maven_command(&root);
+    let mut args = vec!["-q".to_string(), "--batch-mode".to_string()];
+    args.extend(parts);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "stdout".into(),
+        text: Some(format!("{label}\n")),
+        code: None,
+        step: Some("maven".into()),
+    });
+
+    let mut command = Command::new(&cmd.program);
+    command.args(&arg_refs).current_dir(&cmd.cwd);
+    if let Ok(home) = super::gradle::gradle_java_home_for_project(&cmd.cwd) {
+        jdk::apply_java_home(&mut command, &home);
+    }
+    let code = stream_process(&mut command, &tx)?;
+    let _ = emit(&tx, ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: Some("maven".into()),
+    });
+    Ok(code)
 }
 
 /// Fallback for tests — buffered shell (unchanged behavior).

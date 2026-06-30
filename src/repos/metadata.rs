@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -11,6 +11,9 @@ pub struct RepoMetadata {
     pub remote_url: Option<String>,
     pub remote_host: Option<String>,
     pub imported: bool,
+    /// Original on-disk project folder for locally imported repos.
+    #[serde(default)]
+    pub local_path: Option<String>,
 }
 
 impl Default for RepoMetadata {
@@ -19,6 +22,7 @@ impl Default for RepoMetadata {
             remote_url: None,
             remote_host: None,
             imported: false,
+            local_path: None,
         }
     }
 }
@@ -58,16 +62,26 @@ pub fn remote_auth_ready(metadata: &RepoMetadata, settings: &SettingsStore) -> b
         .is_some_and(|host| settings.has_token_for_host(host))
 }
 
+pub fn set_local_path(config: &Config, name: &str, path: &Path) -> Result<RepoMetadata> {
+    let mut metadata = load(config, name)?;
+    metadata.local_path = Some(path.display().to_string());
+    metadata.imported = true;
+    save(config, name, &metadata)?;
+    Ok(metadata)
+}
+
 pub fn set_remote(config: &Config, name: &str, clean_url: &str, host: &str) -> Result<RepoMetadata> {
-    let metadata = RepoMetadata {
-        remote_url: Some(clean_url.to_string()),
-        remote_host: Some(host.to_string()),
-        imported: true,
-    };
+    let mut metadata = load(config, name)?;
+    metadata.remote_url = Some(clean_url.to_string());
+    metadata.remote_host = Some(host.to_string());
+    metadata.imported = true;
     save(config, name, &metadata)?;
     Ok(metadata)
 }
 
 pub fn clear_remote(config: &Config, name: &str) -> Result<()> {
-    save(config, name, &RepoMetadata::default())
+    let mut metadata = load(config, name)?;
+    metadata.remote_url = None;
+    metadata.remote_host = None;
+    save(config, name, &metadata)
 }

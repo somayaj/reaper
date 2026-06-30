@@ -7,7 +7,7 @@ pub use remote::{
     publish_to_github, push_preview, push_to_remote, sync_from_remote,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::config::{self, Config};
 use crate::git;
 use crate::settings::SettingsStore;
+use crate::workspace;
 
 #[derive(Debug, Serialize)]
 pub struct RepoSummary {
@@ -28,6 +29,7 @@ pub struct RepoSummary {
     pub remote_host: Option<String>,
     pub remote_configured: bool,
     pub imported: bool,
+    pub project_folder: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +72,7 @@ pub fn summarize_repo(
         remote_host: meta.remote_host.clone(),
         remote_configured: metadata::remote_auth_ready(&meta, settings),
         imported: meta.imported,
+        project_folder: workspace::project_folder(config, name).map(|p| p.display().to_string()),
     })
 }
 
@@ -153,9 +156,20 @@ pub fn unregister_repo(config: &Config, settings: &SettingsStore, name: &str) ->
         bail!("repository not found");
     }
     settings.hide_repo(name)?;
+    let meta = metadata::load(config, name).unwrap_or_default();
     let ws = config.workspace_path(name);
-    if ws.exists() {
+    if ws.exists() && !same_path(meta.local_path.as_deref(), &ws) {
         std::fs::remove_dir_all(ws)?;
     }
     Ok(())
+}
+
+fn same_path(a: Option<&str>, b: &Path) -> bool {
+    let Some(a) = a else {
+        return false;
+    };
+    match (PathBuf::from(a).canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => PathBuf::from(a) == b,
+    }
 }

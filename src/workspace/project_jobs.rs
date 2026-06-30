@@ -18,6 +18,8 @@ pub struct ProjectIndexStatus {
     pub java: JavaIndexStatus,
     pub workspace_symbols: usize,
     pub error: Option<String>,
+    #[serde(default)]
+    pub needs_refresh: bool,
 }
 
 #[derive(Default)]
@@ -61,12 +63,21 @@ impl ProjectIndexJobs {
         self.start(repo, ws, profile, false);
     }
 
-    /// Invalidate caches and rebuild indexes (called after branch checkout).
-    pub fn on_checkout(&self, repo: &str, ws: &Path) {
+    /// Invalidate Maven/Gradle caches and rebuild indexes (build file save, manual reload).
+    pub fn reload(&self, repo: &str, ws: &Path) {
         let _ = classpath::invalidate_caches(ws);
         symbols::invalidate_symbol_cache(ws);
+        self.java.clear_repo(repo);
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.remove(repo);
+        }
         let profile = project_profile::detect(ws).unwrap_or_default();
         self.start(repo, ws, profile, true);
+    }
+
+    /// Invalidate caches and rebuild indexes (called after branch checkout).
+    pub fn on_checkout(&self, repo: &str, ws: &Path) {
+        self.reload(repo, ws);
     }
 
     fn start(&self, repo: &str, ws: &Path, profile: ProjectProfile, force: bool) {
@@ -90,6 +101,12 @@ impl ProjectIndexJobs {
         if !force && self.caches_warm(ws, repo, &profile) {
             let java = self.java.status(repo);
             if java.state != "running" {
+                if classpath::java_index_needs_refresh(ws) {
+                    tracing::info!(
+                        "Java index stale for {repo} — refreshing classpath and symbols in background"
+                    );
+                    self.reload(repo, ws);
+                }
                 return;
             }
         }
@@ -198,6 +215,7 @@ impl ProjectIndexJobs {
                 java,
                 workspace_symbols,
                 error: error.or_else(|| java_jobs.status(&repo_key).error.clone()),
+                ..Default::default()
             };
         });
     }

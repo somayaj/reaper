@@ -37,8 +37,90 @@ pub struct JdkSettingsView {
     pub installed: Vec<JdkInstall>,
 }
 
+const HOMEBREW_JDK_FORMULAE: &[&str] = &[
+    "openjdk@21",
+    "openjdk@17",
+    "openjdk@11",
+    "openjdk@25",
+    "openjdk@24",
+    "openjdk@23",
+    "openjdk@8",
+    "openjdk",
+    "temurin@21",
+    "temurin@17",
+    "temurin@11",
+    "temurin",
+];
+
+fn homebrew_prefixes() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in ["/opt/homebrew", "/usr/local"] {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn homebrew_jdk_home_at(base: &Path, formula: &str) -> Option<PathBuf> {
+    let opt = base.join("opt").join(formula);
+    if !opt.exists() {
+        return None;
+    }
+    for home in [
+        opt.join("libexec/openjdk.jdk/Contents/Home"),
+        opt.clone(),
+    ] {
+        if validate_java_home(&home).is_ok() {
+            return Some(home);
+        }
+    }
+    None
+}
+
+fn homebrew_java_home_for_version(version: &str) -> Option<PathBuf> {
+    let candidates: Vec<String> = if version == "1.8" {
+        vec!["openjdk@8".into()]
+    } else {
+        vec![format!("openjdk@{version}"), format!("temurin@{version}")]
+    };
+    for prefix in homebrew_prefixes() {
+        for formula in &candidates {
+            if let Some(home) = homebrew_jdk_home_at(&prefix, formula) {
+                return Some(home);
+            }
+        }
+    }
+    None
+}
+
+fn scan_homebrew_jdks() -> Vec<JdkInstall> {
+    let mut installs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for prefix in homebrew_prefixes() {
+        for formula in HOMEBREW_JDK_FORMULAE {
+            let Some(home) = homebrew_jdk_home_at(&prefix, formula) else {
+                continue;
+            };
+            let key = home.canonicalize().unwrap_or_else(|_| home.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            let version = java_version_string(&home).unwrap_or_else(|_| "?".into());
+            installs.push(JdkInstall {
+                path: home.display().to_string(),
+                version: version.clone(),
+                label: format!("{version} — Homebrew {formula}"),
+            });
+        }
+    }
+    installs
+}
+
 pub fn list_installed_jdks() -> Vec<JdkInstall> {
     let mut installs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     #[cfg(target_os = "macos")]
     {
@@ -50,9 +132,21 @@ pub fn list_installed_jdks() -> Vec<JdkInstall> {
             );
             for line in text.lines() {
                 if let Some(install) = parse_macos_java_home_line(line) {
-                    installs.push(install);
+                    let key = PathBuf::from(&install.path);
+                    let key = key.canonicalize().unwrap_or(key);
+                    if seen.insert(key) {
+                        installs.push(install);
+                    }
                 }
             }
+        }
+    }
+
+    for install in scan_homebrew_jdks() {
+        let key = PathBuf::from(&install.path);
+        let key = key.canonicalize().unwrap_or(key);
+        if seen.insert(key) {
+            installs.push(install);
         }
     }
 
@@ -150,7 +244,7 @@ pub fn gradle_java_home() -> Result<PathBuf> {
 pub fn gradle_java_home_with_max(max_major: u32) -> Result<PathBuf> {
     if let Ok(home) = effective_java_home() {
         if let Some(major) = java_major_version(&home) {
-            if major >= 11 && major <= max_major {
+            if (11..=max_major).contains(&major) {
                 return Ok(home);
             }
         }
@@ -158,25 +252,58 @@ pub fn gradle_java_home_with_max(max_major: u32) -> Result<PathBuf> {
     detect_java_home_for_max(max_major)
 }
 
-fn detect_java_home_for_max(max_major: u32) -> Result<PathBuf> {
-    let mut versions = Vec::new();
-    if max_major >= 21 {
-        versions.extend(["21", "17", "11"]);
-    } else if max_major >= 19 {
-        versions.extend(["17", "11", "19"]);
+/// Map JVM classfile major version to Java release (e.g. 70 → 26).
+pub fn java_major_from_classfile(class_major: u32) -> u32 {
+    if class_major >= 45 {
+        class_major.saturating_sub(44)
     } else {
-        versions.extend(["17", "11"]);
+        class_major
     }
-    for v in versions {
-        if let Ok(major) = v.parse::<u32>() {
-            if major <= max_major {
-                if let Ok(home) = detect_java_home_for_versions(&[v]) {
-                    return Ok(home);
-                }
+}
+
+fn detect_java_home_for_max(max_major: u32) -> Result<PathBuf> {
+    let candidates: &[&str] = if max_major >= 24 {
+        &["24", "23", "21", "17", "11"]
+    } else if max_major >= 21 {
+        &["21", "17", "11"]
+    } else if max_major >= 19 {
+        &["19", "17", "11"]
+    } else {
+        &["17", "11"]
+    };
+
+    for v in candidates {
+        let Ok(major) = v.parse::<u32>() else {
+            continue;
+        };
+        if major > max_major {
+            continue;
+        }
+        if let Ok(home) = detect_java_home_for_versions(&[v]) {
+            if java_major_version(&home).is_some_and(|m| m <= max_major) {
+                return Ok(home);
             }
         }
     }
-    detect_gradle_java_home()
+
+    if let Ok(home) = effective_java_home() {
+        if let Some(major) = java_major_version(&home) {
+            if major > max_major {
+                bail!(
+                    "Gradle requires Java 11–{max_major}, but Settings → Java is Java {major}. Install Java 21 or 17 and select it in Settings → Java."
+                );
+            }
+            if major < 11 {
+                bail!(
+                    "Gradle requires Java 11–{max_major}, but Settings → Java is Java {major}."
+                );
+            }
+        }
+    }
+
+    bail!(
+        "Gradle requires Java 11–{max_major}. Install Java 21 or 17 and set it in Settings → Java."
+    );
 }
 
 pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
@@ -202,19 +329,28 @@ fn detect_gradle_java_home() -> Result<PathBuf> {
 }
 
 fn detect_java_home_for_versions(versions: &[&str]) -> Result<PathBuf> {
-    #[cfg(target_os = "macos")]
     for version in versions {
-        if let Ok(out) = Command::new("/usr/libexec/java_home")
-            .arg("-v")
-            .arg(version)
-            .output()
+        #[cfg(target_os = "macos")]
         {
-            if out.status.success() {
-                let home = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-                if home.join("bin/java").is_file() {
-                    return Ok(home);
+            if let Ok(out) = Command::new("/usr/libexec/java_home")
+                .arg("-v")
+                .arg(version)
+                .output()
+            {
+                if out.status.success() {
+                    let home = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+                    if home.join("bin/java").is_file() {
+                        return Ok(home);
+                    }
                 }
             }
+            if let Some(home) = homebrew_java_home_for_version(version) {
+                return Ok(home);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = version;
         }
     }
 
@@ -291,5 +427,29 @@ pub fn apply_java_home(cmd: &mut Command, home: &Path) {
         } else {
             cmd.env("PATH", format!("{prefix}:{path}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn homebrew_openjdk21_path_when_installed() {
+        let base = PathBuf::from("/opt/homebrew");
+        if !base.is_dir() {
+            return;
+        }
+        let home = homebrew_jdk_home_at(&base, "openjdk@21");
+        assert!(
+            home.is_some(),
+            "expected /opt/homebrew/opt/openjdk@21 to resolve to a JDK"
+        );
+        let installs = scan_homebrew_jdks();
+        assert!(
+            installs.iter().any(|j| j.path.contains("openjdk@21") || j.label.contains("openjdk@21")),
+            "scan_homebrew_jdks should include openjdk@21: {installs:?}"
+        );
     }
 }

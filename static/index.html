@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="275" />
+  <meta name="reaper-ui-build" content="289" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -69,7 +69,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=275" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=289" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -79,11 +79,9 @@
     #editor { min-height: 0; }
     @keyframes pulse-soft { 0%,100%{opacity:.5} 50%{opacity:1} }
     .loading-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
-    #agent-dock-right { width: 20rem; }
-    #agent-dock-bottom { height: 16rem; }
     #terminal-dock-right { width: 20rem; }
-    @media (min-width: 1024px) { #agent-dock-right { width: 22rem; } #terminal-dock-right { width: 22rem; } }
-    @media (min-width: 1280px) { #agent-dock-right { width: 24rem; } #terminal-dock-right { width: 24rem; } }
+    @media (min-width: 1024px) { #terminal-dock-right { width: 22rem; } }
+    @media (min-width: 1280px) { #terminal-dock-right { width: 24rem; } }
   </style>
 </head>
 <body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden ij-shell">
@@ -196,6 +194,7 @@
           <button type="button" class="ij-menu-trigger">Run</button>
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="run" disabled>Run<span class="ij-kbd">F5</span></button>
+            <button type="button" class="ij-menu-item" data-action="reload-project" disabled>Reload Gradle/Maven project</button>
           </div>
         </div>
         <div class="ij-menu-root" data-menu="settings">
@@ -313,6 +312,9 @@
             <svg class="ij-icon-expand hidden" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M9 5l7 7-7 7"/></svg>
           </button>
           <button id="btn-toggle-dotfiles" type="button" class="ij-sidebar-btn ij-sidebar-btn-text" title="Show dotfiles &amp; Gradle wrapper (gradlew, gradle/wrapper, …)" aria-label="Toggle dotfiles">.*</button>
+          <button id="btn-reload-project" type="button" class="ij-sidebar-btn hidden" disabled title="Reload Gradle/Maven project" aria-label="Reload Gradle/Maven project">
+            <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0115.5-2.5M20 15a9 9 0 01-15.5 2.5"/></svg>
+          </button>
           <button id="btn-new-file" type="button" class="ij-sidebar-btn" disabled title="New file (⌘N)" aria-label="New file">
             <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
           </button>
@@ -361,15 +363,12 @@
           </div>
           <textarea id="commit-message" rows="3" placeholder="Describe what changed and why…" class="ij-commit-message"></textarea>
           <div class="ij-commit-actions">
-            <button id="btn-commit-only" type="button" disabled class="ij-commit-btn ij-commit-btn-secondary">
+            <button id="btn-commit-only" type="button" disabled title="Commit locally" class="ij-commit-btn ij-commit-btn-secondary" aria-label="Commit locally">
               <span class="ij-commit-btn-icon" data-icon="gitCommit" aria-hidden="true"></span>
               <span class="ij-commit-btn-label">Commit</span>
             </button>
-            <button id="btn-commit-push" type="button" disabled class="ij-commit-btn ij-commit-btn-primary">
-              <span class="ij-commit-btn-icon-group" aria-hidden="true">
-                <span class="ij-commit-btn-icon" data-icon="gitCommit"></span>
-                <span class="ij-commit-btn-icon" data-icon="gitPush"></span>
-              </span>
+            <button id="btn-commit-push" type="button" disabled title="Commit and push" class="ij-commit-btn ij-commit-btn-primary" aria-label="Commit and push">
+              <span class="ij-commit-btn-icon" data-icon="gitPush" aria-hidden="true"></span>
               <span class="ij-commit-btn-label">Commit &amp; Push</span>
             </button>
           </div>
@@ -470,6 +469,9 @@
         <button id="tb-rollback" disabled title="Rollback last change (⌘Z)" class="ij-toolbar-btn" type="button" aria-label="Rollback last change">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14L4 9m0 0l5-5M4 9h10.5a5.5 5.5 0 010 11H11"/></svg>
         </button>
+        <button id="tb-reload-project" disabled title="Reload Maven project" class="ij-toolbar-btn hidden" type="button" aria-label="Reload Maven project">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0115.5-2.5M20 15a9 9 0 01-15.5 2.5"/></svg>
+        </button>
         <span id="gradle-toolbar-sep" class="ij-toolbar-sep hidden"></span>
         <select id="gradle-task" disabled title="Gradle task" class="hidden text-[11px] font-mono disabled:opacity-30">
           <option value="run">run</option>
@@ -556,6 +558,7 @@
     </main>
 
     <!-- Agent dock (right) -->
+    <div id="agent-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize agent panel"></div>
     <aside id="agent-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
 
     <!-- Terminal dock (right) -->
@@ -563,7 +566,9 @@
     </div>
 
     <!-- Agent dock (bottom) -->
-    <div id="agent-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0"></div>
+    <div id="agent-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0">
+      <div id="agent-bottom-resize" class="ij-dock-resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize agent panel" tabindex="0"></div>
+    </div>
 
     <!-- Terminal dock (bottom) -->
     <div id="terminal-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0">
@@ -576,7 +581,7 @@
     <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
       <span id="status-message">Ready</span>
       <span id="status-diag-hint" class="ij-status-diag-hint hidden" title=""></span>
-      <span id="status-complete-debug" class="ij-status-complete-debug shrink-0" title="Completion debug"></span>
+      <span id="status-complete-debug" class="ij-status-complete-debug shrink-0 hidden" title="Completion debug"></span>
       <span id="status-version" class="ij-status-version shrink-0" title="Reaper version"></span>
     </div>
     <div class="flex-1"></div>
@@ -879,6 +884,11 @@
                 <option value="">None — show welcome screen</option>
               </select>
               <p class="text-[11px] text-gray-600 mt-2">Opened automatically when Reaper starts (unless a repo is specified in the URL).</p>
+              <div id="settings-default-repo-folder" class="hidden mt-3 space-y-1.5">
+                <div class="text-xs text-gray-500">Project folder</div>
+                <code id="settings-default-repo-folder-path" class="block text-[11px] bg-surface-950 border border-surface-700 rounded px-2 py-1.5 text-gray-300 break-all select-all font-mono"></code>
+                <p class="text-[11px] text-gray-600">Edits and git changes are saved here. For local imports, this matches the folder you imported.</p>
+              </div>
             </div>
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
@@ -993,7 +1003,24 @@
   </div>
 
   <!-- Toast -->
-  <div id="toast" class="fixed bottom-10 right-4 px-4 py-3 rounded-xl shadow-xl text-sm font-medium hidden z-50 border backdrop-blur-md"></div>
+  <div id="toast-slot" class="ij-toast-slot hidden">
+    <div id="toast" class="ij-toast" role="status" aria-live="polite">
+      <div class="ij-toast-glow" aria-hidden="true"></div>
+      <div class="ij-toast-inner">
+        <div class="ij-toast-icon-wrap">
+          <span class="ij-toast-icon" data-icon="toastInfo" aria-hidden="true"></span>
+        </div>
+        <div class="ij-toast-body">
+          <span class="ij-toast-kind hidden"></span>
+          <p class="ij-toast-message"></p>
+        </div>
+        <button type="button" class="ij-toast-dismiss" aria-label="Dismiss">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="ij-toast-progress" aria-hidden="true"><span class="ij-toast-progress-fill"></span></div>
+    </div>
+  </div>
 
   <script>
     (function () {
@@ -1013,10 +1040,10 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
-  <script src="/icons.js?v=2"></script>
-  <script src="/reaper-lang-core.js?v=275"></script>
-  <script src="/monaco-languages.js?v=275" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/icons.js?v=3"></script>
+  <script src="/reaper-lang-core.js?v=289"></script>
+  <script src="/monaco-languages.js?v=289" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=275"></script>
+  <script src="/app.js?v=289"></script>
 </body>
 </html>

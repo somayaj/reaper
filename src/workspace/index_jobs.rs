@@ -26,6 +26,7 @@ struct JobEntry {
     status: JavaIndexStatus,
 }
 
+#[derive(Clone)]
 pub struct JavaIndexJobs {
     inner: Arc<Mutex<HashMap<String, JobEntry>>>,
 }
@@ -49,6 +50,13 @@ impl JavaIndexJobs {
             .ok()
             .and_then(|g| g.get(repo).map(|e| e.status.clone()))
             .unwrap_or_default()
+    }
+
+    /// Clear in-memory status so a forced reload can restart indexing.
+    pub fn clear_repo(&self, repo: &str) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.remove(repo);
+        }
     }
 
     /// Load Java index counts from disk into memory (no rebuild).
@@ -103,7 +111,9 @@ impl JavaIndexJobs {
                     entry.status = status_from_warm(&peek, None);
                 }
                 if peek.cached && entry.status.state == "ready" {
-                    return;
+                    if !classpath::needs_any_tooling_classpath_resolve(&ws_path) {
+                        return;
+                    }
                 }
             }
         }
@@ -140,7 +150,7 @@ impl JavaIndexJobs {
         std::thread::spawn(move || {
             let progress_inner = Arc::clone(&inner);
             let progress_repo = repo_key.clone();
-            let progress = Box::new(move |phase: &str, count: usize| {
+            let progress: Box<dyn Fn(&str, usize) + Send> = Box::new(move |phase: &str, count: usize| {
                 if let Ok(mut guard) = progress_inner.lock() {
                     if let Some(entry) = guard.get_mut(&progress_repo) {
                         entry.status.state = "running".into();
@@ -149,6 +159,12 @@ impl JavaIndexJobs {
                     }
                 }
             });
+            if let Err(e) = classpath::resolve_classpaths_for_index(&ws_path, Some(&progress)) {
+                tracing::warn!(
+                    "Classpath resolve before index failed for {}: {e:#}",
+                    ws_path.display()
+                );
+            }
             let result = classpath::warm_index_with_progress(&ws_path, Some(progress));
             let mut guard = match inner.lock() {
                 Ok(g) => g,
