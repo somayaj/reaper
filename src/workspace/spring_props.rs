@@ -7,8 +7,31 @@ use serde::{Deserialize, Serialize};
 
 use super::classpath::CompletionItem;
 use super::gradle::find_gradle_root;
+use super::maven::find_maven_root;
 
 const INDEX_PATH: &str = ".reaper/spring-properties.json";
+
+const COMMON_SPRING_PROPERTIES: &[(&str, &str, Option<&str>)] = &[
+    ("spring.application.name", "String", Some("Application display name")),
+    ("spring.profiles.active", "String", Some("Active Spring profiles")),
+    ("server.port", "Integer", Some("HTTP port")),
+    ("server.servlet.context-path", "String", Some("Servlet context path")),
+    ("logging.level.root", "String", Some("Root log level")),
+    ("logging.level.org.springframework", "String", Some("Spring Framework log level")),
+    (
+        "management.endpoints.web.exposure.include",
+        "String",
+        Some("Actuator endpoints to expose"),
+    ),
+    ("spring.datasource.url", "String", Some("JDBC URL")),
+    ("spring.datasource.username", "String", Some("Database username")),
+    ("spring.datasource.password", "String", Some("Database password")),
+    ("spring.datasource.driver-class-name", "String", Some("JDBC driver class")),
+    ("spring.jpa.hibernate.ddl-auto", "String", Some("Hibernate DDL mode")),
+    ("spring.jpa.show-sql", "Boolean", Some("Log SQL statements")),
+    ("spring.main.banner-mode", "String", Some("Banner mode: off, console, log")),
+    ("spring.jackson.serialization.indent-output", "Boolean", Some("Pretty-print JSON")),
+];
 
 const METADATA_ENTRIES: &[&str] = &[
     "META-INF/spring-configuration-metadata.json",
@@ -124,7 +147,7 @@ pub fn completions(
         return Ok(Vec::new());
     }
 
-    let Some(root) = find_gradle_root(ws, from_path)? else {
+    let Some(root) = project_root_for(ws, from_path)? else {
         return Ok(Vec::new());
     };
 
@@ -138,21 +161,55 @@ pub fn completions(
     yaml_completions(&index, content, line, column, prefix)
 }
 
-fn ensure_index(ws: &Path, gradle_root: &Path) -> Result<SpringPropertiesIndex> {
+fn project_root_for(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
+    if let Some(root) = find_gradle_root(ws, from_path)? {
+        return Ok(Some(root));
+    }
+    find_maven_root(ws, from_path)
+}
+
+fn load_index_cache(gradle_root: &Path) -> Option<SpringPropertiesIndex> {
     let cache = gradle_root.join(INDEX_PATH);
-    if cache.is_file() {
-        if let Ok(text) = std::fs::read_to_string(&cache) {
-            if let Ok(index) = serde_json::from_str::<SpringPropertiesIndex>(&text) {
-                if !index.properties.is_empty() {
-                    return Ok(index);
-                }
+    if !cache.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(cache).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn fallback_index() -> SpringPropertiesIndex {
+    SpringPropertiesIndex {
+        properties: COMMON_SPRING_PROPERTIES
+            .iter()
+            .map(|(name, ty, desc)| SpringPropertyEntry {
+                name: (*name).to_string(),
+                prop_type: Some((*ty).to_string()),
+                description: desc.map(str::to_string),
+                default_value: None,
+                hint_values: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn ensure_index(ws: &Path, gradle_root: &Path) -> Result<SpringPropertiesIndex> {
+    if let Some(index) = load_index_cache(gradle_root) {
+        if !index.properties.is_empty() {
+            return Ok(index);
+        }
+    }
+
+    let jars = super::classpath::resolve_dependency_jars_cached(gradle_root);
+    if !jars.is_empty() {
+        let _ = build_index(ws, gradle_root, &jars);
+        if let Some(index) = load_index_cache(gradle_root) {
+            if !index.properties.is_empty() {
+                return Ok(index);
             }
         }
     }
 
-    Ok(SpringPropertiesIndex {
-        properties: Vec::new(),
-    })
+    Ok(fallback_index())
 }
 
 fn properties_completions(

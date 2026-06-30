@@ -53,6 +53,8 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
                 .put(save_workspace_file)
                 .delete(delete_workspace_file),
         )
+        .route("/api/repos/{name}/workspace/mkdir", post(workspace_mkdir))
+        .route("/api/repos/{name}/workspace/reveal", post(workspace_reveal))
         .route("/api/repos/{name}/workspace/status", get(workspace_status))
         .route("/api/repos/{name}/workspace/diff", get(workspace_diff))
         .route("/api/repos/{name}/workspace/conflict", get(conflict_stages_handler))
@@ -71,6 +73,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/java/test-methods", get(java_test_methods_handler).post(java_test_methods_post))
         .route("/api/repos/{name}/workspace/gradle/info", get(gradle_project_info_handler))
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
+        .route("/api/repos/{name}/workspace/run/info", get(run_project_info_handler))
+        .route("/api/repos/{name}/workspace/run/target", get(run_target_handler).post(run_target_post))
+        .route("/api/repos/{name}/workspace/run/task", post(run_project_task_handler))
+        .route("/api/repos/{name}/workspace/maven/run", post(run_maven_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
         .route("/api/repos/{name}/workspace/hover", get(workspace_hover).post(workspace_hover_post))
         .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
@@ -79,6 +85,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/inline-complete", post(workspace_inline_complete))
         .route("/api/repos/{name}/workspace/java/index-status", get(java_index_status))
         .route("/api/repos/{name}/workspace/project/index-status", get(project_index_status))
+        .route("/api/repos/{name}/workspace/project/reload", post(reload_project_index))
         .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
         .route("/api/repos/{name}/workspace/quick-fixes", post(workspace_quick_fixes))
         .route("/api/repos/{name}/workspace/java-level", get(workspace_java_level))
@@ -426,6 +433,41 @@ async fn delete_workspace_file(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     match workspace::delete_path(&ws, &q.path) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PathBody {
+    path: String,
+}
+
+async fn workspace_mkdir(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<PathBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::create_dir(&ws, &body.path) {
+        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({ "path": body.path }))).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_reveal(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<PathBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::reveal_in_system(&ws, &body.path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -873,6 +915,235 @@ async fn run_gradle_handler(
     exec_stream_response(rx)
 }
 
+async fn run_project_info_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::run_project_info(&ws, &q.path) {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RunTargetQuery {
+    path: String,
+    #[serde(default = "default_one_u32")]
+    line: u32,
+    #[serde(default)]
+    use_ai: bool,
+}
+
+fn default_one_u32() -> u32 {
+    1
+}
+
+#[derive(Deserialize)]
+struct RunTargetRequest {
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default = "default_one_u32")]
+    line: u32,
+    #[serde(default)]
+    use_ai: bool,
+}
+
+async fn run_target_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<RunTargetQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = q.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    let line = q.line.max(1);
+    let ws_clone = ws.clone();
+    let path_clone = path.clone();
+    match tokio::task::spawn_blocking(move || workspace::run_context(&ws_clone, &path_clone, None, line)).await
+    {
+        Ok(Ok(mut ctx)) => {
+            maybe_enhance_run_target_with_ai(
+                &state,
+                &ws,
+                &path,
+                line,
+                None,
+                &mut ctx,
+                q.use_ai,
+            )
+            .await;
+            Json(ctx).into_response()
+        }
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("run target task failed: {e:#}"),
+        ),
+    }
+}
+
+async fn run_target_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RunTargetRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    let line = body.line.max(1);
+    let content = body.content.clone();
+    let ws_clone = ws.clone();
+    let path_clone = path.clone();
+    let content_for_task = content.clone();
+    match tokio::task::spawn_blocking(move || {
+        workspace::run_context(&ws_clone, &path_clone, content_for_task.as_deref(), line)
+    })
+    .await
+    {
+        Ok(Ok(mut ctx)) => {
+            maybe_enhance_run_target_with_ai(
+                &state,
+                &ws,
+                &path,
+                line,
+                content.as_deref(),
+                &mut ctx,
+                body.use_ai,
+            )
+            .await;
+            Json(ctx).into_response()
+        }
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("run target task failed: {e:#}"),
+        ),
+    }
+}
+
+async fn maybe_enhance_run_target_with_ai(
+    state: &AppState,
+    ws: &std::path::Path,
+    path: &str,
+    line: u32,
+    content: Option<&str>,
+    ctx: &mut workspace::RunContext,
+    force: bool,
+) {
+    let Some(target) = ctx.target.as_mut() else {
+        return;
+    };
+    if state.settings.gemini_api_key().is_none() {
+        return;
+    }
+    let src = match content {
+        Some(c) => c.to_string(),
+        None => workspace::read_file(ws, path).unwrap_or_default(),
+    };
+    if !force && !workspace::needs_ai_run_classification(target, &src) {
+        return;
+    }
+    if let Ok(hint) = git_agent::suggest_run_target(
+        &state.settings,
+        ws,
+        path,
+        line,
+        &src,
+        &ctx.project,
+        target,
+    )
+    .await
+    {
+        workspace::apply_ai_run_target(target, &hint);
+    }
+}
+
+#[derive(Deserialize)]
+struct RunTaskRequest {
+    path: String,
+    #[serde(default)]
+    task: String,
+}
+
+async fn run_project_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RunTaskRequest>,
+) -> Response {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim().to_string();
+    let task = body.task.trim().to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_run_task(&ws, &path, &task, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+    exec_stream_response(rx)
+}
+
+async fn run_maven_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RunTaskRequest>,
+) -> Response {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let goal = if body.task.trim().is_empty() {
+        match workspace::maven_project_info(&ws, body.path.trim()) {
+            Ok(info) if info.is_maven => info.default_goal,
+            Ok(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    anyhow::anyhow!("not inside a Maven project"),
+                )
+            }
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+        }
+    } else {
+        body.task.trim().to_string()
+    };
+    let path = body.path.trim().to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_maven(&ws, &path, &goal, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+    exec_stream_response(rx)
+}
+
 #[derive(Deserialize)]
 struct DefinitionQuery {
     path: String,
@@ -1058,10 +1329,12 @@ async fn workspace_completions(
     };
     let prefix = q.prefix.unwrap_or_default();
     let from_path = q.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
+    if workspace::definition_uses_java_index(from_path)
+        || workspace::uses_spring_property_completions(from_path)
+    {
         state.java_index_jobs.ensure_building(&name, &ws);
     }
-    match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None) {
+    match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None, &[]) {
         Ok(items) => {
             if items.is_empty() {
                 tracing::debug!(
@@ -1088,6 +1361,12 @@ async fn workspace_completions(
 }
 
 #[derive(Deserialize)]
+struct CompletionsOverlay {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
 struct CompletionsBody {
     path: String,
     line: u32,
@@ -1096,6 +1375,8 @@ struct CompletionsBody {
     prefix: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    overlays: Vec<CompletionsOverlay>,
 }
 
 async fn workspace_completions_post(
@@ -1109,9 +1390,17 @@ async fn workspace_completions_post(
     };
     let prefix = body.prefix.unwrap_or_default();
     let from_path = body.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
+    if workspace::definition_uses_java_index(from_path)
+        || workspace::uses_spring_property_completions(from_path)
+    {
         state.java_index_jobs.ensure_building(&name, &ws);
     }
+    let overlays: Vec<(String, String)> = body
+        .overlays
+        .into_iter()
+        .map(|o| (o.path.trim().to_string(), o.content))
+        .filter(|(p, _)| !p.is_empty())
+        .collect();
     match workspace::java_completions(
         &ws,
         from_path,
@@ -1119,6 +1408,7 @@ async fn workspace_completions_post(
         body.column,
         &prefix,
         body.content.as_deref(),
+        &overlays,
     ) {
         Ok(items) => {
             tracing::info!(
@@ -1222,9 +1512,17 @@ async fn workspace_inline_complete(
 }
 
 #[derive(Deserialize)]
+struct DiagnosticsOverlay {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
 struct DiagnosticsRequest {
     path: String,
     content: String,
+    #[serde(default)]
+    overlays: Vec<DiagnosticsOverlay>,
 }
 
 async fn java_index_status(
@@ -1238,6 +1536,22 @@ async fn project_index_status(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    let mut status = state.project_index_jobs.status(&name);
+    if let Ok(ws) = workspace::ensure_workspace(&state.config, &name) {
+        status.needs_refresh = workspace::java_index_needs_refresh(&ws);
+    }
+    Json(status).into_response()
+}
+
+async fn reload_project_index(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    state.project_index_jobs.reload(&name, &ws);
     Json(state.project_index_jobs.status(&name)).into_response()
 }
 
@@ -1285,7 +1599,17 @@ async fn workspace_diagnostics(
     };
     let path = body.path.trim().to_string();
     let content = body.content;
-    match tokio::task::spawn_blocking(move || workspace::file_diagnostics(&ws, &path, &content)).await {
+    let overlays: Vec<(String, String)> = body
+        .overlays
+        .into_iter()
+        .map(|o| (o.path.trim().to_string(), o.content))
+        .filter(|(p, _)| !p.is_empty())
+        .collect();
+    match tokio::task::spawn_blocking(move || {
+        workspace::file_diagnostics(&ws, &path, &content, &overlays)
+    })
+    .await
+    {
         Ok(Ok(items)) => Json(items).into_response(),
         Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("diagnostics task failed: {e:#}")),

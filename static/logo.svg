@@ -2,19 +2,19 @@
   <title>Reaper</title>
   <rect width="64" height="64" rx="14" fill="#0a0a0a"/>
   <!-- Console polyglot -->
-  <text x="10" y="12" fill="#629755" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">$ git</text>
-  <text x="10" y="19" fill="#589df6" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">&gt; build</text>
-  <text x="10" y="26" fill="#888888" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">&gt; run</text>
-  <text x="10" y="33" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
+  <text x="10" y="12" fill="#629755" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">$ git</text>
+  <text x="10" y="19" fill="#589df6" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">&gt; build</text>
+  <text x="10" y="26" fill="#888888" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">&gt; run</text>
+  <text x="10" y="33" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
     <tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan>
   </text>
-  <text x="10" y="40" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
+  <text x="10" y="40" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
     <tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan>
   </text>
   <!-- Harvest field — binary bit stalks, reaped left → standing right -->
   <rect x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
   <rect x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+  <g font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
     <text x="14" y="51" fill="#629755" font-size="6">0</text>
     <text x="20" y="51" fill="#589df6" font-size="6">1</text>
     <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text>
@@ -50,5 +50,5 @@
     <line x1="56" y1="52" x2="56" y2="33"/>
   </g>
   <path d="M10 56 L30 42" stroke="#589df6" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
-  <text x="12" y="48" fill="#ffc66d" font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="5" opacity="0.7">01</text>
+  <text x="12" y="48" fill="#ffc66d" font-family="Consolas,Menlo,Monaco,monospace" font-size="5" opacity="0.7">01</text>
 </svg>
