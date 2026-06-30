@@ -8,11 +8,16 @@ allprojects { project ->
         if (compileJava != null) {
             dependsOn compileJava
         }
+        def compileTestJava = project.tasks.findByName('compileTestJava')
+        if (compileTestJava != null) {
+            dependsOn compileTestJava
+        }
         doLast {
             def names = [
                 'compileClasspath',
                 'runtimeClasspath',
                 'testCompileClasspath',
+                'testRuntimeClasspath',
                 'annotationProcessor',
             ]
             def seenJars = new LinkedHashSet<String>()

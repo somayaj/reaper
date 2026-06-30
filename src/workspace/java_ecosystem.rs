@@ -15,6 +15,7 @@ pub struct JavaBuildMarkers {
     pub lombok: bool,
     pub jacoco: bool,
     pub slf4j: bool,
+    pub mockito: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +89,11 @@ pub fn scan_build_content(content: &str) -> JavaBuildMarkers {
             || compact.contains("spring-boot-starter-logging")
             || compact.contains("logback-classic")
             || compact.contains("ch.qos.logback"),
+        mockito: compact.contains("mockito-core")
+            || compact.contains("mockito-junit-jupiter")
+            || compact.contains("org.mockito")
+            || compact.contains("mockito-inline")
+            || (compact.contains("mockito") && compact.contains("test")),
     }
 }
 
