@@ -222,23 +222,21 @@ pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
         .canonicalize()
         .with_context(|| format!("resolve gradle project root {}", project_root.display()))?;
 
+    let wrapper_root = find_gradle_wrapper_root(&project_root);
+
     #[cfg(windows)]
-    if project_root.join("gradlew.bat").is_file() {
-        return Ok(GradleCommand {
-            program: PathBuf::from("gradlew.bat"),
-            cwd: project_root,
-            project_args: Vec::new(),
-        });
+    if wrapper_root.join("gradlew.bat").is_file() {
+        return Ok(gradle_wrapper_command(&wrapper_root, &project_root, "gradlew.bat"));
     }
 
     #[cfg(not(windows))]
-    if project_root.join("gradlew").is_file() {
-        ensure_gradlew_executable(&project_root)?;
-        return Ok(GradleCommand {
-            program: PathBuf::from("./gradlew"),
-            cwd: project_root,
-            project_args: Vec::new(),
-        });
+    if wrapper_root.join("gradlew").is_file() {
+        ensure_gradlew_executable(&wrapper_root)?;
+        return Ok(gradle_wrapper_command(
+            &wrapper_root,
+            &project_root,
+            "./gradlew",
+        ));
     }
 
     if let Some(gradle) = crate::toolchain::resolve_program("gradle") {
@@ -285,9 +283,42 @@ pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
     )
 }
 
+/// Directory containing `gradlew` — walk up from a nested module if needed.
+pub fn find_gradle_wrapper_root(project_root: &Path) -> PathBuf {
+    let mut dir = project_root.to_path_buf();
+    loop {
+        if dir.join("gradlew").is_file() || dir.join("gradlew.bat").is_file() {
+            return dir;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent.to_path_buf();
+    }
+    project_root.to_path_buf()
+}
+
+fn gradle_wrapper_command(
+    wrapper_root: &Path,
+    project_root: &Path,
+    program: &str,
+) -> GradleCommand {
+    let mut project_args = Vec::new();
+    if wrapper_root != project_root {
+        project_args.push("-p".into());
+        project_args.push(project_root.to_string_lossy().into_owned());
+    }
+    GradleCommand {
+        program: PathBuf::from(program),
+        cwd: wrapper_root.to_path_buf(),
+        project_args,
+    }
+}
+
 /// JVM for running this project's Gradle wrapper (respects wrapper vs Java compatibility).
 pub fn gradle_java_home_for_project(project_root: &Path) -> Result<PathBuf> {
-    let max_major = max_java_version_for_project(project_root);
+    let wrapper_root = find_gradle_wrapper_root(project_root);
+    let max_major = max_java_version_for_project(&wrapper_root);
     crate::jdk::gradle_java_home_with_max(max_major)
 }
 
@@ -600,6 +631,39 @@ mod tests {
     fn bundled_gradlew_exists_in_repo() {
         let gradlew = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gradlew");
         assert!(gradlew.is_file(), "bundled gradlew should exist at repo root");
+    }
+
+    #[test]
+    fn resolve_gradlew_from_nested_module_without_wrapper() {
+        let root = std::env::temp_dir().join(format!("reaper-gradle-wrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gradle/wrapper")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'root'\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            root.join("gradle/wrapper/gradle-wrapper.properties"),
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.5-bin.zip\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(root.join("gradlew")).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(root.join("gradlew"), perms).unwrap();
+        }
+        let module = root.join("api");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let cmd = resolve_gradle_command(&module).expect("resolve gradle command");
+        assert_eq!(cmd.program, PathBuf::from("./gradlew"));
+        assert!(cmd.cwd.join("gradlew").is_file());
+        assert_eq!(cmd.project_args.len(), 2);
+        assert_eq!(cmd.project_args[0], "-p");
+        assert!(PathBuf::from(&cmd.project_args[1]).ends_with("api"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
