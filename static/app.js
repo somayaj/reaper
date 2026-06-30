@@ -1702,13 +1702,33 @@ async function clearGeminiKeyFromSettings() {
   }
 }
 
-async function hasGitHubPat() {
+function patHostAliases(host) {
+  const base = String(host || '').trim().toLowerCase().split(':')[0];
+  if (!base) return [];
+  const keys = [base];
+  if (base === 'www.github.com' && !keys.includes('github.com')) keys.push('github.com');
+  return keys;
+}
+
+async function loadPatTokenHosts() {
   try {
     const tokens = await api('/api/settings/tokens');
-    return tokens.some((t) => t.host === 'github.com' || t.host === '*');
+    return tokens.map((t) => String(t.host || '').toLowerCase());
   } catch {
-    return false;
+    return [];
   }
+}
+
+async function hasPatForHost(host) {
+  const aliases = patHostAliases(host);
+  if (!aliases.length) return false;
+  const saved = await loadPatTokenHosts();
+  if (saved.includes('*')) return true;
+  return aliases.some((k) => saved.includes(k));
+}
+
+async function hasGitHubPat() {
+  return hasPatForHost('github.com');
 }
 
 function langForPath(path) {
@@ -4506,7 +4526,9 @@ async function cloneRepo(e) {
     setCloneModalState({ busy: false, error: msg, status: '' });
     terminalLog(`clone failed: ${msg}`);
     const host = hostFromUrl(remoteUrl);
-    if (host && /auth|401|403|credential|token|pat/i.test(msg)) {
+    const missingPat = /\bno pat configured\b/i.test(msg);
+    const looksAuth = missingPat || /auth|401|403|credential|authentication/i.test(msg);
+    if (host && looksAuth && !(await hasPatForHost(host))) {
       toast(`${msg} — add a PAT in Settings → Git hosts`, 'error', { duration: 12000 });
     } else {
       toast(msg, 'error', { duration: 12000 });

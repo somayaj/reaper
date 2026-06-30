@@ -267,28 +267,34 @@ impl SettingsStore {
     }
 
     pub fn token_for_host(&self, host: &str) -> Option<String> {
-        if let Ok(guard) = self.inner.read() {
-            if let Some(token) = guard.tokens.get(host) {
-                if !token.is_empty() && host != GEMINI_SETTINGS_KEY {
-                    return Some(token.clone());
-                }
+        for key in token_host_lookup_keys(host) {
+            if let Some(token) = self.token_from_settings(&key) {
+                return Some(token);
             }
-            if let Some(token) = guard.tokens.get("*") {
-                if !token.is_empty() {
-                    return Some(token.clone());
+            if let Ok(env_token) = std::env::var(env_key_for_host(&key)) {
+                if !env_token.is_empty() {
+                    return Some(env_token);
                 }
             }
         }
 
-        if let Ok(env_token) = std::env::var(env_key_for_host(host)) {
-            if !env_token.is_empty() {
-                return Some(env_token);
-            }
-        }
+        self.token_from_settings("*").or_else(|| {
+            std::env::var("REAPER_PAT")
+                .ok()
+                .filter(|t| !t.is_empty())
+        })
+    }
 
-        std::env::var("REAPER_PAT")
-            .ok()
-            .filter(|t| !t.is_empty())
+    fn token_from_settings(&self, host: &str) -> Option<String> {
+        if host == GEMINI_SETTINGS_KEY || host == CURSOR_SETTINGS_KEY {
+            return None;
+        }
+        let guard = self.inner.read().ok()?;
+        let token = guard.tokens.get(host)?;
+        if token.is_empty() {
+            return None;
+        }
+        Some(token.clone())
     }
 
     pub fn has_token_for_host(&self, host: &str) -> bool {
@@ -580,6 +586,40 @@ fn env_key_for_host(host: &str) -> String {
         "REAPER_PAT_{}",
         host.replace('.', "_").replace('-', "_").to_uppercase()
     )
+}
+
+/// Host keys to try when resolving a PAT (aliases such as www.github.com → github.com).
+fn token_host_lookup_keys(host: &str) -> Vec<String> {
+    let trimmed = host.trim().to_lowercase();
+    let base = trimmed.split(':').next().unwrap_or(&trimmed).to_string();
+    let mut keys = vec![base.clone()];
+    if base == "www.github.com" {
+        keys.push("github.com".into());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+#[cfg(test)]
+mod token_host_tests {
+    use super::token_host_lookup_keys;
+
+    #[test]
+    fn github_www_alias() {
+        assert_eq!(
+            token_host_lookup_keys("www.github.com"),
+            vec!["github.com".to_string(), "www.github.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn strips_port() {
+        assert_eq!(
+            token_host_lookup_keys("github.com:443"),
+            vec!["github.com".to_string()]
+        );
+    }
 }
 
 fn stored_gemini_model(guard: &SettingsFile) -> String {

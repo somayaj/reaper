@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::auth;
 use crate::config::Config;
 use crate::settings::SettingsStore;
 
@@ -56,10 +57,17 @@ pub fn delete(config: &Config, name: &str) -> Result<()> {
 }
 
 pub fn remote_auth_ready(metadata: &RepoMetadata, settings: &SettingsStore) -> bool {
+    remote_host(metadata).is_some_and(|host| settings.has_token_for_host(&host))
+}
+
+fn remote_host(metadata: &RepoMetadata) -> Option<String> {
+    if let Some(host) = metadata.remote_host.as_ref().filter(|h| !h.is_empty()) {
+        return Some(host.clone());
+    }
     metadata
-        .remote_host
+        .remote_url
         .as_ref()
-        .is_some_and(|host| settings.has_token_for_host(host))
+        .and_then(|url| auth::host_from_url(url).ok())
 }
 
 pub fn set_local_path(config: &Config, name: &str, path: &Path) -> Result<RepoMetadata> {
