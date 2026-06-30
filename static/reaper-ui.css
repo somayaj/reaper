@@ -38,6 +38,9 @@
   --ij-diff-hunk: #6897bb;
   --ij-tree-folder: #6ba6f7;
   --ij-tree-file: #a9b7c6;
+  --ij-tree-source-main: #6aad7d;
+  --ij-tree-source-test: #b589d6;
+  --ij-tree-source-generated: #d19a66;
   --ij-header-h: 36px;
   --ij-status-h: 22px;
   --ij-sidebar-w: 260px;
@@ -108,6 +111,9 @@
   --ij-diff-hunk: #00ffff;
   --ij-tree-folder: #00ffff;
   --ij-tree-file: #7dff6a;
+  --ij-tree-source-main: #00ff88;
+  --ij-tree-source-test: #ff79c6;
+  --ij-tree-source-generated: #ffb86c;
   --ij-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
   --c-surface-950: #1e1e1e;
   --c-surface-900: #252526;
@@ -171,6 +177,9 @@
   --ij-diff-hunk: #22d3ee;
   --ij-tree-folder: #22d3ee;
   --ij-tree-file: #c4b5fd;
+  --ij-tree-source-main: #34d399;
+  --ij-tree-source-test: #c084fc;
+  --ij-tree-source-generated: #fb923c;
   --ij-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   --c-surface-950: #0f172a;
   --c-surface-900: #1e293b;
@@ -234,6 +243,9 @@
   --ij-diff-hunk: #2563eb;
   --ij-tree-folder: #2563eb;
   --ij-tree-file: #475569;
+  --ij-tree-source-main: #059669;
+  --ij-tree-source-test: #7c3aed;
+  --ij-tree-source-generated: #d97706;
   --ij-shadow: 0 8px 32px rgba(15, 23, 42, 0.12);
   --c-surface-950: #f8fafc;
   --c-surface-900: #ffffff;
@@ -297,6 +309,9 @@
   --ij-diff-hunk: #475569;
   --ij-tree-folder: #334155;
   --ij-tree-file: #64748b;
+  --ij-tree-source-main: #047857;
+  --ij-tree-source-test: #6d28d9;
+  --ij-tree-source-generated: #b45309;
   --ij-shadow: 0 8px 32px rgba(15, 23, 42, 0.1);
   --c-surface-950: #f1f5f9;
   --c-surface-900: #f8fafc;
@@ -360,6 +375,9 @@
   --ij-diff-hunk: #60a5fa;
   --ij-tree-folder: #60a5fa;
   --ij-tree-file: #93c5fd;
+  --ij-tree-source-main: #4ade80;
+  --ij-tree-source-test: #e879f9;
+  --ij-tree-source-generated: #fbbf24;
   --ij-shadow: 0 8px 32px rgba(0, 0, 0, 0.65);
   --c-surface-950: #000000;
   --c-surface-900: #0a0a0a;
@@ -423,6 +441,9 @@
   --ij-diff-hunk: #6e6e6e;
   --ij-tree-folder: #e0e0e0;
   --ij-tree-file: #a0a0a0;
+  --ij-tree-source-main: #9ca3af;
+  --ij-tree-source-test: #d4d4d4;
+  --ij-tree-source-generated: #737373;
   --ij-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
   --c-surface-950: #0a0a0a;
   --c-surface-900: #141414;
@@ -1261,6 +1282,56 @@ body.sidebar-collapsed .ij-sidebar-resizer {
 .ij-tree-dir-row:hover .ij-tree-label,
 .ij-tree-file-row.active .ij-tree-label {
   color: var(--ij-text-bright);
+}
+
+.ij-tree-source-main .ij-tree-label,
+.ij-tree-source-main.ij-tree-file-row .ij-tree-label {
+  color: var(--ij-tree-source-main);
+}
+
+.ij-tree-source-test .ij-tree-label,
+.ij-tree-source-test.ij-tree-file-row .ij-tree-label {
+  color: var(--ij-tree-source-test);
+}
+
+.ij-tree-source-generated .ij-tree-label,
+.ij-tree-source-generated.ij-tree-file-row .ij-tree-label {
+  color: var(--ij-tree-source-generated);
+}
+
+.ij-tree-source-main:hover .ij-tree-label,
+.ij-tree-source-test:hover .ij-tree-label,
+.ij-tree-source-generated:hover .ij-tree-label,
+.ij-tree-source-main.ij-tree-file-row.active .ij-tree-label,
+.ij-tree-source-test.ij-tree-file-row.active .ij-tree-label,
+.ij-tree-source-generated.ij-tree-file-row.active .ij-tree-label {
+  color: var(--ij-text-bright);
+}
+
+.ij-tree-source-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+.ij-tree-source-badge-main {
+  color: var(--ij-tree-source-main);
+  background: color-mix(in srgb, var(--ij-tree-source-main) 18%, transparent);
+}
+
+.ij-tree-source-badge-test {
+  color: var(--ij-tree-source-test);
+  background: color-mix(in srgb, var(--ij-tree-source-test) 18%, transparent);
+}
+
+.ij-tree-source-badge-generated {
+  color: var(--ij-tree-source-generated);
+  background: color-mix(in srgb, var(--ij-tree-source-generated) 18%, transparent);
 }
 
 .ij-tree-icon-folder svg path[fill] {

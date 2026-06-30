@@ -1121,14 +1121,43 @@ pub fn classpath_includes_spring_deps(jars: &[PathBuf]) -> bool {
 
 /// Whether resolved JAR paths include common test-scoped libraries.
 pub fn classpath_includes_test_deps(jars: &[PathBuf]) -> bool {
+    classpath_includes_junit(jars)
+        || classpath_includes_mockito(jars)
+        || jars.iter().any(|p| {
+            let s = p.to_string_lossy().to_ascii_lowercase();
+            s.contains("spring-boot-test")
+                || s.contains("spring-test")
+                || s.contains("assertj")
+        })
+}
+
+pub fn classpath_includes_junit(jars: &[PathBuf]) -> bool {
     jars.iter().any(|p| {
         let s = p.to_string_lossy().to_ascii_lowercase();
-        s.contains("junit-jupiter")
-            || s.contains("/junit/")
-            || s.contains("spring-boot-test")
-            || s.contains("spring-test")
-            || s.contains("mockito")
-            || s.contains("assertj")
+        s.contains("junit-jupiter") || s.contains("/junit/")
+    })
+}
+
+pub fn classpath_includes_mockito(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        p.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("mockito")
+    })
+}
+
+pub fn classpath_includes_slf4j(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.contains("slf4j") || s.contains("logback") || s.contains("log4j")
+    })
+}
+
+pub fn classpath_includes_lombok(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        p.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("lombok")
     })
 }
 
@@ -1156,10 +1185,18 @@ fn merge_with_build_file_dependency_tree(
 /// Classpath for live javac diagnostics — transitive libraries + compiled/generated output dirs.
 pub fn resolve_dependency_jars_for_java_file(
     project_root: &Path,
-    _rel_path: &str,
-    _content: &str,
+    rel_path: &str,
+    content: &str,
 ) -> Vec<PathBuf> {
-    resolve_full_project_classpath(project_root)
+    let include_test = file_needs_test_classpath(rel_path, content);
+    let mut entries = resolve_full_project_classpath(project_root);
+    if include_test {
+        let test_tree = resolve_dependency_tree_jars(project_root, true);
+        entries = merge_classpath_jars(&entries, &test_tree);
+        entries.extend(cached_project_classes_dirs(project_root));
+        entries = dedupe_classpath_entries(filter_existing_classpath_entries(entries));
+    }
+    entries
 }
 
 /// Cached or resolved dependency JARs for javac (offline only — tooling runs in background).
@@ -2059,11 +2096,15 @@ fn member_completions_for_qualifier(
 fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     let mut dirs = java_project_source_dirs(gradle_root);
     if dirs.is_empty() {
-        for rel in ["src/main/java", "src/test/java", "src"] {
+        for rel in super::java_sources::discovery_suffixes() {
             let p = gradle_root.join(rel);
             if p.is_dir() {
                 dirs.push(p);
             }
+        }
+        let plain = gradle_root.join("src");
+        if plain.is_dir() {
+            dirs.push(plain);
         }
     }
     dirs.extend(library_source_dirs(gradle_root));
@@ -2075,66 +2116,12 @@ fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Every `*/src/main/java` and `*/src/test/java` directory under a Gradle/Maven root.
+/// Every Maven/Gradle source root under a project (multi-module safe).
 fn java_project_source_dirs(project_root: &Path) -> Vec<PathBuf> {
-    discover_java_source_prefixes(project_root)
+    super::java_sources::discover_source_prefixes(project_root)
         .into_iter()
         .map(|prefix| project_root.join(prefix))
         .collect()
-}
-
-fn discover_java_source_prefixes(project_root: &Path) -> Vec<String> {
-    let mut prefixes = Vec::new();
-    discover_java_source_prefixes_inner(project_root, project_root, &mut prefixes, 0);
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
-}
-
-fn discover_java_source_prefixes_inner(
-    project_root: &Path,
-    dir: &Path,
-    out: &mut Vec<String>,
-    depth: usize,
-) {
-    if depth > 12 || !dir.is_dir() {
-        return;
-    }
-    for suffix in ["src/main/java", "src/test/java"] {
-        if dir.join(suffix).is_dir() {
-            let rel = dir
-                .strip_prefix(project_root)
-                .unwrap_or(dir)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let prefix = if rel.is_empty() {
-                suffix.to_string()
-            } else {
-                format!("{rel}/{suffix}")
-            };
-            out.push(prefix);
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        if name == "build"
-            || name == "target"
-            || name == ".gradle"
-            || name == "node_modules"
-            || name == ".git"
-            || name == ".reaper"
-        {
-            continue;
-        }
-        discover_java_source_prefixes_inner(project_root, &path, out, depth + 1);
-    }
 }
 
 fn read_project_java_source(
@@ -4759,14 +4746,14 @@ fn collect_dir_class_entries(
 /// Java source roots for javac diagnostics (hand-written + Gradle-generated).
 pub fn project_java_sourcepath(project_root: &Path, overlay_root: &Path) -> Vec<PathBuf> {
     let mut sourcepath = Vec::new();
-    for prefix in discover_java_source_prefixes(project_root) {
+    for prefix in super::java_sources::discover_source_prefixes(project_root) {
         sourcepath.push(overlay_root.join(&prefix));
         let dir = project_root.join(&prefix);
         if dir.is_dir() {
             sourcepath.push(dir);
         }
-        if prefix.contains("/src/test/java") {
-            let main_prefix = prefix.replace("/src/test/java", "/src/main/java");
+        if prefix.contains("/src/test/") {
+            let main_prefix = prefix.replacen("/src/test/", "/src/main/", 1);
             if main_prefix != prefix {
                 sourcepath.push(overlay_root.join(&main_prefix));
                 let main_dir = project_root.join(&main_prefix);
