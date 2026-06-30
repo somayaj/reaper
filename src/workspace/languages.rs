@@ -536,6 +536,7 @@ mod tests {
         let ws = std::env::temp_dir().join("reaper-lang-scan");
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(ws.join("lib")).unwrap();
         std::fs::write(ws.join("src/main.rs"), "fn main() {}").unwrap();
         std::fs::write(ws.join("lib/util.py"), "def helper(): pass").unwrap();
         let langs = scan_workspace_languages(&ws).unwrap();

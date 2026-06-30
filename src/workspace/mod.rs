@@ -15,6 +15,7 @@ mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod java_sources;
 mod java_ecosystem;
 mod java_format;
 mod languages;
@@ -112,6 +113,9 @@ pub struct FileNode {
     pub children: Option<Vec<FileNode>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_children: bool,
+    /// `main`, `test`, or `generated` for Maven/Gradle source roots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
 }
 
 pub fn build_tree(ws: &Path) -> Result<Vec<FileNode>> {
@@ -181,18 +185,20 @@ fn collect_children(ws: &Path, dir: &Path, nodes: &mut Vec<FileNode>, recursive:
             };
             nodes.push(FileNode {
                 name,
-                path: rel,
+                path: rel.clone(),
                 node_type: "dir".into(),
                 children,
                 has_children,
+                source_kind: java_sources::source_root_kind(&rel).map(str::to_string),
             });
         } else {
             nodes.push(FileNode {
                 name,
-                path: rel,
+                path: rel.clone(),
                 node_type: "file".into(),
                 children: None,
                 has_children: false,
+                source_kind: java_sources::source_kind_for_path(&rel).map(str::to_string),
             });
         }
     }
