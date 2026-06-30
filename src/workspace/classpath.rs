@@ -642,22 +642,30 @@ fn paths_to_outputs(classes_dirs: &[PathBuf], source_dirs: &[PathBuf]) -> Projec
     }
 }
 
-/// Compiled project output dirs (e.g. build/classes/java/main) from last Gradle resolve.
+/// Compiled project output dirs (e.g. build/classes/java/main) from last Gradle/Maven resolve.
 pub fn cached_project_classes_dirs(project_root: &Path) -> Vec<PathBuf> {
-    let (classes, _) = outputs_to_paths(&load_project_classpath_outputs(project_root));
-    if !classes.is_empty() {
-        return classes;
+    let (mut classes, _) = outputs_to_paths(&load_project_classpath_outputs(project_root));
+    for dir in discover_project_output_dirs(project_root).0 {
+        if !classes.iter().any(|p| p == &dir) {
+            classes.push(dir);
+        }
     }
-    discover_gradle_output_dirs(project_root).0
+    classes
 }
 
 /// Project Java source roots including generated sources (annotation processors, etc.).
 pub fn cached_project_source_dirs(project_root: &Path) -> Vec<PathBuf> {
-    let (_, sources) = outputs_to_paths(&load_project_classpath_outputs(project_root));
-    if !sources.is_empty() {
-        return sources;
+    let (_, mut sources) = outputs_to_paths(&load_project_classpath_outputs(project_root));
+    for dir in discover_project_output_dirs(project_root).1 {
+        if !sources.iter().any(|p| p == &dir) {
+            sources.push(dir);
+        }
     }
-    discover_gradle_output_dirs(project_root).1
+    sources
+}
+
+fn discover_project_output_dirs(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    discover_gradle_output_dirs(project_root)
 }
 
 fn discover_gradle_output_dirs(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -694,14 +702,29 @@ fn discover_gradle_output_dirs_inner(
         "build/classes/java/test",
         "build/classes/kotlin/main",
         "build/classes/kotlin/test",
+        "target/classes",
+        "target/test-classes",
     ] {
         let p = dir.join(suffix);
         if p.is_dir() && seen_classes.insert(p.clone()) {
             classes.push(p);
         }
     }
-    let generated = dir.join("build/generated/sources");
-    if generated.is_dir() {
+    for generated_rel in [
+        "build/generated/sources",
+        "target/generated-sources",
+        "target/generated-test-sources",
+    ] {
+        let generated = dir.join(generated_rel);
+        if !generated.is_dir() {
+            continue;
+        }
+        if generated_rel.starts_with("target/") {
+            let annotations = generated.join("annotations");
+            if annotations.is_dir() && seen_sources.insert(annotations.clone()) {
+                sources.push(annotations);
+            }
+        }
         collect_java_dirs_under(&generated, sources, seen_sources);
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -968,27 +991,33 @@ fn cached_classpath_trustworthy(project_root: &Path, cached: &[PathBuf]) -> bool
     !resolve_dependency_tree_jars(project_root, true).is_empty()
 }
 
-/// Full project classpath: Gradle/Maven tooling output merged with every dependency declared in build files.
+/// Full project classpath: tooling + declared build-file transitive tree + compiled/generated outputs.
 pub fn resolve_full_project_classpath(project_root: &Path) -> Vec<PathBuf> {
-    let mut entries = Vec::new();
+    let mut entries = resolve_dependency_tree_jars(project_root, true);
 
-    if tooling_classpath_resolved(project_root) {
-        entries.extend(cached_classpath_jars(project_root));
+    let tooling_jars = if tooling_classpath_resolved(project_root) {
+        cached_classpath_jars(project_root)
     } else if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
-        entries.extend(cp.jars);
+        cp.jars
     } else {
         let cached = cached_classpath_jars(project_root);
         if cached_classpath_trustworthy(project_root, &cached) {
-            entries.extend(cached);
+            cached
+        } else {
+            Vec::new()
         }
-    }
-
-    entries = merge_classpath_jars(
-        &entries,
-        &resolve_dependency_tree_jars(project_root, true),
-    );
+    };
+    entries = merge_classpath_jars(&tooling_jars, &entries);
     entries.extend(cached_project_classes_dirs(project_root));
     dedupe_classpath_entries(filter_existing_classpath_entries(entries))
+}
+
+/// Dependency JAR files only (transitive tree + tooling cache).
+pub fn resolve_dependency_jars_for_project(project_root: &Path) -> Vec<PathBuf> {
+    resolve_full_project_classpath(project_root)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 fn resolve_classpath_jars_preferring_build_tree(
@@ -1091,7 +1120,7 @@ fn merge_with_build_file_dependency_tree(
     merge_classpath_jars(jars, &tree)
 }
 
-/// Classpath for live javac diagnostics — all declared compile + test libraries from build files.
+/// Classpath for live javac diagnostics — transitive libraries + compiled/generated output dirs.
 pub fn resolve_dependency_jars_for_java_file(
     project_root: &Path,
     _rel_path: &str,
@@ -2934,13 +2963,15 @@ fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
 
     let mut classes_dirs = base.classes_dirs;
     let mut project_source_dirs = base.project_source_dirs;
-    if classes_dirs.is_empty() || project_source_dirs.is_empty() {
-        let (disc_classes, disc_sources) = discover_gradle_output_dirs(project_root);
-        if classes_dirs.is_empty() {
-            classes_dirs = disc_classes;
+    let (disc_classes, disc_sources) = discover_project_output_dirs(project_root);
+    for dir in disc_classes {
+        if !classes_dirs.iter().any(|p| p == &dir) {
+            classes_dirs.push(dir);
         }
-        if project_source_dirs.is_empty() {
-            project_source_dirs = disc_sources;
+    }
+    for dir in disc_sources {
+        if !project_source_dirs.iter().any(|p| p == &dir) {
+            project_source_dirs.push(dir);
         }
     }
 
@@ -3240,6 +3271,26 @@ fn resolve_classpath_from_gradle_cache_scoped(
         jar_list.truncate(MAX_OFFLINE_CLASSPATH_JARS);
     }
 
+    if jar_list.is_empty()
+        && (super::gradle::is_spring_boot_project(gradle_root)
+            || super::maven::is_spring_boot_project(gradle_root))
+    {
+        let mut jars = HashSet::new();
+        for group in SPRING_CACHE_GROUPS {
+            let remaining = MAX_OFFLINE_CLASSPATH_JARS.saturating_sub(jars.len());
+            if remaining == 0 {
+                break;
+            }
+            for jar in list_jars_in_cache_group(&files_root, group, remaining) {
+                jars.insert(jar);
+                if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
+                    break;
+                }
+            }
+        }
+        jar_list = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
+    }
+
     if jar_list.is_empty() {
         return GradleClasspath::default();
     }
@@ -3396,16 +3447,474 @@ fn collect_gradle_dependency_coordinates(gradle_root: &Path) -> Vec<(String, Str
         return super::maven::collect_dependency_coordinates(gradle_root);
     }
     let catalog = load_gradle_version_catalog(gradle_root);
+    let management = load_gradle_effective_versions(gradle_root, &catalog);
+    let files_root = gradle_user_home().join("caches/modules-2/files-2.1");
     let mut coords = Vec::new();
     let mut seen = HashSet::new();
-    collect_coordinates_from_dir(gradle_root, 0, 5, &mut coords, &mut seen, &catalog);
+    collect_resolved_coordinates_from_dir(
+        gradle_root,
+        0,
+        5,
+        &mut coords,
+        &mut seen,
+        &catalog,
+        &management,
+        &files_root,
+    );
     coords
+}
+
+fn collect_resolved_coordinates_from_dir(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<(String, String, String)>,
+    seen: &mut HashSet<String>,
+    catalog: &GradleVersionCatalog,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) {
+    if depth > max_depth || !dir.is_dir() {
+        return;
+    }
+    for name in [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for coord in parse_gradle_coordinates(&text, catalog, management, files_root) {
+                    let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                    if seen.insert(key) {
+                        out.push(coord);
+                    }
+                }
+            }
+        }
+    }
+    if depth >= max_depth {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "out"
+            || name == "bin"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+        {
+            continue;
+        }
+        collect_resolved_coordinates_from_dir(
+            &path,
+            depth + 1,
+            max_depth,
+            out,
+            seen,
+            catalog,
+            management,
+            files_root,
+        );
+    }
+}
+
+fn load_gradle_effective_versions(
+    gradle_root: &Path,
+    catalog: &GradleVersionCatalog,
+) -> HashMap<String, String> {
+    let mut texts = Vec::new();
+    collect_gradle_build_texts(gradle_root, 0, 5, &mut texts);
+    let files_root = gradle_user_home().join("caches/modules-2/files-2.1");
+    let mut management = HashMap::new();
+    for text in &texts {
+        for (group, artifact, version) in collect_declared_bom_coordinates(text, catalog) {
+            merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+        }
+        for decl in parse_gradle_plugin_declarations(text, catalog) {
+            for (group, artifact, version) in plugin_import_boms(&decl.id, &decl.version) {
+                merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+            }
+        }
+        for (group, artifact, version) in collect_dependency_management_boms(text, catalog) {
+            merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+        }
+    }
+    management
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GradlePluginDecl {
+    id: String,
+    version: String,
+}
+
+/// Known Gradle plugins that import a Maven BOM for dependency versions.
+fn plugin_import_boms(plugin_id: &str, version: &str) -> Vec<(String, String, String)> {
+    let v = version.to_string();
+    match plugin_id {
+        "org.springframework.boot" => vec![(
+            "org.springframework.boot".into(),
+            "spring-boot-dependencies".into(),
+            v,
+        )],
+        "org.jetbrains.kotlin.jvm"
+        | "org.jetbrains.kotlin.android"
+        | "org.jetbrains.kotlin.multiplatform"
+        | "org.jetbrains.kotlin.plugin.spring"
+        | "org.jetbrains.kotlin.plugin.jpa" => vec![(
+            "org.jetbrains.kotlin".into(),
+            "kotlin-bom".into(),
+            v,
+        )],
+        "io.quarkus" | "io.quarkus.gradle" => vec![(
+            "io.quarkus.platform".into(),
+            "quarkus-bom".into(),
+            v,
+        )],
+        "io.micronaut.application" | "io.micronaut.library" | "io.micronaut.minimal.application" => {
+            vec![("io.micronaut.platform".into(), "micronaut-platform".into(), v)]
+        }
+        "org.springframework.dependency-management" | "io.spring.dependency-management" => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_gradle_plugin_declarations(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<GradlePluginDecl> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for block in extract_named_blocks(text, "plugins") {
+        ingest_plugin_block(&block, catalog, &mut out, &mut seen);
+    }
+    for block in extract_named_blocks(text, "pluginManagement") {
+        for plugins in extract_named_blocks(&block, "plugins") {
+            ingest_plugin_block(&plugins, catalog, &mut out, &mut seen);
+        }
+    }
+    out
+}
+
+fn ingest_plugin_block(
+    block: &str,
+    catalog: &GradleVersionCatalog,
+    out: &mut Vec<GradlePluginDecl>,
+    seen: &mut HashSet<String>,
+) {
+    for line in block.lines() {
+        let line = line.split("//").next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(decl) = parse_plugin_line(line, catalog) {
+            let key = format!("{}:{}", decl.id, decl.version);
+            if seen.insert(key) {
+                out.push(decl);
+            }
+        }
+    }
+}
+
+fn parse_plugin_line(line: &str, catalog: &GradleVersionCatalog) -> Option<GradlePluginDecl> {
+    if line.contains("alias(") {
+        return parse_plugin_catalog_alias(line, catalog);
+    }
+    if !line.contains("id") {
+        return None;
+    }
+    let tokens = extract_quoted_tokens(line);
+    let id = tokens.first()?.clone();
+    if id == "java" || id == "application" || id == "idea" || id == "eclipse" {
+        return None;
+    }
+    let version = line
+        .split("version")
+        .nth(1)
+        .and_then(|rest| {
+            parse_toml_string_value(rest.split([' ', ',', ')', ';']).next()?.trim())
+        })
+        .or_else(|| tokens.get(1).cloned())?;
+    if version.is_empty() || version.contains('$') {
+        return None;
+    }
+    Some(GradlePluginDecl { id, version })
+}
+
+fn parse_plugin_catalog_alias(line: &str, catalog: &GradleVersionCatalog) -> Option<GradlePluginDecl> {
+    let idx = line.find("libs.plugins.")?;
+    let rest = &line[idx + 13..];
+    let alias: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    catalog.resolve_plugin(&alias).map(|(id, version)| GradlePluginDecl { id, version })
+}
+
+/// `dependencyManagement { imports { mavenBom '...' } }` blocks (io.spring.dependency-management).
+fn collect_dependency_management_boms(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for block in extract_named_blocks(text, "dependencyManagement") {
+        for imports in extract_named_blocks(&block, "imports") {
+            for line in imports.lines() {
+                let line = line.split("//").next().unwrap_or(line);
+                if !line.to_ascii_lowercase().contains("mavenbom") {
+                    continue;
+                }
+                for token in extract_quoted_tokens(line) {
+                    if let Some(coord) = parse_coordinate_token(&token) {
+                        let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                        if seen.insert(key) {
+                            out.push(coord);
+                        }
+                    }
+                }
+                for alias in extract_version_catalog_aliases(line) {
+                    if let Some(coord) = catalog.resolve(&alias) {
+                        let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                        if seen.insert(key) {
+                            out.push(coord);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_named_blocks(text: &str, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut search = 0usize;
+    while search < text.len() {
+        let Some(rel) = text[search..].find(name) else {
+            break;
+        };
+        let idx = search + rel;
+        let after_name = idx + name.len();
+        let rest = text[after_name..].trim_start();
+        let Some(brace_start) = rest.find('{') else {
+            search = after_name + 1;
+            continue;
+        };
+        if let Some(block) = extract_balanced_block(&rest[brace_start..]) {
+            out.push(block);
+        }
+        search = after_name + brace_start + 1;
+    }
+    out
+}
+
+fn extract_balanced_block(s: &str) -> Option<String> {
+    let s = s.strip_prefix('{')?;
+    let mut depth = 1usize;
+    let mut end = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(s[..end].to_string())
+}
+
+fn extract_spring_boot_plugin_version(text: &str) -> Option<String> {
+    parse_gradle_plugin_declarations(text, &GradleVersionCatalog::default())
+        .into_iter()
+        .find(|p| p.id == "org.springframework.boot")
+        .map(|p| p.version)
+}
+
+fn collect_gradle_build_texts(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<String>) {
+    if depth > max_depth || !dir.is_dir() {
+        return;
+    }
+    for name in [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push(text);
+            }
+        }
+    }
+    if depth >= max_depth {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "out"
+            || name == "bin"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+        {
+            continue;
+        }
+        collect_gradle_build_texts(&path, depth + 1, max_depth, out);
+    }
+}
+
+fn collect_declared_bom_coordinates(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("platform(")
+            || lower.contains("enforcedplatform(")
+            || lower.contains("mavenbom")
+            || lower.contains("bom("))
+        {
+            continue;
+        }
+        for token in extract_quoted_tokens(line) {
+            if let Some(coord) = parse_coordinate_token(&token) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
+            }
+        }
+        for alias in extract_version_catalog_aliases(line) {
+            if let Some(coord) = catalog.resolve(&alias) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn merge_bom_managed_versions(
+    files_root: &Path,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    out: &mut HashMap<String, String>,
+) {
+    let mut merged = super::maven::bom_managed_versions(group, artifact, version);
+    if merged.is_empty() {
+        if let Some(raw) = read_gradle_cached_pom(files_root, group, artifact, version) {
+            merged = super::maven::bom_managed_versions_from_pom(&raw);
+        }
+    }
+    for (ga, ver) in merged {
+        out.entry(ga).or_insert(ver);
+    }
+}
+
+fn resolve_gradle_coordinate(
+    group: String,
+    artifact: String,
+    version: Option<String>,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) -> Option<(String, String, String)> {
+    let key = format!("{group}:{artifact}");
+    let version = version
+        .or_else(|| management.get(&key).cloned())
+        .or_else(|| find_latest_cached_version(files_root, &group, &artifact))
+        .or_else(|| find_latest_m2_version(&group, &artifact))?;
+    Some((group, artifact, version))
+}
+
+fn find_latest_m2_version(group: &str, artifact: &str) -> Option<String> {
+    let dir = super::maven::m2_home()
+        .join(group.replace('.', "/"))
+        .join(artifact);
+    latest_version_in_dir(&dir)
+}
+
+fn find_latest_cached_version(files_root: &Path, group: &str, artifact: &str) -> Option<String> {
+    latest_version_in_dir(&files_root.join(group).join(artifact))
+}
+
+fn latest_version_in_dir(dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !name.starts_with('.') {
+                    versions.push(name.to_string());
+                }
+            }
+        }
+    }
+    versions.sort_by(|a, b| compare_version_tokens(b, a));
+    versions.into_iter().next()
+}
+
+fn compare_version_tokens(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts = version_tokens(a);
+    let b_parts = version_tokens(b);
+    for (av, bv) in a_parts.iter().zip(b_parts.iter()) {
+        let ord = av.cmp(bv);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a_parts.len().cmp(&b_parts.len())
+}
+
+fn version_tokens(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
 struct GradleVersionCatalog {
     versions: HashMap<String, String>,
     libraries: HashMap<String, (String, String, String)>,
+    plugins: HashMap<String, (String, String)>,
 }
 
 fn load_gradle_version_catalog(gradle_root: &Path) -> GradleVersionCatalog {
@@ -3446,6 +3955,11 @@ fn parse_gradle_version_catalog(raw: &str) -> GradleVersionCatalog {
                     catalog.libraries.insert(key, coord);
                 }
             }
+            "plugins" => {
+                if let Some((id, version)) = parse_catalog_plugin_value(value, &catalog.versions) {
+                    catalog.plugins.insert(key, (id, version));
+                }
+            }
             _ => {}
         }
     }
@@ -3467,6 +3981,26 @@ fn parse_toml_string_value(raw: &str) -> Option<String> {
         return Some(raw.to_string());
     }
     None
+}
+
+fn parse_catalog_plugin_value(
+    raw: &str,
+    versions: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let raw = raw.trim();
+    if raw.starts_with('"') || raw.starts_with('\'') {
+        let id = parse_toml_string_value(raw)?;
+        return Some((id, String::new()));
+    }
+    if !raw.starts_with('{') {
+        return None;
+    }
+    let id = extract_catalog_field(raw, "id")?;
+    let version = extract_catalog_field(raw, "version").or_else(|| {
+        let alias = extract_catalog_field(raw, "version.ref")?;
+        versions.get(&alias).cloned()
+    })?;
+    Some((id, version))
 }
 
 fn parse_catalog_library_value(
@@ -3508,77 +4042,96 @@ impl GradleVersionCatalog {
         }
         self.libraries.get(accessor).cloned()
     }
-}
 
-fn collect_coordinates_from_dir(
-    dir: &Path,
-    depth: usize,
-    max_depth: usize,
-    out: &mut Vec<(String, String, String)>,
-    seen: &mut HashSet<String>,
-    catalog: &GradleVersionCatalog,
-) {
-    if depth > max_depth || !dir.is_dir() {
-        return;
-    }
-    for name in ["build.gradle", "build.gradle.kts"] {
-        let path = dir.join(name);
-        if path.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for coord in parse_gradle_coordinates(&text, catalog) {
-                    let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
-                    if seen.insert(key) {
-                        out.push(coord);
-                    }
-                }
-            }
+    fn resolve_plugin(&self, accessor: &str) -> Option<(String, String)> {
+        let key = accessor.replace('.', "-");
+        if let Some(entry) = self.plugins.get(&key) {
+            return Some(entry.clone());
         }
-    }
-    if depth >= max_depth {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        if name == "build"
-            || name == "out"
-            || name == "bin"
-            || name == ".gradle"
-            || name == "node_modules"
-            || name == ".git"
-        {
-            continue;
-        }
-        collect_coordinates_from_dir(&path, depth + 1, max_depth, out, seen, catalog);
+        self.plugins.get(accessor).cloned()
     }
 }
 
 fn parse_gradle_coordinates(
     content: &str,
     catalog: &GradleVersionCatalog,
+    management: &HashMap<String, String>,
+    files_root: &Path,
 ) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for line in content.lines() {
         let line = line.split("//").next().unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("platform(")
+            || lower.contains("enforcedplatform(")
+            || lower.contains("mavenbom")
+        {
+            continue;
+        }
         for token in extract_quoted_tokens(line) {
-            if let Some(coord) = parse_coordinate_token(&token) {
-                out.push(coord);
+            if let Some(coord) = resolve_coordinate_token(&token, management, files_root) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
             }
         }
         for alias in extract_version_catalog_aliases(line) {
             if let Some(coord) = catalog.resolve(&alias) {
-                out.push(coord);
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
             }
         }
     }
     out
+}
+
+fn resolve_coordinate_token(
+    token: &str,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) -> Option<(String, String, String)> {
+    if let Some(coord) = parse_coordinate_token(token) {
+        return Some(coord);
+    }
+    let (group, artifact, version) = parse_coordinate_parts(token)?;
+    resolve_gradle_coordinate(group, artifact, version, management, files_root)
+}
+
+fn parse_coordinate_parts(token: &str) -> Option<(String, String, Option<String>)> {
+    let token = token.trim();
+    let parts: Vec<&str> = token.split(':').collect();
+    match parts.len() {
+        2 => {
+            let group = parts[0].trim();
+            let artifact = parts[1].trim();
+            if group.is_empty() || artifact.is_empty() {
+                None
+            } else {
+                Some((group.to_string(), artifact.to_string(), None))
+            }
+        }
+        3 => {
+            let group = parts[0].trim();
+            let artifact = parts[1].trim();
+            let version = parts[2].trim();
+            if group.is_empty() || artifact.is_empty() || version.is_empty() {
+                None
+            } else if version.contains('$') || version.contains('{') {
+                Some((group.to_string(), artifact.to_string(), None))
+            } else {
+                Some((
+                    group.to_string(),
+                    artifact.to_string(),
+                    Some(version.to_string()),
+                ))
+            }
+        }
+        _ => None,
+    }
 }
 
 fn extract_version_catalog_aliases(line: &str) -> Vec<String> {
@@ -5258,6 +5811,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn discovers_maven_generated_output_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-maven-out-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target/classes/com/example")).unwrap();
+        std::fs::create_dir_all(
+            root.join("target/generated-sources/annotations/com/example"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("target/generated-sources/annotations/com/example/Generated.java"),
+            "package com.example;\npublic class Generated {}\n",
+        )
+        .unwrap();
+
+        let (classes, sources) = discover_project_output_dirs(&root);
+        assert!(classes.iter().any(|p| p.ends_with("target/classes")));
+        assert!(sources.iter().any(|p| p.ends_with("annotations")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn plain_java_completion_workspace(name: &str) -> PathBuf {
         let ws = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&ws);
@@ -5351,10 +5929,111 @@ mod tests {
             implementation "com.google.guava:guava:31.1-jre"
             api 'org.junit.jupiter:junit-jupiter:5.9.3'
         "#;
-        let coords = parse_gradle_coordinates(text, &GradleVersionCatalog::default());
+        let coords = parse_gradle_coordinates(
+            text,
+            &GradleVersionCatalog::default(),
+            &HashMap::new(),
+            Path::new("/nonexistent"),
+        );
         assert_eq!(coords.len(), 2);
         assert_eq!(coords[0].0, "com.google.guava");
         assert_eq!(coords[1].1, "junit-jupiter");
+    }
+
+    #[test]
+    fn parses_gradle_plugin_declarations() {
+        let build = r#"
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0'
+    id("org.jetbrains.kotlin.jvm") version "1.9.22"
+}
+"#;
+        let decls = parse_gradle_plugin_declarations(build, &GradleVersionCatalog::default());
+        assert!(decls.iter().any(|p| p.id == "org.springframework.boot" && p.version == "3.2.0"));
+        assert!(decls.iter().any(|p| p.id == "org.jetbrains.kotlin.jvm" && p.version == "1.9.22"));
+        assert!(!decls.iter().any(|p| p.id == "java"));
+    }
+
+    #[test]
+    fn plugin_import_boms_maps_known_plugins() {
+        let spring = plugin_import_boms("org.springframework.boot", "3.2.0");
+        assert_eq!(spring.len(), 1);
+        assert_eq!(spring[0].0, "org.springframework.boot");
+        assert_eq!(spring[0].1, "spring-boot-dependencies");
+
+        let kotlin = plugin_import_boms("org.jetbrains.kotlin.jvm", "1.9.22");
+        assert_eq!(kotlin[0].1, "kotlin-bom");
+
+        assert!(plugin_import_boms("java", "1.0").is_empty());
+    }
+
+    #[test]
+    fn parses_dependency_management_maven_bom() {
+        let build = r#"
+plugins {
+    id 'io.spring.dependency-management' version '1.1.4'
+}
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.boot:spring-boot-dependencies:3.2.0"
+    }
+}
+"#;
+        let boms = collect_dependency_management_boms(build, &GradleVersionCatalog::default());
+        assert!(boms.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-dependencies" && v == "3.2.0"
+        }));
+    }
+
+    #[test]
+    fn parses_gradle_plugin_catalog_alias() {
+        let catalog = parse_gradle_version_catalog(
+            r#"
+[plugins]
+spring-boot = { id = "org.springframework.boot", version = "3.2.0" }
+"#,
+        );
+        let build = r#"
+plugins {
+    alias(libs.plugins.spring.boot)
+}
+"#;
+        let decls = parse_gradle_plugin_declarations(&build, &catalog);
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].id, "org.springframework.boot");
+        assert_eq!(decls[0].version, "3.2.0");
+    }
+
+    #[test]
+    fn resolves_gradle_versionless_coordinates_from_bom() {
+        let mut management = HashMap::new();
+        management.insert(
+            "org.springframework.boot:spring-boot-starter-web".into(),
+            "3.2.0".into(),
+        );
+        management.insert(
+            "org.springframework.boot:spring-boot-starter-test".into(),
+            "3.2.0".into(),
+        );
+        let build = r#"
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+"#;
+        let coords = parse_gradle_coordinates(
+            build,
+            &GradleVersionCatalog::default(),
+            &management,
+            Path::new("/nonexistent"),
+        );
+        assert!(coords.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-starter-web" && v == "3.2.0"
+        }));
+        assert!(coords.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-starter-test" && v == "3.2.0"
+        }));
     }
 
     #[test]
@@ -5385,10 +6064,16 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 "#;
-        let coords = parse_gradle_coordinates(&build, &catalog);
+        let coords = parse_gradle_coordinates(
+            &build,
+            &catalog,
+            &HashMap::new(),
+            Path::new("/nonexistent"),
+        );
         assert!(coords.iter().any(|(g, a, v)| g == "org.junit.jupiter" && a == "junit-jupiter" && v == "5.11.1"));
         assert!(coords.iter().any(|(g, a, _)| g == "com.google.guava" && a == "guava"));
-        assert_eq!(coords.len(), 2);
+        assert!(coords.iter().any(|(g, a, _)| g == "org.junit.platform" && a == "junit-platform-launcher"));
+        assert_eq!(coords.len(), 3);
     }
 
     #[test]
