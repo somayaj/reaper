@@ -45,8 +45,14 @@ fn check_project_java(
     content: &str,
     overlays: &[(String, String)],
 ) -> Result<Vec<Diagnostic>> {
-    let jars = classpath::resolve_dependency_jars_for_java_file(project_root, rel_path, content);
-    if jars.is_empty() {
+    let classpath_entries =
+        classpath::resolve_dependency_jars_for_java_file(project_root, rel_path, content);
+    let jars: Vec<PathBuf> = classpath_entries
+        .iter()
+        .filter(|p| p.is_file())
+        .cloned()
+        .collect();
+    if jars.is_empty() && classpath_entries.is_empty() {
         tracing::debug!(
             "Project classpath not resolved yet for {} — skipping dependency false positives",
             rel_path
@@ -60,7 +66,7 @@ fn check_project_java(
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
 
-    let cp = jars
+    let cp = classpath_entries
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect::<Vec<_>>()

@@ -489,6 +489,21 @@ fn effective_dependency_management(
     management
 }
 
+/// Managed `group:artifact` → version entries from a Maven BOM POM (imports included when in ~/.m2).
+pub fn bom_managed_versions(group: &str, artifact: &str, version: &str) -> HashMap<String, String> {
+    read_m2_pom_text(group, artifact, version)
+        .map(|raw| bom_managed_versions_from_pom(&raw))
+        .unwrap_or_default()
+}
+
+pub fn bom_managed_versions_from_pom(raw: &str) -> HashMap<String, String> {
+    let pom = parse_pom(raw);
+    dependency_management_for_resolved_pom(&pom)
+        .into_iter()
+        .map(|(ga, (ver, _))| (ga, ver))
+        .collect()
+}
+
 fn dependency_management_for_resolved_pom(pom: &PomModel) -> HashMap<String, (String, String)> {
     if let (Some(g), Some(a), Some(v)) = (&pom.group_id, &pom.artifact_id, &pom.version) {
         if let Some(dir) = resolve_pom_directory(g, a, v) {
