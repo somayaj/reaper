@@ -363,7 +363,7 @@ fn file_uses_lombok(content: &str) -> bool {
     ANNOTATIONS.iter().any(|a| content.contains(a))
 }
 
-fn file_uses_slf4j(content: &str) -> bool {
+pub fn file_uses_slf4j(content: &str) -> bool {
     content.contains("import org.slf4j.")
         || content.contains("LoggerFactory.getLogger")
         || content.contains("@Slf4j")

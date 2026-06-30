@@ -4822,8 +4822,14 @@ async function loadTreeRoot(resetExpanded = false) {
   await loadTreeLevel('');
 }
 
+function treeSourceKindClass(node) {
+  const k = node?.source_kind;
+  return k ? ` ij-tree-source-${k}` : '';
+}
+
 function renderTree(nodes, depth = 0, lazyMode = true) {
   return nodes.map((n) => {
+    const sourceClass = treeSourceKindClass(n);
     if (n.type === 'dir') {
       const isLeaf = n.has_children === false;
       const open = lazyMode
@@ -4849,17 +4855,18 @@ function renderTree(nodes, depth = 0, lazyMode = true) {
       }
       return `
         <details class="ij-tree-dir" data-dir="${escapeHtml(n.path)}" ${open ? 'open' : ''}${isLeaf ? ' data-leaf="1"' : ''}>
-          <summary class="ij-tree-row ij-tree-dir-row" style="--depth:${depth}" aria-expanded="${open ? 'true' : 'false'}">
+          <summary class="ij-tree-row ij-tree-dir-row${sourceClass}" style="--depth:${depth}" aria-expanded="${open ? 'true' : 'false'}">
             <span class="ij-tree-chevron" aria-hidden="true"></span>
             <span class="ij-tree-icon ij-tree-icon-folder">${treeIconSvg('folder')}${treeIconSvg('folderOpen')}</span>
             <span class="ij-tree-label">${escapeHtml(n.name)}</span>
+            ${n.source_kind ? `<span class="ij-tree-source-badge ij-tree-source-badge-${n.source_kind}">${escapeHtml(n.source_kind)}</span>` : ''}
           </summary>
           <div class="ij-tree-children">${childrenHtml}</div>
         </details>`;
     }
     const iconKind = fileIcon(n.name);
     return `
-      <button type="button" data-path="${escapeHtml(n.path)}" class="tree-file ij-tree-row ij-tree-file-row" style="--depth:${depth}">
+      <button type="button" data-path="${escapeHtml(n.path)}" class="tree-file ij-tree-row ij-tree-file-row${sourceClass}" style="--depth:${depth}">
         <span class="ij-tree-icon ij-tree-icon-file">${treeIconSvg(iconKind)}</span>
         <span class="ij-tree-label">${escapeHtml(n.name)}</span>
       </button>`;
