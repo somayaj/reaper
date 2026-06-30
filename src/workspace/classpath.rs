@@ -712,6 +712,8 @@ fn discover_gradle_output_dirs_inner(
     }
     for generated_rel in [
         "build/generated/sources",
+        "build/generated/source",
+        "build/generated/sources/headers",
         "target/generated-sources",
         "target/generated-test-sources",
     ] {
@@ -726,6 +728,7 @@ fn discover_gradle_output_dirs_inner(
             }
         }
         collect_java_dirs_under(&generated, sources, seen_sources);
+        collect_java_source_roots_with_files(&generated, sources, seen_sources);
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -790,6 +793,36 @@ fn collect_java_dirs_under(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSe
             continue;
         }
         collect_java_dirs_under(&path, out, seen);
+    }
+}
+
+/// Any directory under generated output that directly contains `.java` files (MapStruct, etc.).
+fn collect_java_source_roots_with_files(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut has_java = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if path.extension().and_then(|e| e.to_str()) == Some("java") {
+                has_java = true;
+                break;
+            }
+        }
+    }
+    if has_java && seen.insert(dir.to_path_buf()) {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_java_source_roots_with_files(&path, out, seen);
+        }
     }
 }
 
@@ -1733,7 +1766,7 @@ pub fn java_completions(
     let mut items = Vec::new();
 
     for sym in lookup.symbols.iter() {
-        if at_annotation && sym.kind != "annotation" {
+        if at_annotation && !is_annotation_index_symbol(sym) {
             continue;
         }
         if type_preferred && sym.kind == "method" {
@@ -4586,7 +4619,7 @@ fn index_jar_classpath_fallback(
             if entry_idx >= JAR_INDEX_MAX_ENTRIES_PER_JAR {
                 break;
             }
-            if known.contains(&fqcn) || !should_index_jar_class(&fqcn) {
+            if known.contains(&fqcn) || !should_index_jar_entry(&fqcn, &kind) {
                 continue;
             }
             let name = fqcn.rsplit('.').next().unwrap_or(&fqcn).to_string();
@@ -4645,7 +4678,7 @@ fn index_classes_dirs_fallback(
             rel_label
         };
         for (fqcn, kind) in list_dir_class_entries(dir)? {
-            if known.contains(&fqcn) || !should_index_jar_class(&fqcn) {
+            if known.contains(&fqcn) || !should_index_jar_entry(&fqcn, &kind) {
                 continue;
             }
             let name = fqcn.rsplit('.').next().unwrap_or(&fqcn).to_string();
@@ -4715,7 +4748,10 @@ fn collect_dir_class_entries(
         if fqcn.is_empty() {
             continue;
         }
-        out.push((fqcn, "class".to_string()));
+        let kind = read_path_class_bytes(&path)
+            .map(|b| class_kind_from_bytes(&b, &fqcn))
+            .unwrap_or_else(|| "class".into());
+        out.push((fqcn, kind));
     }
     Ok(())
 }
@@ -4797,6 +4833,106 @@ fn jar_is_index_priority(name: &str) -> bool {
         || name.contains("lombok")
 }
 
+fn is_annotation_index_symbol(sym: &IndexedSymbol) -> bool {
+    if sym.kind == "annotation" {
+        return true;
+    }
+    if sym.kind != "class" && sym.kind != "interface" {
+        return false;
+    }
+    if sym.qualified.contains(".annotation.") {
+        return true;
+    }
+    well_known_import(&sym.name).is_some_and(|fqcn| fqcn.contains(".annotation."))
+}
+
+const ACC_INTERFACE: u16 = 0x0200;
+const ACC_ANNOTATION: u16 = 0x2000;
+
+fn class_access_flags(class_bytes: &[u8]) -> Option<u16> {
+    const MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
+    if class_bytes.len() < 8 || class_bytes[..4] != MAGIC {
+        return None;
+    }
+    let mut pos = 8usize; // skip magic + version
+    pos = skip_constant_pool(class_bytes, pos)?;
+    if pos + 2 > class_bytes.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([class_bytes[pos], class_bytes[pos + 1]]))
+}
+
+fn skip_constant_pool(data: &[u8], mut pos: usize) -> Option<usize> {
+    if pos + 2 > data.len() {
+        return None;
+    }
+    let count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+    for _ in 1..count {
+        if pos >= data.len() {
+            return None;
+        }
+        let tag = data[pos];
+        pos += 1;
+        pos = match tag {
+            1 => {
+                if pos + 2 > data.len() {
+                    return None;
+                }
+                let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+                pos + 2 + len
+            }
+            3 | 4 => pos + 4,
+            5 | 6 => pos + 8,
+            7 | 8 => pos + 2,
+            9 | 10 | 11 | 12 | 18 => pos + 4,
+            15 => pos + 3,
+            16 => pos + 2,
+            _ => return None,
+        };
+        if pos > data.len() {
+            return None;
+        }
+    }
+    Some(pos)
+}
+
+fn class_kind_from_bytes(class_bytes: &[u8], fqcn: &str) -> String {
+    if fqcn.contains(".annotation.") {
+        return "annotation".into();
+    }
+    let Some(flags) = class_access_flags(class_bytes) else {
+        return "class".into();
+    };
+    if flags & ACC_ANNOTATION != 0 {
+        "annotation".into()
+    } else if flags & ACC_INTERFACE != 0 {
+        "interface".into()
+    } else {
+        "class".into()
+    }
+}
+
+fn read_path_class_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok().filter(|b| b.len() >= 8)
+}
+
+fn read_jar_entry_bytes(jar: &Path, entry: &str) -> Option<Vec<u8>> {
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(jar)
+        .arg(entry)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if out.status.success() && out.stdout.len() >= 8 {
+        Some(out.stdout)
+    } else {
+        None
+    }
+}
+
 fn should_index_jar_class(fqcn: &str) -> bool {
     if fqcn.starts_with("java.") {
         return false;
@@ -4813,6 +4949,13 @@ fn should_index_jar_class(fqcn: &str) -> bool {
         || fqcn.starts_with("lombok.")
 }
 
+fn should_index_jar_entry(fqcn: &str, kind: &str) -> bool {
+    if fqcn.starts_with("java.") || fqcn.starts_with("jdk.") {
+        return false;
+    }
+    kind == "annotation" || should_index_jar_class(fqcn)
+}
+
 fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
     let out = Command::new("jar")
         .arg("tf")
@@ -4823,23 +4966,39 @@ fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
+    let mut annotation_probe_reads = 0usize;
+    const MAX_ANNOTATION_PROBE_READS: usize = 512;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let line = line.trim();
         if !line.ends_with(".class") || line.contains('$') {
             continue;
         }
         let fqcn = line.trim_end_matches(".class").replace('/', ".");
-        let kind = if fqcn.contains(".") {
-            let simple = fqcn.rsplit('.').next().unwrap_or("");
-            if simple.ends_with("Exception") || simple.ends_with("Error") {
-                "class".to_string()
-            } else {
-                "class".to_string()
+        if !fqcn.contains('.') {
+            continue;
+        }
+        let kind = if fqcn.contains(".annotation.") {
+            "annotation".to_string()
+        } else if should_index_jar_class(&fqcn) {
+            read_jar_entry_bytes(jar, line)
+                .map(|b| class_kind_from_bytes(&b, &fqcn))
+                .unwrap_or_else(|| "class".into())
+        } else if annotation_probe_reads < MAX_ANNOTATION_PROBE_READS {
+            annotation_probe_reads += 1;
+            let Some(bytes) = read_jar_entry_bytes(jar, line) else {
+                continue;
+            };
+            let detected = class_kind_from_bytes(&bytes, &fqcn);
+            if detected != "annotation" {
+                continue;
             }
+            detected
         } else {
             continue;
         };
-        entries.push((fqcn, kind));
+        if should_index_jar_entry(&fqcn, &kind) {
+            entries.push((fqcn, kind));
+        }
     }
     Ok(entries)
 }
@@ -5170,6 +5329,9 @@ fn should_index_methods(rel_path: &str) -> bool {
         return true;
     }
     if rel.contains("/build/generated/") && rel.ends_with(".java") {
+        return true;
+    }
+    if rel.contains("/generated-sources/") && rel.ends_with(".java") {
         return true;
     }
     if rel.contains("/src/") && rel.ends_with(".java") && !rel.contains("/build/classes/") {
@@ -6120,6 +6282,51 @@ dependencies {
         assert_eq!(fqcn.as_deref(), Some("java.lang.String"));
         let list = resolve_type_fqcn(&lookup, "List", &imports, Path::new("."));
         assert_eq!(list.as_deref(), Some("java.util.List"));
+    }
+
+    #[test]
+    fn class_kind_detects_annotation_from_classfile() {
+        let dir = std::env::temp_dir().join(format!("reaper-ann-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Sample.java"),
+            "public @interface Sample { String value() default \"\"; }\n",
+        )
+        .unwrap();
+        let status = Command::new("javac")
+            .arg(dir.join("Sample.java"))
+            .status()
+            .unwrap();
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let bytes = std::fs::read(dir.join("Sample.class")).unwrap();
+        assert_eq!(class_kind_from_bytes(&bytes, "Sample"), "annotation");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_annotation_index_symbol_matches_library_annotations() {
+        let spring = IndexedSymbol {
+            name: "GetMapping".into(),
+            qualified: "org.springframework.web.bind.annotation.GetMapping".into(),
+            kind: "annotation".into(),
+            path: "jar".into(),
+            line: 1,
+            column: 1,
+        };
+        assert!(is_annotation_index_symbol(&spring));
+        let plain = IndexedSymbol {
+            name: "Hello".into(),
+            qualified: "com.example.Hello".into(),
+            kind: "class".into(),
+            path: "src".into(),
+            line: 1,
+            column: 1,
+        };
+        assert!(!is_annotation_index_symbol(&plain));
     }
 
     #[test]
