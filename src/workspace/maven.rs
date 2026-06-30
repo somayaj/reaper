@@ -293,7 +293,12 @@ fn stamp_pom_chain(root: &Path, parts: &mut Vec<String>) -> Result<()> {
         parts.push(format!(
             "pom:{}:{}",
             meta.len(),
-            meta.modified()?.elapsed()?.as_nanos()
+            meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
     }
     if let Ok(pom) = read_pom(root) {
