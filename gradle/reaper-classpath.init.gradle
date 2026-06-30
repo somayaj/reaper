@@ -1,5 +1,5 @@
-// Reaper: print resolved compile/runtime classpath JARs and source JARs for IDE indexing.
-// stdout: JAR:/absolute/path  SOURCES:/absolute/path
+// Reaper: print resolved compile/runtime classpath JARs, project output dirs, and source roots.
+// stdout: JAR:/path  SOURCES:/path  CLASSES:/path  SRCROOT:/path
 allprojects { project ->
     project.tasks.register('reaperPrintClasspath') {
         group = 'reaper'
@@ -22,6 +22,8 @@ allprojects { project ->
             ]
             def seenJars = new LinkedHashSet<String>()
             def seenSources = new LinkedHashSet<String>()
+            def seenClasses = new LinkedHashSet<String>()
+            def seenSrcRoots = new LinkedHashSet<String>()
 
             for (name in names) {
                 def conf = project.configurations.findByName(name)
@@ -79,6 +81,28 @@ allprojects { project ->
                     }
                 } catch (Exception ignored) {
                     // Resolution metadata unavailable for this configuration.
+                }
+            }
+
+            project.sourceSets.all { sourceSet ->
+                sourceSet.java.srcDirs.each { dir ->
+                    if (dir.isDirectory() && seenSrcRoots.add(dir.absolutePath)) {
+                        println 'SRCROOT:' + dir.absolutePath
+                    }
+                }
+                try {
+                    sourceSet.output.generatedSourcesDirs.files.each { dir ->
+                        if (dir.isDirectory() && seenSrcRoots.add(dir.absolutePath)) {
+                            println 'SRCROOT:' + dir.absolutePath
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Older Gradle API without generatedSourcesDirs.
+                }
+                sourceSet.output.classesDirs.files.each { dir ->
+                    if (dir.isDirectory() && seenClasses.add(dir.absolutePath)) {
+                        println 'CLASSES:' + dir.absolutePath
+                    }
                 }
             }
         }
