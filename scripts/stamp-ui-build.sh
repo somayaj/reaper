@@ -13,6 +13,7 @@ fi
 
 sed -i '' "s/name=\"reaper-ui-build\" content=\"[^\"]*\"/name=\"reaper-ui-build\" content=\"$BUILD\"/" "$TARGET"
 sed -i '' "s|/reaper-ui.css?v=[0-9]*|/reaper-ui.css?v=$BUILD|g" "$TARGET"
+sed -i '' "s|/reaper-lang-core.js?v=[0-9]*|/reaper-lang-core.js?v=$BUILD|g" "$TARGET"
 sed -i '' "s|/monaco-languages.js?v=[0-9]*|/monaco-languages.js?v=$BUILD|g" "$TARGET"
 sed -i '' "s|/app.js?v=[0-9]*|/app.js?v=$BUILD|g" "$TARGET"
 

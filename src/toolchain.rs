@@ -191,6 +191,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_PRETTIER"),
     },
     ToolDef {
+        id: "google-java-format",
+        label: "Google Java Format",
+        kind: ToolKind::Binary,
+        defaults: &["google-java-format"],
+        env_key: Some("REAPER_GOOGLE_JAVA_FORMAT"),
+    },
+    ToolDef {
         id: "jsonlint",
         label: "JSON (jsonlint)",
         kind: ToolKind::Binary,

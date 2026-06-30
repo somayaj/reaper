@@ -22,6 +22,7 @@ pub struct GradleProjectInfo {
     pub default_task: String,
     pub application_main: Option<String>,
     pub tasks: Vec<String>,
+    pub is_spring_boot: bool,
     pub has_junit: bool,
     pub has_spring_test: bool,
     pub has_jacoco: bool,
@@ -37,6 +38,7 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task: String::new(),
         application_main: None,
         tasks: Vec::new(),
+        is_spring_boot: false,
         has_junit: false,
         has_spring_test: false,
         has_jacoco: false,
@@ -53,8 +55,11 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     let has_wrapper = root.join("gradlew").exists() || root.join("gradlew.bat").exists();
     let build_content = read_build_file(&root).unwrap_or_default();
     let application_main = find_application_main(&build_content);
+    let is_spring_boot = is_spring_boot_project(&root);
     let has_application = has_application_plugin(&build_content);
-    let default_task = if has_application {
+    let default_task = if is_spring_boot {
+        "bootRun".to_string()
+    } else if has_application {
         "run".to_string()
     } else {
         "build".to_string()
@@ -63,7 +68,9 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     let markers = super::java_ecosystem::scan_gradle_project(&root);
 
     let mut tasks = vec!["build".to_string(), "test".to_string(), "clean".to_string()];
-    if has_application {
+    if is_spring_boot {
+        tasks.insert(0, "bootRun".to_string());
+    } else if has_application {
         tasks.insert(0, "run".to_string());
     }
     if markers.jacoco {
@@ -77,6 +84,7 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         default_task,
         application_main,
         tasks,
+        is_spring_boot,
         has_junit: markers.junit,
         has_spring_test: markers.spring_test,
         has_jacoco: markers.jacoco,
@@ -194,7 +202,9 @@ pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<Git
         .current_dir(&cmd.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::jdk::apply_gradle_java_env(&mut process);
+    if let Ok(home) = gradle_java_home_for_project(&cmd.cwd) {
+        crate::jdk::apply_java_home(&mut process, &home);
+    }
 
     let output = process
         .output()
@@ -265,6 +275,48 @@ pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
         "Gradle not found for {}. Add a Gradle wrapper (gradlew) to the project or install Gradle.",
         project_root.display()
     )
+}
+
+/// JVM for running this project's Gradle wrapper (respects wrapper vs Java compatibility).
+pub fn gradle_java_home_for_project(project_root: &Path) -> Result<PathBuf> {
+    let max_major = max_java_version_for_project(project_root);
+    crate::jdk::gradle_java_home_with_max(max_major)
+}
+
+/// Highest Java major version Gradle can run with for this project's wrapper.
+pub fn max_java_version_for_project(project_root: &Path) -> u32 {
+    wrapper_gradle_version(project_root)
+        .map(|(major, minor)| max_java_for_gradle(major, minor))
+        .unwrap_or(19)
+}
+
+fn wrapper_gradle_version(project_root: &Path) -> Option<(u32, u32)> {
+    let path = project_root.join("gradle/wrapper/gradle-wrapper.properties");
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let url = line
+            .strip_prefix("distributionUrl=")
+            .map(str::trim)
+            .unwrap_or(line.trim());
+        let after = url.split("gradle-").nth(1)?;
+        let mut parts = after.split(|c: char| !c.is_ascii_digit());
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().unwrap_or("0").parse().ok()?;
+        return Some((major, minor));
+    }
+    None
+}
+
+fn max_java_for_gradle(major: u32, minor: u32) -> u32 {
+    match major {
+        0..=6 => 11,
+        7 => 19,
+        8 if minor >= 14 => 24,
+        8 if minor >= 10 => 23,
+        8 if minor >= 5 => 21,
+        8 => 20,
+        _ => 25,
+    }
 }
 
 fn bundled_gradlew() -> Option<PathBuf> {
@@ -379,7 +431,7 @@ pub fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn is_gradle_project_dir(dir: &Path) -> bool {
+pub fn is_gradle_project_dir(dir: &Path) -> bool {
     dir.join("settings.gradle").is_file()
         || dir.join("settings.gradle.kts").is_file()
         || dir.join("build.gradle").is_file()
@@ -596,5 +648,11 @@ mod tests {
             .expect("find gradle root should not error for unsaved paths");
         assert!(root.is_none());
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn max_java_for_gradle_8_14() {
+        assert_eq!(max_java_for_gradle(8, 14), 24);
+        assert_eq!(max_java_for_gradle(8, 5), 21);
     }
 }

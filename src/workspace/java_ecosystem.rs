@@ -4,11 +4,13 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::gradle::{self, find_gradle_root};
+use super::maven::{self};
 use super::safe_join;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JavaBuildMarkers {
     pub junit: bool,
+    pub spring: bool,
     pub spring_test: bool,
     pub lombok: bool,
     pub jacoco: bool,
@@ -42,6 +44,8 @@ pub struct JavaFileContext {
     pub uses_lombok: bool,
     pub has_slf4j: bool,
     pub uses_slf4j: bool,
+    pub is_spring_boot_project: bool,
+    pub class_type: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub frameworks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -57,7 +61,18 @@ pub fn scan_build_content(content: &str) -> JavaBuildMarkers {
             || compact.contains("org.junit.jupiter")
             || compact.contains("junit:junit")
             || compact.contains("org.junit:junit")
+            || compact.contains("spring-boot-starter-test")
+            || compact.contains("org.springframework.boot:spring-boot-starter-test")
             || (compact.contains("junit") && compact.contains("testimplementation")),
+        spring: compact.contains("org.springframework")
+            || compact.contains("springframework")
+            || compact.contains("spring-boot-starter")
+            || compact.contains("spring-boot")
+            || compact.contains("spring-data")
+            || compact.contains("spring-context")
+            || compact.contains("spring-web")
+            || compact.contains("spring-jdbc")
+            || compact.contains("spring-core"),
         spring_test: compact.contains("spring-boot-starter-test")
             || compact.contains("org.springframework.boot:spring-boot-starter-test")
             || compact.contains("spring-test")
@@ -78,6 +93,38 @@ pub fn scan_build_content(content: &str) -> JavaBuildMarkers {
 
 pub fn scan_maven_pom(content: &str) -> JavaBuildMarkers {
     scan_build_content(content)
+}
+
+/// Declared test/framework dependencies from pom.xml or Gradle build files.
+pub fn project_build_markers(project_root: &Path) -> JavaBuildMarkers {
+    if maven::is_maven_project_root(project_root) {
+        let pom = std::fs::read_to_string(project_root.join("pom.xml")).unwrap_or_default();
+        scan_maven_pom(&pom)
+    } else if gradle::is_gradle_project_dir(project_root) {
+        scan_gradle_project(project_root)
+    } else {
+        JavaBuildMarkers::default()
+    }
+}
+
+/// True when the project declares Spring Data (JPA, Mongo, etc.).
+pub fn project_declares_spring_data(project_root: &Path) -> bool {
+    let content = if maven::is_maven_project_root(project_root) {
+        std::fs::read_to_string(project_root.join("pom.xml")).unwrap_or_default()
+    } else if gradle::is_gradle_project_dir(project_root) {
+        gradle::read_build_file_content(project_root).unwrap_or_default()
+    } else {
+        return false;
+    };
+    let compact: String = content
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    compact.contains("spring-data")
+        || compact.contains("spring-boot-starter-data")
+        || compact.contains(":spring-boot-starter-data-jpa")
+        || compact.contains(":spring-boot-starter-data-mongodb")
 }
 
 pub fn scan_gradle_project(root: &Path) -> JavaBuildMarkers {
@@ -132,12 +179,19 @@ pub fn detect_java_file_context(
     }
 
     let _ = safe_join(ws, rel_path)?;
-    let markers = if let Some(root) = find_gradle_root(ws, rel_path)? {
+    let (markers, is_spring_boot_project) = if let Some(root) = find_gradle_root(ws, rel_path)? {
         ctx.is_gradle = true;
         ctx.project_root = gradle::rel_path_for(ws, &root)?;
-        scan_gradle_project(&root)
+        (scan_gradle_project(&root), gradle::is_spring_boot_project(&root))
+    } else if let Some(root) = maven::find_maven_root(ws, rel_path)? {
+        ctx.project_root = gradle::rel_path_for(ws, &root)?;
+        let pom_raw = std::fs::read_to_string(root.join("pom.xml")).unwrap_or_default();
+        (
+            scan_maven_pom(&pom_raw),
+            maven::is_spring_boot_project(&root),
+        )
     } else {
-        scan_workspace_markers(ws)?
+        (scan_workspace_markers(ws)?, false)
     };
 
     ctx.has_junit = markers.junit;
@@ -147,7 +201,9 @@ pub fn detect_java_file_context(
     ctx.uses_lombok = file_uses_lombok(content);
     ctx.has_slf4j = markers.slf4j;
     ctx.uses_slf4j = file_uses_slf4j(content);
-    ctx.frameworks = frameworks_for(&markers, content);
+    ctx.is_spring_boot_project = is_spring_boot_project;
+    ctx.class_type = classify_java_class_type(rel_path, content);
+    ctx.frameworks = frameworks_for(&markers, content, is_spring_boot_project);
 
     ctx.is_test_file = is_test_file_path(rel_path) || file_has_test_annotations(content);
     ctx.test_methods = list_test_methods(rel_path, content);
@@ -168,14 +224,68 @@ pub fn detect_java_file_context(
 
 fn merge_markers(into: &mut JavaBuildMarkers, from: JavaBuildMarkers) {
     into.junit |= from.junit;
+    into.spring |= from.spring;
     into.spring_test |= from.spring_test;
     into.lombok |= from.lombok;
     into.jacoco |= from.jacoco;
     into.slf4j |= from.slf4j;
 }
 
-fn frameworks_for(markers: &JavaBuildMarkers, content: &str) -> Vec<String> {
+pub fn classify_java_class_type(rel_path: &str, content: &str) -> String {
+    if content.contains("@SpringBootApplication") {
+        return "spring-boot-app".into();
+    }
+    if file_has_spring_test_annotations(content) {
+        return "spring-boot-test".into();
+    }
+    if is_test_file_path(rel_path) || file_has_test_annotations(content) {
+        return "junit-test".into();
+    }
+    if content.contains("@QuarkusMain")
+        || content.contains("io.quarkus.runtime.Quarkus")
+        || content.contains("io.quarkus:quarkus")
+    {
+        return "quarkus-app".into();
+    }
+    if has_static_main(content) {
+        return "plain-main".into();
+    }
+    if content.contains("@Configuration")
+        || content.contains("@Component")
+        || content.contains("@Service")
+        || content.contains("@Repository")
+        || content.contains("@Controller")
+        || content.contains("@RestController")
+    {
+        return "spring-component".into();
+    }
+    if content.contains(" interface ") || content.trim_start().starts_with("interface ") {
+        return "interface".into();
+    }
+    if content.contains(" enum ") || content.trim_start().starts_with("enum ") {
+        return "enum".into();
+    }
+    if content.contains(" record ") || content.trim_start().starts_with("record ") {
+        return "record".into();
+    }
+    "library".into()
+}
+
+pub fn has_static_main(content: &str) -> bool {
+    let normalized: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    normalized.contains("staticvoidmain(")
+        || normalized.contains("publicstaticvoidmain(")
+}
+
+fn frameworks_for(
+    markers: &JavaBuildMarkers,
+    content: &str,
+    is_spring_boot_project: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
+    if is_spring_boot_project {
+        push_unique(&mut out, "spring-boot");
+    }
     if markers.junit || file_has_test_annotations(content) {
         push_unique(&mut out, "junit");
     }
@@ -190,6 +300,9 @@ fn frameworks_for(markers: &JavaBuildMarkers, content: &str) -> Vec<String> {
     }
     if markers.slf4j || file_uses_slf4j(content) {
         push_unique(&mut out, "slf4j");
+    }
+    if content.contains("org.mockito") || content.contains("@Mock") || content.contains("@InjectMocks") {
+        push_unique(&mut out, "mockito");
     }
     out
 }
@@ -303,24 +416,20 @@ pub fn list_test_methods(rel_path: &str, content: &str) -> Vec<TestMethodMarker>
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if !line_has_test_annotation(&lines, i) {
+        if !is_test_annotation_line(lines[i]) {
             i += 1;
             continue;
         }
-        let Some(sig_idx) = find_method_signature_index(&lines, i) else {
+        let anno_idx = i;
+        let Some((sig_idx, method_name)) = test_method_after_annotation(&lines, anno_idx) else {
             i += 1;
             continue;
         };
-        let Some(method_name) = parse_method_name(lines[sig_idx]) else {
-            i = sig_idx + 1;
-            continue;
-        };
         let end = method_block_end(&lines, sig_idx);
-        let glyph_idx = find_test_annotation_index(&lines, i, sig_idx);
         out.push(TestMethodMarker {
             name: method_name.clone(),
             line: (sig_idx + 1) as u32,
-            glyph_line: (glyph_idx + 1) as u32,
+            glyph_line: (anno_idx + 1) as u32,
             end_line: (end + 1) as u32,
             filter: format!("{class_name}.{method_name}"),
             is_class: false,
@@ -346,6 +455,70 @@ pub fn list_test_methods(rel_path: &str, content: &str) -> Vec<TestMethodMarker>
     }
 
     out
+}
+
+fn is_test_annotation_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+        return false;
+    }
+    trimmed.contains("@Test")
+        || trimmed.contains("@ParameterizedTest")
+        || trimmed.contains("@RepeatedTest")
+        || trimmed.contains("@TestFactory")
+        || trimmed.contains("@TestTemplate")
+}
+
+/// Read the declared test method name on or just after a `@Test` annotation line.
+fn test_method_after_annotation(lines: &[&str], anno_idx: usize) -> Option<(usize, String)> {
+    let end = (anno_idx + 6).min(lines.len());
+    for j in anno_idx..end {
+        if j > anno_idx && is_test_annotation_line(lines[j]) {
+            break;
+        }
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let code = strip_leading_annotations(trimmed);
+        if let Some(name) = test_method_declaration_name(code) {
+            return Some((j, name));
+        }
+    }
+    None
+}
+
+/// Name from a method *declaration* (`void foo(`), not a call (`assertNotNull(`).
+fn test_method_declaration_name(code: &str) -> Option<String> {
+    let trimmed = code.split("//").next()?.trim();
+    if trimmed.is_empty() || !trimmed.contains('(') {
+        return None;
+    }
+    if trimmed.contains('=') || trimmed.contains("new ") {
+        return None;
+    }
+    let paren = trimmed.find('(')?;
+    let before = trimmed[..paren].trim();
+    if !before.contains(char::is_whitespace) {
+        return None;
+    }
+    const MODIFIERS: &[&str] = &["public", "protected", "private", "static", "final", "synchronized", "abstract"];
+    const PRIMITIVES: &[&str] = &["void", "class", "int", "long", "boolean", "char", "byte", "short", "float", "double"];
+    let tokens: Vec<&str> = before.split_whitespace().collect();
+    let name = tokens
+        .iter()
+        .rev()
+        .find(|t| !MODIFIERS.contains(t))?;
+    if PRIMITIVES.contains(name) {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn find_test_annotation_index(lines: &[&str], start: usize, sig_idx: usize) -> usize {
@@ -391,7 +564,8 @@ pub fn test_method_at_line(rel_path: &str, content: &str, line: u32) -> Option<T
     }
     list_test_methods(rel_path, content)
         .into_iter()
-        .find(|m| line >= m.line && line <= m.end_line)
+        .filter(|m| !m.is_class && line >= m.line && line <= m.end_line)
+        .last()
 }
 
 fn strip_leading_annotations(line: &str) -> &str {
@@ -448,7 +622,7 @@ fn find_method_signature_index(lines: &[&str], start: usize) -> Option<usize> {
         if code.starts_with('@') {
             continue;
         }
-        if parse_method_name(code).is_some() {
+        if super::symbols::java_method_name_on_line(code).is_some() {
             return Some(i);
         }
     }
@@ -480,11 +654,10 @@ fn test_method_name_at_line(content: &str, line: u32) -> Option<String> {
 }
 
 fn line_has_test_annotation(lines: &[&str], idx: usize) -> bool {
-    let mut i = idx;
-    while i > 0 && lines[i].trim().is_empty() {
-        i -= 1;
+    let mut scan = idx;
+    while scan > 0 && lines[scan].trim().is_empty() {
+        scan -= 1;
     }
-    let mut scan = i;
     loop {
         let trimmed = lines[scan].trim();
         if trimmed.starts_with('@')
@@ -496,8 +669,19 @@ fn line_has_test_annotation(lines: &[&str], idx: usize) -> bool {
         {
             return true;
         }
-        if !trimmed.starts_with('@') && !trimmed.is_empty() {
+        if trimmed.starts_with("class ")
+            || trimmed.contains(" class ")
+            || trimmed.starts_with("public class ")
+            || trimmed.starts_with("protected class ")
+            || trimmed.starts_with("private class ")
+        {
             return false;
+        }
+        if !trimmed.starts_with('@') && !trimmed.is_empty() {
+            let code = strip_leading_annotations(trimmed);
+            if super::symbols::java_method_name_on_line(code).is_some() {
+                return false;
+            }
         }
         if scan == 0 {
             return false;
@@ -768,10 +952,36 @@ dependencies {
     }
 
     #[test]
+    fn detects_spring_data_dependency() {
+        let pom = r#"
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>"#;
+        let m = scan_maven_pom(pom);
+        assert!(m.spring);
+    }
+
+    #[test]
     fn detects_spring_test_starter() {
         let content =
             "testImplementation 'org.springframework.boot:spring-boot-starter-test'";
         let m = scan_build_content(content);
+        assert!(m.spring_test);
+        assert!(m.junit, "starter-test transitively provides JUnit");
+    }
+
+    #[test]
+    fn detects_junit_via_maven_spring_boot_starter_test() {
+        let pom = r#"
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-test</artifactId>
+  <scope>test</scope>
+</dependency>
+"#;
+        let m = scan_maven_pom(pom);
+        assert!(m.junit);
         assert!(m.spring_test);
     }
 
@@ -895,17 +1105,72 @@ class DemoTest {
     }
 
     #[test]
+    fn gradle_init_app_test_lists_greeting_method_not_app_type() {
+        let path = "app/src/test/java/com/example/AppTest.java";
+        let content = r#"/*
+ * This source file was generated by the Gradle 'init' task
+ */
+package com.example;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+class AppTest {
+    @Test void appHasAGreeting() {
+        App classUnderTest = new App();
+        assertNotNull(classUnderTest.getGreeting());
+    }
+}
+"#;
+        let methods: Vec<_> = list_test_methods(path, content)
+            .into_iter()
+            .filter(|m| !m.is_class)
+            .collect();
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "appHasAGreeting");
+        assert_eq!(methods[0].filter, "com.example.AppTest.appHasAGreeting");
+        assert_eq!(
+            test_method_at_line(path, content, 11).map(|m| m.filter),
+            Some("com.example.AppTest.appHasAGreeting".into())
+        );
+        assert_eq!(
+            test_method_at_line(path, content, 12).map(|m| m.filter),
+            Some("com.example.AppTest.appHasAGreeting".into())
+        );
+        let method_names: Vec<_> = list_test_methods(path, content)
+            .into_iter()
+            .filter(|m| !m.is_class)
+            .map(|m| m.name)
+            .collect();
+        assert!(!method_names.iter().any(|n| n == "assertNotNull" || n == "App"));
+        assert_eq!(
+            test_method_at_line(path, content, 9).map(|m| m.filter),
+            None
+        );
+        let class_filter = list_test_methods(path, content)
+            .into_iter()
+            .find(|m| m.is_class)
+            .map(|m| m.filter);
+        assert_eq!(class_filter.as_deref(), Some("com.example.AppTest"));
+    }
+
+    #[test]
     fn detects_lombok_in_source() {
         assert!(file_uses_lombok("@Data\npublic class User {\n}\n"));
     }
 
     #[test]
-    fn detects_slf4j_in_gradle_and_source() {
-        let content = "implementation 'org.slf4j:slf4j-api:2.0.9'";
-        assert!(scan_build_content(content).slf4j);
-        assert!(file_uses_slf4j(
-            "import org.slf4j.Logger;\nprivate static final Logger log = LoggerFactory.getLogger(Foo.class);\n"
-        ));
-        assert!(file_uses_slf4j("@Slf4j\npublic class Foo {}\n"));
+    fn classifies_spring_boot_app() {
+        let src = "@SpringBootApplication\npublic class App { public static void main(String[] args) {} }";
+        assert_eq!(classify_java_class_type("src/main/java/App.java", src), "spring-boot-app");
+    }
+
+    #[test]
+    fn classifies_junit_test() {
+        let src = "class DemoTest { @Test void ok() {} }";
+        assert_eq!(
+            classify_java_class_type("src/test/java/DemoTest.java", src),
+            "junit-test"
+        );
     }
 }

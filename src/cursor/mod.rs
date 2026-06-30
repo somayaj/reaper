@@ -207,6 +207,65 @@ impl CursorBridge {
         );
     }
 
+    pub async fn chat_collect(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        mode: Option<&str>,
+    ) -> Result<String> {
+        use futures_util::StreamExt;
+
+        let resp = self
+            .chat_stream(session_id, prompt, model, mode)
+            .await?;
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut text = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("cursor chat stream read failed")?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buf.find("\n\n") {
+                let block = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+                for line in block.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("data:") {
+                        continue;
+                    }
+                    let payload = line["data:".len()..].trim();
+                    if payload.is_empty() || payload == "[DONE]" {
+                        continue;
+                    }
+                    let v: serde_json::Value =
+                        serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                        Some("error") => {
+                            let msg = v
+                                .get("error")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("cursor chat error");
+                            bail!("{msg}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if text.trim().is_empty() {
+            bail!("empty cursor response");
+        }
+        Ok(text)
+    }
+
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let _ = self
             .client

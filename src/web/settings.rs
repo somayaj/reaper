@@ -31,6 +31,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
             get(get_compilers).patch(set_compiler),
         )
         .route("/api/settings/toolchains/{id}", delete(clear_compiler))
+        .route("/api/settings/general", get(get_general).patch(set_general))
 }
 
 async fn list_tokens(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -309,4 +310,27 @@ fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response:
         Json(serde_json::json!({ "error": err.to_string() })),
     )
         .into_response()
+}
+
+async fn get_general(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.settings.general_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetGeneralRequest {
+    default_repo: Option<String>,
+}
+
+async fn set_general(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetGeneralRequest>,
+) -> impl IntoResponse {
+    let name = body
+        .default_repo
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    if let Err(e) = state.settings.set_default_repo(name) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    Json(state.settings.general_view()).into_response()
 }

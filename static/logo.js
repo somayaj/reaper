@@ -8,7 +8,7 @@
     welcome: 'w-[72px] h-[72px]',
   };
 
-  const CODE_FONT = "Consolas,'JetBrains Mono',Menlo,Monaco,monospace";
+  const CODE_FONT = "Consolas,Menlo,Monaco,monospace";
 
   const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
   <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>

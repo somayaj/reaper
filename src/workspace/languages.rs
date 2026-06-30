@@ -179,6 +179,7 @@ pub fn merge_languages(into: &mut Vec<String>, from: &[String]) {
 pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
     match tool_id {
         "java" => &[".java"],
+        "google-java-format" => &[".java"],
         "kotlin" => &[".kt", ".kts", ".gradle.kts"],
         "groovy" => &[".groovy", ".gradle", ".gvy", ".gy", ".gsh"],
         "python" => &[".py", ".pyw"],

@@ -21,7 +21,12 @@ pub struct Diagnostic {
     pub severity: String,
 }
 
-pub fn check_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+pub fn check_file(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Result<Vec<Diagnostic>> {
     if rel_path.starts_with(".reaper/") {
         return Ok(Vec::new());
     }
@@ -31,7 +36,7 @@ pub fn check_file(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
     let ext = file_extension(&lower);
 
     if lower.ends_with(".java") {
-        return Ok(java_diagnostics::check_java(ws, rel_path, content)?);
+        return Ok(java_diagnostics::check_java(ws, rel_path, content, overlays)?);
     }
     if ext == "rs" {
         return check_rust(ws, rel_path, content);
@@ -1797,7 +1802,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let content = "public class RightName {\n}\n";
-        let diags = check_file(&ws, "WrongFile.java", content).unwrap();
+        let diags = check_file(&ws, "WrongFile.java", content, &[]).unwrap();
         assert!(
             diags.iter().any(|d| d.message.contains("should be declared in a file named")),
             "unsaved Java files should still get file/class diagnostics: {:?}",
@@ -1811,11 +1816,11 @@ mod tests {
         let ws = std::env::temp_dir().join("reaper-diag-smoke");
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
-        let json_diags = check_file(&ws, "bad.json", "{ invalid").unwrap();
+        let json_diags = check_file(&ws, "bad.json", "{ invalid", &[]).unwrap();
         assert!(!json_diags.is_empty(), "JSON syntax errors should surface");
         assert_eq!(json_diags[0].severity, "error");
 
-        let yaml_diags = check_file(&ws, "bad.yaml", "foo: [bar\n").unwrap();
+        let yaml_diags = check_file(&ws, "bad.yaml", "foo: [bar\n", &[]).unwrap();
         assert!(!yaml_diags.is_empty(), "YAML syntax errors should surface");
         assert_eq!(yaml_diags[0].severity, "error");
 
@@ -1829,7 +1834,7 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let content = "public class RightName {\n}\n";
         std::fs::write(ws.join("WrongFile.java"), content).unwrap();
-        let diags = check_file(&ws, "WrongFile.java", content).unwrap();
+        let diags = check_file(&ws, "WrongFile.java", content, &[]).unwrap();
         assert!(
             diags.iter().any(|d| d.message.contains("should be declared in a file named")),
             "Java file/class mismatch should show in editor diagnostics: {:?}",

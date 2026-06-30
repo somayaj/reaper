@@ -33,6 +33,54 @@ pub struct SymbolLocation {
     pub column: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HoverInfo {
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+}
+
+pub fn hover_info_from_location(content: &str, hit: &SymbolLocation) -> HoverInfo {
+    let line_idx = hit.line.saturating_sub(1) as usize;
+    let source_line = content.lines().nth(line_idx);
+    let signature = source_line.and_then(|line| {
+        java_member_signature_on_line(line, &hit.name).or_else(|| {
+            let trimmed = line.split("//").next()?.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    trimmed
+                        .split('{')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .split(';')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                )
+            }
+        })
+    });
+    let documentation = java_javadoc_before_line(content, hit.line);
+    HoverInfo {
+        name: hit.name.clone(),
+        kind: hit.kind.clone(),
+        signature,
+        documentation,
+        path: Some(hit.path.clone()),
+        line: Some(hit.line),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ClassSearchHit {
     pub name: String,
@@ -114,23 +162,32 @@ pub fn find_definition(
         (Some(s), _) | (_, Some(s)) if !s.is_empty() => s,
         _ => return Ok(None),
     };
+    find_definition_for_symbol(ws, from_path, content, &symbol)
+}
 
-    if is_keyword(&symbol) {
+pub fn find_definition_for_symbol(
+    ws: &Path,
+    from_path: &str,
+    content: &str,
+    symbol: &str,
+) -> Result<Option<SymbolLocation>> {
+    let symbol = symbol.trim().trim_end_matches("()");
+    if symbol.is_empty() || is_keyword(symbol) {
         return Ok(None);
     }
 
     if crate::workspace::ruby_nav::is_ruby_path(from_path) {
-        if let Some(hit) = crate::workspace::ruby_nav::find_rails_constant(ws, &symbol)? {
+        if let Some(hit) = crate::workspace::ruby_nav::find_rails_constant(ws, symbol)? {
             return Ok(Some(hit));
         }
     }
 
     let mut hits = Vec::new();
-    if let Some(hit) = find_in_content(&symbol, from_path, content) {
+    if let Some(hit) = find_in_content(symbol, from_path, content) {
         hits.push(hit);
     }
-    collect_definitions(ws, ws, from_path, &symbol, &mut hits)?;
-    Ok(best_definition(&hits, &symbol, from_path))
+    collect_definitions(ws, ws, from_path, symbol, &mut hits)?;
+    Ok(best_definition(&hits, symbol, from_path))
 }
 
 pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
@@ -188,6 +245,10 @@ pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     if before.is_empty() || before.contains('.') {
         return None;
     }
+    // Declarations have a return type or modifiers before the name; calls do not (assertNotNull(...)).
+    if !before.contains(char::is_whitespace) {
+        return None;
+    }
 
     let name = before
         .rsplit(|c: char| c.is_whitespace() || c == '<' || c == '>')
@@ -204,6 +265,72 @@ pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     }
 
     Some(name.to_string())
+}
+
+/// Javadoc comment immediately above `line` (1-based), if any.
+pub(crate) fn java_javadoc_before_line(content: &str, line: u32) -> Option<String> {
+    if line == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut end = line.saturating_sub(1) as usize;
+    while end > 0 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let end_idx = end - 1;
+    if !lines[end_idx].trim().ends_with("*/") {
+        return None;
+    }
+    let mut start_idx = end_idx;
+    while start_idx > 0 {
+        if lines[start_idx].trim().starts_with("/**") {
+            break;
+        }
+        start_idx -= 1;
+    }
+    if !lines[start_idx].trim().starts_with("/**") {
+        return None;
+    }
+    Some(format_java_javadoc_block(&lines[start_idx..=end_idx]))
+}
+
+fn format_java_javadoc_block(block: &[&str]) -> String {
+    let mut out = Vec::new();
+    for line in block {
+        let t = line.trim();
+        let inner = t
+            .trim_start_matches("/**")
+            .trim_end_matches("*/")
+            .trim_start_matches('*')
+            .trim();
+        if !inner.is_empty() {
+            out.push(inner.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// Method or field declaration snippet on `line` for completion detail.
+pub(crate) fn java_member_signature_on_line(line: &str, member: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains(&format!("{member}("))
+        && !trimmed.contains(&format!("{member};"))
+        && !trimmed.contains(&format!("{member} ="))
+    {
+        return None;
+    }
+    let sig = trimmed.split('{').next()?.split(';').next()?.trim();
+    if sig.is_empty() {
+        None
+    } else {
+        Some(sig.to_string())
+    }
 }
 
 pub(crate) fn java_class_from_source_path(path: &str) -> Option<String> {
@@ -240,11 +367,355 @@ pub(crate) fn java_member_qualifier(content: &str, line: u32, column: u32, symbo
     None
 }
 
+/// 1-based column at the start of `member` on `line` (for go-to-definition style hover).
+pub(crate) fn java_hover_column_for_member(
+    content: &str,
+    line: u32,
+    column: u32,
+    member: &str,
+) -> Option<u32> {
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let col0 = column.saturating_sub(1) as usize;
+    let col_limit = col0.min(line_text.len());
+    let before = &line_text[..col_limit];
+
+    if let Some(dot) = before.rfind('.') {
+        let after_dot = &before[dot + 1..];
+        if member.starts_with(after_dot) || after_dot.is_empty() {
+            return Some((dot + 2) as u32);
+        }
+    }
+
+    if let Some(pos) = line_text.find(&format!(".{member}")) {
+        return Some((pos + 2) as u32);
+    }
+
+    None
+}
+
+fn split_java_param_list(params: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut angle_depth = 0u32;
+    for ch in params.chars() {
+        match ch {
+            '<' => {
+                angle_depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                angle_depth = angle_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if angle_depth == 0 => {
+                out.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
+fn normalize_java_type_token(ty: &str) -> String {
+    let mut t = ty.trim().replace('@', "");
+    const MODS: &[&str] = &["final", "volatile", "transient"];
+    loop {
+        let mut changed = false;
+        for m in MODS {
+            if let Some(rest) = t.strip_prefix(m) {
+                t = rest.trim_start().to_string();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    t
+}
+
+fn parse_java_parameter(param: &str) -> Option<(String, String)> {
+    let param = param.trim();
+    if param.is_empty() {
+        return None;
+    }
+    if let Some(idx) = param.find("...") {
+        let ty = param[..idx].trim();
+        let name = param[idx + 3..].trim();
+        if name.is_empty() || is_keyword(name) {
+            return None;
+        }
+        return Some((format!("{}[]", normalize_java_type_token(ty)), name.to_string()));
+    }
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.last()?.to_string();
+    if is_keyword(&name) {
+        return None;
+    }
+    let ty = parts[..parts.len() - 1].join(" ");
+    Some((normalize_java_type_token(&ty), name))
+}
+
+fn infer_java_parameter_type_on_line(line: &str, var_name: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if !trimmed.contains(var_name) || !trimmed.contains('(') {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let close = trimmed.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    for param in split_java_param_list(&trimmed[open + 1..close]) {
+        if let Some((ty, name)) = parse_java_parameter(&param) {
+            if name == var_name {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+/// Qualifier and partial member name when the cursor is in a dotted expression (`foo.`, `foo.get`, `this.`).
+pub(crate) fn infer_java_receiver_type(content: &str, var_name: &str) -> Option<String> {
+    if var_name.is_empty() || var_name == "this" || var_name == "super" {
+        return None;
+    }
+
+    const COLLECTION_PREFIXES: &[&str] = &[
+        "List<",
+        "ArrayList<",
+        "LinkedList<",
+        "Set<",
+        "HashSet<",
+        "LinkedHashSet<",
+        "Collection<",
+        "Iterable<",
+        "Queue<",
+        "Deque<",
+        "ArrayDeque<",
+    ];
+    const MAP_PREFIXES: &[&str] = &[
+        "Map<",
+        "HashMap<",
+        "LinkedHashMap<",
+        "TreeMap<",
+        "ConcurrentHashMap<",
+    ];
+
+    let mut best: Option<(usize, String)> = None;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        if !line.contains(var_name) {
+            continue;
+        }
+        let trimmed = line.trim();
+
+        for prefix in COLLECTION_PREFIXES {
+            let type_name = prefix.trim_end_matches('<');
+            let mut search = 0;
+            while let Some(idx) = trimmed[search..].find(prefix) {
+                let start = search + idx;
+                let after = &trimmed[start + prefix.len()..];
+                if let Some(end_gt) = after.find('>') {
+                    let rest = after[end_gt + 1..].trim_start();
+                    if java_var_decl_matches(rest, var_name) {
+                        let pos = line_idx * 10_000 + start;
+                        if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                            best = Some((pos, type_name.to_string()));
+                        }
+                    }
+                }
+                search = start + prefix.len();
+            }
+        }
+
+        for prefix in MAP_PREFIXES {
+            let type_name = prefix.trim_end_matches('<');
+            let mut search = 0;
+            while let Some(idx) = trimmed[search..].find(prefix) {
+                let start = search + idx;
+                let after = &trimmed[start + prefix.len()..];
+                if let Some(end_gt) = after.find('>') {
+                    let rest = after[end_gt + 1..].trim_start();
+                    if java_var_decl_matches(rest, var_name) {
+                        let pos = line_idx * 10_000 + start;
+                        if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                            best = Some((pos, type_name.to_string()));
+                        }
+                    }
+                }
+                search = start + prefix.len();
+            }
+        }
+
+        if let Some(type_name) = simple_java_type_before_var(trimmed, var_name) {
+            let pos = line_idx * 10_000 + trimmed.len();
+            if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                best = Some((pos, type_name));
+            }
+        }
+
+        // var name = new Type or var name = new Type<...>
+        if let Some(type_name) = infer_type_from_new_assignment(trimmed, var_name) {
+            let pos = line_idx * 10_000 + trimmed.len();
+            if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                best = Some((pos, type_name));
+            }
+        }
+
+        if let Some(type_name) = infer_java_parameter_type_on_line(line, var_name) {
+            let pos = line_idx * 10_000 + trimmed.len();
+            if best.as_ref().map(|(p, _)| pos > *p).unwrap_or(true) {
+                best = Some((pos, type_name));
+            }
+        }
+    }
+
+    best.map(|(_, t)| t)
+}
+
+/// Infer type for a dotted receiver expression (`items`, `args[0]`, `list.get(0)` base forms).
+pub(crate) fn infer_java_receiver_type_from_expr(content: &str, expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    if let Some(bracket) = expr.find('[') {
+        if expr.ends_with(']') && bracket > 0 {
+            let base = expr[..bracket].trim();
+            if let Some(ty) = infer_java_receiver_type(content, base) {
+                let ty = ty.trim();
+                if ty.ends_with("[]") {
+                    return Some(ty[..ty.len() - 2].trim().to_string());
+                }
+                if let Some(start) = ty.find('<') {
+                    if ty.ends_with('>') {
+                        let inner = ty[start + 1..ty.len() - 1].trim();
+                        let first = inner.split(',').next()?.trim();
+                        if !first.is_empty() {
+                            return Some(first.to_string());
+                        }
+                    }
+                }
+                return Some(ty.to_string());
+            }
+        }
+    }
+    infer_java_receiver_type(content, expr)
+}
+
+fn is_valid_java_dot_receiver(receiver: &str) -> bool {
+    let r = receiver.trim();
+    if r.is_empty() {
+        return false;
+    }
+    if r == "this" || r == "super" {
+        return true;
+    }
+    let ident_ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    if ident_ok(r) {
+        return true;
+    }
+    if r.contains('.') {
+        return r.split('.').all(|seg| {
+            let seg = seg.trim();
+            seg == "this" || seg == "super" || ident_ok(seg)
+        });
+    }
+    if let Some(bracket) = r.find('[') {
+        if !r.ends_with(']') {
+            return false;
+        }
+        let base = r[..bracket].trim();
+        let index = r[bracket + 1..r.len() - 1].trim();
+        if base.is_empty() || index.is_empty() {
+            return false;
+        }
+        let base_ok = base == "this" || base == "super" || ident_ok(base);
+        let index_ok = index.chars().all(|c| c.is_ascii_digit())
+            || ident_ok(index);
+        return base_ok && index_ok;
+    }
+    false
+}
+
+fn java_var_decl_matches(rest: &str, var_name: &str) -> bool {
+    let rest = rest.trim_start();
+    if !rest.starts_with(var_name) {
+        return false;
+    }
+    let after = rest[var_name.len()..].trim_start();
+    after.is_empty()
+        || after.starts_with('=')
+        || after.starts_with(';')
+        || after.starts_with(',')
+}
+
+fn simple_java_type_before_var(line: &str, var_name: &str) -> Option<String> {
+    let idx = line.find(var_name)?;
+    let before = line[..idx].trim_end();
+    if before.is_empty() {
+        return None;
+    }
+    let type_token = before.split_whitespace().last()?;
+    let type_name = type_token.split('<').next()?.trim().trim_end_matches("[]");
+    if type_name.is_empty() || is_keyword(type_name) {
+        return None;
+    }
+    if type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase() || c == '@') {
+        Some(type_name.replace('@', ""))
+    } else {
+        None
+    }
+}
+
+fn infer_type_from_new_assignment(line: &str, var_name: &str) -> Option<String> {
+    let needle = format!("{var_name} =");
+    let idx = line.find(&needle)?;
+    let after = line[idx + needle.len()..].trim_start();
+    if !after.starts_with("new ") {
+        return None;
+    }
+    let after_new = after[4..].trim_start();
+    let type_end = after_new
+        .find(|c: char| c == '(' || c == '<' || c.is_whitespace())
+        .unwrap_or(after_new.len());
+    let type_name = after_new[..type_end].trim();
+    if type_name.is_empty() || is_keyword(type_name) {
+        None
+    } else {
+        Some(type_name.to_string())
+    }
+}
+
 /// Qualifier and partial member name when the cursor is in a dotted expression (`foo.`, `foo.get`, `this.`).
 pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Option<(String, String)> {
     let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
     let col = column.saturating_sub(1) as usize;
-    let before = &line_text[..col.min(line_text.len())];
+    let len = line_text.len();
+    let end = col.min(len);
+    let slice_end = if end < len && line_text.as_bytes().get(end) == Some(&b'.') {
+        end + 1
+    } else if end > 0 && line_text.as_bytes().get(end - 1) == Some(&b'.') {
+        end
+    } else {
+        end
+    };
+    let before = &line_text[..slice_end.min(len)];
     let trimmed_end = before.trim_end();
     if trimmed_end.is_empty() {
         return None;
@@ -252,13 +723,15 @@ pub(crate) fn java_dot_qualifier(content: &str, line: u32, column: u32) -> Optio
     let dot_pos = trimmed_end.rfind('.')?;
     let qual_part = trimmed_end[..dot_pos].trim();
     let member_part = trimmed_end[dot_pos + 1..].trim().to_string();
-    let simple = qual_part.rsplit('.').next()?.trim();
-    if simple.is_empty()
-        || (is_keyword(simple) && simple != "this" && simple != "super")
-    {
+    let receiver_expr = if let Some(paren) = qual_part.rfind('(') {
+        qual_part[paren + 1..].trim()
+    } else {
+        qual_part
+    };
+    if !is_valid_java_dot_receiver(receiver_expr) {
         return None;
     }
-    Some((simple.to_string(), member_part))
+    Some((receiver_expr.to_string(), member_part))
 }
 
 /// FQCN fragment typed after `import` / `import static` on the current line.
@@ -307,10 +780,156 @@ pub(crate) fn is_java_type_reference_context(content: &str, line: u32, column: u
                 || trimmed_end.ends_with("implements ")
                 || trimmed_end.ends_with("throws ")
                 || trimmed_end.ends_with("catch (")
+                || trimmed_end.ends_with("for (")
+                || trimmed_end.ends_with("for(")
                 || trimmed_end.ends_with("<")
         }
         None => false,
     }
+}
+
+/// Cursor at the start of a `for (` / `for(` header (type or init position).
+pub(crate) fn is_java_for_type_start(content: &str, line: u32, column: u32) -> bool {
+    let Some(line_text) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let col = column.saturating_sub(1) as usize;
+    let before = line_text.get(..col.min(line_text.len())).unwrap_or(line_text);
+    let trimmed = before.trim_end();
+    trimmed.ends_with("for (") || trimmed.ends_with("for(")
+}
+
+/// Cursor after `:` in an enhanced `for (Type x : …)` on the same line.
+pub(crate) fn is_java_for_iterable_context(content: &str, line: u32, column: u32) -> bool {
+    let Some(line_text) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let col = column.saturating_sub(1) as usize;
+    let before = line_text.get(..col.min(line_text.len())).unwrap_or(line_text);
+    let Some(for_pos) = before.rfind("for") else {
+        return false;
+    };
+    let tail = &before[for_pos..];
+    if !(tail.starts_with("for (") || tail.starts_with("for(")) {
+        return false;
+    }
+    let Some(paren) = tail.find('(') else {
+        return false;
+    };
+    let inside = &tail[paren + 1..];
+    !inside.contains(')') && inside.contains(':')
+}
+
+fn parse_java_local_segment(seg: &str) -> Option<(String, String)> {
+    const MODS: &[&str] = &[
+        "public", "private", "protected", "static", "final", "volatile", "transient",
+    ];
+    let decl = seg.split('=').next()?.trim().trim_end_matches(',');
+    if decl.contains('(')
+        || decl.contains("class ")
+        || decl.contains("interface ")
+        || decl.contains("enum ")
+        || decl.contains("record ")
+    {
+        return None;
+    }
+    let mut parts: Vec<&str> = decl.split_whitespace().collect();
+    while parts.len() > 2 && MODS.contains(&parts[0]) {
+        parts.remove(0);
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.last()?.to_string();
+    if is_keyword(&name) {
+        return None;
+    }
+    let ty = parts[..parts.len() - 1].join(" ");
+    if ty.is_empty() {
+        return None;
+    }
+    Some((normalize_java_type_token(&ty), name))
+}
+
+fn parse_java_local_declarations_on_line(line: &str) -> Vec<(String, String)> {
+    if line.starts_with("import ")
+        || line.starts_with("package ")
+        || line.starts_with('@')
+        || line.starts_with("//")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for segment in line.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty()
+            || seg.starts_with("for ")
+            || seg.starts_with("if ")
+            || seg.starts_with("while ")
+            || seg.starts_with("switch ")
+            || seg.starts_with("return ")
+        {
+            continue;
+        }
+        if let Some(pair) = parse_java_local_segment(seg) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+pub(crate) fn is_java_iterable_type_hint(ty: &str) -> bool {
+    let t = ty.trim();
+    t.contains('[')
+        || t.starts_with("List")
+        || t.starts_with("Set")
+        || t.starts_with("Collection")
+        || t.starts_with("Iterable")
+        || t.starts_with("Queue")
+        || t.starts_with("Deque")
+        || t.starts_with("ArrayList")
+        || t.starts_with("LinkedList")
+        || t.starts_with("HashSet")
+}
+
+/// Parameters and locals visible before `through_line` (1-based).
+pub(crate) fn collect_java_scope_variables(content: &str, through_line: u32) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let limit = through_line as usize;
+
+    for (idx, line_text) in content.lines().enumerate() {
+        if idx >= limit {
+            break;
+        }
+        let trimmed = line_text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains('(') {
+            if let Some(open) = trimmed.find('(') {
+                if let Some(rel_close) = trimmed[open + 1..].find(')') {
+                    let close = open + 1 + rel_close;
+                    if close > open {
+                        for param in split_java_param_list(&trimmed[open + 1..close]) {
+                            if let Some((ty, name)) = parse_java_parameter(&param) {
+                                if seen.insert(name.clone()) {
+                                    out.push((name, ty));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (ty, name) in parse_java_local_declarations_on_line(trimmed) {
+            if seen.insert(name.clone()) {
+                out.push((name, ty));
+            }
+        }
+    }
+    out
 }
 
 fn word_before(line: &str, col: usize) -> Option<String> {
@@ -774,8 +1393,7 @@ pub fn format_content(ws: &Path, rel_path: &str, content: &str) -> Result<String
             .or_else(|_| try_stdin_command(ws, "ktlint", &["format", "-"], content));
     }
     if ext == "java" {
-        return try_stdin_command(ws, "google-java-format", &["-"], content)
-            .or_else(|_| try_stdin_command(ws, "clang-format", &["-assume-filename=file.java"], content));
+        return super::java_format::format_java(ws, content);
     }
     if ext == "rs" {
         return try_stdin_command(ws, "rustfmt", &["--emit", "stdout"], content);
@@ -958,7 +1576,7 @@ fn read_ident_prefix(s: &str) -> Option<(String, usize)> {
 }
 
 /// Members used with `qualifier.` anywhere in the file, plus language-specific defs.
-fn member_completions_from_content(
+pub(crate) fn member_completions_from_content(
     content: &str,
     qualifier: &str,
     member_prefix: &str,
@@ -1000,8 +1618,12 @@ fn member_completions_from_content(
                             path: Some(from_path.to_string()),
                             line: None,
                             column: None,
+                            documentation: None,
                         });
                     }
+                }
+                if start >= line_text.len() {
+                    break;
                 }
                 search = start + 1;
             }
@@ -1027,6 +1649,7 @@ fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1048,6 +1671,7 @@ fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1069,6 +1693,7 @@ fn member_completions_from_content(
                                 path: Some(from_path.to_string()),
                                 line: None,
                                 column: None,
+                            documentation: None,
                             });
                         }
                     }
@@ -1094,6 +1719,7 @@ fn member_completions_from_content(
                                     path: Some(from_path.to_string()),
                                     line: None,
                                     column: None,
+                                    documentation: None,
                                 });
                             }
                         }
@@ -1152,6 +1778,7 @@ pub fn completions(
                     path: Some(from_path.to_string()),
                     line: Some(hit.line),
                     column: Some(hit.column),
+                    documentation: None,
                 });
                 limit -= 1;
             }
@@ -1180,6 +1807,7 @@ pub fn completions(
                             path: Some(hit.path.clone()),
                             line: Some(hit.line),
                             column: Some(hit.column),
+                            documentation: None,
                         });
                         limit -= 1;
                     }
@@ -1202,6 +1830,7 @@ pub fn completions(
                     path: None,
                     line: None,
                     column: None,
+                    documentation: None,
                 });
                 limit -= 1;
             }
@@ -1235,6 +1864,19 @@ fn path_score_bonus(rel_path: &str) -> u32 {
 }
 
 const WORKSPACE_SYMBOLS_VERSION: u32 = 2;
+
+pub fn workspace_symbol_cache_count(ws: &Path) -> usize {
+    let path = ws.join(WORKSPACE_SYMBOLS_PATH);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    if let Ok(cache) = serde_json::from_str::<WorkspaceSymbolCache>(&text) {
+        if cache.version == WORKSPACE_SYMBOLS_VERSION && cache.symbol_count > 0 {
+            return cache.symbol_count;
+        }
+    }
+    text.matches("\"name\"").count()
+}
 
 #[derive(Serialize, Deserialize)]
 struct WorkspaceSymbolCache {
@@ -1874,6 +2516,59 @@ mod tests {
             Some("main".into())
         );
         assert_eq!(java_method_name_on_line("        SpringApplication.run(Application.class, args);"), None);
+        assert_eq!(
+            java_method_name_on_line("        assertNotNull(classUnderTest.getGreeting());"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_java_javadoc_before_method() {
+        let src = r#"
+public class Demo {
+    /**
+     * Prints a greeting.
+     * @param name the recipient
+     */
+    public void greet(String name) {
+    }
+}
+"#;
+        assert_eq!(
+            java_javadoc_before_line(src, 7),
+            Some("Prints a greeting.\n@param name the recipient".into())
+        );
+    }
+
+    #[test]
+    fn extracts_java_member_signature() {
+        let line = "    public void println(String x) {";
+        assert_eq!(
+            java_member_signature_on_line(line, "println"),
+            Some("public void println(String x)".into())
+        );
+    }
+
+    #[test]
+    fn builds_hover_info_from_definition() {
+        let src = r#"
+public class Demo {
+    /** Greets someone. */
+    public void greet(String name) {
+    }
+}
+"#;
+        let hit = SymbolLocation {
+            name: "greet".into(),
+            kind: "method".into(),
+            path: "Demo.java".into(),
+            line: 4,
+            column: 5,
+        };
+        let info = hover_info_from_location(src, &hit);
+        assert_eq!(info.name, "greet");
+        assert_eq!(info.documentation.as_deref(), Some("Greets someone."));
+        assert!(info.signature.as_ref().is_some_and(|s| s.contains("greet(String name)")));
     }
 
     #[test]
@@ -1963,6 +2658,27 @@ mod tests {
     }
 
     #[test]
+    fn infers_field_type_for_member_completion() {
+        let src = "package com.helloworld;\n\npublic class HelloWorld {\n    String a;\n    public static void main(String[] args) {\n        a.";
+        assert_eq!(
+            infer_java_receiver_type(src, "a"),
+            Some("String".into())
+        );
+    }
+
+    #[test]
+    fn parses_dot_qualifier_chained_receiver() {
+        assert_eq!(
+            java_dot_qualifier("        System.out.", 1, 20),
+            Some(("System.out".into(), "".into()))
+        );
+        assert_eq!(
+            java_dot_qualifier("        System.", 1, 16),
+            Some(("System".into(), "".into()))
+        );
+    }
+
+    #[test]
     fn parses_dot_qualifier() {
         assert_eq!(
             java_dot_qualifier("foo.", 1, 5),
@@ -1975,6 +2691,74 @@ mod tests {
         assert_eq!(
             java_dot_qualifier("        this.", 1, 14),
             Some(("this".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn infers_java_receiver_type_from_declarations() {
+        let src = "List<String> items = new ArrayList<>();\nitems.size();";
+        assert_eq!(
+            infer_java_receiver_type(src, "items"),
+            Some("List".into())
+        );
+        let src2 = "String name = \"x\";\nname.";
+        assert_eq!(
+            infer_java_receiver_type(src2, "name"),
+            Some("String".into())
+        );
+        let src3 = "var app = new SpringApplication();\napp.";
+        assert_eq!(
+            infer_java_receiver_type(src3, "app"),
+            Some("SpringApplication".into())
+        );
+        let src4 = "public static void main(String[] args) {\n    while(args.";
+        assert_eq!(
+            infer_java_receiver_type(src4, "args"),
+            Some("String[]".into())
+        );
+    }
+
+    #[test]
+    fn for_type_start_and_scope_vars() {
+        let src = "public static void main(String[] args) {\n    for(";
+        assert!(is_java_for_type_start(src, 2, 9));
+        let vars = collect_java_scope_variables(src, 2);
+        assert!(vars.iter().any(|(n, _)| n == "args"));
+        let iter_src = "public static void main(String[] args) {\n    for (String s : ";
+        assert!(is_java_for_iterable_context(
+            iter_src,
+            2,
+            iter_src.lines().nth(1).unwrap().len() as u32 + 1,
+        ));
+    }
+
+    #[test]
+    fn parses_dot_qualifier_inside_while_paren() {
+        assert_eq!(
+            java_dot_qualifier("while(args.", 1, 11),
+            Some(("args".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn parses_dot_qualifier_after_array_index() {
+        assert_eq!(
+            java_dot_qualifier("args[0].", 1, 9),
+            Some(("args[0]".into(), "".into()))
+        );
+        let src = "System.out.println(args[0].";
+        assert_eq!(
+            java_dot_qualifier(src, 1, src.len() as u32),
+            Some(("args[0]".into(), "".into()))
+        );
+    }
+
+    #[test]
+    fn infers_element_type_from_array_index_expr() {
+        let src = "public static void main(String[] args) {\n    args[0].";
+        assert_eq!(
+            infer_java_receiver_type_from_expr(src, "args[0]"),
+            Some("String".into())
         );
     }
 

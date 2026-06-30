@@ -166,6 +166,10 @@ pub fn seed_bare_repo_with_readme(bare_path: &Path, readme: &str) -> Result<()> 
     if !push.success() {
         bail!("failed to seed repo: {}", push.stderr.trim());
     }
+    let _ = run_git(
+        Some(&bare_abs),
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
     Ok(())
 }
 
@@ -190,6 +194,12 @@ impl Drop for TempDirGuard {
     }
 }
 
+const LEGACY_BRANCH: &str = "master";
+
+fn is_legacy_branch(name: &str) -> bool {
+    name == LEGACY_BRANCH
+}
+
 pub fn list_branches(repo: &Path) -> Result<Vec<String>> {
     let out = run_git(Some(repo), &["branch", "--format=%(refname:short)"])?;
     if !out.success() {
@@ -199,23 +209,56 @@ pub fn list_branches(repo: &Path) -> Result<Vec<String>> {
         .stdout
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && !is_legacy_branch(l))
         .map(str::to_string)
         .collect())
 }
 
-pub fn default_branch(repo: &Path) -> Result<String> {
+fn remote_default_branch(repo: &Path) -> Option<String> {
     let out = run_git(
         Some(repo),
-        &["symbolic-ref", "--short", "HEAD"],
-    )?;
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .ok()?;
     if out.success() {
-        return Ok(out.stdout.trim().to_string());
+        let name = out.stdout.trim().to_string();
+        if !name.is_empty() && !is_legacy_branch(&name) {
+            return Some(name);
+        }
+    }
+    let out = run_git(Some(repo), &["remote", "show", "origin"]).ok()?;
+    if !out.success() {
+        return None;
+    }
+    for line in out.stdout.lines() {
+        if let Some(rest) = line.trim().strip_prefix("HEAD branch: ") {
+            let name = rest.trim();
+            if !name.is_empty() && !is_legacy_branch(name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn default_branch(repo: &Path) -> Result<String> {
+    if let Some(name) = remote_default_branch(repo) {
+        return Ok(name);
+    }
+    let out = run_git(Some(repo), &["symbolic-ref", "--short", "HEAD"])?;
+    if out.success() {
+        let name = out.stdout.trim();
+        if !name.is_empty() && !is_legacy_branch(name) {
+            return Ok(name.to_string());
+        }
     }
     let branches = list_branches(repo)?;
+    if branches.iter().any(|b| b == "main") {
+        return Ok("main".into());
+    }
     branches
         .into_iter()
-        .find(|b| b == "main" || b == "master")
+        .next()
         .ok_or_else(|| anyhow::anyhow!("no default branch"))
 }
 
