@@ -1,11 +1,15 @@
 mod gemini;
+mod gemini_chat;
 
 pub use gemini::GeminiClient;
+pub use gemini_chat::{ChatTurn, GeminiChatStore};
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 
 use crate::git::{self, GitOutput};
 use crate::settings::SettingsStore;
@@ -262,15 +266,77 @@ pub async fn suggest_ai_completions(
     Ok(parse_ai_completion_items(&raw, line_prefix))
 }
 
+pub async fn suggest_run_target(
+    settings: &SettingsStore,
+    ws: &Path,
+    path: &str,
+    line: u32,
+    content: &str,
+    project: &workspace::RunProjectInfo,
+    heuristic: &workspace::JavaRunTarget,
+) -> Result<workspace::AiRunTargetHint> {
+    let api_key = settings
+        .gemini_api_key()
+        .ok_or_else(|| anyhow::anyhow!("gemini not configured"))?;
+
+    let mut context = String::new();
+    use std::fmt::Write;
+    writeln!(context, "File: {path}").ok();
+    writeln!(context, "Cursor line: {line}").ok();
+    writeln!(
+        context,
+        "Project: build_tool={} spring_boot={} root={}",
+        project.build_tool, project.is_spring_boot, project.project_root
+    )
+    .ok();
+    if !project.frameworks.is_empty() {
+        writeln!(context, "Project frameworks: {}", project.frameworks.join(", ")).ok();
+    }
+    writeln!(
+        context,
+        "Heuristic: class_type={} mode={} runnable={}",
+        heuristic.class_type, heuristic.mode, heuristic.runnable
+    )
+    .ok();
+    if let Some(r) = &heuristic.reason {
+        writeln!(context, "Heuristic reason: {r}").ok();
+    }
+    writeln!(context).ok();
+    writeln!(context, "--- source ---").ok();
+    let preview: String = content
+        .lines()
+        .take(220)
+        .collect::<Vec<_>>()
+        .join("\n");
+    writeln!(context, "{preview}").ok();
+
+    let client = GeminiClient::new(api_key, settings.gemini_model());
+    let raw = client.classify_java_run_target(&context).await?;
+    parse_ai_run_target_hint(&raw)
+}
+
+fn parse_ai_run_target_hint(raw: &str) -> Result<workspace::AiRunTargetHint> {
+    let unfenced = strip_inline_code_fence(raw).trim();
+    if let Ok(v) = serde_json::from_str::<workspace::AiRunTargetHint>(unfenced) {
+        return Ok(v);
+    }
+    if let (Some(start), Some(end)) = (unfenced.find('{'), unfenced.rfind('}')) {
+        if let Ok(v) = serde_json::from_str::<workspace::AiRunTargetHint>(&unfenced[start..=end]) {
+            return Ok(v);
+        }
+    }
+    bail!("could not parse AI run target response")
+}
+
 #[derive(Debug, Deserialize)]
 struct AiQuickFixEditRaw {
-    #[serde(rename = "startLine", default = "default_one")]
+    #[serde(rename = "startLine", alias = "start_line", default = "default_one")]
     start_line: u32,
-    #[serde(rename = "startColumn", default = "default_one")]
+    #[serde(rename = "startColumn", alias = "start_column", default = "default_one")]
     start_column: u32,
-    #[serde(rename = "endLine", default = "default_one")]
+    #[serde(rename = "endLine", alias = "end_line", default = "default_one")]
     end_line: u32,
-    #[serde(rename = "endColumn", default = "default_one")]
+    #[serde(rename = "endColumn", alias = "end_column", default = "default_one")]
     end_column: u32,
     #[serde(default)]
     text: String,
@@ -287,47 +353,109 @@ struct AiQuickFixRaw {
     edits: Vec<AiQuickFixEditRaw>,
 }
 
+const QUICK_FIX_CURSOR_TIMEOUT: Duration = Duration::from_secs(12);
+
 pub async fn suggest_quick_fixes(
     settings: &SettingsStore,
     ws: &Path,
     path: &str,
     content: &str,
     diagnostics: &[workspace::QuickFixDiagnostic],
+    cursor_bridge: Option<&crate::cursor::CursorBridge>,
 ) -> Result<Vec<workspace::QuickFix>> {
     if diagnostics.is_empty() {
         return Ok(Vec::new());
     }
 
-    let api_key = settings
-        .gemini_api_key()
-        .ok_or_else(|| anyhow::anyhow!("gemini not configured"))?;
+    let fixes = workspace::suggest_local_quick_fixes(ws, path, content, diagnostics)?;
+    if !fixes.is_empty() {
+        return Ok(fixes);
+    }
 
+    let context = build_quick_fix_context(path, content, diagnostics);
     let line_count = content.lines().count().max(1) as u32;
-    let line_len = |line: u32| -> u32 {
-        content
-            .lines()
-            .nth(line.saturating_sub(1) as usize)
-            .map(|l| l.len().max(1) as u32)
-            .unwrap_or(1)
-    };
 
-    let mut context = workspace::build_inline_completion_context(
-        ws,
-        path,
-        diagnostics[0].line,
-        diagnostics[0].column.max(1),
-        content,
-        "",
-    );
+    // Gemini: one HTTP call — usually much faster than Cursor session + stream.
+    if settings.gemini_api_key().is_some() {
+        match suggest_quick_fixes_via_gemini(settings, content, &context, line_count).await {
+            Ok(fixes) if !fixes.is_empty() => return Ok(fixes),
+            Ok(_) => tracing::debug!("gemini quick fix returned no fixes"),
+            Err(e) => tracing::warn!("gemini quick fix failed: {e:#}"),
+        }
+    }
+
+    if let Some(bridge) = cursor_bridge {
+        if settings.cursor_api_key().is_some() && bridge.health().await {
+            let cursor = suggest_quick_fixes_via_cursor(
+                settings,
+                bridge,
+                ws,
+                content,
+                &context,
+                line_count,
+            );
+            match timeout(QUICK_FIX_CURSOR_TIMEOUT, cursor).await {
+                Ok(Ok(fixes)) if !fixes.is_empty() => return Ok(fixes),
+                Ok(Ok(_)) => tracing::debug!("cursor quick fix returned no fixes"),
+                Ok(Err(e)) => tracing::warn!("cursor quick fix failed: {e:#}"),
+                Err(_) => tracing::warn!("cursor quick fix timed out after {:?}", QUICK_FIX_CURSOR_TIMEOUT),
+            }
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn quick_fix_line_len(content: &str, line: u32) -> u32 {
+    content
+        .lines()
+        .nth(line.saturating_sub(1) as usize)
+        .map(|l| l.len().max(1) as u32)
+        .unwrap_or(1)
+}
+
+fn build_quick_fix_context(
+    path: &str,
+    content: &str,
+    diagnostics: &[workspace::QuickFixDiagnostic],
+) -> String {
+    let lang = workspace::language_for_path(path).unwrap_or("plaintext");
+    let mut out = String::new();
     use std::fmt::Write;
-    writeln!(context).ok();
-    writeln!(context, "--- Errors to fix ---").ok();
+    writeln!(out, "File: {path}").ok();
+    writeln!(out, "Language: {lang}").ok();
+
+    if path.ends_with(".java") || path.ends_with(".kt") || path.ends_with(".kts") {
+        for line in content.lines().take(40) {
+            let trimmed = line.trim();
+            if trimmed.starts_with("package ") {
+                writeln!(out, "Package: {trimmed}").ok();
+                break;
+            }
+        }
+        let imports: Vec<&str> = content
+            .lines()
+            .filter(|l| l.trim_start().starts_with("import "))
+            .take(48)
+            .collect();
+        if !imports.is_empty() {
+            writeln!(out, "Imports:").ok();
+            for imp in imports {
+                writeln!(out, "  {imp}").ok();
+            }
+        }
+    }
+
+    writeln!(out, "\n--- Code ---").ok();
+    out.push_str(&quick_fix_numbered_snippet(content, diagnostics));
+
+    writeln!(out, "\n--- Errors to fix ---").ok();
     for d in diagnostics.iter().take(8) {
         writeln!(
-            context,
+            out,
             "  line {} col {} [{}]: {}",
             d.line,
-            d.column,
+            d.column.max(1),
             if d.severity.is_empty() {
                 "error"
             } else {
@@ -337,16 +465,120 @@ pub async fn suggest_quick_fixes(
         )
         .ok();
     }
-    writeln!(context).ok();
+    writeln!(out).ok();
     writeln!(
-        context,
+        out,
         "Return JSON quick fixes that resolve the errors above. Minimal edits only."
     )
     .ok();
 
+    out
+}
+
+fn quick_fix_numbered_snippet(
+    content: &str,
+    diagnostics: &[workspace::QuickFixDiagnostic],
+) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let focus_idx = diagnostics[0].line.saturating_sub(1) as usize;
+    let mut min_idx = focus_idx.min(lines.len() - 1);
+    let mut max_idx = min_idx;
+    for d in diagnostics.iter().take(8) {
+        let i = d.line.saturating_sub(1) as usize;
+        if i < lines.len() {
+            min_idx = min_idx.min(i);
+            max_idx = max_idx.max(i);
+        }
+    }
+    let start = min_idx.saturating_sub(10);
+    let end = (max_idx + 10).min(lines.len() - 1);
+    let mut snippet = String::new();
+    use std::fmt::Write;
+    for i in start..=end {
+        writeln!(snippet, "{:4}| {}", i + 1, lines[i]).ok();
+    }
+    snippet
+}
+
+const QUICK_FIX_SYSTEM: &str = "You are an IDE quick-fix engine.\n\
+    The user has compiler/linter errors in a source file. Propose concrete fixes they can apply.\n\
+    Return a JSON array of up to 5 quick fixes. Each element:\n\
+    - title: short menu label (e.g. \"Import java.util.Arrays\", \"Add missing semicolon\")\n\
+    - edits: array of text edits to apply together (usually 1 edit; use multiple for import + change)\n\
+    Each edit object:\n\
+    - startLine, startColumn, endLine, endColumn: 1-based line/column (inclusive start, exclusive end column like the editor)\n\
+    - text: exact replacement text for that range (use \\n for newlines)\n\
+    RULES:\n\
+    - Fix the reported errors using minimal correct edits.\n\
+    - For missing imports, insert after package or at top of file.\n\
+    - Do not repeat unchanged file content — only edit regions.\n\
+    - Code only in text fields — no markdown or explanations.\n\
+    - If no safe fix, return [].";
+
+async fn suggest_quick_fixes_via_cursor(
+    settings: &SettingsStore,
+    bridge: &crate::cursor::CursorBridge,
+    ws: &Path,
+    content: &str,
+    context: &str,
+    line_count: u32,
+) -> Result<Vec<workspace::QuickFix>> {
+    let api_key = settings
+        .cursor_api_key()
+        .ok_or_else(|| anyhow::anyhow!("cursor not configured"))?;
+    let model = settings.cursor_model();
+    let cwd = ws
+        .canonicalize()
+        .unwrap_or_else(|_| ws.to_path_buf())
+        .display()
+        .to_string();
+    let session_id = bridge
+        .create_session(&cwd, &api_key, &model, "ask")
+        .await?;
+    let prompt = format!("{QUICK_FIX_SYSTEM}\n\n{context}");
+    let raw = match bridge
+        .chat_collect(&session_id, &prompt, Some(model.as_str()), Some("ask"))
+        .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            let _ = bridge.delete_session(&session_id).await;
+            return Err(e);
+        }
+    };
+    let _ = bridge.delete_session(&session_id).await;
+    Ok(tag_quick_fixes(
+        parse_ai_quick_fixes(&raw, line_count, |line| quick_fix_line_len(content, line)),
+        "cursor",
+    ))
+}
+
+async fn suggest_quick_fixes_via_gemini(
+    settings: &SettingsStore,
+    content: &str,
+    context: &str,
+    line_count: u32,
+) -> Result<Vec<workspace::QuickFix>> {
+    let api_key = settings
+        .gemini_api_key()
+        .ok_or_else(|| anyhow::anyhow!("gemini not configured"))?;
+
     let client = GeminiClient::new(api_key, settings.gemini_model());
-    let raw = client.suggest_quick_fixes(&context).await?;
-    Ok(parse_ai_quick_fixes(&raw, line_count, line_len))
+    let raw = client.suggest_quick_fixes(context).await?;
+    Ok(tag_quick_fixes(
+        parse_ai_quick_fixes(&raw, line_count, |line| quick_fix_line_len(content, line)),
+        "gemini",
+    ))
+}
+
+fn tag_quick_fixes(mut fixes: Vec<workspace::QuickFix>, provider: &str) -> Vec<workspace::QuickFix> {
+    for fix in &mut fixes {
+        fix.provider = Some(provider.to_string());
+    }
+    fixes
 }
 
 fn parse_ai_quick_fixes(
@@ -391,6 +623,7 @@ fn parse_ai_quick_fixes(
         out.push(workspace::QuickFix {
             title: title.to_string(),
             edits,
+            provider: None,
         });
         if out.len() >= 6 {
             break;
@@ -439,6 +672,7 @@ fn parse_ai_completion_items(raw: &str, line_prefix: &str) -> Vec<workspace::Com
             path: None,
             line: None,
             column: None,
+            documentation: None,
         });
         if out.len() >= 12 {
             break;

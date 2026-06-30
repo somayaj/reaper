@@ -1,4 +1,7 @@
 const AGENT_DOCK_KEY = 'reaper-agent-dock';
+const AGENT_RIGHT_WIDTH_KEY = 'reaper-agent-right-w';
+const AGENT_BOTTOM_HEIGHT_KEY = 'reaper-agent-bottom-h';
+const AGENT_PROVIDER_KEY = 'reaper-agent-provider';
 const TERMINAL_DOCK_KEY = 'reaper-terminal-dock';
 const TERMINAL_BOTTOM_HEIGHT_KEY = 'reaper-terminal-bottom-height';
 const EDITOR_FONT_SIZE_KEY = 'reaper-editor-font-size';
@@ -12,7 +15,24 @@ const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
 const AUTO_SAVE_DELAY_MS = 800;
 const DIAG_DELAY_MS = 150;
-const PROJECT_INDEX_POLL_MS = 2000;
+const ALL_JAVA_DIAG_DELAY_MS = 250;
+const PROJECT_RELOAD_DELAY_MS = 2000;
+const PROJECT_BUILD_RELOAD_DELAY_MS = 1500;
+const PROJECT_INDEX_POLL_MS = 750;
+const PROJECT_AUTO_REFRESH_MAX = 3;
+
+/** xterm ANSI styling for streamed command output */
+const TERM_ESC = {
+  reset: '\x1b[0m',
+  dim: '\x1b[90m',
+  bold: '\x1b[1m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+  brightCyan: '\x1b[96m',
+};
 const DEFAULT_EDITOR_FONT_SIZE = 13;
 const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 28;
@@ -79,6 +99,83 @@ const CURSOR_MODELS_FALLBACK = [
   { id: 'claude-opus-4-8-thinking-high', label: 'Claude Opus 4.8' },
 ];
 
+/** Registered chat agents — add providers here as backends land. */
+const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic'];
+
+const AGENT_PROVIDERS = {
+  cursor: {
+    id: 'cursor',
+    label: 'Cursor',
+    settingsTab: 'cursor',
+    capabilities: { modes: true, tools: true, revert: true, liveFollow: true },
+    isConfigured: () => state.cursorConfigured,
+    isReady: () => state.cursorConfigured && state.cursorBridgeOk,
+    welcome: () => 'Ask the Cursor agent to edit files, run git commands, or explain the codebase.',
+    placeholder: 'Ask Cursor… (Enter to send)',
+    emptyReply: () => 'Done — check Source Control for changes.',
+    hintWhenReady: 'Enter to send · Shift+Enter for newline',
+    messageLabel: 'Cursor agent',
+    labelClass: 'agent-msg-label-cursor',
+    models: () => (state.cursorModels?.length ? state.cursorModels : CURSOR_MODELS_FALLBACK),
+    currentModel: () => state.cursorModel,
+    setModel: (id) => setCursorAgentModel(id),
+    statusText: () => {
+      const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
+      return `Cursor ${modeLabel} · ${state.cursorModel || 'composer-2.5'}`;
+    },
+    chatPath: '/cursor/chat',
+    stopPath: '/cursor/stop',
+    chatBody: (prompt) => ({ prompt, model: state.cursorModel, mode: state.cursorMode }),
+    notConfiguredHint: 'Configure Cursor in Settings (⌘,)',
+    notReadyHint: () => state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper',
+  },
+  gemini: {
+    id: 'gemini',
+    label: 'Gemini',
+    settingsTab: 'ai',
+    capabilities: { readOnly: true },
+    isConfigured: () => state.geminiConfigured,
+    isReady: () => state.geminiConfigured,
+    welcome: () => 'Ask the Gemini agent to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.',
+    placeholder: 'Ask Gemini… (Enter to send)',
+    emptyReply: () => 'No response from Gemini. Check your API key and model in Settings → AI.',
+    hintWhenReady: 'Gemini agent — read-only Q&A · Enter to send',
+    messageLabel: 'Gemini agent',
+    labelClass: 'agent-msg-label-gemini',
+    models: () => GEMINI_MODELS,
+    currentModel: () => state.geminiModel,
+    setModel: (id) => setGeminiAgentModel(id),
+    statusText: () => `Gemini agent · ${state.geminiModel}`,
+    chatPath: '/gemini/chat',
+    stopPath: null,
+    chatBody: (prompt) => ({ prompt, model: state.geminiModel }),
+    notConfiguredHint: 'Configure Gemini in Settings → AI (⌘,)',
+  },
+  anthropic: {
+    id: 'anthropic',
+    label: 'Claude',
+    settingsTab: 'ai',
+    comingSoon: true,
+    capabilities: { readOnly: true },
+    isConfigured: () => false,
+    isReady: () => false,
+    welcome: () => 'Claude agent is coming soon — Anthropic API key support is on the way.',
+    placeholder: 'Claude agent — coming soon',
+    emptyReply: () => 'No response from Claude.',
+    hintWhenReady: 'Claude agent — coming soon',
+    messageLabel: 'Claude agent',
+    labelClass: 'agent-msg-label-anthropic',
+    models: () => [],
+    currentModel: () => '',
+    setModel: () => {},
+    statusText: () => 'Claude — coming soon',
+    chatPath: '/anthropic/chat',
+    stopPath: null,
+    chatBody: () => ({}),
+    notConfiguredHint: 'Claude agent — coming soon',
+  },
+};
+
 const state = {
   repo: null,
   repos: [],
@@ -101,6 +198,7 @@ const state = {
   cursorKeyMasked: null,
   cursorKeySource: null,
   cursorModel: 'composer-2.5',
+  agentProvider: localStorage.getItem(AGENT_PROVIDER_KEY) || 'cursor',
   cursorMode: 'agent',
   cursorModels: [],
   agentBusy: false,
@@ -120,15 +218,26 @@ const state = {
   editorReady: false,
   suppressEditorChange: false,
   autoSaveTimer: null,
+  projectReloadTimer: null,
+  projectReloadPending: false,
+  projectReloadBackground: false,
+  projectAutoRefreshAttempts: 0,
   gradleInfo: null,
+  runInfo: null,
+  serverRunTarget: null,
+  runTarget: { mode: 'none' },
   repoDetail: null,
   projectIndexPoll: null,
   projectIndexNotified: false,
   projectIndexRunning: false,
   projectIndexReady: false,
   projectIndexStartedAt: 0,
+  editorIndexFrozen: false,
+  editorIndexFrozenPrevReadOnly: undefined,
+  indexFreezeActive: false,
   projectProfile: null,
   repoPickerUnregisterName: null,
+  patTokenPendingRemove: null,
   treeNavAnchor: null,
   mergeState: null,
   conflictDecorationIds: [],
@@ -153,6 +262,7 @@ const state = {
 };
 
 let diagTimer = null;
+let allJavaDiagTimer = null;
 let diagSeq = 0;
 let fileDiags = [];
 let diagJumpIndex = 0;
@@ -192,14 +302,107 @@ function repoApi(name, suffix = '') {
   return `/api/repos/${encodeURIComponent(name)}${suffix}`;
 }
 
+const TOAST_ICONS = {
+  error: 'toastError',
+  warning: 'toastWarning',
+  success: 'toastSuccess',
+  info: 'toastInfo',
+};
+
+const TOAST_KINDS = {
+  error: 'Error',
+  warning: 'Notice',
+  success: 'Done',
+  info: '',
+};
+
+function dismissToast() {
+  const el = $('#toast');
+  const slot = $('#toast-slot');
+  if (!el || !slot || slot.classList.contains('hidden') || slot.classList.contains('is-closing')) return;
+  clearTimeout(toast._timer);
+  const progress = el.querySelector('.ij-toast-progress-fill');
+  if (progress) progress.style.animationPlayState = 'paused';
+  slot.classList.remove('is-open');
+  slot.classList.add('is-closing');
+  const finish = () => {
+    slot.classList.add('hidden');
+    slot.classList.remove('is-open', 'is-closing');
+    if (progress) progress.style.animation = '';
+  };
+  const onEnd = (e) => {
+    if (e.target !== slot || e.animationName !== 'ij-toast-roll-up') return;
+    slot.removeEventListener('animationend', onEnd);
+    finish();
+  };
+  slot.addEventListener('animationend', onEnd);
+  setTimeout(finish, 520);
+}
+
 function toast(msg, type = 'info', { duration } = {}) {
   const el = $('#toast');
-  el.textContent = msg;
+  const slot = $('#toast-slot');
+  if (!el || !slot) {
+    console.error('[toast missing]', msg);
+    return;
+  }
+  const msgEl = el.querySelector('.ij-toast-message');
+  const iconEl = el.querySelector('.ij-toast-icon');
+  const kindEl = el.querySelector('.ij-toast-kind');
+  if (msgEl) msgEl.textContent = msg;
+  if (iconEl) {
+    iconEl.dataset.icon = TOAST_ICONS[type] || TOAST_ICONS.info;
+    mountReaperIcons(el);
+  }
+  if (kindEl) {
+    const kind = TOAST_KINDS[type] || '';
+    kindEl.textContent = kind;
+    kindEl.classList.toggle('hidden', !kind);
+  }
   el.className = `ij-toast ${type}`;
-  el.classList.remove('hidden');
+  slot.classList.remove('hidden', 'is-closing', 'is-open');
+  void slot.offsetWidth;
+  slot.classList.add('is-open');
   clearTimeout(toast._timer);
   const ms = duration ?? (type === 'error' ? 9000 : 3500);
-  toast._timer = setTimeout(() => el.classList.add('hidden'), ms);
+  const progress = el.querySelector('.ij-toast-progress-fill');
+  if (progress) {
+    progress.style.animation = 'none';
+    void progress.offsetWidth;
+    progress.style.animation = `ij-toast-progress ${ms}ms linear forwards`;
+  }
+  toast._timer = setTimeout(dismissToast, ms);
+}
+
+function gradleClassfileVersionToast(output) {
+  if (!/Unsupported class file major version/i.test(String(output || ''))) return false;
+  const m = String(output).match(/major version\s+(\d+)/i);
+  const classMajor = m ? Number(m[1]) : 0;
+  const javaMajor = classMajor >= 45 ? classMajor - 44 : classMajor;
+  let msg = 'Gradle needs a compatible JDK — open Settings → Java and pick Java 21 or 17.';
+  if (javaMajor >= 25) {
+    msg = `Java ${javaMajor} is too new for this Gradle version (class file ${classMajor}). Set Settings → Java to Java 21 or 17 for Gradle builds.`;
+  } else if (javaMajor > 0 && javaMajor < 17) {
+    msg = `Java ${javaMajor} is too old for this Gradle version. Use Java 17 or 21 in Settings → Java.`;
+  }
+  toast(msg, 'error', { duration: 14000 });
+  return true;
+}
+
+function completionDebugEnabled() {
+  try {
+    return localStorage.getItem('reaper-complete-debug') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setCompleteDebugStatus(msg) {
+  if (!completionDebugEnabled()) return;
+  const line = String(msg || '');
+  const dbg = $('#status-complete-debug');
+  if (dbg) dbg.textContent = line;
+  console.log('[Reaper complete]', line);
 }
 
 function setGlobalLoading(on, text = 'Loading…') {
@@ -327,8 +530,20 @@ function getEditorFontSize() {
   return DEFAULT_EDITOR_FONT_SIZE;
 }
 
+const LEGACY_EDITOR_FONT_IDS = new Set(['jetbrains-mono', 'jetbrains', 'intellij']);
+
+function normalizeEditorFontId(id) {
+  if (!id || LEGACY_EDITOR_FONT_IDS.has(id)) return DEFAULT_EDITOR_FONT_ID;
+  return id;
+}
+
 function getEditorFontSpec() {
-  const id = localStorage.getItem(EDITOR_FONT_FAMILY_KEY) || DEFAULT_EDITOR_FONT_ID;
+  const stored = localStorage.getItem(EDITOR_FONT_FAMILY_KEY);
+  const id = normalizeEditorFontId(stored || DEFAULT_EDITOR_FONT_ID);
+  if (stored && id !== stored) {
+    localStorage.setItem(EDITOR_FONT_FAMILY_KEY, id);
+    document.getElementById('reaper-font-jetbrains-mono')?.remove();
+  }
   return EDITOR_FONTS.find((f) => f.id === id) || EDITOR_FONTS[0];
 }
 
@@ -347,7 +562,11 @@ function getAgentFontSize() {
 
 function getAgentFontSpec() {
   if (getAgentFontMatchEditor()) return getEditorFontSpec();
-  const id = localStorage.getItem(AGENT_FONT_FAMILY_KEY) || DEFAULT_EDITOR_FONT_ID;
+  const stored = localStorage.getItem(AGENT_FONT_FAMILY_KEY);
+  const id = normalizeEditorFontId(stored || DEFAULT_EDITOR_FONT_ID);
+  if (stored && id !== stored) {
+    localStorage.setItem(AGENT_FONT_FAMILY_KEY, id);
+  }
   return EDITOR_FONTS.find((f) => f.id === id) || EDITOR_FONTS[0];
 }
 
@@ -429,7 +648,8 @@ async function initStatusFooter() {
   try {
     const info = await api('/api/version');
     if (info) {
-      apply(info.version || version, info.build || metaBuild);
+      // Prefer meta tag (loaded static bundle) over compile-time API build.
+      apply(info.version || version, metaBuild || info.build);
     }
   } catch {
     /* server still starting */
@@ -438,7 +658,7 @@ async function initStatusFooter() {
 
 function getAiInlineCompleteEnabled() {
   const stored = localStorage.getItem(AI_INLINE_COMPLETE_KEY);
-  if (stored === null) return state.geminiConfigured;
+  if (stored === null) return true;
   return stored === '1';
 }
 
@@ -463,11 +683,14 @@ function getShowDotfiles() {
 function setShowDotfiles(show) {
   localStorage.setItem(SHOW_DOTFILES_KEY, show ? '1' : '0');
   syncDotfilesControls(show);
-  renderFilteredTree();
+  if (state.repo) {
+    void refreshTree().then(() => refreshGitStatus());
+  }
 }
 
 function getNewWindowOnRepoChange() {
   const stored = localStorage.getItem(NEW_WINDOW_ON_REPO_KEY);
+  if (stored === null) return true;
   return stored === '1' || stored === 'true';
 }
 
@@ -649,9 +872,24 @@ function setAgentFontMatchEditor(match) {
   applyAgentTypography();
 }
 
+function applyUiTypography() {
+  const size = getEditorFontSize();
+  document.documentElement.style.setProperty('--ij-ui-font-size', `${size}px`);
+}
+
+function syncTerminalFontSize() {
+  const size = getEditorFontSize();
+  for (const term of state.terminals || []) {
+    if (!term?.xterm) continue;
+    term.xterm.options.fontSize = size;
+    fitTerminal(term);
+  }
+}
+
 function applyEditorFontSize(size) {
   const clamped = Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)));
   localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(clamped));
+  applyUiTypography();
   if (state.editor) {
     state.editor.updateOptions({
       fontSize: clamped,
@@ -661,6 +899,7 @@ function applyEditorFontSize(size) {
   if (getAgentFontMatchEditor()) {
     applyAgentTypography();
   }
+  syncTerminalFontSize();
   syncFontSizeControls(clamped);
   syncAgentFontControls();
   updateEditorFontPreview();
@@ -820,6 +1059,7 @@ function loadAppearanceSettingsSection() {
     }
   }
   syncDotfilesControls(getShowDotfiles());
+  void populateDefaultRepoSelect();
   const newWindowOnRepo = $('#settings-new-window-on-repo');
   if (newWindowOnRepo) {
     newWindowOnRepo.checked = getNewWindowOnRepoChange();
@@ -827,6 +1067,68 @@ function loadAppearanceSettingsSection() {
       newWindowOnRepo.dataset.bound = '1';
       newWindowOnRepo.addEventListener('change', (e) => setNewWindowOnRepoChange(e.target.checked));
     }
+  }
+}
+
+async function populateDefaultRepoSelect() {
+  const select = $('#settings-default-repo');
+  if (!select) return;
+  try {
+    const [general, repos] = await Promise.all([
+      api('/api/settings/general'),
+      state.repos.length ? Promise.resolve(state.repos) : api('/api/repos'),
+    ]);
+    const current = general?.default_repo || '';
+    const names = (repos || []).map((r) => r.name);
+    select.innerHTML = '<option value="">None — show welcome screen</option>'
+      + names.map((name) => `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    await updateDefaultRepoFolderDisplay(current, repos || []);
+    if (!select.dataset.bound) {
+      select.dataset.bound = '1';
+      select.addEventListener('change', async (e) => {
+        const value = e.target.value.trim();
+        try {
+          await api('/api/settings/general', {
+            method: 'PATCH',
+            body: JSON.stringify({ default_repo: value || null }),
+          });
+          toast(value ? `Default repo set to ${value}` : 'Default repo cleared', 'success');
+          await updateDefaultRepoFolderDisplay(value, state.repos);
+        } catch (err) {
+          toast(err.message, 'error');
+          populateDefaultRepoSelect();
+        }
+      });
+    }
+  } catch (err) {
+    select.innerHTML = `<option value="">Could not load: ${escapeHtml(err.message)}</option>`;
+  }
+}
+
+async function updateDefaultRepoFolderDisplay(repoName, repos) {
+  const wrap = $('#settings-default-repo-folder');
+  const pathEl = $('#settings-default-repo-folder-path');
+  if (!wrap || !pathEl) return;
+  if (!repoName) {
+    wrap.classList.add('hidden');
+    pathEl.textContent = '';
+    return;
+  }
+  let folder = repos.find((r) => r.name === repoName)?.project_folder || '';
+  if (!folder) {
+    try {
+      const detail = await api(repoApi(repoName));
+      folder = detail.summary?.project_folder || detail.project_folder || '';
+    } catch {
+      folder = '';
+    }
+  }
+  if (folder) {
+    pathEl.textContent = folder;
+    wrap.classList.remove('hidden');
+  } else {
+    wrap.classList.add('hidden');
+    pathEl.textContent = '';
   }
 }
 
@@ -855,8 +1157,17 @@ async function loadPatTokensList() {
     }
     list.innerHTML = tokens.map((t) => {
       const removable = t.source === 'settings';
+      if (removable && state.patTokenPendingRemove === t.host) {
+        return `<div class="ij-settings-token-row ij-settings-token-row--confirm">
+          <span class="ij-settings-token-confirm-text">Remove token for <strong>${escapeHtml(t.host)}</strong>?</span>
+          <div class="ij-settings-token-confirm-actions">
+            <button type="button" class="ij-settings-remove" data-pat-remove-confirm="${escapeHtml(t.host)}">Remove</button>
+            <button type="button" class="ij-settings-remove ghost" data-pat-remove-cancel>Cancel</button>
+          </div>
+        </div>`;
+      }
       const removeBtn = removable
-        ? `<button type="button" class="ij-settings-remove" data-host="${escapeHtml(t.host)}">Remove</button>`
+        ? `<button type="button" class="ij-settings-remove" data-pat-remove="${escapeHtml(t.host)}">Remove</button>`
         : '<span class="text-[10px] text-gray-600 shrink-0">read-only</span>';
       return `<div class="ij-settings-token-row">
         <div class="min-w-0">
@@ -866,8 +1177,20 @@ async function loadPatTokensList() {
         ${removeBtn}
       </div>`;
     }).join('');
-    list.querySelectorAll('.ij-settings-remove').forEach((btn) => {
-      btn.addEventListener('click', () => removePatToken(btn.dataset.host));
+    list.querySelectorAll('[data-pat-remove]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.patTokenPendingRemove = btn.dataset.patRemove;
+        loadPatTokensList();
+      });
+    });
+    list.querySelectorAll('[data-pat-remove-confirm]').forEach((btn) => {
+      btn.addEventListener('click', () => removePatToken(btn.dataset.patRemoveConfirm));
+    });
+    list.querySelectorAll('[data-pat-remove-cancel]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.patTokenPendingRemove = null;
+        loadPatTokensList();
+      });
     });
   } catch (err) {
     list.innerHTML = `<p class="ij-settings-empty">${escapeHtml(err.message)}</p>`;
@@ -875,9 +1198,10 @@ async function loadPatTokensList() {
 }
 
 async function removePatToken(host) {
-  if (!host || !confirm(`Remove token for ${host}?`)) return;
+  if (!host) return;
   try {
     await api(`/api/settings/tokens/${encodeURIComponent(host)}`, { method: 'DELETE' });
+    state.patTokenPendingRemove = null;
     toast(`Removed token for ${host}`, 'success');
     await loadPatTokensList();
   } catch (err) {
@@ -1118,12 +1442,14 @@ async function showSettingsModal(tab = 'git') {
   overlay?.classList.add('flex');
   $('.ij-settings-modal')?.classList.toggle('ij-settings-modal--compiler', tab === 'compilers');
   void loadSettingsModal();
-  setTimeout(() => {
-    if (tab === 'cursor') $('#settings-cursor-key')?.focus();
-    else if (tab === 'ai') $('#settings-gemini-key')?.focus();
-    else if (tab === 'appearance') $('#settings-editor-font-size')?.focus();
-    else if (tab === 'compilers') $('#settings-compiler-search')?.focus();
-    else $('#settings-pat-host')?.focus();
+  setTimeout(async () => {
+    let field;
+    if (tab === 'cursor') field = $('#settings-cursor-key');
+    else if (tab === 'ai') field = $('#settings-gemini-key');
+    else if (tab === 'appearance') field = $('#settings-editor-font-size');
+    else if (tab === 'compilers') field = $('#settings-compiler-search');
+    else field = $('#settings-pat-host');
+    field?.focus();
   }, 50);
 }
 
@@ -1155,7 +1481,7 @@ async function saveCursorKeyFromSettings(e) {
   e?.preventDefault();
   const key = $('#settings-cursor-key')?.value.trim();
   if (!key) {
-    toast('Paste your Cursor API key', 'error');
+    toast('Enter your Cursor API key', 'error');
     $('#settings-cursor-key')?.focus();
     return;
   }
@@ -1216,6 +1542,7 @@ async function loadGeminiSettingsSection() {
     state.geminiConfigured = !!cfg.configured;
     ensureAiInlineCompleteDefault(cfg.configured);
     syncGeminiModelSelect(cfg.model);
+    refreshAgentProviderUi();
     if (cfg.configured) {
       statusEl.innerHTML = '<span class="ok">AI commit messages are enabled</span>';
       form?.classList.add('hidden');
@@ -1247,6 +1574,7 @@ async function loadGeminiSettingsSection() {
     state.geminiConfigured = false;
     form?.classList.remove('hidden');
     changeBtn?.classList.add('hidden');
+    refreshAgentProviderUi();
   }
 }
 
@@ -1415,9 +1743,9 @@ function treeIconSvg(kind) {
   const icons = {
     folder: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3.172a1.5 1.5 0 0 1 1.06.44L9.085 4.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V4.5Z" fill="currentColor" fill-opacity=".9"/></svg>',
     folderOpen: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 6.5A1.5 1.5 0 0 1 3 5h2.55a1 1 0 0 1 .707.293L6.414 7H12.5A1.5 1.5 0 0 1 14 8.5V12a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12V6.5Z" fill="currentColor" fill-opacity=".92"/></svg>',
-    java: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#9876aa" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#9876aa" font-family="JetBrains Mono,Consolas,monospace">J</text></svg>',
-    gradle: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6a8759" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#6a8759" font-family="JetBrains Mono,Consolas,monospace">G</text></svg>',
-    kotlin: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#7f52ff" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#7f52ff" font-family="JetBrains Mono,Consolas,monospace">K</text></svg>',
+    java: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#9876aa" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#9876aa" font-family="Consolas,Menlo,monospace">J</text></svg>',
+    gradle: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6a8759" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#6a8759" font-family="Consolas,Menlo,monospace">G</text></svg>',
+    kotlin: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#7f52ff" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#7f52ff" font-family="Consolas,Menlo,monospace">K</text></svg>',
     rust: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#a17358" fill-opacity=".2"/><text x="8" y="11" text-anchor="middle" font-size="7" font-weight="700" fill="#a17358" font-family="Inter,sans-serif">R</text></svg>',
     js: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#cbcb41" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#cbcb41" font-family="Inter,sans-serif">JS</text></svg>',
     ts: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".2"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">TS</text></svg>',
@@ -1433,7 +1761,7 @@ function treeIconSvg(kind) {
     go: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="7" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">Go</text></svg>',
     sql: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">SQL</text></svg>',
     docker: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">D</text></svg>',
-    git: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#f14c28" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#f14c28" font-family="JetBrains Mono,Consolas,monospace">G</text></svg>',
+    git: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#f14c28" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#f14c28" font-family="Consolas,Menlo,monospace">G</text></svg>',
     file: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2.5h5.5L12 5v8.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z" fill="currentColor" fill-opacity=".28"/><path d="M9.5 2.5V5H12" stroke="currentColor" stroke-opacity=".55" stroke-width=".8"/></svg>',
   };
   return icons[kind] || icons.file;
@@ -1467,6 +1795,70 @@ function updateBreadcrumbs(path) {
 function updateEditorStatus(pos) {
   const el = $('#status-cursor');
   if (el && pos) el.textContent = `${pos.lineNumber}:${pos.column}`;
+  updateDiagnosticHintAtCursor(pos);
+}
+
+function diagnosticFriendlyHint(msg) {
+  const lower = String(msg || '').toLowerCase();
+  if (lower.includes('reached end of file while parsing')) {
+    return ' — check for a missing closing brace }';
+  }
+  if (lower.includes("'}' expected") || lower.includes('\'}\' expected')) {
+    return ' — add a closing brace }';
+  }
+  if (lower.includes('illegal start of type') && lower.includes('}')) {
+    return ' — a method or block may be missing }';
+  }
+  return '';
+}
+
+function formatDiagnosticDisplay(d) {
+  const msg = String(d?.message || '').trim();
+  if (!msg) return '';
+  const prefix = d.severity === 'warning' ? 'Warning: ' : 'Error: ';
+  return `${prefix}${msg}${diagnosticFriendlyHint(msg)}`;
+}
+
+function truncateDiagnosticText(text, max = 72) {
+  const s = String(text || '').trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
+}
+
+function primaryDiagnosticForUi(model, diags) {
+  if (!diags.length) return null;
+  const pos = state.editor?.getPosition();
+  if (model && pos) {
+    const atCursor = findDiagnosticNearLine(model, pos.lineNumber);
+    if (atCursor) return atCursor;
+  }
+  const errors = diags.filter((d) => d.severity !== 'warning');
+  return errors[0] || diags[0];
+}
+
+function updateDiagnosticHintAtCursor(pos) {
+  const hint = $('#status-diag-hint');
+  if (!hint) return;
+  const model = state.editor?.getModel();
+  if (!model || !pos || !fileDiags.length) {
+    hint.classList.add('hidden');
+    hint.textContent = '';
+    hint.title = '';
+    return;
+  }
+  const d = findDiagnosticNearLine(model, pos.lineNumber);
+  if (!d) {
+    hint.classList.add('hidden');
+    hint.textContent = '';
+    hint.title = '';
+    return;
+  }
+  const formatted = formatDiagnosticDisplay(d);
+  hint.classList.remove('hidden');
+  hint.classList.toggle('is-error', d.severity !== 'warning');
+  hint.classList.toggle('is-warning', d.severity === 'warning');
+  hint.textContent = truncateDiagnosticText(formatted, 96);
+  hint.title = formatted;
 }
 
 function setStatusMessage(msg) {
@@ -1479,7 +1871,137 @@ function stopProjectIndexPolling() {
     clearInterval(state.projectIndexPoll);
     state.projectIndexPoll = null;
   }
+  clearIndexingProgressUi();
+}
+
+function projectIndexNeedsFreeze(status) {
+  if (!status) return false;
+  const indexers = status.profile?.indexers || [];
+  const needsJava = indexers.includes('java');
+  const javaRunning = status.java?.state === 'running';
+  return status.state === 'running' || (needsJava && javaRunning);
+}
+
+function indexingPhaseLabel(phase) {
+  switch (phase) {
+    case 'workspace-symbols': return 'Scanning workspace symbols';
+    case 'java-index': return 'Building Java index';
+    case 'classpath': return 'Resolving dependencies';
+    case 'sources':
+    case 'extracting-sources': return 'Extracting library sources';
+    case 'indexing': return 'Indexing Java symbols';
+    case 'jar-index': return 'Indexing dependency classes';
+    case 'writing': return 'Saving index';
+    case 'starting': return 'Starting';
+    case 'ready': return 'Ready';
+    default: return phase ? phase.replace(/-/g, ' ') : 'Indexing';
+  }
+}
+
+function indexingProgressPercent(status) {
+  if (!status) return 0;
+  if (status.state === 'ready') return 100;
+  const java = status.java || {};
+  const phase = status.phase || java.phase || '';
+  const wsN = status.workspace_symbols || 0;
+  const rawJavaN = java.symbol_count || 0;
+
+  if (phase === 'writing') return 96;
+  if (phase === 'jar-index') {
+    const base = Math.floor(rawJavaN / 1000) * 1000;
+    const jarFrac = rawJavaN - base;
+    const jarPct = Math.min(999, Math.max(0, jarFrac));
+    return Math.min(94, 72 + Math.round((jarPct / 999) * 22));
+  }
+  if (phase === 'extracting-sources') {
+    return Math.min(32, 18 + Math.round((rawJavaN / 1000) * 14));
+  }
+  if (phase === 'indexing' || rawJavaN > 0) {
+    const symPct = Math.min(1, rawJavaN / 120000);
+    return Math.min(70, 32 + Math.round(symPct * 38));
+  }
+  if (phase === 'sources') return 22;
+  if (phase === 'classpath') return 14;
+  if (phase === 'java-index') return 26;
+  if (phase === 'workspace-symbols') return wsN > 0 ? 22 : 12;
+  if (wsN > 0) return 25;
+  return 8;
+}
+
+function formatIndexingProgress(status) {
+  const label = status?.label || indexingLabelFromProfile(status?.profile) || 'project';
+  const java = status?.java || {};
+  const phase = java.phase || status?.phase || 'starting';
+  const phaseLabel = indexingPhaseLabel(phase);
+  const wsN = status?.workspace_symbols || 0;
+  const rawJavaN = java.symbol_count || 0;
+  const javaN = phase === 'jar-index'
+    ? Math.floor(rawJavaN / 1000) * 1000
+    : rawJavaN;
+  const parts = [];
+  if (wsN > 0) parts.push(`${wsN.toLocaleString()} workspace`);
+  if (javaN > 0) parts.push(`${javaN.toLocaleString()} Java`);
+  if (java.spring_symbols > 0) parts.push(`${java.spring_symbols.toLocaleString()} Spring`);
+  const detail = parts.length ? parts.join(' · ') : phaseLabel;
+  const pct = indexingProgressPercent(status);
+  return {
+    title: `Indexing ${label}…`,
+    phase: phaseLabel,
+    stats: parts.join(' · '),
+    detail,
+    percent: pct,
+  };
+}
+
+function applyIndexingProgressUi({ title, phase, stats, percent, show, label }) {
+  const pct = Math.max(0, Math.min(100, percent || 0));
+  const pctText = `${pct}%`;
+  const fillBanner = $('#banner-index-progress-fill');
+  const fillCard = $('#editor-index-progress-fill');
+  const pctBanner = $('#java-index-banner-pct');
+  const pctCard = $('#editor-index-overlay-pct');
+  const overlay = $('#editor-index-overlay');
+  const overlayTitle = $('#editor-index-overlay-title');
+  const overlayPhase = $('#editor-index-overlay-text');
+  const overlayStats = $('#editor-index-progress-detail');
+  const bannerLabel = $('#java-index-banner-label');
+  const bannerText = $('#java-index-banner-text');
+
+  if (fillBanner) fillBanner.style.width = `${pct}%`;
+  if (fillCard) fillCard.style.width = `${pct}%`;
+  if (pctBanner) pctBanner.textContent = show ? pctText : '';
+  if (pctCard) pctCard.textContent = show ? pctText : '';
+  if (overlayTitle && title) overlayTitle.textContent = title;
+  if (overlayPhase) overlayPhase.textContent = phase || '';
+  if (overlayStats) overlayStats.textContent = stats || '';
+  if (bannerLabel) bannerLabel.textContent = show && label ? label : 'Indexing';
+  if (bannerText) {
+    bannerText.textContent = stats
+      ? `${phase || ''}${phase && stats ? ' — ' : ''}${stats}`
+      : (phase || 'Preparing workspace…');
+  }
+  // Banner only — never cover the editor; the veil blocks Monaco suggest widgets.
+  overlay?.classList.add('hidden');
+  overlay?.setAttribute('aria-hidden', 'true');
+}
+
+function clearIndexingProgressUi() {
   $('#java-index-banner')?.classList.add('hidden');
+  applyIndexingProgressUi({ show: false });
+  state.editorIndexFrozen = false;
+  state.indexFreezeActive = false;
+  if (state.editor && window.monaco) {
+    state.editor.updateOptions({ readOnly: false });
+    state.editorIndexFrozenPrevReadOnly = undefined;
+  }
+}
+
+function indexingLabelFromProfile(profile) {
+  const langs = (profile?.languages || []).join(', ');
+  const frameworks = (profile?.frameworks || []).filter((f) => f !== 'gradle' && f !== 'maven');
+  if (frameworks.length) return frameworks.join(', ');
+  if (langs) return langs;
+  return 'project';
 }
 
 function startProjectIndexPolling() {
@@ -1492,52 +2014,201 @@ function startProjectIndexPolling() {
 
 function updateProjectIndexUi(status) {
   const banner = $('#java-index-banner');
-  const bannerText = $('#java-index-banner-text');
-  banner?.classList.add('hidden');
 
-  state.projectIndexRunning = status?.state === 'running';
-  const javaReady = status?.java?.state === 'ready' && (status?.java?.dependency_jars || 0) > 0;
-  state.projectIndexReady = status?.state === 'ready' && (javaReady || (status?.workspace_symbols || 0) > 0);
+  state.projectIndexRunning = projectIndexNeedsFreeze(status);
+  const javaReady = status?.java?.state === 'ready'
+    && (status?.java?.symbol_count || 0) > 0;
+  const javaHasSymbols = (status?.java?.symbol_count || 0) > 0;
+  state.projectIndexReady = status?.state === 'ready'
+    && (javaReady || (status?.workspace_symbols || 0) > 0)
+    || javaHasSymbols;
   state.projectProfile = status?.profile || null;
 
-  if (status?.state === 'running') {
-    const label = status.label || 'project';
-    const parts = [];
-    if (status.java?.symbol_count > 0) {
-      parts.push(`${Number(status.java.symbol_count).toLocaleString()} Java symbols`);
-    }
-    if (status.workspace_symbols > 0) {
-      parts.push(`${Number(status.workspace_symbols).toLocaleString()} workspace symbols`);
-    }
-    const detail = parts.length ? ` (${parts.join(', ')})` : '';
-    setStatusMessage(`Indexing ${label}${detail}…`);
-    if (bannerText) bannerText.textContent = `Indexing ${label}…`;
+  updateProjectReloadButton();
+
+  maybeAutoRefreshProjectIndex(status);
+
+  if (projectIndexNeedsFreeze(status)) {
+    const progress = formatIndexingProgress(status);
+    setStatusMessage(`${progress.title} — ${progress.detail}`);
     banner?.classList.remove('hidden');
+    applyIndexingProgressUi({
+      title: progress.title,
+      label: status?.label || indexingLabelFromProfile(status?.profile),
+      phase: progress.phase,
+      stats: progress.stats,
+      percent: progress.percent ?? 5,
+      show: true,
+    });
     return;
   }
 
+  clearIndexingProgressUi();
+
   if (status?.state === 'ready' && !state.projectIndexNotified) {
     state.projectIndexNotified = true;
-    const label = status.label || 'Project';
-    const javaN = status.java?.symbol_count ?? 0;
-    const wsN = status.workspace_symbols ?? 0;
-    const springN = status.java?.spring_symbols ?? 0;
-    const jdkN = status.java?.jdk_symbols ?? 0;
-    const total = javaN + wsN;
-    const langs = (status.profile?.languages || []).join(', ') || label.toLowerCase();
-    const detail = [
-      springN ? `${springN.toLocaleString()} Spring` : '',
-      jdkN ? `${jdkN.toLocaleString()} JDK` : '',
-    ].filter(Boolean).join(', ');
-    toast(
-      `${label} index ready — ${total.toLocaleString()} symbols${detail ? ` (${detail})` : ''} [${langs}]`,
-      springN > 0 || !status.profile?.frameworks?.includes('spring-boot') ? 'success' : 'warning',
-    );
-    terminalLog(`${label} index ready: ${total.toLocaleString()} symbols`);
-    if (state.activeTab?.endsWith('.java')) scheduleDiagnostics();
+    const background = state.projectReloadBackground;
+    state.projectReloadBackground = false;
+    if (!background) {
+      const label = status.label || 'Project';
+      const javaN = status.java?.symbol_count ?? 0;
+      const wsN = status.workspace_symbols ?? 0;
+      const springN = status.java?.spring_symbols ?? 0;
+      const jdkN = status.java?.jdk_symbols ?? 0;
+      const total = javaN + wsN;
+      const langs = (status.profile?.languages || []).join(', ') || label.toLowerCase();
+      const detail = [
+        javaN ? `${javaN.toLocaleString()} Java` : '',
+        wsN ? `${wsN.toLocaleString()} workspace` : '',
+        springN ? `${springN.toLocaleString()} Spring` : '',
+        jdkN ? `${jdkN.toLocaleString()} JDK` : '',
+      ].filter(Boolean).join(', ');
+      toast(
+        `${label} index ready — ${total.toLocaleString()} symbols${detail ? ` (${detail})` : ''} [${langs}]`,
+        springN > 0 || !status.profile?.frameworks?.includes('spring-boot') ? 'success' : 'warning',
+      );
+      terminalLog(`${label} index ready: ${total.toLocaleString()} symbols`);
+    }
+    refreshProjectClasspathUi();
   } else if (status?.state === 'error' && !state.projectIndexNotified) {
     state.projectIndexNotified = true;
-    toast(`Project indexing failed: ${status.error || status.java?.error || 'unknown error'}`, 'error');
+    state.projectReloadBackground = false;
+    if (!state.projectReloadPending) {
+      toast(`Project indexing failed: ${status.error || status.java?.error || 'unknown error'}`, 'error');
+    }
+  }
+
+  if (!projectIndexNeedsFreeze(status) && state.projectReloadPending) {
+    state.projectReloadPending = false;
+    scheduleProjectReload(0);
+  }
+}
+
+function isProjectBuildFile(path) {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  const base = normalized.split('/').pop() || '';
+  if (base === 'pom.xml') return true;
+  if (base === 'build.gradle' || base === 'build.gradle.kts') return true;
+  if (base === 'settings.gradle' || base === 'settings.gradle.kts') return true;
+  if (base === 'gradle.properties') return true;
+  if (normalized.endsWith('/gradle/libs.versions.toml')) return true;
+  return false;
+}
+
+function isProjectSourceFile(path) {
+  if (!path || path.startsWith('.reaper/')) return false;
+  return path.replace(/\\/g, '/').endsWith('.java');
+}
+
+/** Java sources or Maven/Gradle files that change the classpath when edited. */
+function isProjectClasspathFile(path) {
+  return isProjectSourceFile(path) || isProjectBuildFile(path);
+}
+
+function hasAutoReloadProject() {
+  return hasJavaBuildToolProject() || Boolean(state.runInfo?.has_project);
+}
+
+function projectStatusNeedsAutoRefresh(status) {
+  if (!status) return false;
+  if (status.needs_refresh) return true;
+  const indexers = status.profile?.indexers || [];
+  if (!indexers.includes('java')) return false;
+  const java = status.java || {};
+  const frameworks = status.profile?.frameworks || [];
+  const isSpring = frameworks.includes('spring-boot') || frameworks.includes('spring-test');
+  if (isSpring && java.state === 'ready' && (java.dependency_jars || 0) === 0) return true;
+  if (java.state === 'idle' && (java.symbol_count || 0) === 0 && indexers.includes('java')) return true;
+  return false;
+}
+
+function maybeAutoRefreshProjectIndex(status) {
+  if (!state.repo || state.projectIndexRunning) return;
+  if (state.projectAutoRefreshAttempts >= PROJECT_AUTO_REFRESH_MAX) return;
+  if (!projectStatusNeedsAutoRefresh(status)) return;
+  state.projectAutoRefreshAttempts += 1;
+  state.projectReloadBackground = true;
+  reloadProjectIndex({ silent: true });
+}
+
+function scheduleProjectReload(delayMs) {
+  if (!state.repo || !hasAutoReloadProject()) return;
+  if (!state.activeTab || !isProjectClasspathFile(state.activeTab)) return;
+  const delay = delayMs ?? (
+    isProjectBuildFile(state.activeTab) ? PROJECT_BUILD_RELOAD_DELAY_MS : PROJECT_RELOAD_DELAY_MS
+  );
+  clearTimeout(state.projectReloadTimer);
+  state.projectReloadTimer = setTimeout(() => runBackgroundProjectReload(), delay);
+}
+
+async function runBackgroundProjectReload() {
+  state.projectReloadTimer = null;
+  if (!state.repo || !hasAutoReloadProject()) return;
+  if (state.projectIndexRunning) {
+    state.projectReloadPending = true;
+    return;
+  }
+  const path = state.activeTab;
+  if (!path || !isProjectClasspathFile(path)) return;
+  try {
+    if (state.dirty.has(path)) {
+      await saveFile({ silent: true, skipProjectReload: true });
+    }
+    state.projectReloadBackground = true;
+    await reloadProjectIndex({ silent: true });
+  } catch {
+    state.projectReloadBackground = false;
+  }
+}
+
+function hasJavaBuildToolProject() {
+  const frameworks = state.projectProfile?.frameworks || [];
+  return frameworks.includes('maven') || frameworks.includes('gradle');
+}
+
+function projectBuildToolName() {
+  const frameworks = state.projectProfile?.frameworks || [];
+  if (frameworks.includes('maven')) return 'Maven';
+  if (frameworks.includes('gradle')) return 'Gradle';
+  return 'Maven/Gradle';
+}
+
+function updateProjectReloadButton() {
+  const show = Boolean(state.repo && hasJavaBuildToolProject());
+  const tool = projectBuildToolName();
+  const title = state.projectIndexRunning
+    ? `Re-indexing ${tool} project…`
+    : `Reload ${tool} project`;
+  const disabled = !show || state.projectIndexRunning;
+  for (const sel of ['#tb-reload-project', '#btn-reload-project']) {
+    const btn = $(sel);
+    if (!btn) continue;
+    btn.classList.toggle('hidden', !show);
+    btn.disabled = disabled;
+    if (show) {
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
+    }
+  }
+  setMenuDisabled('reload-project', disabled);
+}
+
+async function reloadProjectIndex(options = {}) {
+  const { silent = false } = options;
+  if (!state.repo) return;
+  try {
+    if (!silent) toast('Reloading Maven/Gradle project…', 'info');
+    state.projectIndexNotified = false;
+    state.projectIndexStartedAt = Date.now();
+    state.projectIndexRunning = true;
+    updateProjectReloadButton();
+    await api(repoApi(state.repo, '/workspace/project/reload'), { method: 'POST' });
+    startProjectIndexPolling();
+  } catch (err) {
+    state.projectIndexRunning = false;
+    updateProjectReloadButton();
+    if (!silent) toast(err.message || 'Failed to reload project', 'error');
   }
 }
 
@@ -1547,14 +2218,16 @@ async function pollProjectIndexStatus() {
     const status = await api(repoApi(state.repo, '/workspace/project/index-status'));
     updateProjectIndexUi(status);
     const elapsed = Date.now() - (state.projectIndexStartedAt || Date.now());
-    const timedOut = status?.state === 'running' && elapsed > 5 * 60 * 1000;
+    const timedOut = projectIndexNeedsFreeze(status) && elapsed > 5 * 60 * 1000;
     if (timedOut && !state.projectIndexNotified) {
       state.projectIndexNotified = true;
+      clearIndexingProgressUi();
       toast('Indexing is taking longer than expected — you can keep working; check Settings → Java if Gradle is stuck', 'warning', { duration: 12000 });
       stopProjectIndexPolling();
       return;
     }
-    if (status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') {
+    const javaStillRunning = status?.profile?.indexers?.includes('java') && status?.java?.state === 'running';
+    if ((status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') && !javaStillRunning) {
       stopProjectIndexPolling();
     }
   } catch {
@@ -1743,6 +2416,7 @@ function runMenuAction(action) {
     'settings-toolchains': () => showSettingsModal('compilers'),
     'settings-java': () => showSettingsModal('compilers'),
     run: runActive,
+    'reload-project': () => reloadProjectIndex(),
   };
   map[action]?.();
 }
@@ -1758,6 +2432,7 @@ const PALETTE_COMMANDS = [
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },
+  { id: 'reload-project', label: 'Reload Maven/Gradle project', run: () => reloadProjectIndex(), needsRepo: true, needsBuildTool: true },
   { id: 'new-file', label: 'New file', kbd: '⌘N', run: showFileModal, needsRepo: true },
   { id: 'save', label: 'Save', kbd: '⌘S', run: saveFile, needsTab: true, needsDirty: true },
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
@@ -1801,6 +2476,7 @@ function paletteMatches(cmd, query) {
 
 function paletteEnabled(cmd) {
   if (cmd.needsRepo && !state.repo) return false;
+  if (cmd.needsBuildTool && !hasJavaBuildToolProject()) return false;
   if (cmd.needsTab && !state.activeTab) return false;
   if (cmd.needsDirty && !(state.activeTab && state.dirty.has(state.activeTab))) return false;
   if (cmd.needsRun && ($('#tb-run')?.disabled ?? true)) return false;
@@ -1875,18 +2551,34 @@ function hideGoToClass() {
 let branchPickerIndex = 0;
 let branchPickerBranches = [];
 
+function withoutMasterBranch(name) {
+  return name === 'master' ? '' : (name || '');
+}
+
+function normalizeBranchList(branches) {
+  return (branches || []).filter((b) => b !== 'master');
+}
+
+function resolveDefaultBranch(defaultBranch, branches) {
+  const def = withoutMasterBranch(defaultBranch);
+  if (def && branches.includes(def)) return def;
+  if (branches.includes('main')) return 'main';
+  return branches[0] || '';
+}
+
 function setBranchLabel(branch) {
-  state.currentBranch = branch || '';
+  const normalized = withoutMasterBranch(branch);
+  state.currentBranch = normalized || '';
   const el = $('#branch-picker-label');
-  if (el) el.textContent = branch || 'branch';
+  if (el) el.textContent = normalized || 'branch';
   updateDefaultBranchUi();
 }
 
 function updateDefaultBranchUi() {
   const el = $('#repo-default-branch');
   if (!el) return;
-  const def = state.defaultBranch;
-  if (!state.repo || !def) {
+  const def = withoutMasterBranch(state.defaultBranch);
+  if (!state.repo || !def || def === state.currentBranch) {
     el.textContent = '';
     el.classList.add('hidden');
     el.title = '';
@@ -2048,7 +2740,7 @@ function renderRepoPickerResults() {
   const current = state.repo;
   const pending = state.repoPickerUnregisterName;
   results.innerHTML = state.repos.map((r) => {
-    const label = r.default_branch ? `${r.name} (${r.default_branch})` : r.name;
+    const label = r.name;
     const isCurrent = r.name === current;
     if (pending === r.name) {
       return `
@@ -2239,6 +2931,97 @@ function initSidebarResize() {
   });
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
+}
+
+function applyAgentRightWidth(px) {
+  const min = 240;
+  const max = Math.min(window.innerWidth * 0.5, 560);
+  const clamped = Math.min(max, Math.max(min, Math.round(px)));
+  document.documentElement.style.setProperty('--ij-agent-right-w', `${clamped}px`);
+  return clamped;
+}
+
+function applyAgentBottomHeight(px) {
+  const dock = $('#agent-dock-bottom');
+  if (!dock) return null;
+  const min = 180;
+  const max = Math.min(window.innerHeight * 0.7, 720);
+  const clamped = Math.min(max, Math.max(min, Math.round(px)));
+  dock.style.setProperty('--ij-agent-bottom-h', `${clamped}px`);
+  return clamped;
+}
+
+function initAgentDockResize() {
+  const savedW = localStorage.getItem(AGENT_RIGHT_WIDTH_KEY);
+  if (savedW) document.documentElement.style.setProperty('--ij-agent-right-w', savedW);
+
+  const savedH = parseInt(localStorage.getItem(AGENT_BOTTOM_HEIGHT_KEY), 10);
+  if (Number.isFinite(savedH)) applyAgentBottomHeight(savedH);
+
+  const resizer = $('#agent-right-resizer');
+  if (resizer) {
+    let dragging = false;
+    const onMove = (e) => {
+      if (!dragging) return;
+      applyAgentRightWidth(window.innerWidth - e.clientX);
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const w = getComputedStyle(document.documentElement).getPropertyValue('--ij-agent-right-w').trim();
+      if (w) localStorage.setItem(AGENT_RIGHT_WIDTH_KEY, w);
+    };
+    resizer.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onUp);
+  }
+
+  const handle = $('#agent-bottom-resize');
+  if (!handle) return;
+
+  let draggingBottom = false;
+  let startY = 0;
+  let startH = 0;
+
+  const stopBottomDrag = () => {
+    if (!draggingBottom) return;
+    draggingBottom = false;
+    handle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    const h = applyAgentBottomHeight($('#agent-dock-bottom')?.getBoundingClientRect().height);
+    if (h) localStorage.setItem(AGENT_BOTTOM_HEIGHT_KEY, String(h));
+  };
+
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    draggingBottom = true;
+    startY = e.clientY;
+    startH = $('#agent-dock-bottom')?.getBoundingClientRect().height || 0;
+    handle.classList.add('active');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!draggingBottom) return;
+    applyAgentBottomHeight(startH + (startY - e.clientY));
+  });
+
+  window.addEventListener('mouseup', stopBottomDrag);
+  window.addEventListener('blur', stopBottomDrag);
 }
 
 function bindPalette() {
@@ -2518,6 +3301,9 @@ function renderSideBySideHtml(diffText) {
   if (!diffText?.trim()) {
     return '<div class="ij-sbs-empty">No changes</div>';
   }
+  if (diffText.startsWith('(no diff')) {
+    return `<div class="ij-sbs-empty">${escapeHtml(diffText)}</div>`;
+  }
   const files = parseUnifiedDiff(diffText);
   if (!files.length) {
     return `<pre class="ij-sbs-empty">${escapeHtml(diffText)}</pre>`;
@@ -2541,10 +3327,14 @@ function renderSideBySideHtml(diffText) {
         </div>
       `;
     }).join('');
+    let emptyMsg = '<div class="ij-sbs-empty">No changes</div>';
+    if (/Binary files .* differ/i.test(diffText)) {
+      emptyMsg = '<div class="ij-sbs-empty">Binary file — preview not available</div>';
+    }
     return `
       <section class="ij-sbs-file">
         <div class="ij-sbs-file-header">${escapeHtml(file.path)}</div>
-        ${hunksHtml || '<div class="ij-sbs-empty">No hunks</div>'}
+        ${hunksHtml || emptyMsg}
       </section>
     `;
   }).join('');
@@ -2628,24 +3418,36 @@ function javaFqcnFromSource(path, content) {
   return simple;
 }
 
-function lineHasTestAnnotation(lines, idx) {
-  let i = idx;
-  while (i > 0 && !lines[i].trim()) i -= 1;
-  let scan = i;
-  for (;;) {
-    const trimmed = lines[scan].trim();
-    if (trimmed.startsWith('@')
-      && (trimmed.includes('@Test')
-        || trimmed.includes('@ParameterizedTest')
-        || trimmed.includes('@RepeatedTest')
-        || trimmed.includes('@TestFactory')
-        || trimmed.includes('@TestTemplate'))) {
-      return true;
-    }
-    if (!trimmed.startsWith('@') && trimmed) return false;
-    if (scan === 0) return false;
-    scan -= 1;
+function isTestAnnotationLine(line) {
+  const trimmed = (line || '').trim();
+  if (/^\s*(import|package)\b/.test(trimmed)) return false;
+  return /@Test|@ParameterizedTest|@RepeatedTest|@TestFactory|@TestTemplate/.test(trimmed);
+}
+
+/** Name from a method declaration (`void foo(`), not a call (`assertNotNull(`). */
+function testMethodDeclarationName(code) {
+  const trimmed = (code || '').split('//')[0].trim();
+  if (!trimmed || !trimmed.includes('(')) return null;
+  if (trimmed.includes('=') || trimmed.includes('new ')) return null;
+  const paren = trimmed.indexOf('(');
+  const before = trimmed.slice(0, paren).trim();
+  if (!before || !/\s/.test(before)) return null;
+  const token = before.split(/\s+/).filter((t) => !['public', 'protected', 'private', 'static', 'final', 'synchronized', 'abstract'].includes(t)).pop();
+  if (!token || ['void', 'class', 'int', 'long', 'boolean', 'char', 'byte', 'short', 'float', 'double'].includes(token)) return null;
+  if (!/^[A-Za-z_]\w*$/.test(token)) return null;
+  return token;
+}
+
+function testMethodAfterAnnotation(lines, annoIdx) {
+  const end = Math.min(annoIdx + 6, lines.length);
+  for (let j = annoIdx; j < end; j += 1) {
+    if (j > annoIdx && isTestAnnotationLine(lines[j])) break;
+    const trimmed = lines[j].trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    const name = testMethodDeclarationName(stripLeadingJavaAnnotations(trimmed));
+    if (name) return { sigIdx: j, name };
   }
+  return null;
 }
 
 function stripLeadingJavaAnnotations(line) {
@@ -2687,7 +3489,18 @@ function findJavaMethodSignatureIndex(lines, start) {
 }
 
 function parseJavaMethodName(line) {
-  const before = line.trim().split('(')[0];
+  const trimmed = line.split('//')[0].trim();
+  if (!trimmed || !trimmed.includes('(')) return null;
+  if (/^\s*(import|package)\b/.test(trimmed) || trimmed.startsWith('@')) return null;
+  for (const pat of ['if (', 'while (', 'for (', 'catch (', 'switch (', 'return ', 'throw ', 'new ']) {
+    if (trimmed.includes(pat)) return null;
+  }
+  if (trimmed.includes('=')) return null;
+  const paren = trimmed.indexOf('(');
+  const before = trimmed.slice(0, paren).trim();
+  if (!before || before.includes('.')) return null;
+  // Declarations have a return type or modifiers before the name; calls do not (assertNotNull(...)).
+  if (!/\s/.test(before)) return null;
   const token = before.split(/\s+/).filter((t) => !['public', 'protected', 'private', 'static', 'final', 'synchronized'].includes(t) && !t.endsWith('<')).pop();
   if (!token || token === 'void' || token === 'class') return null;
   if (!/^[A-Za-z_]\w*$/.test(token)) return null;
@@ -2743,28 +3556,23 @@ function listJavaTestMethods(path, content) {
   const out = [];
   let i = 0;
   while (i < lines.length) {
-    if (!lineHasTestAnnotation(lines, i)) {
+    if (!isTestAnnotationLine(lines[i])) {
       i += 1;
       continue;
     }
-    const sigIdx = findJavaMethodSignatureIndex(lines, i);
-    if (sigIdx < 0) {
+    const annoIdx = i;
+    const found = testMethodAfterAnnotation(lines, annoIdx);
+    if (!found) {
       i += 1;
       continue;
     }
-    const name = parseJavaMethodName(lines[sigIdx]);
-    if (!name) {
-      i = sigIdx + 1;
-      continue;
-    }
-    const end = javaMethodBlockEnd(lines, sigIdx);
-    const glyphIdx = findTestAnnotationLineIndex(lines, i, sigIdx);
+    const end = javaMethodBlockEnd(lines, found.sigIdx);
     out.push({
-      name,
-      line: sigIdx + 1,
-      glyphLine: glyphIdx + 1,
+      name: found.name,
+      line: found.sigIdx + 1,
+      glyphLine: annoIdx + 1,
       end_line: end + 1,
-      filter: `${className}.${name}`,
+      filter: `${className}.${found.name}`,
       isClass: false,
     });
     i = end + 1;
@@ -3057,18 +3865,43 @@ async function openConflictFile(path) {
 }
 
 // --- Monaco ---
+let pendingEditorPath = null;
+let pendingEditorContent = null;
+
 function setEditorContent(path, content) {
-  if (!state.editor) return;
+  const text = content ?? '';
+  if (!state.editor) {
+    pendingEditorPath = path;
+    pendingEditorContent = text;
+    return;
+  }
+  pendingEditorPath = null;
+  pendingEditorContent = null;
   state.suppressEditorChange = true;
-  state.editor.setValue(content ?? '');
-  monaco.editor.setModelLanguage(state.editor.getModel(), langForPath(path));
-  state.suppressEditorChange = false;
+  try {
+    state.editor.setValue(text);
+    const lang = langForPath(path);
+    window.ReaperLang?.ensureMonacoBasicLanguage?.(lang);
+    monaco.editor.setModelLanguage(state.editor.getModel(), lang);
+  } finally {
+    state.suppressEditorChange = false;
+  }
   applyTestRunDecorations();
+}
+
+function flushPendingEditorContent() {
+  if (!state.editor || pendingEditorPath == null) return;
+  const path = pendingEditorPath;
+  const content = pendingEditorContent;
+  pendingEditorPath = null;
+  pendingEditorContent = null;
+  setEditorContent(path, content);
 }
 
 function syncEditorFromActiveTab() {
   if (!state.editor || !state.activeTab || !state.tabContents.has(state.activeTab)) return;
   setEditorContent(state.activeTab, state.tabContents.get(state.activeTab));
+  flushPendingEditorContent();
 }
 
 function defaultReadmeContent(path) {
@@ -3078,8 +3911,32 @@ function defaultReadmeContent(path) {
   return `# ${title}\n\nManaged by Reaper.\n`;
 }
 
+const MONACO_LOCAL_BASE = '/vendor/monaco-editor/min';
+
+function monacoBaseUrl() {
+  return MONACO_LOCAL_BASE;
+}
+
+function monacoVsBaseUrl() {
+  return `${monacoBaseUrl()}/vs`;
+}
+
+function configureMonacoEnvironment() {
+  const base = monacoBaseUrl();
+  const workerMain = `${base}/vs/base/worker/workerMain.js`;
+  window.MonacoEnvironment = {
+    getWorkerUrl() {
+      // WKWebView blocks cross-origin Worker URLs; bootstrap via data URL + same-origin or CDN importScripts.
+      return `data:text/javascript;charset=utf-8,${encodeURIComponent(
+        `self.MonacoEnvironment = { baseUrl: '${base}' };importScripts('${workerMain}');`,
+      )}`;
+    },
+  };
+}
+
 function initEditor() {
-  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+  configureMonacoEnvironment();
+  require.config({ paths: { vs: monacoVsBaseUrl() } });
   require(['vs/editor/editor.main'], () => {
     ensureGeminiReady().finally(() => {
     void refreshJavaLanguageLevel();
@@ -3091,6 +3948,8 @@ function initEditor() {
       value: '',
       language: 'plaintext',
       theme: window.ReaperThemes?.getMonacoThemeId() || 'reaper-navy',
+      fixedOverflowWidgets: true,
+      overflowWidgetsDomNode: document.getElementById('editor-overflow-root'),
       fontFamily: fontSpec.family,
       fontSize,
       lineHeight: editorLineHeightFor(fontSize),
@@ -3108,27 +3967,30 @@ function initEditor() {
       cursorStyle: 'line',
       smoothScrolling: true,
       links: true,
-      wordBasedSuggestions: getAiInlineCompleteEnabled() ? 'off' : 'currentDocument',
-      quickSuggestions: { other: true, strings: false, comments: false },
-      quickSuggestionsDelay: 200,
+      hover: { enabled: true, delay: 300, sticky: true },
+      wordBasedSuggestions: 'off',
+      quickSuggestions: { other: true, strings: true, comments: false },
+      quickSuggestionsDelay: 120,
       suggestOnTriggerCharacters: true,
       suggest: {
-        preview: false,
+        preview: true,
         showIcons: true,
         snippetsPreventQuickSuggestions: false,
         filterGraceful: true,
         localityBonus: true,
         showStatusBar: false,
+        shareSuggestSelections: true,
+        showInlineDetails: true,
+        acceptSuggestionOnCommitCharacter: false,
       },
       inlineSuggest: {
         enabled: true,
         showToolbar: false,
-        suppressSuggestions: getAiInlineCompleteEnabled(),
+        suppressSuggestions: false,
+        mode: 'subwordSmart',
       },
       lightbulb: {
-        enabled: monaco.editor.ShowLightbulbIconMode?.On
-          ?? monaco.editor.ShowLightbulbIconMode?.OnCode
-          ?? 2,
+        enabled: monaco.editor.ShowLightbulbIconMode?.Off ?? false,
       },
       tabCompletion: 'on',
       renderWhitespace: 'selection',
@@ -3141,22 +4003,12 @@ function initEditor() {
       overviewRulerBorder: false,
       overviewRulerLanes: 2,
     });
-    state.editor.onDidChangeModelContent(() => {
-      if (state.suppressEditorChange || !state.activeTab) return;
-      state.tabContents.set(state.activeTab, state.editor.getValue());
-      state.dirty.add(state.activeTab);
-      updateSaveButton();
-      if (isGradleFilePath(state.activeTab)) refreshGradleInfo();
-      else if (state.activeTab?.endsWith('.java')) updateRunButtons();
-      renderTabs();
-      scheduleAutoSave();
-      scheduleDiagnostics();
-      updateConflictUi();
-      applyTestRunDecorations();
-    });
-    state.editor.onDidChangeCursorPosition((e) => updateEditorStatus(e.position));
     setupDiagnosticNavigation(state.editor);
-    window.ReaperLang?.setupEditorFeatures(state.editor, {
+    try {
+      if (!window.ReaperLang?.setupEditorFeatures) {
+        throw new Error('ReaperLang.setupEditorFeatures missing');
+      }
+      window.ReaperLang.setupEditorFeatures(state.editor, {
       api,
       repoApi,
       getRepo: () => state.repo,
@@ -3164,12 +4016,18 @@ function initEditor() {
       getEditor: () => state.editor,
       openFileAt,
       isFileDirty: (path) => state.dirty.has(path),
+      getJavaSourceOverlays: (excludePath) => collectJavaDiagnosticOverlays(excludePath),
       getAiInlineComplete: () => getAiInlineCompleteEnabled(),
       getGeminiConfigured: () => state.geminiConfigured,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
       toast,
+      terminalLog,
+      setCompleteDebugStatus,
+      setStatusMessage,
       showQuickFixMenu,
+      hideQuickFixMenu,
+      isQuickFixMenuOpen,
       scheduleDiagnostics: () => scheduleDiagnostics(),
       getDiagnosticsInRange: (model, range) => {
         if (!model || !range || !fileDiags.length) return [];
@@ -3183,14 +4041,67 @@ function initEditor() {
         });
       },
       diagnosticSpan: (model, d) => diagnosticMarkerSpan(model, d),
+      diagnosticFriendlyHint,
       setLanguageStatus: (label) => {
         const el = $('#status-language');
         if (el) el.textContent = label;
       },
     });
+      setCompleteDebugStatus('editor features OK');
+      if (window.__reaperLangBundleError) {
+        console.warn('[Reaper] Completion bundle failed to load — using core JDK stubs only');
+      }
+    } catch (err) {
+      const msg = err?.message || String(err);
+      setCompleteDebugStatus(`features ERR: ${msg}`);
+      toast(`Editor features failed: ${msg}`, 'error', { duration: 20000 });
+      console.error('[Reaper] setupEditorFeatures', err);
+    }
+    state.editor.onDidChangeModelContent(() => {
+      if (state.suppressEditorChange || !state.activeTab) return;
+      state.tabContents.set(state.activeTab, state.editor.getValue());
+      state.dirty.add(state.activeTab);
+      updateSaveButton();
+      if (isRunToolbarPath(state.activeTab)) refreshRunInfo();
+      else if (state.activeTab?.endsWith('.java')) updateRunButtons();
+      renderTabs();
+      scheduleAutoSave();
+      scheduleDiagnostics();
+      if (isProjectBuildFile(state.activeTab)) {
+        scheduleProjectReload();
+      } else if (isProjectSourceFile(state.activeTab)) {
+        scheduleAllJavaDiagnostics();
+      }
+      updateConflictUi();
+      applyTestRunDecorations();
+      const model = state.editor.getModel();
+      const position = state.editor.getPosition();
+      if (model && position) {
+        const ctx = window.ReaperLang?.memberDotContext?.(model, position);
+        const linePrefix = ctx?.linePrefix
+          ?? model.getValueInRange(new monaco.Range(
+            position.lineNumber, 1, position.lineNumber, position.column,
+          ));
+        if (linePrefix.trimEnd().endsWith('.')) {
+          window.ReaperLang?.handleDotCompletion?.(state.editor);
+        }
+      }
+    });
+    state.editor.onDidChangeCursorPosition((e) => {
+      updateEditorStatus(e.position);
+      if (state.activeTab?.endsWith('.java')) updateRunButtons();
+    });
+    window.ReaperThemes?.syncMonacoOverflowWidgetTheme?.(
+      window.ReaperThemes.getTheme(window.ReaperThemes.getStoredTheme()).dark,
+    );
     state.editorReady = true;
+    flushPendingEditorContent();
     syncEditorFromActiveTab();
     });
+  }, (err) => {
+    const msg = err?.requireType || err?.message || String(err);
+    toast(`Monaco failed to load: ${msg}`, 'error', { duration: 25000 });
+    console.error('[Reaper] monaco require', err);
   });
 }
 
@@ -3211,6 +4122,7 @@ async function loadRepos() {
 async function selectRepo(name) {
   if (!name) {
     state.repo = null;
+    state.projectFolder = null;
     resetUI();
     updateWindowTitle();
     setRepoPickerLabel('');
@@ -3224,21 +4136,23 @@ async function selectRepo(name) {
 
   state.repo = name;
   resetTerminalCwds();
-  updateTerminalCwdUi();
   const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
   state.projectProfile = opened?.profile || null;
-  if (opened?.indexing) {
-    startProjectIndexPolling();
-  }
+  state.projectFolder = opened?.path || null;
+  startProjectIndexPolling();
+  updateProjectReloadButton();
   const detail = await api(repoApi(name));
-  state.branches = detail.branches;
-  state.defaultBranch = detail.default_branch || detail.summary?.default_branch || '';
+  state.branches = normalizeBranchList(detail.branches);
+  state.defaultBranch = resolveDefaultBranch(
+    detail.default_branch || detail.summary?.default_branch || '',
+    state.branches,
+  );
   updateBranchSelect();
   updateDefaultBranchUi();
   updateRepoInfo(detail);
   enableControls();
   updateAgentUi();
-  await refreshTree();
+  await refreshTree({ resetExpanded: true });
   await refreshGitStatus();
   await refreshHistory();
   try {
@@ -3274,9 +4188,12 @@ function showNoRepoFileTree() {
 function resetUI() {
   state.treeNavAnchor = null;
   resetTerminalCwds();
-  updateTerminalCwdUi();
   updateTreeBackButton();
   stopProjectIndexPolling();
+  clearTimeout(state.projectReloadTimer);
+  state.projectReloadTimer = null;
+  state.projectReloadPending = false;
+  state.projectReloadBackground = false;
   showNoRepoFileTree();
   $('#git-status-list').innerHTML = '';
   $('#commit-history').innerHTML = '';
@@ -3285,13 +4202,16 @@ function resetUI() {
   state.lastGitStatusFiles = [];
   state.mergeBlockedCommit = false;
   state.repoDetail = null;
+  state.projectFolder = null;
   state.defaultBranch = '';
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = true;
   $('#branch-picker-btn').disabled = true;
   setBranchLabel('');
   updateDefaultBranchUi();
-  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-rollback', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-rollback', '#tb-reload-project', '#btn-reload-project', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task'].forEach((s) => { const el = $(s); if (el) el.disabled = true; });
+  $('#tb-reload-project')?.classList.add('hidden');
+  $('#btn-reload-project')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.add('hidden');
   $('#editor-toolbar')?.classList.remove('flex');
   closeAllTabs();
@@ -3309,7 +4229,7 @@ function enableControls() {
   $('#branch-picker-btn').disabled = false;
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = false;
-  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task', '#terminal-input'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
+  ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
   updateRunButtons();
   updateRollbackButton();
   updateMenuState();
@@ -3328,6 +4248,7 @@ function updateBranchSelect() {
 function updateRepoInfo(detail) {
   state.repoDetail = detail;
   const s = detail.summary || detail;
+  const projectFolder = state.projectFolder || s.project_folder || '';
   const el = $('#repo-info');
   if (!el) return;
   el.innerHTML = `
@@ -3335,6 +4256,12 @@ function updateRepoInfo(detail) {
       <div class="text-white font-medium">${s.name}</div>
       ${s.description ? `<p class="text-gray-500 text-xs mt-1">${s.description}</p>` : ''}
     </div>
+    ${projectFolder ? `
+    <div class="space-y-2">
+      <div class="text-xs text-gray-500">Project folder</div>
+      <code class="block text-xs bg-surface-950 border border-surface-700 rounded px-2 py-1.5 text-gray-300 break-all select-all">${escapeHtml(projectFolder)}</code>
+      <p class="text-[11px] text-gray-600">All edits and git changes are saved here.</p>
+    </div>` : ''}
     <div class="space-y-2">
       <div class="text-xs text-gray-500">Clone URL</div>
       <code class="block text-xs bg-surface-950 border border-surface-700 rounded px-2 py-1.5 text-accent break-all select-all">${s.clone_url}</code>
@@ -3754,29 +4681,64 @@ const treeState = {
   recursiveNodes: null,
 };
 const fileFetchInflight = new Map();
+const treeLoadInflight = new Map();
 let gradleInfoTimer = null;
 
 async function loadTreeLevel(dirPath = '') {
   const q = dirPath ? `?dir=${encodeURIComponent(dirPath)}` : '';
-  const nodes = await api(repoApi(state.repo, `/workspace/tree${q}`));
-  treeState.children.set(dirPath, nodes);
-  return nodes;
-}
-
-async function prefetchTreeLevel(dirPath) {
-  if (treeState.children.has(dirPath) || treeState.loading.has(dirPath)) return;
-  treeState.loading.add(dirPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
   try {
-    await loadTreeLevel(dirPath);
-  } catch {
-    /* ignore background prefetch errors */
+    const nodes = await api(repoApi(state.repo, `/workspace/tree${q}`), { signal: controller.signal });
+    treeState.children.set(dirPath, nodes);
+    return nodes;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('File tree request timed out — try Reload project or restart Reaper');
+    }
+    throw err;
   } finally {
-    treeState.loading.delete(dirPath);
+    clearTimeout(timer);
   }
 }
 
-async function loadTreeRoot() {
-  treeState.expanded.clear();
+/** Load one lazy tree folder; dedupes concurrent requests for the same path. */
+async function ensureTreeDirLoaded(dirPath) {
+  if (!dirPath || treeState.recursiveNodes || !state.repo) return;
+  if (treeState.children.has(dirPath)) return;
+  if (treeLoadInflight.has(dirPath)) return treeLoadInflight.get(dirPath);
+
+  treeState.loading.add(dirPath);
+  const promise = (async () => {
+    try {
+      return await loadTreeLevel(dirPath);
+    } catch (err) {
+      treeState.expanded.delete(dirPath);
+      toast(err.message, 'error');
+      throw err;
+    } finally {
+      treeState.loading.delete(dirPath);
+      treeLoadInflight.delete(dirPath);
+      renderFilteredTree();
+    }
+  })();
+  treeLoadInflight.set(dirPath, promise);
+  renderFilteredTree();
+  return promise;
+}
+
+/** Start fetches for expanded folders that rendered open but have no cached children. */
+function scheduleTreeGapLoads() {
+  if (treeState.recursiveNodes || !state.repo) return;
+  for (const dir of treeState.expanded) {
+    if (dir && !treeState.children.has(dir) && !treeLoadInflight.has(dir)) {
+      void ensureTreeDirLoaded(dir);
+    }
+  }
+}
+
+async function loadTreeRoot(resetExpanded = false) {
+  if (resetExpanded) treeState.expanded.clear();
   await loadTreeLevel('');
 }
 
@@ -3794,7 +4756,11 @@ function renderTree(nodes, depth = 0, lazyMode = true) {
         if (loading) {
           childrenHtml = '<div class="ij-tree-loading">Loading…</div>';
         } else if (loaded) {
-          childrenHtml = renderTree(treeState.children.get(n.path) || [], depth + 1, true);
+          childrenHtml = renderTree(
+            filterHiddenTreeItems(treeState.children.get(n.path) || []),
+            depth + 1,
+            true,
+          );
         } else if (open && !isLeaf) {
           childrenHtml = '<div class="ij-tree-loading">Loading…</div>';
         }
@@ -3843,16 +4809,23 @@ async function reloadOpenTabsFromDisk() {
 
 let lastTreeNodes = [];
 
-async function refreshTree() {
+async function refreshTree(options = {}) {
+  const { resetExpanded = false } = options;
+  const savedExpanded = resetExpanded ? null : [...treeState.expanded];
   treeState.children.clear();
   treeState.loading.clear();
   treeState.recursiveNodes = null;
+  treeLoadInflight.clear();
   const query = $('#tree-filter')?.value?.trim() || '';
   if (query) {
     treeState.recursiveNodes = await api(repoApi(state.repo, '/workspace/tree?recursive=1'));
     lastTreeNodes = treeState.recursiveNodes;
   } else {
-    await loadTreeRoot();
+    if (resetExpanded) treeState.expanded.clear();
+    await loadTreeLevel('');
+    if (savedExpanded) {
+      for (const dir of savedExpanded) treeState.expanded.add(dir);
+    }
     lastTreeNodes = treeState.children.get('') || [];
   }
   renderFilteredTree();
@@ -3863,21 +4836,10 @@ async function refreshTree() {
 async function loadExpandedTreeGaps() {
   if (treeState.recursiveNodes) return;
   const pending = [...treeState.expanded].filter(
-    (d) => d && !treeState.children.has(d) && !treeState.loading.has(d),
+    (d) => d && !treeState.children.has(d) && !treeLoadInflight.has(d),
   );
   if (!pending.length) return;
-  await Promise.all(pending.map(async (dir) => {
-    treeState.loading.add(dir);
-    try {
-      await loadTreeLevel(dir);
-    } catch (err) {
-      treeState.expanded.delete(dir);
-      toast(err.message, 'error');
-    } finally {
-      treeState.loading.delete(dir);
-    }
-  }));
-  renderFilteredTree();
+  await Promise.allSettled(pending.map((dir) => ensureTreeDirLoaded(dir)));
 }
 
 function isCompiledTreeEntry(n) {
@@ -3889,14 +4851,41 @@ function isCompiledTreeEntry(n) {
   return false;
 }
 
-function isHiddenTreeEntry(n) {
-  const name = n.name || '';
-  const path = (n.path || '').replace(/\\/g, '/');
-  if (name.startsWith('.')) return true;
-  if (name === 'gradlew' || name === 'gradlew.bat') return true;
-  if (name === 'gradle.properties') return true;
-  if (path === 'gradle' || path.startsWith('gradle/')) return true;
+function isIgnoredChangesPath(path) {
+  const normalized = (path || '').replace(/\\/g, '/').replace(/\/$/, '');
+  if (!normalized) return true;
+  if (normalized === 'target' || normalized.startsWith('target/') || normalized.split('/').includes('target')) {
+    return true;
+  }
+  const name = normalized.split('/').pop() || normalized;
+  if (name === 'mvnw' || name === 'mvnw.cmd' || name === 'gradlew' || name === 'gradlew.bat') return true;
   return false;
+}
+
+function isHiddenPath(path) {
+  const normalized = (path || '').replace(/\\/g, '/').replace(/\/$/, '');
+  if (!normalized) return true;
+  const name = normalized.split('/').pop() || normalized;
+  if (name.startsWith('.')) return true;
+  if (normalized.split('/').some((seg) => seg.startsWith('.') && seg.length > 1)) return true;
+  if (name === 'mvnw' || name === 'mvnw.cmd' || name === 'gradlew' || name === 'gradlew.bat') return true;
+  if (name === 'gradle.properties' && !normalized.includes('/')) return true;
+  if (normalized === 'gradle' || normalized.startsWith('gradle/')) return true;
+  return false;
+}
+
+function isHiddenTreeEntry(n) {
+  return isHiddenPath(n.path || n.name || '');
+}
+
+function filterStatusFilesForDisplay(files) {
+  return (files || []).filter((f) => {
+    const p = (f.path || '').replace(/\\/g, '/');
+    if (!p || p.endsWith('/')) return false;
+    if (isIgnoredChangesPath(p)) return false;
+    if (!getShowDotfiles() && isHiddenPath(p)) return false;
+    return true;
+  });
 }
 
 function filterHiddenTreeItems(nodes) {
@@ -3952,6 +4941,7 @@ function renderFilteredTree() {
   if (state.activeTab) {
     $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === state.activeTab));
   }
+  scheduleTreeGapLoads();
 }
 
 function bindTreeEvents() {
@@ -3967,17 +4957,10 @@ function bindTreeEvents() {
     if (details.open) {
       treeState.expanded.add(dir);
       if (details.dataset.leaf === '1' || treeState.children.has(dir)) return;
-      treeState.loading.add(dir);
-      renderFilteredTree();
       try {
-        await loadTreeLevel(dir);
-      } catch (err) {
-        toast(err.message, 'error');
-        treeState.expanded.delete(dir);
+        await ensureTreeDirLoaded(dir);
+      } catch {
         details.open = false;
-      } finally {
-        treeState.loading.delete(dir);
-        renderFilteredTree();
       }
     } else {
       treeState.expanded.delete(dir);
@@ -4001,7 +4984,7 @@ async function fetchFileContent(path) {
   const promise = api(`${repoApi(state.repo, '/workspace/file')}?path=${encodeURIComponent(path)}`)
     .then((data) => {
       fileFetchInflight.delete(path);
-      return data.content;
+      return data?.content ?? '';
     })
     .catch((err) => {
       fileFetchInflight.delete(path);
@@ -4009,6 +4992,14 @@ async function fetchFileContent(path) {
     });
   fileFetchInflight.set(path, promise);
   return promise;
+}
+
+async function hydrateTabContent(path) {
+  if (state.tabContents.has(path)) return state.tabContents.get(path);
+  const content = await fetchFileContent(path);
+  const text = content ?? '';
+  state.tabContents.set(path, text);
+  return text;
 }
 
 function prefetchFile(path) {
@@ -4021,7 +5012,7 @@ function scheduleGradleInfoRefresh() {
   if (gradleInfoTimer) clearTimeout(gradleInfoTimer);
   gradleInfoTimer = setTimeout(() => {
     gradleInfoTimer = null;
-    refreshGradleInfo();
+    refreshRunInfo();
   }, 150);
 }
 
@@ -4077,27 +5068,31 @@ async function goBackToTreeFile() {
 
 async function openFile(path) {
   if (state.tabs.includes(path)) {
+    try {
+      if (!state.tabContents.has(path)) await hydrateTabContent(path);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
     activateTab(path);
+    navigateToPrimarySource(path);
     return;
   }
   state.tabs.push(path);
   state.activeTab = path;
   renderTabs();
-  activateTabShell(path);
 
   try {
-    let content = await fetchFileContent(path);
+    let content = await hydrateTabContent(path);
     if (path.split('/').pop()?.toLowerCase() === 'readme.md' && !content.trim()) {
       content = defaultReadmeContent(path);
       state.dirty.add(path);
+      state.tabContents.set(path, content);
     }
-    state.tabContents.set(path, content);
-    if (state.activeTab === path) {
-      setEditorContent(path, content);
-      if (!state.editorReady) syncEditorFromActiveTab();
-    }
+    activateTabShell(path);
+    setEditorContent(path, state.tabContents.get(path));
     renderTabs();
     $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
+    navigateToPrimarySource(path);
     scheduleGradleInfoRefresh();
   } catch (err) {
     state.tabs = state.tabs.filter((t) => t !== path);
@@ -4171,8 +5166,8 @@ function activateTabShell(path) {
   updateBreadcrumbs(path);
   const langEl = $('#status-language');
   if (langEl) {
-    const lang = window.ReaperLang?.langLabel(langForPath(path)) || 'Plain Text';
-    const compilers = window.ReaperLang?.compilerLabelsForPath(path);
+    const lang = window.ReaperLang?.langLabel?.(langForPath(path)) || 'Plain Text';
+    const compilers = window.ReaperLang?.compilerLabelsForPath?.(path);
     langEl.textContent = compilers ? `${lang} · ${compilers}` : lang;
     langEl.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
   }
@@ -4193,6 +5188,9 @@ function activateTabShell(path) {
 
 function activateTab(path) {
   activateTabShell(path);
+  if (state.tabContents.has(path)) {
+    setEditorContent(path, state.tabContents.get(path));
+  }
   renderTabs();
 }
 
@@ -4221,6 +5219,7 @@ function clearDiagnostics() {
   diagJumpIndex = 0;
   updateDiagnosticsStatusBar(state.activeTab, []);
   clearDiagDecorations();
+  state.editor?.clearQuickFixBulbs?.();
   const model = state.editor?.getModel();
   if (model && window.monaco) {
     monaco.editor.setModelMarkers(model, 'reaper-diagnostics', []);
@@ -4277,6 +5276,14 @@ function diagnosticMarkerSpan(model, d) {
   const adjusted = adjustDiagnosticPosition(model, d);
   const line = Math.max(1, adjusted.line || 1);
   const lineText = model.getLineContent(line);
+  if (!lineText.trim()) {
+    return {
+      startLineNumber: line,
+      startColumn: 1,
+      endLineNumber: line,
+      endColumn: Math.max(2, lineText.length + 1),
+    };
+  }
   let startCol = Math.max(1, adjusted.column || 1);
 
   const msg = String(d.message || '');
@@ -4337,8 +5344,8 @@ function diagnosticMarkerSpan(model, d) {
 function updateAiFixControls(errors) {
   const show = errors > 0;
   const title = show
-    ? `AI quick fix for ${errors} error${errors === 1 ? '' : 's'} (Ctrl+.)`
-    : 'AI quick fix';
+    ? `Quick fix for ${errors} error${errors === 1 ? '' : 's'} (⌘.) — local fixes + Cursor/Gemini`
+    : 'Quick fix';
   const dock = $('#ai-bulb-dock');
   const tb = $('#tb-ai-fix');
   const status = $('#status-ai-fix');
@@ -4370,6 +5377,7 @@ function aiFixMenuAnchor() {
 function updateDiagnosticsStatusBar(path, diags) {
   const el = $('#status-diagnostics');
   const countEl = $('#status-diag-count');
+  const primaryEl = $('#status-diag-primary');
   if (!el || !countEl) return;
 
   const errors = diags.filter((d) => d.severity !== 'warning').length;
@@ -4379,9 +5387,11 @@ function updateDiagnosticsStatusBar(path, diags) {
     el.classList.add('hidden');
     el.classList.remove('has-errors', 'has-warnings');
     countEl.textContent = '';
+    if (primaryEl) primaryEl.textContent = '';
     el.title = 'No problems';
     updateAiFixControls(0);
     hideQuickFixMenu();
+    updateDiagnosticHintAtCursor(state.editor?.getPosition());
     return;
   }
 
@@ -4394,10 +5404,22 @@ function updateDiagnosticsStatusBar(path, diags) {
   if (warnings) parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`);
   countEl.textContent = parts.join(', ');
 
+  const model = state.editor?.getModel();
+  const primary = primaryDiagnosticForUi(model, diags);
+  const primaryText = primary ? formatDiagnosticDisplay(primary) : '';
+  if (primaryEl) {
+    primaryEl.textContent = primaryText ? truncateDiagnosticText(primaryText, 56) : '';
+    primaryEl.title = primaryText;
+  }
+
   const name = path?.split('/').pop() || 'file';
-  el.title = `${name}: ${parts.join(', ')} — click to go to next problem`;
+  const titleParts = [`${name}: ${parts.join(', ')}`];
+  if (primaryText) titleParts.push(primaryText);
+  titleParts.push('click to go to next problem');
+  el.title = titleParts.join(' — ');
 
   updateAiFixControls(errors);
+  updateDiagnosticHintAtCursor(state.editor?.getPosition());
 }
 
 function hideQuickFixMenu() {
@@ -4405,12 +5427,30 @@ function hideQuickFixMenu() {
   if (pop) pop.classList.add('hidden');
 }
 
-function showQuickFixMenu(fixes, onPick) {
+function isQuickFixMenuOpen() {
   const pop = $('#ai-quickfix-popover');
-  const anchor = aiFixMenuAnchor();
+  return !!(pop && !pop.classList.contains('hidden'));
+}
+
+function quickFixMenuLabel(f) {
+  const title = String(f?.title || 'Fix').replace(/</g, '&lt;');
+  if (f?.provider === 'loading') return title;
+  if (/^(AI|Cursor):/i.test(title)) return title;
+  if (f?.provider === 'local') return title;
+  const src = f?.provider === 'cursor' ? 'Cursor' : 'AI';
+  return `${src}: ${title}`;
+}
+
+function showQuickFixMenu(fixes, onPick, anchorEl) {
+  const pop = $('#ai-quickfix-popover');
+  const anchor = anchorEl || aiFixMenuAnchor();
   if (!pop || !fixes?.length) return;
   pop.innerHTML = fixes.map((f, i) => {
-    const title = String(f.title || 'Fix').replace(/</g, '&lt;');
+    const title = quickFixMenuLabel(f);
+    const loading = f?.provider === 'loading' || !f?.edits?.length;
+    if (loading) {
+      return `<div class="ij-quickfix-item ij-quickfix-item--loading" data-idx="${i}">${title}</div>`;
+    }
     return `<button type="button" class="ij-quickfix-item" data-idx="${i}">${title}</button>`;
   }).join('');
   pop.classList.remove('hidden');
@@ -4430,12 +5470,12 @@ function showQuickFixMenu(fixes, onPick) {
       });
     }
   }
-  pop.querySelectorAll('.ij-quickfix-item').forEach((btn) => {
+  pop.querySelectorAll('.ij-quickfix-item:not(.ij-quickfix-item--loading)').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const fix = fixes[Number(btn.dataset.idx)];
       hideQuickFixMenu();
-      if (fix) onPick(fix);
+      if (fix?.edits?.length) onPick(fix);
     });
   });
 }
@@ -4539,16 +5579,71 @@ async function runDiagnostics() {
   const content = state.editor.getValue();
   const seq = ++diagSeq;
   try {
-    const diags = await api(repoApi(state.repo, '/workspace/diagnostics'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, content }),
-    });
+    const diags = await fetchDiagnosticsForPath(path, content);
     if (seq !== diagSeq || path !== state.activeTab) return;
     applyDiagnostics(path, Array.isArray(diags) ? diags : []);
   } catch {
     if (seq === diagSeq) clearDiagnostics();
   }
+}
+
+function scheduleAllJavaDiagnostics(delayMs = ALL_JAVA_DIAG_DELAY_MS) {
+  if (!state.repo) return;
+  clearTimeout(allJavaDiagTimer);
+  allJavaDiagTimer = setTimeout(() => {
+    allJavaDiagTimer = null;
+    void refreshAllJavaTabDiagnostics();
+  }, delayMs);
+}
+
+function collectJavaDiagnosticOverlays(excludePath) {
+  const overlays = [];
+  for (const path of state.tabs) {
+    if (!isProjectSourceFile(path) || path === excludePath) continue;
+    const content = path === state.activeTab && state.editor
+      ? state.editor.getValue()
+      : state.tabContents.get(path);
+    if (content == null) continue;
+    overlays.push({ path, content });
+  }
+  return overlays;
+}
+
+async function fetchDiagnosticsForPath(path, content) {
+  return api(repoApi(state.repo, '/workspace/diagnostics'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      path,
+      content,
+      overlays: collectJavaDiagnosticOverlays(path),
+    }),
+  });
+}
+
+/** Re-validate imports/diagnostics on every open Java tab after classpath changes. */
+async function refreshAllJavaTabDiagnostics() {
+  if (!state.repo) return;
+  const javaTabs = state.tabs.filter((p) => isDiagnosablePath(p));
+  if (!javaTabs.length) return;
+  const activePath = state.activeTab;
+  await Promise.all(javaTabs.map(async (path) => {
+    const content = path === activePath && state.editor
+      ? state.editor.getValue()
+      : (state.tabContents.get(path) ?? '');
+    try {
+      const diags = await fetchDiagnosticsForPath(path, content);
+      if (path === state.activeTab) {
+        applyDiagnostics(path, Array.isArray(diags) ? diags : []);
+      }
+    } catch { /* ignore transient errors */ }
+  }));
+}
+
+function refreshProjectClasspathUi() {
+  void refreshAllJavaTabDiagnostics();
+  if (hasAutoReloadProject()) void refreshRunInfo();
+  if (state.activeTab?.endsWith('.java')) applyTestRunDecorations();
 }
 
 function applyDiagnostics(path, diags) {
@@ -4566,6 +5661,7 @@ function applyDiagnostics(path, diags) {
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
   updateDiagnosticsStatusBar(path, diags);
   state.editor?.prefetchAiQuickFixes?.(diags);
+  state.editor?.refreshQuickFixBulbs?.(diags);
 }
 
 function isGradleFilePath(path) {
@@ -4579,21 +5675,233 @@ function isGradleFilePath(path) {
   return false;
 }
 
-async function refreshGradleInfo() {
+function isMavenFilePath(path) {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  const base = normalized.split('/').pop() || '';
+  if (base === 'pom.xml') return true;
+  if (base === 'mvnw' || base === 'mvnw.cmd') return true;
+  if (normalized.endsWith('/.mvn/wrapper/maven-wrapper.properties')) return true;
+  if (normalized.startsWith('.mvn/')) return true;
+  return false;
+}
+
+function isJavaTestClass(path, content) {
+  if (!path?.endsWith('.java')) return false;
+  if (/@SpringBootTest\b/.test(content)) return true;
+  if (isJavaTestFilePath(path)) return true;
+  if (/@Test|@ParameterizedTest|@RepeatedTest|@TestFactory|@TestTemplate/.test(content)) {
+    return true;
+  }
+  return listJavaTestMethods(path, content).length > 0;
+}
+
+function testFilterForJavaFile(path, content, cursorLine) {
+  const methods = listJavaTestMethods(path, content);
+  const classEntry = methods.find((m) => m.isClass);
+  const classFilter = classEntry?.filter || javaFqcnFromSource(path, content);
+  if (!cursorLine) return classFilter;
+  if (classEntry && cursorLine >= classEntry.line && cursorLine <= classEntry.end_line) {
+    return classFilter;
+  }
+  const matches = methods.filter(
+    (m) => !m.isClass && cursorLine >= m.line && cursorLine <= m.end_line,
+  );
+  if (matches.length) return matches[matches.length - 1].filter;
+  return classFilter;
+}
+
+/** What F5 / Run should do for the active editor file. */
+function detectJavaRunTarget(path, content, runInfo, cursorLine) {
+  if (!path?.endsWith('.java')) {
+    if (runInfo?.has_project && isRunToolbarPath(path)) {
+      return { mode: 'project-task' };
+    }
+    return { mode: 'none' };
+  }
+
+  const spring = detectSpringBootApp(content);
+  const main = detectJavaMain(content);
+
+  if (isJavaTestClass(path, content) && runInfo?.has_project) {
+    const filter = testFilterForJavaFile(path, content, cursorLine);
+    if (filter) {
+      return { mode: 'test', filter };
+    }
+  }
+
+  if (spring && runInfo?.is_spring_boot) {
+    return {
+      mode: 'spring-boot',
+      task: runInfo.default_task,
+      qualifiedName: spring.qualifiedName,
+    };
+  }
+
+  if (main) {
+    return { mode: 'main', qualifiedName: main.qualifiedName };
+  }
+
+  return { mode: 'none' };
+}
+
+function runTargetLabel(target, content) {
+  const fw = target.frameworks?.length ? ` · ${target.frameworks.slice(0, 3).join(', ')}` : '';
+  if (target.mode === 'test') {
+    const short = target.filter?.split('.').pop() || target.filter;
+    return `Test · ${short}${fw}`;
+  }
+  if (target.mode === 'spring-boot') {
+    const name = target.qualifiedName || detectSpringBootApp(content)?.qualifiedName || 'app';
+    return `Spring Boot · ${name.split('.').pop()}${fw}`;
+  }
+  if (target.mode === 'main') {
+    return `Java · ${target.qualifiedName?.split('.').pop() || target.qualifiedName}${fw}`;
+  }
+  if (target.mode === 'project-task' && state.runInfo) {
+    const tool = state.runInfo.build_tool === 'maven' ? 'Maven' : 'Gradle';
+    return state.runInfo.is_spring_boot
+      ? `Spring Boot · ${state.runInfo.project_root}`
+      : `${tool} · ${state.runInfo.project_root}`;
+  }
+  if (target.classType && target.classType !== 'library') {
+    return `${target.classType.replace(/-/g, ' ')}${fw}`;
+  }
+  return '';
+}
+
+function runTargetTitle(target) {
+  let base = '';
+  if (target.mode === 'test') {
+    base = `Run tests: ${target.filter} (F5)`;
+  } else if (target.mode === 'spring-boot') {
+    base = `Run Spring Boot application (F5)`;
+  } else if (target.mode === 'main') {
+    base = `Run ${target.qualifiedName} (F5)`;
+  } else if (target.mode === 'project-task' && state.runInfo) {
+    const task = $('#gradle-task')?.value || state.runInfo.default_task;
+    const tool = state.runInfo.build_tool === 'maven' ? 'Maven' : 'Gradle';
+    base = `Run ${tool} '${task}' (F5)`;
+  } else if (target.classType) {
+    base = `${target.classType.replace(/-/g, ' ')} (F5)`;
+  } else {
+    base = 'Run (F5)';
+  }
+  if (target.reason && !target.runnable) {
+    return `${base} — ${target.reason}`;
+  }
+  if (target.missing?.length) {
+    return `${base} — missing: ${target.missing.join(', ')}`;
+  }
+  if (target.aiAssisted) {
+    return `${base} (AI)`;
+  }
+  return base;
+}
+
+function isRunToolbarPath(path) {
+  if (!path) return false;
+  if (isGradleFilePath(path) || isMavenFilePath(path)) return true;
+  if (path.endsWith('.java') && state.runInfo?.has_project) return true;
+  return false;
+}
+
+function detectSpringBootApp(content) {
+  if (!content || !/@SpringBootApplication\b/.test(content)) return null;
+  const cls = content.match(/(?:public\s+)?class\s+(\w+)/)?.[1];
+  if (!cls) return null;
+  const pkg = content.match(/^\s*package\s+([\w.]+)\s*;/m)?.[1] || null;
+  return { className: cls, package: pkg, qualifiedName: pkg ? `${pkg}.${cls}` : cls };
+}
+
+function serverRunTargetToClient(t) {
+  if (!t) return { mode: 'none', runnable: false };
+  return {
+    mode: t.mode || 'none',
+    filter: t.test_filter,
+    task: t.task,
+    qualifiedName: t.qualified_name,
+    classType: t.class_type,
+    frameworks: t.frameworks || [],
+    missing: t.missing || [],
+    reason: t.reason,
+    aiAssisted: t.ai_assisted,
+    runnable: !!t.runnable,
+  };
+}
+
+function resolveRunTarget(path, content, info, cursorLine) {
+  if (state.serverRunTarget) {
+    const target = serverRunTargetToClient(state.serverRunTarget);
+    if (target.mode === 'test' && cursorLine) {
+      target.filter = testFilterForJavaFile(path, content, cursorLine) || target.filter;
+    }
+    return target;
+  }
+  return detectJavaRunTarget(path, content, info, cursorLine);
+}
+
+async function refreshRunInfo() {
   if (!state.repo || !state.activeTab) {
+    state.runInfo = null;
     state.gradleInfo = null;
+    state.serverRunTarget = null;
     updateRunButtons();
     return;
   }
+  const content = state.tabContents.get(state.activeTab) ?? state.editor?.getValue?.() ?? '';
+  const line = state.editor?.getPosition?.()?.lineNumber || 1;
   try {
-    const info = await api(
-      `${repoApi(state.repo, '/workspace/gradle/info')}?path=${encodeURIComponent(state.activeTab)}`,
-    );
-    state.gradleInfo = info?.is_gradle ? info : null;
+    const ctx = await api(repoApi(state.repo, '/workspace/run/target'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.activeTab, content, line }),
+    });
+    state.runInfo = ctx?.has_project ? ctx : (ctx?.target ? ctx : null);
+    state.serverRunTarget = ctx?.target || null;
+    if (!ctx?.has_project && ctx) {
+      state.runInfo = ctx;
+    }
+    state.gradleInfo = ctx?.build_tool === 'gradle' && ctx?.has_project
+      ? {
+        is_gradle: true,
+        project_root: ctx.project_root,
+        has_wrapper: ctx.has_wrapper,
+        default_task: ctx.default_task,
+        application_main: ctx.application_main,
+        tasks: ctx.tasks,
+        is_spring_boot: ctx.is_spring_boot,
+      }
+      : null;
   } catch {
-    state.gradleInfo = null;
+    try {
+      const info = await api(
+        `${repoApi(state.repo, '/workspace/run/info')}?path=${encodeURIComponent(state.activeTab)}`,
+      );
+      state.runInfo = info?.has_project ? info : null;
+      state.serverRunTarget = null;
+      state.gradleInfo = info?.build_tool === 'gradle' && info?.has_project
+        ? {
+          is_gradle: true,
+          project_root: info.project_root,
+          has_wrapper: info.has_wrapper,
+          default_task: info.default_task,
+          application_main: info.application_main,
+          tasks: info.tasks,
+          is_spring_boot: info.is_spring_boot,
+        }
+        : null;
+    } catch {
+      state.runInfo = null;
+      state.serverRunTarget = null;
+      state.gradleInfo = null;
+    }
   }
   updateRunButtons();
+}
+
+async function refreshGradleInfo() {
+  await refreshRunInfo();
 }
 
 function updateRunButtons() {
@@ -4601,42 +5909,63 @@ function updateRunButtons() {
   const taskSel = $('#gradle-task');
   const runLabel = $('#toolbar-run-label');
   const gradleSep = $('#gradle-toolbar-sep');
-  const info = state.gradleInfo;
+  const info = state.runInfo;
   state.javaRunTarget = null;
+  state.runTarget = { mode: 'none' };
 
-  const showGradle = !!(info?.is_gradle && isGradleFilePath(state.activeTab));
-  if (showGradle) {
-    taskSel?.classList.remove('hidden');
-    if (taskSel && info.tasks?.length) {
-      const current = taskSel.value;
-      taskSel.innerHTML = info.tasks.map((t) => `<option value="${t}">${t}</option>`).join('');
-      taskSel.value = info.tasks.includes(current) ? current : info.default_task;
+  const path = state.activeTab;
+  const content = path
+    ? (state.tabContents.get(path) ?? state.editor?.getValue() ?? '')
+    : '';
+  const cursorLine = state.editor?.getPosition?.()?.lineNumber;
+  const target = resolveRunTarget(path, content, info, cursorLine);
+  state.runTarget = target;
+
+  const showTaskPicker = target.mode === 'project-task' && info?.has_project;
+  const showJavaRun = path?.endsWith('.java') && target.mode !== 'none';
+  const canRun = target.runnable || showTaskPicker;
+
+  if ((showTaskPicker || showJavaRun) && canRun) {
+    if (showTaskPicker) {
+      taskSel?.classList.remove('hidden');
+      if (taskSel && info.tasks?.length) {
+        const current = taskSel.value;
+        taskSel.innerHTML = info.tasks.map((t) => `<option value="${t}">${t}</option>`).join('');
+        taskSel.value = info.tasks.includes(current) ? current : info.default_task;
+      }
+    } else {
+      taskSel?.classList.add('hidden');
     }
-    const task = taskSel?.value || info.default_task;
+
     if (tbRun) {
       tbRun.disabled = false;
-      tbRun.title = `Run Gradle '${task}' (F5)`;
+      tbRun.title = runTargetTitle(target);
     }
     if (runLabel) {
       runLabel.classList.remove('hidden');
-      runLabel.textContent = info.application_main ? `Gradle · ${info.application_main}` : `Gradle · ${info.project_root}`;
+      runLabel.textContent = runTargetLabel(target, content);
     }
     gradleSep?.classList.remove('hidden');
+
+    if (target.mode === 'main') {
+      state.javaRunTarget = target.qualifiedName;
+    }
+  } else if (showJavaRun && target.reason) {
+    taskSel?.classList.add('hidden');
+    runLabel?.classList.remove('hidden');
+    runLabel.textContent = runTargetLabel(target, content) || 'Not runnable';
+    gradleSep?.classList.remove('hidden');
+    if (tbRun) {
+      tbRun.disabled = true;
+      tbRun.title = runTargetTitle(target);
+    }
   } else {
     taskSel?.classList.add('hidden');
     runLabel?.classList.add('hidden');
     gradleSep?.classList.add('hidden');
-    const isJava = !!(state.repo && state.activeTab?.endsWith('.java'));
     if (tbRun) {
-      tbRun.disabled = !isJava;
-      if (isJava) {
-        const content = state.tabContents.get(state.activeTab) ?? state.editor?.getValue() ?? '';
-        const main = detectJavaMain(content);
-        state.javaRunTarget = main?.qualifiedName || null;
-        tbRun.title = main ? `Run ${main.qualifiedName} (F5)` : 'Run Java (F5) — needs static void main';
-      } else {
-        tbRun.title = 'Run (F5)';
-      }
+      tbRun.disabled = true;
+      tbRun.title = 'Run (F5)';
     }
   }
 
@@ -4645,6 +5974,31 @@ function updateRunButtons() {
   if (tbFormat) tbFormat.disabled = !state.activeTab;
   if (tbSave) tbSave.disabled = !state.activeTab || !state.dirty.has(state.activeTab);
   updateRollbackButton();
+  updateProjectReloadButton();
+}
+
+function primaryJavaNavTarget(content) {
+  if (!content) return { line: 1, column: 1 };
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/(?:public\s+|protected\s+|private\s+)?(?:abstract\s+|static\s+|final\s+)*?(?:class|interface|enum|@interface)\s+(\w+)/);
+    if (m) {
+      const col = line.indexOf(m[1]) + 1;
+      return { line: i + 1, column: col > 0 ? col : 1 };
+    }
+  }
+  return { line: 1, column: 1 };
+}
+
+function navigateToPrimarySource(path, { force = false } = {}) {
+  if (!state.editor || !path?.endsWith('.java')) return;
+  if (!force && path !== state.activeTab) return;
+  const content = state.tabContents.get(path) ?? state.editor.getModel()?.getValue?.() ?? '';
+  const { line, column } = primaryJavaNavTarget(content);
+  if (line <= 1 && column <= 1) return;
+  state.editor.revealLineInCenter(line);
+  state.editor.setPosition({ lineNumber: line, column });
 }
 
 async function openFileAt(path, line = 1, column = 1) {
@@ -4736,6 +6090,7 @@ function closeWorkspaceTabs() {
   updateTreeBackButton();
   state.conflictFiles = new Set();
   state.conflictPanelHidden = false;
+  state.runInfo = null;
   state.gradleInfo = null;
   state.javaRunTarget = null;
   clearDiagnostics();
@@ -4743,22 +6098,30 @@ function closeWorkspaceTabs() {
 }
 
 async function saveFile(options = {}) {
-  const { silent = false } = options;
+  const { silent = false, skipProjectReload = false } = options;
   if (!state.activeTab || !state.editor) return;
+  const savedPath = state.activeTab;
   const content = state.editor.getValue();
   try {
     await api(repoApi(state.repo, '/workspace/file'), {
       method: 'PUT',
-      body: JSON.stringify({ path: state.activeTab, content }),
+      body: JSON.stringify({ path: savedPath, content }),
     });
-    state.tabContents.set(state.activeTab, content);
-    state.dirty.delete(state.activeTab);
+    state.tabContents.set(savedPath, content);
+    state.dirty.delete(savedPath);
     updateSaveButton();
     renderTabs();
     if (!silent) {
       await refreshTree();
       await refreshGitStatus();
       toast('Saved', 'success');
+    }
+    if (!skipProjectReload && isProjectClasspathFile(savedPath) && hasAutoReloadProject()) {
+      if (isProjectSourceFile(savedPath)) {
+        window.ReaperLang?.clearCompletionCache?.();
+        scheduleAllJavaDiagnostics(0);
+      }
+      scheduleProjectReload(0);
     }
   } catch (err) {
     if (!silent) toast(err.message || 'Failed to save', 'error');
@@ -4773,7 +6136,6 @@ function scheduleAutoSave() {
   state.autoSaveTimer = setTimeout(async () => {
     if (state.dirty.has(state.activeTab)) {
       await saveFile({ silent: true });
-      await refreshTree();
       await refreshGitStatus();
     }
   }, AUTO_SAVE_DELAY_MS);
@@ -4874,80 +6236,125 @@ function updateJavaRunButton() {
   updateRunButtons();
 }
 
-async function runGradle() {
-  if (!state.repo || !state.activeTab || !state.gradleInfo?.is_gradle) return;
+async function runProjectTask(taskOverride) {
+  if (!state.repo || !state.activeTab || !state.runInfo?.has_project) return;
   if (state.dirty.has(state.activeTab)) await saveFile();
   showTerminal();
   const term = getActiveTerminal();
-  const task = $('#gradle-task')?.value || state.gradleInfo.default_task;
-  const label = `▶ gradle ${task}  (${state.gradleInfo.project_root})`;
+  const info = state.runInfo;
+  const task = taskOverride || $('#gradle-task')?.value || info.default_task;
+  const toolLabel = info.build_tool === 'maven' ? 'mvn' : 'gradle';
+  const where = info.project_root || state.activeTab || '.';
+  const label = `▶ ${toolLabel} ${task}  (${where})`;
   try {
-    const exitCode = await runWorkspaceCommandStream(
-      '/workspace/gradle/run',
+    const { exitCode, output } = await runWorkspaceCommandStream(
+      '/workspace/run/task',
       { path: state.activeTab, task },
       { label, terminalId: term.id },
     );
-    const output = term.lines.filter((e) => typeof e === 'string').pop() || '';
-    if (exitCode !== 0 && /Unsupported class file major version/i.test(output)) {
-      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
-    }
+    if (gradleClassfileVersionToast(output)) return;
   } catch (e) {
     terminalLog(`error: ${e.message}`);
-    if (/Unsupported class file major version/i.test(e.message || '')) {
-      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
-    }
+    if (gradleClassfileVersionToast(e.message || '')) return;
   }
 }
 
-function normalizeGradleTestFilter(testFilter) {
-  return String(testFilter || '')
+async function runGradle() {
+  await runProjectTask();
+}
+
+async function runProjectTest(testFilter) {
+  if (!state.repo || !state.activeTab || !testFilter) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  await refreshRunInfo();
+  const info = state.runInfo;
+  if (!info?.has_project) {
+    toast('Not inside a Gradle or Maven project', 'error');
+    return;
+  }
+  const term = getActiveTerminal();
+  const filter = normalizeTestFilter(testFilter, info.build_tool);
+  if (!filter) return;
+  const task = info.build_tool === 'maven'
+    ? `-Dtest=${filter} test`
+    : `test --tests ${filter}`;
+  const toolLabel = info.build_tool === 'maven' ? 'mvn' : 'gradle';
+  const label = `▶ ${toolLabel} ${task}  (${state.activeTab})`;
+  try {
+    const { exitCode, output } = await runWorkspaceCommandStream(
+      '/workspace/run/task',
+      { path: state.activeTab, task },
+      { label, terminalId: term.id, kind: 'test' },
+    );
+    if (gradleClassfileVersionToast(output)) return;
+  } catch (e) {
+    terminalLog(`error: ${e.message}`);
+    if (gradleClassfileVersionToast(e.message || '')) return;
+  }
+}
+
+function normalizeTestFilter(testFilter, buildTool) {
+  let filter = String(testFilter || '')
     .replace(/\s*\([^)]*\.java\)\s*$/, '')
     .replace(/\//g, '.')
     .trim();
+  if (!filter) return '';
+  if (buildTool === 'maven') return mavenSurefireTestFilter(filter);
+  return filter;
+}
+
+/** Gradle uses fqcn.method; Maven Surefire uses fqcn#method. */
+function mavenSurefireTestFilter(filter) {
+  const lastDot = filter.lastIndexOf('.');
+  if (lastDot <= 0) return filter;
+  const method = filter.slice(lastDot + 1);
+  if (method && /^[a-z]/.test(method)) {
+    return `${filter.slice(0, lastDot)}#${method}`;
+  }
+  return filter;
+}
+
+function normalizeGradleTestFilter(testFilter) {
+  return normalizeTestFilter(testFilter, 'gradle');
 }
 
 async function runGradleTest(testFilter) {
-  if (!state.repo || !state.activeTab || !testFilter) return;
-  if (state.dirty.has(state.activeTab)) await saveFile();
-  await refreshGradleInfo();
-  if (!state.gradleInfo?.is_gradle) {
-    toast('Not inside a Gradle project', 'error');
-    return;
-  }
-  showTerminal();
-  const term = getActiveTerminal();
-  const filter = normalizeGradleTestFilter(testFilter);
-  if (!filter) return;
-  const task = `test --tests ${filter}`;
-  const label = `▶ gradle ${task}  (${state.activeTab})`;
-  try {
-    const exitCode = await runWorkspaceCommandStream(
-      '/workspace/gradle/run',
-      { path: state.activeTab, task },
-      { label, terminalId: term.id },
-    );
-    const output = term.lines.filter((e) => typeof e === 'string').pop() || '';
-    if (exitCode !== 0 && /Unsupported class file major version/i.test(output)) {
-      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
-    }
-  } catch (e) {
-    terminalLog(`error: ${e.message}`);
-    if (/Unsupported class file major version/i.test(e.message || '')) {
-      toast('Gradle needs an older JDK — open Settings → Java and pick Java 17 or 21', 'error', { duration: 12000 });
-    }
-  }
+  await runProjectTest(testFilter);
 }
 
 async function runActive() {
-  if (state.gradleInfo?.is_gradle && isGradleFilePath(state.activeTab)) await runGradle();
-  else await runJavaMain();
+  if (!state.repo || !state.activeTab) return;
+  await refreshRunInfo();
+  const target = state.runTarget;
+  if (!target || target.mode === 'none') return;
+  if (target.runnable === false && target.mode !== 'project-task') {
+    if (target.reason) toast(target.reason, 'error');
+    return;
+  }
+
+  switch (target.mode) {
+    case 'test':
+      await runProjectTest(target.filter);
+      break;
+    case 'spring-boot':
+      await runProjectTask(target.task || state.runInfo?.default_task);
+      break;
+    case 'main':
+      await runJavaMain(target.qualifiedName);
+      break;
+    case 'project-task':
+      await runProjectTask();
+      break;
+    default:
+      break;
+  }
 }
-async function runJavaMain() {
+async function runJavaMain(qualifiedName) {
   if (!state.repo || !state.activeTab?.endsWith('.java')) return;
   if (state.dirty.has(state.activeTab)) await saveFile();
   showTerminal();
   const term = getActiveTerminal();
-  const name = state.javaRunTarget || state.activeTab;
+  const name = qualifiedName || state.javaRunTarget || state.activeTab;
   try {
     await runWorkspaceCommandStream(
       '/workspace/java/run',
@@ -4985,8 +6392,13 @@ async function showFileDiff(path, staged = false) {
     await openConflictFile(path);
     return;
   }
-  const diff = await api(`${repoApi(state.repo, '/workspace/diff')}?path=${encodeURIComponent(path)}&staged=${staged}`);
-  showDiffInMainArea(path, diff.diff || '(no diff — new or binary file)');
+  let diff = await api(`${repoApi(state.repo, '/workspace/diff')}?path=${encodeURIComponent(path)}&staged=${staged}`);
+  let text = (diff.diff || '').trim();
+  if (!text && !staged) {
+    diff = await api(`${repoApi(state.repo, '/workspace/diff')}?path=${encodeURIComponent(path)}&staged=true`);
+    text = (diff.diff || '').trim();
+  }
+  showDiffInMainArea(path, text || '(no diff — new or binary file)');
   highlightGitStatusFile(path);
 }
 
@@ -4999,6 +6411,12 @@ function highlightGitStatusFile(path) {
 function formatActivityBadgeCount(n) {
   if (n > 99) return '99+';
   return String(n);
+}
+
+function gitStatusFileName(path) {
+  const normalized = (path || '').replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
 }
 
 function groupStatusFilesByPath(files) {
@@ -5096,23 +6514,34 @@ async function refreshGitStatus() {
     return { clean: true, files: [], branch: '', ahead: 0 };
   }
   const status = await api(repoApi(state.repo, '/workspace/status'));
+  const displayFiles = filterStatusFilesForDisplay(status.files);
   state.conflictFiles = new Set(
-    (status.files || []).filter((f) => f.status === 'conflict').map((f) => f.path),
+    displayFiles.filter((f) => f.status === 'conflict').map((f) => f.path),
   );
   updateMergeBanner(status);
   const mergeBlocked = !!(status.merge?.active && (status.conflict_count || 0) > 0);
   state.mergeBlockedCommit = mergeBlocked;
-  state.lastGitStatusFiles = status.files || [];
-  syncCommitSelection(status.files || []);
-  updateCommitSelectionUi(status.files || [], { mergeBlocked });
-  updateGitNavUi(status);
-  setBranchLabel(status.branch);
+  state.lastGitStatusFiles = displayFiles;
+  syncCommitSelection(displayFiles);
+  updateCommitSelectionUi(displayFiles, { mergeBlocked });
+  updateGitNavUi({ ...status, files: displayFiles, clean: displayFiles.length === 0 });
+  const branch = withoutMasterBranch(status.branch);
+  if (branch) {
+    setBranchLabel(branch);
+  } else if (state.branches.includes('main')) {
+    setBranchLabel('main');
+  } else if (state.branches.length) {
+    setBranchLabel(state.branches[0]);
+  } else {
+    setBranchLabel('');
+  }
   const badge = $('#git-badge');
+  const grouped = groupStatusFilesByPath(displayFiles);
   if (badge) {
-    if (status.clean) {
+    if (!displayFiles.length) {
       badge.classList.add('hidden');
     } else {
-      const n = status.conflict_count || status.files.length;
+      const n = status.conflict_count || grouped.length;
       const label = formatActivityBadgeCount(n);
       badge.textContent = label;
       badge.classList.toggle('wide', label.length > 1);
@@ -5123,33 +6552,33 @@ async function refreshGitStatus() {
     }
   }
   const list = $('#git-status-list');
-  if (status.clean) {
+  if (!displayFiles.length) {
     list.innerHTML = '<div class="ij-empty-state"><div class="ij-empty-icon">✓</div><p>Nothing to commit — working tree clean</p></div>';
     updateCommitSelectionUi([], { mergeBlocked });
-    updateStatusBar(status);
+    updateStatusBar({ ...status, files: displayFiles, clean: true });
     updateConflictUi();
     return { clean: true, files: [], branch: status.branch, ahead: status.ahead || 0 };
   }
-  const grouped = groupStatusFilesByPath(status.files);
   list.innerHTML = grouped.map((f) => {
     const checked = !f.conflict && state.commitSelectedPaths.has(f.path);
     const disabled = f.conflict ? ' disabled' : '';
     const checkedAttr = checked ? ' checked' : '';
+    const fileName = gitStatusFileName(f.path);
     return `
     <div class="ij-git-row${f.conflict ? ' conflict-item' : ''}">
       <label class="ij-git-check" title="${f.conflict ? 'Resolve conflicts before committing' : 'Include in commit'}">
         <input type="checkbox" class="ij-git-stage-check" data-path="${escapeHtml(f.path)}"${checkedAttr}${disabled}>
       </label>
-      <button type="button" data-status-path="${escapeHtml(f.path)}" data-staged="${f.staged}" data-status="${f.status}" class="ij-git-item" title="${escapeHtml(statusLabel(f.status))} — click to preview diff">
+      <button type="button" data-status-path="${escapeHtml(f.path)}" data-staged="${f.staged}" data-status="${f.status}" class="ij-git-item" title="${escapeHtml(f.path)} — ${escapeHtml(statusLabel(f.status))} — click to preview diff">
         <span class="ij-git-badge ${f.status}" title="${escapeHtml(statusLabel(f.status))}">${statusIcon(f.status)}</span>
-        <span class="ij-git-path">${escapeHtml(f.path)}</span>
+        <span class="ij-git-path">${escapeHtml(fileName)}</span>
       </button>
     </div>`;
   }).join('');
   list.querySelectorAll('.ij-git-stage-check').forEach((input) => {
     input.addEventListener('change', () => {
       setCommitPathSelected(input.dataset.path, input.checked);
-      updateCommitSelectionUi(status.files || [], { mergeBlocked });
+      updateCommitSelectionUi(displayFiles, { mergeBlocked });
     });
   });
   list.querySelectorAll('.ij-git-item').forEach((btn) => {
@@ -5166,11 +6595,11 @@ async function refreshGitStatus() {
       btn.classList.toggle('selected', btn.dataset.statusPath === state.agentLiveDiffPath);
     });
   }
-  updateStatusBar(status);
+  updateStatusBar({ ...status, files: displayFiles, clean: false });
   updateConflictUi();
   const result = {
     clean: false,
-    files: status.files,
+    files: displayFiles,
     branch: status.branch,
     merge: status.merge,
     conflict_count: status.conflict_count || 0,
@@ -5322,9 +6751,15 @@ async function refreshAfterAgent({ fromAgent = false, final = false } = {}) {
   if (fromAgent && state.agentBusy && !status.clean) {
     await followAgentFileChanges(status);
   }
-  if (final && state.agentHadFileChanges) {
-    toast('Agent finished — review diffs in the main panel or Source Control', 'success');
-    state.agentHadFileChanges = false;
+  if (final) {
+    if (state.agentHadFileChanges) {
+      toast('Agent finished — review changes in Source Control', 'success');
+      state.agentHadFileChanges = false;
+    }
+    if (!status.clean && state.activePanel !== 'git') {
+      const badge = $('#git-badge');
+      if (badge) badge.classList.remove('hidden');
+    }
   }
   return !status.clean;
 }
@@ -5476,11 +6911,19 @@ async function checkoutBranch(branch) {
   terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
   await refreshTree();
   await refreshGitStatus();
+  await refreshHistory();
   startProjectIndexPolling();
 }
 
-// --- Terminal ---
+// --- Terminal (xterm + PTY WebSocket) ---
 let terminalNextNum = 1;
+
+function xtermApi() {
+  const Terminal = globalThis.Terminal;
+  const FitAddon = globalThis.FitAddon?.FitAddon;
+  if (!Terminal || !FitAddon) return null;
+  return { Terminal, FitAddon };
+}
 
 function createTerminalSession(name) {
   const num = terminalNextNum++;
@@ -5488,9 +6931,13 @@ function createTerminalSession(name) {
     id: `term-${num}`,
     name: name || String(num),
     cwd: '',
-    history: [],
-    historyIndex: -1,
-    lines: [],
+    container: null,
+    xterm: null,
+    fitAddon: null,
+    ws: null,
+    streamLine: null,
+    streamColorPartial: '',
+    commandStartLine: null,
   };
 }
 
@@ -5506,60 +6953,160 @@ function getActiveTerminal() {
   return state.terminals.find((t) => t.id === state.activeTerminalId) || state.terminals[0];
 }
 
+function terminalForId(id) {
+  return state.terminals.find((t) => t.id === id);
+}
+
+function destroyTerminalInstance(term) {
+  if (!term) return;
+  disconnectTerminalWs(term);
+  if (term.xterm) {
+    try { term.xterm.dispose(); } catch { /* ignore */ }
+    term.xterm = null;
+    term.fitAddon = null;
+  }
+  if (term.container) {
+    term.container.remove();
+    term.container = null;
+  }
+  term.streamLine = null;
+}
+
+function spawnTerminalInstance(term, host) {
+  if (!term || !host) return;
+  destroyTerminalInstance(term);
+  initTerminalXterm(term, host);
+}
+
 function resetTerminalCwds() {
+  const host = $('#terminal-xterm-host');
   state.terminals.forEach((t) => {
     t.cwd = '';
+    if (host) spawnTerminalInstance(t, host);
+    else destroyTerminalInstance(t);
   });
 }
 
-function clearTerminalSession(term) {
-  term.lines = [];
-  term.cwd = '';
-  term.history = [];
-  term.historyIndex = -1;
+function fitActiveTerminal() {
+  fitTerminal(getActiveTerminal());
 }
 
-function appendTerminalLine(text, container = $('#terminal-output')) {
-  if (!container) return;
-  const line = document.createElement('div');
-  line.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
-  line.textContent = text;
-  container.appendChild(line);
-  container.scrollTop = container.scrollHeight;
-}
-
-function appendTerminalEntry(entry, container = $('#terminal-output')) {
-  if (!container) return;
-  if (typeof entry === 'string') {
-    appendTerminalLine(entry, container);
-    return;
+function fitTerminal(term) {
+  if (!term?.fitAddon || !term.xterm) return;
+  try {
+    term.fitAddon.fit();
+    sendTerminalResize(term);
+  } catch {
+    /* host may be hidden */
   }
-  if (entry?.kind === 'cmd-start') {
-    const head = document.createElement('div');
-    head.className = 'ij-terminal-cmd-head';
-    head.textContent = entry.label;
-    container.appendChild(head);
-  } else if (entry?.kind === 'cmd-end') {
-    const foot = document.createElement('div');
-    foot.className = 'ij-terminal-cmd-foot';
-    if (entry.exitCode != null && entry.exitCode !== 0) {
-      foot.classList.add('ij-terminal-cmd-foot--failed');
-      const label = document.createElement('span');
-      label.className = 'ij-terminal-cmd-foot-label';
-      label.textContent = `exit ${entry.exitCode}`;
-      foot.appendChild(label);
+}
+
+function sendTerminalResize(term) {
+  if (!term?.ws || term.ws.readyState !== WebSocket.OPEN || !term.xterm) return;
+  term.ws.send(JSON.stringify({
+    type: 'resize',
+    cols: term.xterm.cols,
+    rows: term.xterm.rows,
+  }));
+}
+
+function terminalWsUrl(term) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let url = `${proto}//${location.host}/api/repos/${encodeURIComponent(state.repo)}/workspace/terminal`;
+  if (term.cwd) url += `?cwd=${encodeURIComponent(term.cwd)}`;
+  return url;
+}
+
+function disconnectTerminalWs(term) {
+  if (!term?.ws) return;
+  try { term.ws.close(); } catch { /* ignore */ }
+  term.ws = null;
+}
+
+function connectTerminalWs(term) {
+  if (!state.repo || !term) return;
+  disconnectTerminalWs(term);
+  const ws = new WebSocket(terminalWsUrl(term));
+  term.ws = ws;
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => fitTerminal(term);
+  ws.onmessage = (ev) => {
+    if (!term.xterm) return;
+    if (ev.data instanceof ArrayBuffer) {
+      term.xterm.write(new Uint8Array(ev.data));
+    } else if (typeof ev.data === 'string') {
+      term.xterm.write(ev.data);
     }
-    container.appendChild(foot);
-  }
-  container.scrollTop = container.scrollHeight;
+  };
+  ws.onclose = () => {
+    if (term.xterm) {
+      term.xterm.write('\r\n\x1b[90m[session ended]\x1b[0m\r\n');
+    }
+  };
 }
 
-function renderTerminalOutput() {
-  const out = $('#terminal-output');
+function ensureTerminalPane(term, host) {
+  if (term.container?.isConnected) return term.container;
+  const pane = document.createElement('div');
+  pane.className = 'ij-terminal-xterm-pane hidden';
+  pane.dataset.terminalId = term.id;
+  host.appendChild(pane);
+  term.container = pane;
+  return pane;
+}
+
+function initTerminalXterm(term, host) {
+  const api = xtermApi();
+  if (!api || !host || !term) return;
+
+  const pane = ensureTerminalPane(term, host);
+  const xterm = new api.Terminal({
+    cursorBlink: true,
+    convertEol: true,
+    fontSize: getEditorFontSize(),
+    lineHeight: 1.25,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    theme: {
+      background: '#0a0e14',
+      foreground: '#c8d1dc',
+      cursor: '#7eb8da',
+      selectionBackground: '#2a4560',
+    },
+    scrollback: 4000,
+  });
+  const fitAddon = new api.FitAddon();
+  xterm.loadAddon(fitAddon);
+  xterm.open(pane);
+  xterm.onData((data) => {
+    if (term.ws?.readyState === WebSocket.OPEN) {
+      term.ws.send(data);
+    }
+  });
+  term.xterm = xterm;
+  term.fitAddon = fitAddon;
+  fitTerminal(term);
+  connectTerminalWs(term);
+}
+
+function mountActiveTerminal({ fresh = false } = {}) {
+  ensureTerminals();
   const term = getActiveTerminal();
-  if (!out || !term) return;
-  out.replaceChildren();
-  term.lines.forEach((entry) => appendTerminalEntry(entry, out));
+  const host = $('#terminal-xterm-host');
+  if (!host || !term) return;
+
+  state.terminals.forEach((t) => {
+    if (t.container) t.container.classList.add('hidden');
+  });
+
+  if (fresh || !term.xterm || !term.ws || term.ws.readyState === WebSocket.CLOSED) {
+    spawnTerminalInstance(term, host);
+  } else {
+    ensureTerminalPane(term, host);
+    term.container.classList.remove('hidden');
+    fitTerminal(term);
+  }
+  term.container?.classList.remove('hidden');
+  term.xterm?.focus();
 }
 
 function renderTerminalTabs() {
@@ -5596,35 +7143,30 @@ function switchTerminal(id) {
   if (!state.terminals.some((t) => t.id === id)) return;
   state.activeTerminalId = id;
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
-  setTimeout(() => $('#terminal-input')?.focus(), 30);
+  mountActiveTerminal();
 }
 
 function newTerminal({ focus = true } = {}) {
-  ensureTerminals();
   const term = createTerminalSession();
   state.terminals.push(term);
   state.activeTerminalId = term.id;
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
-  if (focus) {
-    showTerminal();
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
-  }
+  if (focus) showTerminal();
+  mountActiveTerminal({ fresh: true });
 }
 
 function closeTerminal(id) {
   ensureTerminals();
-  const term = state.terminals.find((t) => t.id === id);
+  const term = terminalForId(id);
   if (!term) return;
+  const host = $('#terminal-xterm-host');
   if (state.terminals.length <= 1) {
-    clearTerminalSession(term);
-    renderTerminalOutput();
-    updateTerminalCwdUi();
+    spawnTerminalInstance(term, host);
+    renderTerminalTabs();
+    mountActiveTerminal();
     return;
   }
+  destroyTerminalInstance(term);
   const idx = state.terminals.findIndex((t) => t.id === id);
   state.terminals.splice(idx, 1);
   if (state.activeTerminalId === id) {
@@ -5632,126 +7174,170 @@ function closeTerminal(id) {
     state.activeTerminalId = next.id;
   }
   renderTerminalTabs();
-  renderTerminalOutput();
-  updateTerminalCwdUi();
+  mountActiveTerminal();
 }
 
-function terminalPromptFor(term = getActiveTerminal()) {
-  const repo = state.repo || 'repo';
-  const cwd = term?.cwd ? `${repo}/${term.cwd}` : repo;
-  return `${cwd} ❯`;
+function terminalWrite(term, text) {
+  if (!text) return;
+  const t = term || getActiveTerminal();
+  if (!t?.xterm) return;
+  const normalized = String(text).replace(/\r?\n/g, '\r\n');
+  t.xterm.write(normalized + (normalized.endsWith('\r\n') ? '' : '\r\n'));
 }
 
-function updateTerminalCwdUi() {
-  const el = $('#terminal-cwd');
-  if (el) el.textContent = terminalPromptFor();
+function resolveTerminal(terminalId) {
+  return terminalForId(terminalId) || getActiveTerminal();
+}
+
+function terminalBufferLine(term) {
+  if (!term?.xterm) return 0;
+  const buf = term.xterm.buffer.active;
+  return buf.baseY + buf.cursorY;
+}
+
+function scrollTerminalToLine(term, line) {
+  if (!term?.xterm || line == null) return;
+  requestAnimationFrame(() => {
+    try {
+      term.xterm.scrollToLine(Math.max(0, line));
+    } catch {
+      /* viewport may not be ready */
+    }
+  });
+}
+
+function focusCommandTerminal(terminalId) {
+  showTerminal();
+  if (terminalId && state.activeTerminalId !== terminalId) {
+    switchTerminal(terminalId);
+  } else {
+    mountActiveTerminal();
+  }
+  const term = resolveTerminal(terminalId);
+  term?.xterm?.focus();
+  return term;
+}
+
+function colorizeStreamLine(line) {
+  const trimmed = line.trimEnd();
+  if (!trimmed) return line;
+  if (/^BUILD SUCCESSFUL/i.test(trimmed)) {
+    return `${TERM_ESC.green}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
+  }
+  if (/^BUILD FAILED/i.test(trimmed)) {
+    return `${TERM_ESC.red}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
+  }
+  if (/^> Task /i.test(trimmed)) return `${TERM_ESC.dim}${line}${TERM_ESC.reset}`;
+  if (/FAILED/i.test(trimmed) && !/UP-TO-DATE/i.test(trimmed)) {
+    return `${TERM_ESC.red}${line}${TERM_ESC.reset}`;
+  }
+  if (/\bPASSED\b/i.test(trimmed) || /^Tests run:/i.test(trimmed)) {
+    return `${TERM_ESC.green}${line}${TERM_ESC.reset}`;
+  }
+  if (/^FAILURE:/i.test(trimmed) || /^error:/i.test(trimmed)) {
+    return `${TERM_ESC.red}${line}${TERM_ESC.reset}`;
+  }
+  if (/^\* What went wrong:/i.test(trimmed)) {
+    return `${TERM_ESC.yellow}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
+  }
+  if (/^warning:/i.test(trimmed) || /^WARNING:/i.test(trimmed)) {
+    return `${TERM_ESC.yellow}${line}${TERM_ESC.reset}`;
+  }
+  if (/^> /i.test(trimmed) && /\bcompile\b|\btest\b/i.test(trimmed)) {
+    return `${TERM_ESC.magenta}${line}${TERM_ESC.reset}`;
+  }
+  if (/^\$ /.test(trimmed)) return `${TERM_ESC.cyan}${line}${TERM_ESC.reset}`;
+  return line;
+}
+
+function writeColorizedStreamChunk(term, text) {
+  if (!term?.xterm || !text) return;
+  const combined = `${term.streamColorPartial || ''}${text}`;
+  const parts = combined.split('\n');
+  term.streamColorPartial = combined.endsWith('\n') ? '' : (parts.pop() || '');
+  let out = '';
+  for (const line of parts) {
+    out += `${colorizeStreamLine(line)}\n`;
+  }
+  if (out) term.xterm.write(out.replace(/\n/g, '\r\n'));
 }
 
 function terminalLog(text, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  term.streamLine = null;
-  term.lines.push(text);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalLine(text);
-  }
+  terminalWrite(terminalForId(terminalId) || getActiveTerminal(), text);
 }
 
-function terminalCommandBegin(label, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  const entry = {
-    kind: 'cmd-start',
-    label: String(label || '').trim() || 'command',
-  };
-  term.lines.push(entry);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalEntry(entry);
-  }
+function terminalCommandBegin(label, terminalId, { kind } = {}) {
+  const term = resolveTerminal(terminalId);
+  if (!term?.xterm) return;
+  term.streamColorPartial = '';
+  term.xterm.write('\r\n');
+  term.commandStartLine = terminalBufferLine(term);
+  const labelText = String(label || '').trim() || 'command';
+  const isTest = kind === 'test' || (/\btest\b/i.test(labelText) && labelText.includes('▶'));
+  const accent = isTest ? TERM_ESC.brightCyan : TERM_ESC.cyan;
+  term.xterm.write(`${TERM_ESC.dim}────────────────────────────────────────${TERM_ESC.reset}\r\n`);
+  term.xterm.write(`${accent}${TERM_ESC.bold}${labelText}${TERM_ESC.reset}\r\n`);
+  scrollTerminalToLine(term, term.commandStartLine);
+  term.xterm.focus();
 }
 
 function terminalCommandEnd(exitCode, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
-  if (!term) return;
-  const entry = {
-    kind: 'cmd-end',
-    exitCode: typeof exitCode === 'number' ? exitCode : null,
-  };
-  term.lines.push(entry);
-  if (term.id === state.activeTerminalId) {
-    appendTerminalEntry(entry);
+  const term = resolveTerminal(terminalId);
+  if (!term?.xterm) return;
+  if (term.streamColorPartial) {
+    term.xterm.write(term.streamColorPartial.replace(/\n/g, '\r\n'));
+    term.streamColorPartial = '';
   }
+  if (typeof exitCode === 'number') {
+    if (exitCode === 0) {
+      term.xterm.write(`${TERM_ESC.green}${TERM_ESC.bold}✓ finished (exit 0)${TERM_ESC.reset}\r\n`);
+    } else {
+      term.xterm.write(`${TERM_ESC.red}${TERM_ESC.bold}✗ failed (exit ${exitCode})${TERM_ESC.reset}\r\n`);
+    }
+  }
+  term.xterm.write(`${TERM_ESC.dim}────────────────────────────────────────${TERM_ESC.reset}\r\n\r\n`);
+  if (typeof exitCode === 'number' && exitCode !== 0) {
+    try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
+  } else {
+    scrollTerminalToLine(term, term.commandStartLine ?? terminalBufferLine(term));
+  }
+  term.xterm.focus();
 }
 
 function beginTerminalStream(terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = resolveTerminal(terminalId);
   if (!term) return;
   term.streamLine = '';
-  term.lines.push('');
+  term.streamColorPartial = '';
 }
 
 function terminalStreamChunk(text, terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = resolveTerminal(terminalId);
   if (!term || term.streamLine == null) return;
   term.streamLine += text;
-  term.lines[term.lines.length - 1] = term.streamLine;
-  if (term.id === state.activeTerminalId) {
-    updateTerminalStreamLine(term);
-  }
+  writeColorizedStreamChunk(term, text);
 }
 
 function finalizeTerminalStream(terminalId) {
-  const term = terminalId
-    ? state.terminals.find((t) => t.id === terminalId)
-    : getActiveTerminal();
+  const term = resolveTerminal(terminalId);
   if (!term) return;
   term.streamLine = null;
-  const out = $('#terminal-output');
-  const last = out?.lastElementChild;
-  if (last?.dataset?.streaming) delete last.dataset.streaming;
+  term.streamColorPartial = '';
 }
 
-function updateTerminalStreamLine(term) {
-  const out = $('#terminal-output');
-  if (!out) return;
-  let el = out.lastElementChild;
-  if (!el?.dataset?.streaming) {
-    el = document.createElement('div');
-    el.className = 'mb-1 whitespace-pre-wrap ij-terminal-line';
-    el.dataset.streaming = '1';
-    out.appendChild(el);
-  }
-  el.textContent = term.streamLine || '';
-  out.scrollTop = out.scrollHeight;
-}
-
-async function handleTerminalCd(cmd) {
-  const term = getActiveTerminal();
-  const target = cmd.trim() === 'cd' ? '' : cmd.trim().slice(2).trim();
-  try {
-    const body = { target };
-    if (term.cwd) body.cwd = term.cwd;
-    const res = await api(repoApi(state.repo, '/workspace/shell/cd'), {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
-    term.cwd = res.cwd || '';
-    updateTerminalCwdUi();
-    return true;
-  } catch (e) {
-    terminalLog(`cd: ${e.message}`);
-    return false;
-  }
+function bindTerminalTabs() {
+  $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
+  $('#terminal-tabs')?.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('.ij-terminal-tab-close');
+    const tab = e.target.closest('.ij-terminal-tab');
+    if (!tab) return;
+    if (closeBtn) {
+      e.stopPropagation();
+      closeTerminal(tab.dataset.terminalId);
+      return;
+    }
+    switchTerminal(tab.dataset.terminalId);
+  });
 }
 
 async function consumeWorkspaceExecStream(res, terminalId) {
@@ -5797,91 +7383,21 @@ async function postWorkspaceExecStream(path, body, terminalId) {
   return consumeWorkspaceExecStream(res, terminalId);
 }
 
-async function runWorkspaceCommandStream(path, body, { label, terminalId } = {}) {
+async function runWorkspaceCommandStream(path, body, { label, terminalId, kind } = {}) {
   const termId = terminalId ?? getActiveTerminal()?.id;
-  if (label && termId) terminalCommandBegin(label, termId);
+  focusCommandTerminal(termId);
+  if (label && termId) terminalCommandBegin(label, termId, { kind });
   try {
     const exitCode = await postWorkspaceExecStream(path, body, termId);
+    const output = terminalForId(termId)?.streamLine || '';
     finalizeTerminalStream(termId);
     if (termId) terminalCommandEnd(exitCode, termId);
-    return exitCode;
+    return { exitCode, output };
   } catch (e) {
     finalizeTerminalStream(termId);
     if (termId) terminalCommandEnd(-1, termId);
     throw e;
   }
-}
-
-async function runTerminalCommand(raw) {
-  if (!state.repo) return;
-  const term = getActiveTerminal();
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-
-  if (!term.history.length || term.history[0] !== trimmed) {
-    term.history.unshift(trimmed);
-    if (term.history.length > 100) term.history.pop();
-  }
-  term.historyIndex = -1;
-
-  const label = `${terminalPromptFor(term)} ${trimmed}`;
-
-  if (trimmed === 'cd' || trimmed.startsWith('cd ') || trimmed.startsWith('cd\t')) {
-    terminalCommandBegin(label, term.id);
-    const ok = await handleTerminalCd(trimmed);
-    terminalCommandEnd(ok ? 0 : 1, term.id);
-    return;
-  }
-
-  try {
-    const body = { command: trimmed };
-    if (term.cwd) body.cwd = term.cwd;
-    const exitCode = await runWorkspaceCommandStream('/workspace/shell', body, {
-      label,
-      terminalId: term.id,
-    });
-    if (/^git\b/.test(trimmed)) {
-      await refreshGitStatus();
-      await refreshHistory();
-    }
-    return exitCode;
-  } catch (e) {
-    terminalLog(`error: ${e.message}`, term.id);
-  }
-}
-
-function terminalHistoryUp(input) {
-  const term = getActiveTerminal();
-  if (!term.history.length) return;
-  term.historyIndex = Math.min(
-    term.historyIndex + 1,
-    term.history.length - 1,
-  );
-  input.value = term.history[term.historyIndex] || '';
-}
-
-function terminalHistoryDown(input) {
-  const term = getActiveTerminal();
-  if (!term.history.length) return;
-  term.historyIndex = Math.max(term.historyIndex - 1, -1);
-  input.value = term.historyIndex < 0
-    ? ''
-    : term.history[term.historyIndex] || '';
-}
-
-function bindTerminalTabs() {
-  $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
-  $('#terminal-tabs')?.addEventListener('click', (e) => {
-    const closeBtn = e.target.closest('.ij-terminal-tab-close');
-    const tab = e.target.closest('.ij-terminal-tab');
-    if (!tab) return;
-    if (closeBtn) {
-      e.stopPropagation();
-      closeTerminal(tab.dataset.terminalId);
-      return;
-    }
-    switchTerminal(tab.dataset.terminalId);
-  });
 }
 
 // --- Cursor Agent ---
@@ -5899,10 +7415,33 @@ function pickAgentFinalText(textBuffer, buffer, summary) {
   return cleaned || streamed || done;
 }
 
+function getAgentProvider(id) {
+  return AGENT_PROVIDERS[id] || AGENT_PROVIDERS.cursor;
+}
+
+function agentProviderDef() {
+  return getAgentProvider(state.agentProvider);
+}
+
+function anyAgentProviderConfigured() {
+  return AGENT_PROVIDER_ORDER.some((id) => {
+    const p = AGENT_PROVIDERS[id];
+    return !p.comingSoon && p.isConfigured();
+  });
+}
+
+function agentAssistantLabel(provider) {
+  return getAgentProvider(provider || state.agentProvider).messageLabel;
+}
+
+function agentEmptyReplyText() {
+  return agentProviderDef().emptyReply();
+}
+
 async function finalizeAgentMessage(el, { textBuffer, buffer, summary }) {
   const finalText = pickAgentFinalText(textBuffer, buffer, summary);
   if (!finalText) {
-    await window.ReaperAgentMarkdown?.renderAgentContent(el, 'Done — check Source Control for changes.');
+    await window.ReaperAgentMarkdown?.renderAgentContent(el, agentEmptyReplyText());
     return;
   }
   if (!window.ReaperAgentMarkdown?.renderAgentContent) {
@@ -5913,22 +7452,28 @@ async function finalizeAgentMessage(el, { textBuffer, buffer, summary }) {
   await window.ReaperAgentMarkdown.renderAgentContent(el, finalText);
 }
 
-function appendAgentMessage(role, text) {
+function appendAgentMessage(role, text, opts = {}) {
   const box = $('#agent-messages');
   const placeholder = box.querySelector('.agent-msg-system.text-center');
   if (placeholder) box.innerHTML = '';
 
+  const provider = opts.provider || state.agentProvider || 'cursor';
+  const providerDef = getAgentProvider(provider);
   const wrap = document.createElement('div');
   wrap.className = `rounded-lg px-3 py-2 ${
     role === 'user' ? 'agent-msg-user text-gray-200' :
-    role === 'assistant' ? 'agent-msg-assistant text-gray-300' :
-    'agent-msg-system'
+    role === 'assistant'
+      ? `agent-msg-assistant text-gray-300 agent-provider-${provider}`
+      : 'agent-msg-system'
   }`;
+  if (role === 'assistant') {
+    wrap.dataset.agentProvider = provider;
+  }
 
   if (role !== 'system') {
     const label = document.createElement('div');
-    label.className = 'text-[10px] uppercase tracking-wide text-gray-500 mb-1';
-    label.textContent = role === 'user' ? 'You' : 'Cursor';
+    label.className = `agent-msg-label text-[10px] uppercase tracking-wide mb-1 ${providerDef.labelClass}`;
+    label.textContent = role === 'user' ? 'You' : providerDef.messageLabel;
     wrap.appendChild(label);
   }
 
@@ -5992,23 +7537,18 @@ async function restoreAgentWorkspacePaths(paths) {
   }
 }
 
-function removeAgentMessageWrap(wrap) {
-  wrap?.remove();
-  const box = $('#agent-messages');
-  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
-    box.innerHTML = '<div class="agent-msg-system text-center py-4 px-2">Ask the Cursor agent to edit files, run git commands, or explain the codebase.</div>';
-  }
-}
-
 async function stopAgentChat() {
   if (!state.agentBusy || !state.repo) return;
   state.agentStopRequested = true;
   state.agentMessageQueue = [];
   state.agentAbortController?.abort();
-  try {
-    await api(repoApi(state.repo, '/cursor/stop'), { method: 'POST' });
-  } catch {
-    /* stream abort still stops the UI */
+  const stopPath = agentProviderDef().stopPath;
+  if (stopPath) {
+    try {
+      await api(repoApi(state.repo, stopPath), { method: 'POST' });
+    } catch {
+      /* stream abort still stops the UI */
+    }
   }
   updateAgentUi();
 }
@@ -6033,28 +7573,260 @@ async function revertAgentMessage() {
   updateAgentUi();
 }
 
+function removeAgentMessageWrap(wrap) {
+  wrap?.remove();
+  const box = $('#agent-messages');
+  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
+    setAgentWelcomeMessage();
+  }
+}
+
+function currentAgentModel() {
+  return agentProviderDef().currentModel();
+}
+
+function agentWelcomeText() {
+  return agentProviderDef().welcome();
+}
+
+function setAgentWelcomeMessage() {
+  const el = $('#agent-welcome-msg');
+  if (el) {
+    el.textContent = agentWelcomeText();
+    return;
+  }
+  const box = $('#agent-messages');
+  if (box && !box.querySelector('.agent-msg-user, .agent-msg-assistant')) {
+    box.innerHTML = `<div id="agent-welcome-msg" class="agent-msg-system text-center py-4 px-2">${escapeHtml(agentWelcomeText())}</div>`;
+  }
+}
+
+function fillAgentModelSelect(select, models, currentId) {
+  select.innerHTML = '';
+  const ids = new Set();
+  for (const m of models) {
+    ids.add(m.id);
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label || m.id;
+    if (m.description) opt.title = m.description;
+    select.appendChild(opt);
+  }
+  if (currentId && !ids.has(currentId)) {
+    const opt = document.createElement('option');
+    opt.value = currentId;
+    opt.textContent = currentId;
+    select.appendChild(opt);
+  }
+  select.value = currentId;
+}
+
+function agentProviderChipStatus(def) {
+  if (def.comingSoon) return 'soon';
+  if (!def.isConfigured()) return 'needs-key';
+  if (!def.isReady()) return 'waiting';
+  return 'ready';
+}
+
+function agentProviderChipTitle(def) {
+  if (def.comingSoon) return `${def.label} agent — coming soon`;
+  if (!def.isConfigured()) return `Configure ${def.label} in Settings`;
+  if (!def.isReady()) return def.notReadyHint?.() || `${def.label} — not ready`;
+  const caps = def.capabilities;
+  if (caps.readOnly) return `${def.label} agent — read-only Q&A`;
+  return `${def.label} agent — edit files and run tools`;
+}
+
+function renderAgentProviderPicker() {
+  const picker = $('#agent-provider-picker');
+  if (!picker) return;
+  picker.innerHTML = '';
+  for (const id of AGENT_PROVIDER_ORDER) {
+    const def = AGENT_PROVIDERS[id];
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.dataset.agentProvider = id;
+    chip.className = 'agent-provider-chip';
+    chip.setAttribute('role', 'tab');
+    chip.setAttribute('aria-selected', id === state.agentProvider ? 'true' : 'false');
+    chip.dataset.status = agentProviderChipStatus(def);
+    chip.title = agentProviderChipTitle(def);
+
+    const dot = document.createElement('span');
+    dot.className = 'agent-provider-status-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    chip.appendChild(dot);
+
+    const name = document.createElement('span');
+    name.className = 'agent-provider-chip-label';
+    name.textContent = def.label;
+    chip.appendChild(name);
+
+    if (def.comingSoon) {
+      const badge = document.createElement('span');
+      badge.className = 'agent-provider-soon';
+      badge.textContent = 'Soon';
+      chip.appendChild(badge);
+    }
+
+    chip.classList.toggle('active', id === state.agentProvider);
+    picker.appendChild(chip);
+  }
+}
+
+function renderAgentProviderControls() {
+  const container = $('#agent-provider-controls');
+  if (!container) return;
+  const def = agentProviderDef();
+  container.innerHTML = '';
+  container.dataset.provider = def.id;
+
+  if (def.comingSoon) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-gray-600 leading-snug';
+    hint.textContent = 'Coming soon — Anthropic API key support is on the way.';
+    container.appendChild(hint);
+    return;
+  }
+
+  if (def.capabilities.modes) {
+    const modeBar = document.createElement('div');
+    modeBar.className = 'flex items-center border border-surface-700 rounded-md overflow-hidden shrink-0';
+    modeBar.title = 'Conversation mode';
+    for (const [idx, mode] of ['agent', 'plan', 'ask'].entries()) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.agentMode = mode;
+      btn.className = `agent-mode-btn px-2 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors${idx ? ' border-l border-surface-700' : ''}`;
+      btn.title = mode === 'agent'
+        ? 'Agent — edit files and run tools'
+        : mode === 'plan'
+          ? 'Plan — design before implementing'
+          : 'Ask — read-only Q&A';
+      btn.textContent = mode === 'agent' ? 'Agent' : mode === 'plan' ? 'Plan' : 'Ask';
+      btn.classList.toggle('active', state.cursorMode === mode);
+      modeBar.appendChild(btn);
+    }
+    container.appendChild(modeBar);
+  }
+
+  if (def.capabilities.readOnly) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-gray-600 shrink-0';
+    hint.textContent = 'Read-only chat';
+    container.appendChild(hint);
+  }
+
+  const models = def.models();
+  if (models.length) {
+    const select = document.createElement('select');
+    select.id = 'agent-provider-model';
+    select.className = 'ij-theme-menu-select flex-1 min-w-0 text-[11px]';
+    select.title = `${def.label} model`;
+    const current = def.currentModel();
+    fillAgentModelSelect(select, models, current);
+    if (def.id === 'cursor') state.cursorModel = select.value;
+    else if (def.id === 'gemini') state.geminiModel = select.value;
+    container.appendChild(select);
+  }
+}
+
+function ensureAgentProviderAvailable() {
+  const current = getAgentProvider(state.agentProvider);
+  if (!current.comingSoon && current.isConfigured()) return;
+  const fallback = AGENT_PROVIDER_ORDER.find((id) => {
+    const p = AGENT_PROVIDERS[id];
+    return !p.comingSoon && p.isConfigured();
+  });
+  if (fallback) state.agentProvider = fallback;
+  else if (current.comingSoon || !AGENT_PROVIDERS[state.agentProvider]) {
+    state.agentProvider = AGENT_PROVIDER_ORDER[0];
+  }
+}
+
+function refreshAgentProviderUi() {
+  ensureAgentProviderAvailable();
+  localStorage.setItem(AGENT_PROVIDER_KEY, state.agentProvider);
+  renderAgentProviderPicker();
+  renderAgentProviderControls();
+
+  const def = agentProviderDef();
+  const input = $('#agent-input');
+  if (input) input.placeholder = def.placeholder;
+
+  setAgentWelcomeMessage();
+}
+
+function agentCanChat() {
+  if (!state.repo) return false;
+  const def = agentProviderDef();
+  if (def.comingSoon) return false;
+  return def.isReady();
+}
+
+async function setAgentProvider(provider) {
+  const def = getAgentProvider(provider);
+  if (!def || provider === state.agentProvider) return;
+  if (def.comingSoon) {
+    toast('Claude agent is coming soon', 'info');
+    return;
+  }
+  if (!def.isConfigured()) {
+    toast(`Add a ${def.label} API key in Settings`, 'error');
+    showSettingsModal(def.settingsTab);
+    return;
+  }
+  state.agentProvider = provider;
+  refreshAgentProviderUi();
+  updateAgentUi();
+}
+
 function updateAgentUi() {
-  const canChat = state.repo && state.cursorConfigured && state.cursorBridgeOk;
+  const prevProvider = $('#agent-provider-controls')?.dataset.provider;
+  ensureAgentProviderAvailable();
+  localStorage.setItem(AGENT_PROVIDER_KEY, state.agentProvider);
+  renderAgentProviderPicker();
+  if (state.agentProvider !== prevProvider) {
+    renderAgentProviderControls();
+    setAgentWelcomeMessage();
+  }
+
+  const def = agentProviderDef();
+  const input = $('#agent-input');
+  if (input) input.placeholder = def.placeholder;
+
+  const canChat = agentCanChat();
   $('#agent-input').disabled = !canChat;
   $('#btn-agent-send').disabled = !canChat;
-  const modelEl = $('#agent-model');
-  if (modelEl) modelEl.disabled = !state.cursorConfigured || !state.cursorBridgeOk;
+
+  const modelEl = $('#agent-provider-model');
+  if (modelEl) {
+    modelEl.disabled = !def.isConfigured() || def.comingSoon;
+  }
 
   let status = 'Ready';
-  if (!state.cursorConfigured) status = 'API key not configured';
-  else if (!state.cursorBridgeOk) {
-    status = state.cursorBridgeError ? `Bridge offline — ${state.cursorBridgeError}` : 'Bridge offline';
+  if (!anyAgentProviderConfigured()) {
+    status = 'API key not configured';
+  } else if (def.comingSoon) {
+    status = def.statusText();
+  } else if (!def.isConfigured()) {
+    status = `${def.label} API key not configured`;
+  } else if (!def.isReady()) {
+    status = def.notReadyHint?.() || 'Not ready';
   } else if (state.agentBusy) {
     const queued = state.agentMessageQueue.length;
     status = queued ? `Working… · ${queued} queued` : 'Working…';
-  } else if (!state.repo) status = 'Select a repo';
-  else {
-    const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
-    status = `${modeLabel} · ${state.cursorModel || 'composer-2.5'}`;
+  } else if (!state.repo) {
+    status = 'Select a repo';
+  } else {
+    status = def.statusText();
   }
   $('#agent-status').textContent = status;
-  $('#btn-agent-retry')?.classList.toggle('hidden', state.cursorBridgeOk || !state.cursorConfigured);
-  $('#agent-config-banner')?.classList.toggle('hidden', state.cursorConfigured);
+  $('#btn-agent-retry')?.classList.toggle(
+    'hidden',
+    def.id !== 'cursor' || state.cursorBridgeOk || !state.cursorConfigured,
+  );
+  $('#agent-config-banner')?.classList.toggle('hidden', anyAgentProviderConfigured());
 
   const workBar = $('#agent-work-status');
   const workText = $('#agent-work-status-text');
@@ -6072,19 +7844,24 @@ function updateAgentUi() {
     }
   }
 
-  const hint = !state.cursorConfigured ? 'Configure Cursor in Settings (⌘,)' :
-    !state.repo ? 'Select a repo to chat' :
-    !state.cursorBridgeOk ? (state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper') :
-    state.agentBusy ? 'Enter to queue another message · Shift+Enter for newline' :
-    'Enter to send · Shift+Enter for newline';
+  let hint;
+  if (!anyAgentProviderConfigured()) {
+    hint = 'Configure an agent in Settings (⌘,)';
+  } else if (def.comingSoon || !def.isConfigured()) {
+    hint = def.notConfiguredHint;
+  } else if (!state.repo) {
+    hint = 'Select a repo to chat';
+  } else if (!def.isReady()) {
+    hint = def.notReadyHint?.() || def.notConfiguredHint;
+  } else if (state.agentBusy) {
+    hint = 'Enter to queue another message · Shift+Enter for newline';
+  } else {
+    hint = def.hintWhenReady;
+  }
   $('#agent-hint').textContent = hint;
 
   $$('[data-agent-dock]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.agentDock === state.agentDock);
-  });
-
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
   });
 
   const agentBadge = $('#agent-badge');
@@ -6093,55 +7870,31 @@ function updateAgentUi() {
   const stopBtn = $('#btn-agent-stop');
   if (stopBtn) stopBtn.disabled = !canChat || !state.agentBusy;
   const revertBtn = $('#btn-agent-revert');
-  if (revertBtn) revertBtn.disabled = !canChat || state.agentBusy || !state.agentLastRevertibleTurn;
-}
-
-function populateAgentModelSelect(models, selectedId) {
-  const el = $('#agent-model');
-  if (!el) return;
-  const list = models?.length ? models : CURSOR_MODELS_FALLBACK;
-  const current = selectedId || state.cursorModel || 'composer-2.5';
-  el.innerHTML = '';
-  const ids = new Set();
-  for (const m of list) {
-    ids.add(m.id);
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.label || m.id;
-    if (m.description) opt.title = m.description;
-    el.appendChild(opt);
+  if (revertBtn) {
+    revertBtn.classList.toggle('hidden', !def.capabilities.revert);
+    revertBtn.disabled = !canChat || state.agentBusy || !state.agentLastRevertibleTurn;
   }
-  if (!ids.has(current)) {
-    const opt = document.createElement('option');
-    opt.value = current;
-    opt.textContent = current;
-    el.appendChild(opt);
-  }
-  el.value = current;
-  state.cursorModel = current;
 }
 
 async function loadCursorModels() {
   if (!state.cursorConfigured) {
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    if (state.agentProvider === 'cursor') renderAgentProviderControls();
     return;
   }
   try {
     const data = await api('/api/cursor/models');
-    const models = data.models || [];
-    state.cursorModels = models;
-    populateAgentModelSelect(models.length ? models : CURSOR_MODELS_FALLBACK, state.cursorModel);
+    state.cursorModels = data.models || [];
   } catch {
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    /* keep fallback list */
   }
+  if (state.agentProvider === 'cursor') renderAgentProviderControls();
+  updateAgentUi();
 }
 
 async function setAgentMode(mode) {
   if (!['agent', 'plan', 'ask'].includes(mode) || mode === state.cursorMode) return;
   state.cursorMode = mode;
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.agentMode === mode);
-  });
+  renderAgentProviderControls();
   updateAgentUi();
   try {
     const cfg = await api('/api/settings/cursor/mode', {
@@ -6154,7 +7907,7 @@ async function setAgentMode(mode) {
   }
 }
 
-async function setAgentModel(modelId) {
+async function setCursorAgentModel(modelId) {
   if (!modelId || modelId === state.cursorModel) return;
   state.cursorModel = modelId;
   updateAgentUi();
@@ -6169,8 +7922,23 @@ async function setAgentModel(modelId) {
   }
 }
 
+async function setGeminiAgentModel(modelId) {
+  if (!modelId || modelId === state.geminiModel) return;
+  state.geminiModel = modelId;
+  updateAgentUi();
+  try {
+    const cfg = await api('/api/settings/gemini/model', {
+      method: 'PATCH',
+      body: JSON.stringify({ model: modelId }),
+    });
+    state.geminiModel = cfg.model || modelId;
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function showAgentKeyForm() {
-  showSettingsModal('cursor');
+  showSettingsModal(agentProviderDef().settingsTab);
 }
 
 async function loadCursorStatus() {
@@ -6187,13 +7955,14 @@ async function loadCursorStatus() {
       btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
     });
     await loadCursorModels();
+    refreshAgentProviderUi();
   } catch {
     state.cursorConfigured = false;
     state.cursorBridgeOk = false;
     state.cursorBridgeError = null;
     state.cursorKeyMasked = null;
     state.cursorKeySource = null;
-    populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+    refreshAgentProviderUi();
   }
   updateAgentUi();
 }
@@ -6246,6 +8015,7 @@ function initTerminalBottomResize() {
     document.body.style.userSelect = '';
     const h = applyTerminalBottomHeight($('#terminal-dock-bottom')?.getBoundingClientRect().height);
     if (h) localStorage.setItem(TERMINAL_BOTTOM_HEIGHT_KEY, String(h));
+    fitActiveTerminal();
   };
 
   handle.addEventListener('mousedown', (e) => {
@@ -6321,6 +8091,9 @@ function applyTerminalDock() {
 
   syncActivityButtons();
   updateStatusBar();
+  if (showTerminal) {
+    requestAnimationFrame(() => fitActiveTerminal());
+  }
 }
 
 function showTerminal() {
@@ -6336,10 +8109,10 @@ function openTerminal() {
     switchPanel('terminal');
     return;
   }
+  const wasOpen = state.terminalOpen;
   state.terminalOpen = true;
   applyTerminalDock();
-  updateTerminalCwdUi();
-  setTimeout(() => $('#terminal-input')?.focus(), 50);
+  mountActiveTerminal({ fresh: !wasOpen });
 }
 
 function toggleTerminal() {
@@ -6347,10 +8120,11 @@ function toggleTerminal() {
     switchPanel(state.activePanel === 'terminal' ? 'explorer' : 'terminal');
     return;
   }
+  const wasOpen = state.terminalOpen;
   state.terminalOpen = !state.terminalOpen;
   applyTerminalDock();
   if (state.terminalOpen) {
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
+    mountActiveTerminal({ fresh: !wasOpen });
   }
 }
 
@@ -6370,10 +8144,16 @@ function applyAgentDock() {
   const sidebar = $('#sidebar');
   const rightDock = $('#agent-dock-right');
   const bottomDock = $('#agent-dock-bottom');
+  const rightResizer = $('#agent-right-resizer');
   if (!panel || !sidebar || !rightDock || !bottomDock) return;
 
   const dock = state.agentDock;
   const showAgent = dock === 'left' ? state.activePanel === 'agent' : state.agentOpen;
+
+  if (rightResizer) {
+    const showRightResize = dock === 'right' && showAgent;
+    rightResizer.classList.toggle('hidden', !showRightResize);
+  }
 
   if (dock === 'left') {
     sidebar.appendChild(panel);
@@ -6397,11 +8177,6 @@ function applyAgentDock() {
 
   panel.classList.toggle('hidden', !showAgent);
   panel.classList.toggle('flex', showAgent);
-
-  sidebar.classList.toggle('w-72', dock === 'left' && state.activePanel === 'agent');
-  sidebar.classList.toggle('lg:w-80', dock === 'left' && state.activePanel === 'agent');
-  sidebar.classList.toggle('w-60', !(dock === 'left' && state.activePanel === 'agent'));
-  sidebar.classList.toggle('lg:w-64', !(dock === 'left' && state.activePanel === 'agent'));
 
   syncActivityButtons();
   updateAgentUi();
@@ -6437,10 +8212,13 @@ function toggleAgent() {
 async function clearAgentSession() {
   if (state.repo) {
     try {
-      await api(repoApi(state.repo, '/cursor/session'), { method: 'DELETE' });
+      await Promise.all([
+        api(repoApi(state.repo, '/cursor/session'), { method: 'DELETE' }).catch(() => {}),
+        api(repoApi(state.repo, '/gemini/session'), { method: 'DELETE' }).catch(() => {}),
+      ]);
     } catch { /* ignore */ }
   }
-  $('#agent-messages').innerHTML = '<div class="agent-msg-system text-center py-6 px-2">New conversation started.</div>';
+  setAgentWelcomeMessage();
   state.agentMessageQueue = [];
   state.agentLastRevertibleTurn = null;
   updateAgentUi();
@@ -6449,7 +8227,7 @@ async function clearAgentSession() {
 async function sendAgentMessage() {
   const prompt = $('#agent-input').value.trim();
   if (!prompt || !state.repo) return;
-  if (!state.cursorConfigured || !state.cursorBridgeOk) return;
+  if (!agentCanChat()) return;
 
   $('#agent-input').value = '';
 
@@ -6477,13 +8255,15 @@ async function runAgentChat(prompt, opts = {}) {
   }
 
   let userWrap = null;
+  const def = agentProviderDef();
+  const chatProvider = def.id;
   if (!opts.skipUserBubble) {
-    ({ wrap: userWrap } = appendAgentMessage('user', prompt));
+    ({ wrap: userWrap } = appendAgentMessage('user', prompt, { provider: chatProvider }));
   }
   state.agentBusy = true;
   state.agentStopRequested = false;
   state.agentAbortController = new AbortController();
-  state.agentLiveFollow = state.cursorMode === 'agent';
+  state.agentLiveFollow = !!def.capabilities.liveFollow && state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
   state.agentLastToolPath = null;
   state.agentSeenPaths = new Set();
@@ -6492,21 +8272,18 @@ async function runAgentChat(prompt, opts = {}) {
   updateAgentUi();
   if (state.agentLiveFollow) showAgentDiffPlaceholder();
 
-  const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…');
+  const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…', { provider: chatProvider });
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
   let cancelled = false;
 
   try {
-    const res = await fetch(repoApi(state.repo, '/cursor/chat'), {
+    const chatUrl = repoApi(state.repo, def.chatPath);
+    const res = await fetch(chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        model: state.cursorModel,
-        mode: state.cursorMode,
-      }),
+      body: JSON.stringify(def.chatBody(prompt)),
       signal: state.agentAbortController.signal,
     });
 
@@ -6553,7 +8330,9 @@ async function runAgentChat(prompt, opts = {}) {
             buffer = buffer || 'Stopped.';
             textBuffer = textBuffer || buffer;
           } else if (!buffer && data.status === 'finished') {
-            buffer = 'Done — check Source Control for file changes, or reopen files in the editor.';
+            buffer = def.capabilities.tools
+              ? 'Done — check Source Control for file changes, or reopen files in the editor.'
+              : def.emptyReply();
             textBuffer = buffer;
           } else if (!buffer && data.status === 'error') {
             throw new Error('Agent run failed');
@@ -6638,6 +8417,7 @@ function switchPanel(name) {
     return;
   }
 
+  const panelChanged = state.activePanel !== name;
   state.activePanel = name;
   syncActivityButtons();
   const titles = {
@@ -6661,7 +8441,7 @@ function switchPanel(name) {
     setTimeout(() => $('#agent-input')?.focus(), 50);
   }
   if (name === 'terminal') {
-    setTimeout(() => $('#terminal-input')?.focus(), 50);
+    mountActiveTerminal({ fresh: panelChanged });
   }
 }
 
@@ -6706,24 +8486,52 @@ function installFormClipboardShortcuts() {
         }
         e.preventDefault();
       } catch { /* fall back to native Edit menu */ }
-      return;
-    }
-
-    if (key === 'v') {
-      try {
-        const text = await navigator.clipboard.readText();
-        if (!text) return;
-        el.setRangeText(text, start, end, 'end');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        e.preventDefault();
-      } catch { /* fall back to native Edit menu */ }
     }
   }, true);
+}
+
+function isTerminalFocused() {
+  const term = getActiveTerminal();
+  const pane = term?.container;
+  if (!pane) return false;
+  if (pane.querySelector('.xterm.focus')) return true;
+  const active = document.activeElement;
+  return !!(active && pane.contains(active));
+}
+
+function installTerminalClipboard() {
+  const pasteIntoActiveTerminal = (text) => {
+    const term = getActiveTerminal();
+    if (!term?.xterm || !text) return;
+    term.xterm.paste(text);
+  };
+
+  document.addEventListener('keydown', async (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'v' || e.altKey) return;
+    if (!isTerminalFocused()) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      pasteIntoActiveTerminal(text);
+    } catch { /* fall back to native */ }
+  }, true);
+
+  $('#terminal-xterm-host')?.addEventListener('paste', (e) => {
+    if (!isTerminalFocused()) return;
+    const text = e.clipboardData?.getData('text/plain');
+    if (!text) return;
+    e.preventDefault();
+    pasteIntoActiveTerminal(text);
+  });
 }
 
 // --- Init ---
 function bindEvents() {
   installFormClipboardShortcuts();
+  installTerminalClipboard();
+  $('#toast .ij-toast-dismiss')?.addEventListener('click', dismissToast);
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
   $('#status-ai-fix')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -6772,7 +8580,7 @@ function bindEvents() {
     hidePublishModal();
     showSettingsModal('git');
   });
-  $('#btn-agent-open-settings')?.addEventListener('click', () => showSettingsModal('cursor'));
+  $('#btn-agent-open-settings')?.addEventListener('click', showAgentKeyForm);
   $('#file-modal-cancel').addEventListener('click', hideFileModal);
   $('#new-repo-form').addEventListener('submit', createRepo);
   $('#clone-repo-form')?.addEventListener('submit', cloneRepo);
@@ -6782,6 +8590,8 @@ function bindEvents() {
   $('#tb-save')?.addEventListener('click', saveFile);
   $('#tb-format')?.addEventListener('click', formatDocument);
   $('#tb-rollback')?.addEventListener('click', rollbackLastChange);
+  $('#tb-reload-project')?.addEventListener('click', () => reloadProjectIndex());
+  $('#btn-reload-project')?.addEventListener('click', () => reloadProjectIndex());
   $('#tb-run')?.addEventListener('click', runActive);
   $('#gradle-task')?.addEventListener('change', () => updateRunButtons());
   $('#btn-commit-only')?.addEventListener('click', commitOnly);
@@ -6817,11 +8627,20 @@ function bindEvents() {
   $('#btn-agent-revert')?.addEventListener('click', revertAgentMessage);
   $('#btn-agent-settings').addEventListener('click', showAgentKeyForm);
   $('#btn-agent-clear').addEventListener('click', clearAgentSession);
-  $$('[data-agent-mode]').forEach((btn) => {
-    btn.addEventListener('click', () => setAgentMode(btn.dataset.agentMode));
+  $('#agent-provider-picker')?.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-agent-provider]');
+    if (chip) setAgentProvider(chip.dataset.agentProvider);
   });
-  $('#agent-model')?.addEventListener('change', (e) => setAgentModel(e.target.value));
-  populateAgentModelSelect(CURSOR_MODELS_FALLBACK, state.cursorModel);
+  $('#agent-provider-controls')?.addEventListener('click', (e) => {
+    const modeBtn = e.target.closest('[data-agent-mode]');
+    if (modeBtn) setAgentMode(modeBtn.dataset.agentMode);
+  });
+  $('#agent-provider-controls')?.addEventListener('change', (e) => {
+    if (e.target.id === 'agent-provider-model') {
+      agentProviderDef().setModel(e.target.value);
+    }
+  });
+  refreshAgentProviderUi();
   $('#btn-close-diff')?.addEventListener('click', () => {
     state.agentLiveDiffPath = null;
     state.agentLiveFollow = false;
@@ -6842,6 +8661,11 @@ function bindEvents() {
     btn.addEventListener('click', () => setTerminalDock(btn.dataset.terminalDock));
   });
   bindTerminalTabs();
+  window.addEventListener('resize', () => {
+    if (state.terminalOpen || state.activePanel === 'terminal') {
+      fitActiveTerminal();
+    }
+  });
 
   $('#agent-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -6863,23 +8687,6 @@ function bindEvents() {
         switchPanel(btn.dataset.panel);
       }
     });
-  });
-
-  $('#terminal-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      runTerminalCommand(e.target.value);
-      e.target.value = '';
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      terminalHistoryUp(e.target);
-      return;
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      terminalHistoryDown(e.target);
-    }
   });
 
   document.addEventListener('keydown', (e) => {
@@ -7019,19 +8826,20 @@ function bindEvents() {
 }
 
 async function init() {
+  setStatusMessage('Ready');
   if (!window.ReaperAgentMarkdown?.libsReady?.()) {
     console.error('[Reaper] Agent markdown not ready — tables/diagrams will show as plain text until scripts load.');
   }
   populateFontSizeSelects();
   populateFontFamilySelects();
   populateAgentFontSelects();
+  applyUiTypography();
   syncFontSizeControls(getEditorFontSize());
   ensureEditorFontLoaded(getEditorFontSpec());
   applyAgentTypography();
   syncAgentFontControls();
   ensureTerminals();
   renderTerminalTabs();
-  renderTerminalOutput();
   syncDotfilesControls(getShowDotfiles());
   await ensureGeminiReady();
   initEditor();
@@ -7044,6 +8852,7 @@ async function init() {
   mountReaperIcons();
   void initStatusFooter();
   initSidebarResize();
+  initAgentDockResize();
   initTerminalBottomResize();
   applyAgentDock();
   applyTerminalDock();
@@ -7062,6 +8871,15 @@ async function init() {
   const initialRepo = getInitialRepoFromUrl();
   if (!initialRepo && !state.repo) {
     showNoRepoFileTree();
+    try {
+      const general = await api('/api/settings/general');
+      const defaultRepo = general?.default_repo;
+      if (defaultRepo && state.repos.some((r) => r.name === defaultRepo)) {
+        await selectRepo(defaultRepo);
+      }
+    } catch {
+      /* settings unavailable */
+    }
   }
   if (initialRepo && state.repos.some((r) => r.name === initialRepo)) {
     await selectRepo(initialRepo);

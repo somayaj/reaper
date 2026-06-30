@@ -78,7 +78,7 @@
 @keyframes reaperCrop8 { 0%, 50% { transform: scaleY(0); opacity: 0; } 58%, 60% { transform: scaleY(1); opacity: 1; } 64%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
 
 .reaper-logo-anim .reap-slash {
-  font-family: Consolas, "JetBrains Mono", Menlo, Monaco, monospace;
+  font-family: Consolas, Menlo, Monaco, monospace;
   animation: reaperSlash 4s ease-out infinite;
 }
 @keyframes reaperSlash {

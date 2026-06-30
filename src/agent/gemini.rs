@@ -198,7 +198,6 @@ impl GeminiClient {
     pub async fn suggest_commit_message(&self, context: &str) -> Result<String> {
         let system = "You write concise git commit messages. Respond with ONLY the commit message text: \
             a subject line (<=72 characters, imperative mood), optionally followed by a blank line and a short body. \
-            Prefer a CN-XXXX: prefix when no ticket is known use CN-0000. \
             No markdown, no code fences, no surrounding quotes.";
 
         let url = format!(
@@ -358,6 +357,63 @@ impl GeminiClient {
         Ok(text)
     }
 
+    pub async fn classify_java_run_target(&self, context: &str) -> Result<String> {
+        let system = "You classify a Java source file for IDE Run (F5) behavior.\n\
+            Return one JSON object with:\n\
+            - class_type: spring-boot-app | spring-boot-test | junit-test | plain-main | quarkus-app | spring-component | library | interface | enum | record\n\
+            - mode: none | test | spring-boot | main | project-task\n\
+            - runnable: boolean\n\
+            - qualified_name: optional fully qualified class name\n\
+            - test_filter: optional Gradle/Maven test filter (ClassName or ClassName.method)\n\
+            - task: optional build task/goal when mode is spring-boot or project-task (e.g. bootRun, spring-boot:run, quarkusDev)\n\
+            - frameworks: array of strings (junit, spring-boot, spring-test, mockito, lombok, slf4j, quarkus, etc.)\n\
+            - reason: optional short explanation when runnable is false\n\
+            RULES:\n\
+            - @SpringBootApplication + Spring Boot project context => spring-boot-app, mode spring-boot, runnable true\n\
+            - @Test / @SpringBootTest => junit-test or spring-boot-test, mode test when project has build tool\n\
+            - public static void main => plain-main, mode main, runnable true\n\
+            - Spring @Component/@Service without main => not runnable\n\
+            - Prefer heuristic hints when they match the source.\n\
+            - JSON only, no markdown.";
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents: vec![Content {
+                role: "user",
+                parts: vec![TextPart { text: context }],
+            }],
+            generation_config: Self::generation_config(0.1, "application/json", Some(512), true),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini request failed")?;
+
+        let status = resp.status();
+        let parsed: GenerateResponse = resp.json().await.context("parse gemini response")?;
+
+        if let Some(err) = parsed.error {
+            bail!(
+                "gemini error ({}): {}",
+                status,
+                err.message.unwrap_or_else(|| "unknown".into())
+            );
+        }
+
+        Ok(Self::extract_response_text(&parsed).unwrap_or_default())
+    }
+
     pub async fn suggest_quick_fixes(&self, context: &str) -> Result<String> {
         let system = "You are an IDE quick-fix engine.\n\
             The user has compiler/linter errors in a source file. Propose concrete fixes they can apply.\n\
@@ -412,6 +468,142 @@ impl GeminiClient {
         let text = Self::extract_response_text(&parsed).unwrap_or_default();
 
         Ok(text)
+    }
+
+    pub async fn chat_with_history(
+        &self,
+        system: &str,
+        history: &[(String, String)],
+        prompt: &str,
+    ) -> Result<String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let mut contents: Vec<Content<'_>> = history
+            .iter()
+            .map(|(role, text)| Content {
+                role: if role == "model" { "model" } else { "user" },
+                parts: vec![TextPart { text }],
+            })
+            .collect();
+        contents.push(Content {
+            role: "user",
+            parts: vec![TextPart { text: prompt }],
+        });
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents,
+            generation_config: Self::generation_config(0.35, "text/plain", Some(8192), false),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini request failed")?;
+
+        let status = resp.status();
+        let parsed: GenerateResponse = resp.json().await.context("parse gemini response")?;
+
+        if let Some(err) = parsed.error {
+            bail!(
+                "gemini error ({}): {}",
+                status,
+                err.message.unwrap_or_else(|| "unknown".into())
+            );
+        }
+
+        Self::extract_response_text(&parsed)
+            .ok_or_else(|| anyhow::anyhow!("empty gemini response"))
+    }
+
+    pub async fn chat_stream_with_history(
+        &self,
+        system: &str,
+        history: &[(String, String)],
+        prompt: &str,
+    ) -> Result<reqwest::Response> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+            self.model, self.api_key
+        );
+
+        let mut contents: Vec<Content<'_>> = history
+            .iter()
+            .map(|(role, text)| Content {
+                role: if role == "model" { "model" } else { "user" },
+                parts: vec![TextPart { text }],
+            })
+            .collect();
+        contents.push(Content {
+            role: "user",
+            parts: vec![TextPart { text: prompt }],
+        });
+
+        let body = GenerateRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![TextPart { text: system }],
+            },
+            contents,
+            generation_config: Self::generation_config(0.35, "text/plain", Some(8192), false),
+        };
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("gemini stream request failed")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let parsed: GenerateResponse = resp.json().await.unwrap_or(GenerateResponse {
+                candidates: None,
+                error: Some(GeminiError {
+                    message: Some("gemini stream failed".into()),
+                }),
+            });
+            if let Some(err) = parsed.error {
+                bail!(
+                    "gemini error ({}): {}",
+                    status,
+                    err.message.unwrap_or_else(|| "unknown".into())
+                );
+            }
+            bail!("gemini stream failed ({status})");
+        }
+
+        Ok(resp)
+    }
+
+    pub fn parse_stream_payload(payload: &str) -> Result<String, String> {
+        let parsed: GenerateResponse =
+            serde_json::from_str(payload).map_err(|e| format!("parse stream chunk: {e}"))?;
+        if let Some(err) = parsed.error {
+            return Err(err.message.unwrap_or_else(|| "gemini error".into()));
+        }
+        Ok(Self::extract_stream_chunk_text(&parsed))
+    }
+
+    pub fn extract_stream_chunk_text(chunk: &GenerateResponse) -> String {
+        let Some(parts) = chunk
+            .candidates
+            .as_ref()
+            .and_then(|c| c.first())
+            .and_then(|c| c.content.as_ref())
+            .and_then(|c| c.parts.as_ref())
+        else {
+            return String::new();
+        };
+        Self::extract_non_thought_text(parts)
     }
 }
 

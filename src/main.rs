@@ -14,6 +14,7 @@ mod web;
 mod workspace;
 
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -50,13 +51,47 @@ fn wants_gui() -> bool {
 }
 
 fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "reaper=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let data_dir = Config::resolve_data_dir();
+    let log_path = Config::resolve_log_path();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "reaper: could not create data directory {}: {e}",
+            data_dir.display()
+        );
+    }
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "reaper=debug,tower_http=debug".into());
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(log_file) => {
+            let file_writer = Mutex::new(log_file);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(file_writer)
+                        .with_ansi(false)
+                        .with_target(true),
+                )
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
+        Err(e) => {
+            eprintln!(
+                "reaper: could not open log file {}: {e}",
+                log_path.display()
+            );
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
+    }
 }
 
 async fn prepare_state() -> anyhow::Result<AppState> {
@@ -109,6 +144,7 @@ async fn run_server_mode() -> anyhow::Result<()> {
 
     tracing::info!("Reaper listening on http://{addr}");
     tracing::info!("Data directory: {}", config.data_dir.display());
+    tracing::info!("Log file: {}", Config::resolve_log_path().display());
     tracing::info!("Repositories stored in {}", config.repos_dir.display());
     tracing::info!("Static assets from {}", config.static_dir.display());
 
@@ -134,6 +170,7 @@ fn run_gui_mode() -> anyhow::Result<()> {
 
             tracing::info!("Reaper listening on {url}");
             tracing::info!("Data directory: {}", config.data_dir.display());
+            tracing::info!("Log file: {}", Config::resolve_log_path().display());
             tracing::info!("Repositories stored in {}", config.repos_dir.display());
             tracing::info!("Static assets from {}", config.static_dir.display());
 
