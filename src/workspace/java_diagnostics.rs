@@ -349,7 +349,27 @@ fn is_stale_declared_dependency_diag(
         return missing_package || missing_symbol;
     }
 
+    if markers.mockito && uses_mockito(content) {
+        if lower.contains("org.mockito")
+            || (missing_package && lower.contains("mockito"))
+            || (missing_symbol
+                && (lower.contains("mock")
+                    || lower.contains("injectmocks")
+                    || lower.contains("mockito")))
+        {
+            return true;
+        }
+    }
+
     false
+}
+
+fn uses_mockito(content: &str) -> bool {
+    content.contains("org.mockito")
+        || content.contains("@Mock")
+        || content.contains("@InjectMocks")
+        || content.contains("@Spy")
+        || content.contains("MockitoExtension")
 }
 
 fn uses_junit(content: &str) -> bool {

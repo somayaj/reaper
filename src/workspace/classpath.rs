@@ -677,18 +677,20 @@ pub fn resolve_classpaths_for_index(
 
 fn resolve_root_classpath(root: &Path, progress: IndexProgress) -> Result<Vec<PathBuf>> {
     if let Some(cp) = gradle_classpath_from_tooling_cache(root) {
-        let _ = ensure_dependency_sources(root, &cp.jars);
+        let jars = merge_with_build_file_dependency_tree(root, &cp.jars, true);
+        let _ = ensure_dependency_sources(root, &jars);
         tracing::info!(
-            "Using {} tooling classpath JARs for {} before index",
-            cp.jars.len(),
+            "Using {} tooling + build-file classpath JARs for {} before index",
+            jars.len(),
             root.display()
         );
-        return Ok(cp.jars);
+        return Ok(jars);
     }
 
     if let Some(cp) = try_resolve_classpath_via_tooling(root, progress) {
-        let _ = ensure_dependency_sources(root, &cp.jars);
-        return Ok(cp.jars);
+        let jars = merge_with_build_file_dependency_tree(root, &cp.jars, true);
+        let _ = ensure_dependency_sources(root, &jars);
+        return Ok(jars);
     }
 
     let tree = resolve_dependency_tree_jars(root, true);
@@ -705,8 +707,9 @@ fn resolve_root_classpath(root: &Path, progress: IndexProgress) -> Result<Vec<Pa
 
     let cached = cached_classpath_jars(root);
     if !cached.is_empty() && cached_classpath_trustworthy(root, &cached, true) {
-        let _ = ensure_dependency_sources(root, &cached);
-        return Ok(cached);
+        let jars = merge_with_build_file_dependency_tree(root, &cached, true);
+        let _ = ensure_dependency_sources(root, &jars);
+        return Ok(jars);
     }
 
     let offline = if super::maven::is_maven_project_root(root) {
@@ -715,15 +718,16 @@ fn resolve_root_classpath(root: &Path, progress: IndexProgress) -> Result<Vec<Pa
         resolve_classpath_from_gradle_cache(root)
     };
     if !offline.jars.is_empty() {
-        let _ = ensure_dependency_sources(root, &offline.jars);
-        let _ = save_classpath_jars_cache_pub(root, &offline.jars);
+        let jars = merge_with_build_file_dependency_tree(root, &offline.jars, true);
+        let _ = ensure_dependency_sources(root, &jars);
+        let _ = save_classpath_jars_cache_pub(root, &jars);
         tracing::info!(
-            "Resolved {} JARs offline for {} before index ({})",
-            offline.jars.len(),
+            "Resolved {} JARs offline + build-file tree for {} before index ({})",
+            jars.len(),
             root.display(),
             offline.log
         );
-        return Ok(offline.jars);
+        return Ok(jars);
     }
 
     Ok(Vec::new())
@@ -836,21 +840,28 @@ fn resolve_classpath_jars_preferring_build_tree(
     project_root: &Path,
     include_test_scope: bool,
 ) -> Vec<PathBuf> {
-    if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
-        return cp.jars;
-    }
+    let base = if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        cp.jars
+    } else {
+        let cached = cached_classpath_jars(project_root);
+        if cached_classpath_trustworthy(project_root, &cached, include_test_scope) {
+            cached
+        } else {
+            Vec::new()
+        }
+    };
 
-    let cached = cached_classpath_jars(project_root);
-    if cached_classpath_trustworthy(project_root, &cached, include_test_scope) {
-        return cached;
+    let merged = merge_with_build_file_dependency_tree(project_root, &base, include_test_scope);
+    if !merged.is_empty() {
+        return filter_existing_jars(merged);
     }
 
     let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
     if !tree.is_empty() {
-        return tree;
+        return filter_existing_jars(tree);
     }
 
-    cached
+    filter_existing_jars(cached_classpath_jars(project_root))
 }
 
 /// Cached dependency JARs for javac — never triggers Maven/Gradle during diagnostics.
@@ -867,6 +878,11 @@ pub fn file_needs_test_classpath(rel_path: &str, content: &str) -> bool {
         || content.contains("org.junit.jupiter")
         || content.contains("org.junit.")
         || content.contains("org.springframework.boot.test")
+        || content.contains("org.mockito")
+        || content.contains("@Mock")
+        || content.contains("@InjectMocks")
+        || content.contains("@Spy")
+        || content.contains("MockitoExtension")
 }
 
 /// Whether resolved JAR paths include Spring Data API types (commons/jpa/etc.), not just Boot starters.
@@ -926,6 +942,16 @@ fn merge_classpath_jars(primary: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> 
         }
     }
     out
+}
+
+/// Union tooling/offline JARs with Maven/Gradle build-file transitive tree (all declared scopes).
+fn merge_with_build_file_dependency_tree(
+    project_root: &Path,
+    jars: &[PathBuf],
+    include_test_scope: bool,
+) -> Vec<PathBuf> {
+    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
+    merge_classpath_jars(jars, &tree)
 }
 
 /// Classpath for live javac diagnostics — includes test-scoped Maven transitives when needed.
@@ -2609,7 +2635,8 @@ fn persist_tooling_classpath(project_root: &Path, cp: &GradleClasspath, preserve
     if cp.jars.is_empty() {
         return Ok(());
     }
-    save_classpath_jars_cache_pub(project_root, &cp.jars)?;
+    let jars = merge_with_build_file_dependency_tree(project_root, &cp.jars, true);
+    save_classpath_jars_cache_pub(project_root, &jars)?;
     mark_tooling_classpath_done(project_root)?;
     if preserve_index {
         invalidate_lookup_cache(project_root);
@@ -2709,18 +2736,32 @@ const SPRING_CACHE_GROUPS: &[&str] = &[
 
 /// Resolve dependency JARs for indexing — tooling cache or offline fallback (tooling runs separately).
 fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
-    if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
-        return cp;
+    let base = if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        cp
+    } else {
+        let mut cp = resolve_classpath_offline_fallback(project_root);
+        if !cp.jars.is_empty() {
+            let _ = ensure_dependency_sources(project_root, &cp.jars);
+            cp.source_jars = discover_source_jars_for_jars(&cp.jars);
+        }
+        cp
+    };
+
+    let jars = merge_with_build_file_dependency_tree(project_root, &base.jars, true);
+    if jars.is_empty() {
+        return GradleClasspath::default();
     }
 
-    let mut cp = resolve_classpath_offline_fallback(project_root);
-
-    if !cp.jars.is_empty() {
-        let _ = ensure_dependency_sources(project_root, &cp.jars);
-        cp.source_jars = discover_source_jars_for_jars(&cp.jars);
+    let source_jars = discover_source_jars_for_jars(&jars);
+    GradleClasspath {
+        jars,
+        source_jars,
+        log: if base.log.is_empty() {
+            "from build-file dependency tree".into()
+        } else {
+            format!("{} + build-file tree", base.log)
+        },
     }
-
-    cp
 }
 
 fn resolve_classpath_offline_fallback(project_root: &Path) -> GradleClasspath {
@@ -3885,6 +3926,11 @@ fn should_index_jar_class(fqcn: &str) -> bool {
         || fqcn.starts_with("javax.")
         || fqcn.starts_with("kotlin.")
         || fqcn.starts_with("org.junit.")
+        || fqcn.starts_with("org.mockito.")
+        || fqcn.starts_with("org.assertj.")
+        || fqcn.starts_with("org.slf4j.")
+        || fqcn.starts_with("org.hamcrest.")
+        || fqcn.starts_with("lombok.")
 }
 
 fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
@@ -5310,6 +5356,45 @@ dependencies {
         assert!(
             needs_tooling_classpath_resolve(&ws),
             "build file change should invalidate tooling classpath"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn should_index_mockito_and_slf4j_jar_classes() {
+        assert!(should_index_jar_class("org.mockito.Mock"));
+        assert!(should_index_jar_class("org.mockito.junit.jupiter.MockitoExtension"));
+        assert!(should_index_jar_class("org.slf4j.Logger"));
+        assert!(should_index_jar_class("lombok.extern.slf4j.Slf4j"));
+    }
+
+    #[test]
+    fn build_file_tree_merged_with_tooling_cache() {
+        let ws = std::env::temp_dir().join("reaper-classpath-tree-merge");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper")).unwrap();
+        std::fs::write(
+            ws.join("build.gradle"),
+            r#"
+plugins { id 'java' }
+dependencies {
+    testImplementation 'org.mockito:mockito-core:5.14.2'
+}
+"#,
+        )
+        .unwrap();
+
+        let tooling_only = ws.join("guava-tooling.jar");
+        std::fs::write(&tooling_only, b"PK").unwrap();
+        save_classpath_jars_cache(&ws, &[tooling_only.clone()]).unwrap();
+        mark_tooling_classpath_done(&ws).unwrap();
+
+        // Mockito may not resolve offline without M2 cache; at minimum tooling JAR is kept.
+        let jars = resolve_classpath_jars_preferring_build_tree(&ws, true);
+        assert!(
+            jars.iter().any(|p| p == &tooling_only),
+            "expected tooling jar preserved, got {:?}",
+            jars
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
