@@ -1886,7 +1886,12 @@ function indexingPhaseLabel(phase) {
   switch (phase) {
     case 'workspace-symbols': return 'Scanning workspace symbols';
     case 'java-index': return 'Building Java index';
-    case 'classpath': return 'Resolving dependencies';
+    case 'classpath':
+    case 'classpath-resolve': return 'Resolving dependencies';
+    case 'running-gradle-compile': return 'Running Gradle (compiling…)';
+    case 'running-gradle-classpath': return 'Running Gradle (classpath…)';
+    case 'running-maven-sources': return 'Running Maven (downloading sources…)';
+    case 'running-maven-classpath': return 'Running Maven (classpath…)';
     case 'sources':
     case 'extracting-sources': return 'Extracting library sources';
     case 'indexing': return 'Indexing Java symbols';
@@ -1898,11 +1903,19 @@ function indexingPhaseLabel(phase) {
   }
 }
 
+function isBackgroundToolingPhase(phase) {
+  return phase === 'running-gradle-compile'
+    || phase === 'running-gradle-classpath'
+    || phase === 'running-maven-sources'
+    || phase === 'running-maven-classpath'
+    || phase === 'classpath-resolve';
+}
+
 function indexingProgressPercent(status) {
   if (!status) return 0;
   if (status.state === 'ready') return 100;
   const java = status.java || {};
-  const phase = status.phase || java.phase || '';
+  const phase = java.phase || status.phase || '';
   const wsN = status.workspace_symbols || 0;
   const rawJavaN = java.symbol_count || 0;
 
@@ -1916,12 +1929,20 @@ function indexingProgressPercent(status) {
   if (phase === 'extracting-sources') {
     return Math.min(32, 18 + Math.round((rawJavaN / 1000) * 14));
   }
-  if (phase === 'indexing' || rawJavaN > 0) {
-    const symPct = Math.min(1, rawJavaN / 120000);
-    return Math.min(70, 32 + Math.round(symPct * 38));
+  if (phase === 'indexing') {
+    const symPct = Math.min(1, rawJavaN / 250000);
+    return Math.min(71, 32 + Math.round(symPct * 39));
+  }
+  if (rawJavaN > 0 && phase !== 'classpath' && phase !== 'classpath-resolve' && phase !== 'sources') {
+    const symPct = Math.min(1, rawJavaN / 250000);
+    return Math.min(71, 32 + Math.round(symPct * 39));
   }
   if (phase === 'sources') return 22;
-  if (phase === 'classpath') return 14;
+  if (phase === 'running-gradle-compile') return 11;
+  if (phase === 'running-gradle-classpath') return 15;
+  if (phase === 'running-maven-sources') return 11;
+  if (phase === 'running-maven-classpath') return 15;
+  if (phase === 'classpath' || phase === 'classpath-resolve') return 14;
   if (phase === 'java-index') return 26;
   if (phase === 'workspace-symbols') return wsN > 0 ? 22 : 12;
   if (wsN > 0) return 25;
@@ -2043,6 +2064,22 @@ function updateProjectIndexUi(status) {
     return;
   }
 
+  const bgPhase = status?.java?.phase;
+  if (isBackgroundToolingPhase(bgPhase)) {
+    const phaseLabel = indexingPhaseLabel(bgPhase);
+    setStatusMessage(phaseLabel);
+    banner?.classList.remove('hidden');
+    applyIndexingProgressUi({
+      title: `Updating ${status?.label || indexingLabelFromProfile(status?.profile) || 'project'} classpath…`,
+      label: status?.label || indexingLabelFromProfile(status?.profile),
+      phase: phaseLabel,
+      stats: '',
+      percent: indexingProgressPercent(status),
+      show: true,
+    });
+    return;
+  }
+
   clearIndexingProgressUi();
 
   if (status?.state === 'ready' && !state.projectIndexNotified) {
@@ -2112,10 +2149,11 @@ function hasAutoReloadProject() {
 
 function projectStatusNeedsAutoRefresh(status) {
   if (!status) return false;
-  if (status.needs_refresh) return true;
   const indexers = status.profile?.indexers || [];
   if (!indexers.includes('java')) return false;
   const java = status.java || {};
+  if (java.state === 'running') return false;
+  if (status.needs_refresh) return true;
   const frameworks = status.profile?.frameworks || [];
   const isSpring = frameworks.includes('spring-boot') || frameworks.includes('spring-test');
   if (isSpring && java.state === 'ready' && (java.dependency_jars || 0) === 0) return true;

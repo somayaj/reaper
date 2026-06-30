@@ -532,6 +532,14 @@ fn find_plain_java_root(ws: &Path, rel_path: &str) -> Option<PathBuf> {
 const TOOLING_CLASSPATH_DONE: &str = "tooling-classpath.done";
 const CLASSPATH_JARS_CACHE: &str = "classpath-jars.json";
 
+type IndexProgress<'a> = Option<&'a Box<dyn Fn(&str, usize) + Send>>;
+
+fn report_index_progress(progress: IndexProgress, phase: &str, count: usize) {
+    if let Some(cb) = progress {
+        cb(phase, count);
+    }
+}
+
 /// Drop cached Java indexes so the next warm_index rebuilds (e.g. after branch checkout).
 pub fn invalidate_caches(ws: &Path) -> Result<()> {
     for root in find_all_index_roots(ws)? {
@@ -595,9 +603,7 @@ pub fn needs_tooling_classpath_resolve(project_root: &Path) -> bool {
     if !index_build_tooling_enabled() || !is_build_tool_project_root(project_root) {
         return false;
     }
-    !reaper_dir(project_root)
-        .join(TOOLING_CLASSPATH_DONE)
-        .is_file()
+    !tooling_classpath_resolved(project_root)
 }
 
 pub fn mark_tooling_classpath_done(project_root: &Path) -> Result<()> {
@@ -606,14 +612,37 @@ pub fn mark_tooling_classpath_done(project_root: &Path) -> Result<()> {
         reaper_dir(project_root).join(TOOLING_CLASSPATH_DONE),
         project_root.display().to_string(),
     )?;
+    if let Ok(stamp) = classpath_stamp(project_root) {
+        std::fs::write(reaper_dir(project_root).join("classpath.stamp"), stamp)?;
+    }
     Ok(())
+}
+
+fn tooling_classpath_stamp_valid(project_root: &Path) -> bool {
+    let reaper = reaper_dir(project_root);
+    let Ok(current) = classpath_stamp(project_root) else {
+        return false;
+    };
+    let Ok(stored) = std::fs::read_to_string(reaper.join("classpath.stamp")) else {
+        // Tooling finished; index rebuild may not have written a stamp yet.
+        return true;
+    };
+    stored == current
+}
+
+/// True when Gradle/Maven compile classpath was saved via tooling (not tree-walk alone).
+pub fn tooling_classpath_resolved(project_root: &Path) -> bool {
+    reaper_dir(project_root)
+        .join(TOOLING_CLASSPATH_DONE)
+        .is_file()
+        && tooling_classpath_stamp_valid(project_root)
 }
 
 pub fn invalidate_root_index_cache(project_root: &Path) {
     invalidate_lookup_cache(project_root);
     let reaper = reaper_dir(project_root);
     let _ = std::fs::remove_file(reaper.join("java-index.json"));
-    let _ = std::fs::remove_file(reaper.join("classpath.stamp"));
+    // Keep classpath.stamp when tooling cache is still valid (build files unchanged).
 }
 
 pub fn needs_any_tooling_classpath_resolve(ws: &Path) -> bool {
@@ -640,20 +669,34 @@ pub fn resolve_classpaths_for_index(
         if let Some(cb) = progress {
             cb("classpath-resolve", 0);
         }
-        resolve_root_classpath(&root)?;
+        resolve_root_classpath(&root, progress)?;
     }
     let _ = ws;
     Ok(())
 }
 
-fn resolve_root_classpath(root: &Path) -> Result<Vec<PathBuf>> {
+fn resolve_root_classpath(root: &Path, progress: IndexProgress) -> Result<Vec<PathBuf>> {
+    if let Some(cp) = gradle_classpath_from_tooling_cache(root) {
+        let _ = ensure_dependency_sources(root, &cp.jars);
+        tracing::info!(
+            "Using {} tooling classpath JARs for {} before index",
+            cp.jars.len(),
+            root.display()
+        );
+        return Ok(cp.jars);
+    }
+
+    if let Some(cp) = try_resolve_classpath_via_tooling(root, progress) {
+        let _ = ensure_dependency_sources(root, &cp.jars);
+        return Ok(cp.jars);
+    }
+
     let tree = resolve_dependency_tree_jars(root, true);
     if build_tree_classpath_sufficient(root, &tree) {
         let _ = ensure_dependency_sources(root, &tree);
-        save_classpath_jars_cache_pub(root, &tree)?;
-        mark_tooling_classpath_done(root)?;
+        let _ = save_classpath_jars_cache_pub(root, &tree);
         tracing::info!(
-            "Resolved {} JARs from build-file dependency tree for {} before index",
+            "Resolved {} JARs from build-file dependency tree for {} (tooling pending)",
             tree.len(),
             root.display()
         );
@@ -661,42 +704,9 @@ fn resolve_root_classpath(root: &Path) -> Result<Vec<PathBuf>> {
     }
 
     let cached = cached_classpath_jars(root);
-    if !cached.is_empty()
-        && !needs_tooling_classpath_resolve(root)
-        && cached_classpath_trustworthy(root, &cached, true)
-    {
+    if !cached.is_empty() && cached_classpath_trustworthy(root, &cached, true) {
         let _ = ensure_dependency_sources(root, &cached);
         return Ok(cached);
-    }
-
-    if index_build_tooling_enabled() && is_build_tool_project_root(root) {
-        tracing::info!(
-            "Resolving Maven/Gradle classpath via tooling for {} before index",
-            root.display()
-        );
-        match resolve_classpath_via_tooling_full(root) {
-            Ok(cp) if !cp.jars.is_empty() => {
-                let _ = ensure_dependency_sources(root, &cp.jars);
-                save_classpath_jars_cache_pub(root, &cp.jars)?;
-                mark_tooling_classpath_done(root)?;
-                invalidate_root_index_cache(root);
-                tracing::info!(
-                    "Resolved {} JARs via tooling for {} ({})",
-                    cp.jars.len(),
-                    root.display(),
-                    cp.log
-                );
-                return Ok(cp.jars);
-            }
-            Ok(_) => tracing::warn!(
-                "Classpath tooling returned no JARs for {}",
-                root.display()
-            ),
-            Err(e) => tracing::warn!(
-                "Classpath tooling failed for {}: {e:#}",
-                root.display()
-            ),
-        }
     }
 
     let offline = if super::maven::is_maven_project_root(root) {
@@ -706,8 +716,7 @@ fn resolve_root_classpath(root: &Path) -> Result<Vec<PathBuf>> {
     };
     if !offline.jars.is_empty() {
         let _ = ensure_dependency_sources(root, &offline.jars);
-        save_classpath_jars_cache_pub(root, &offline.jars)?;
-        mark_tooling_classpath_done(root)?;
+        let _ = save_classpath_jars_cache_pub(root, &offline.jars);
         tracing::info!(
             "Resolved {} JARs offline for {} before index ({})",
             offline.jars.len(),
@@ -722,14 +731,17 @@ fn resolve_root_classpath(root: &Path) -> Result<Vec<PathBuf>> {
 
 /// Run Maven/Gradle to download dependency JARs and sources (blocking).
 pub fn resolve_classpath_via_tooling(project_root: &Path) -> Result<Vec<PathBuf>> {
-    Ok(resolve_classpath_via_tooling_full(project_root)?.jars)
+    Ok(resolve_classpath_via_tooling_full(project_root, None)?.jars)
 }
 
-fn resolve_classpath_via_tooling_full(project_root: &Path) -> Result<GradleClasspath> {
+fn resolve_classpath_via_tooling_full(
+    project_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
     if super::maven::is_maven_project_root(project_root) {
-        resolve_maven_classpath_via_tooling(project_root)
+        resolve_maven_classpath_via_tooling(project_root, progress)
     } else {
-        resolve_gradle_classpath(project_root)
+        resolve_gradle_classpath(project_root, progress)
     }
 }
 
@@ -755,20 +767,23 @@ fn ensure_dependency_sources(project_root: &Path, jars: &[PathBuf]) -> Result<()
         jars.len()
     );
     if super::maven::is_maven_project_root(project_root) {
-        ensure_maven_dependencies(project_root)?;
+        ensure_maven_dependencies(project_root, None)?;
     } else if super::gradle::is_gradle_project_dir(project_root) {
-        let _ = resolve_gradle_classpath(project_root);
+        let _ = resolve_gradle_classpath(project_root, None);
     }
     Ok(())
 }
 
-fn resolve_maven_classpath_via_tooling(maven_root: &Path) -> Result<GradleClasspath> {
-    ensure_maven_dependencies(maven_root)?;
+fn resolve_maven_classpath_via_tooling(
+    maven_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
+    ensure_maven_dependencies(maven_root, progress)?;
     let resolved = resolve_classpath_from_m2(maven_root);
     if !resolved.jars.is_empty() {
         return Ok(resolved);
     }
-    resolve_maven_classpath_via_mvn(maven_root)
+    resolve_maven_classpath_via_mvn(maven_root, progress)
 }
 
 pub fn compile_classpath_jars(gradle_root: &Path) -> Result<Vec<PathBuf>> {
@@ -821,17 +836,20 @@ fn resolve_classpath_jars_preferring_build_tree(
     project_root: &Path,
     include_test_scope: bool,
 ) -> Vec<PathBuf> {
-    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
-    if build_tree_classpath_sufficient(project_root, &tree) {
-        return tree;
+    if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        return cp.jars;
     }
+
     let cached = cached_classpath_jars(project_root);
     if cached_classpath_trustworthy(project_root, &cached, include_test_scope) {
         return cached;
     }
+
+    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
     if !tree.is_empty() {
         return tree;
     }
+
     cached
 }
 
@@ -1136,11 +1154,9 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
     Ok(combined)
 }
 
-/// True when a cached Java index should be rebuilt (classpath tooling pending, missing Spring Data types, etc.).
+/// True when a cached Java index should be fully rebuilt (missing types, empty deps, etc.).
+/// Pending Gradle/Maven tooling alone does not require a rebuild — see `tooling_classpath_pending`.
 pub fn java_index_needs_refresh(ws: &Path) -> bool {
-    if needs_any_tooling_classpath_resolve(ws) {
-        return true;
-    }
     let Ok(roots) = find_all_index_roots(ws) else {
         return false;
     };
@@ -1161,6 +1177,11 @@ pub fn java_index_needs_refresh(ws: &Path) -> bool {
         }
     }
     false
+}
+
+/// True when compile classpath still needs Gradle/Maven resolve (diagnostics may be incomplete).
+pub fn tooling_classpath_pending(ws: &Path) -> bool {
+    needs_any_tooling_classpath_resolve(ws)
 }
 
 fn index_missing_spring_data_domain(ws: &Path, root: &Path) -> bool {
@@ -2246,7 +2267,12 @@ fn classpath_stamp(gradle_root: &Path) -> Result<String> {
                 parts.push(format!(
                     "{name}:{}:{}",
                     meta.len(),
-                    meta.modified()?.elapsed()?.as_nanos()
+                    meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
                 ));
             }
         }
@@ -2563,6 +2589,105 @@ struct GradleClasspath {
     log: String,
 }
 
+fn gradle_classpath_from_tooling_cache(project_root: &Path) -> Option<GradleClasspath> {
+    if !tooling_classpath_resolved(project_root) {
+        return None;
+    }
+    let jars = cached_classpath_jars(project_root);
+    if jars.is_empty() {
+        return None;
+    }
+    let source_jars = discover_source_jars_for_jars(&jars);
+    Some(GradleClasspath {
+        jars,
+        source_jars,
+        log: "from Gradle/Maven compile classpath cache".into(),
+    })
+}
+
+fn persist_tooling_classpath(project_root: &Path, cp: &GradleClasspath, preserve_index: bool) -> Result<()> {
+    if cp.jars.is_empty() {
+        return Ok(());
+    }
+    save_classpath_jars_cache_pub(project_root, &cp.jars)?;
+    mark_tooling_classpath_done(project_root)?;
+    if preserve_index {
+        invalidate_lookup_cache(project_root);
+    } else {
+        invalidate_root_index_cache(project_root);
+    }
+    Ok(())
+}
+
+fn has_materialized_java_index(project_root: &Path) -> bool {
+    let path = reaper_dir(project_root).join(INDEX_PATH);
+    path.is_file()
+        && std::fs::metadata(&path)
+            .map(|m| m.len() > 2)
+            .unwrap_or(false)
+}
+
+fn try_resolve_classpath_via_tooling(
+    project_root: &Path,
+    progress: IndexProgress,
+) -> Option<GradleClasspath> {
+    try_resolve_classpath_via_tooling_inner(
+        project_root,
+        has_materialized_java_index(project_root),
+        progress,
+    )
+}
+
+fn try_resolve_classpath_via_tooling_inner(
+    project_root: &Path,
+    preserve_index: bool,
+    progress: IndexProgress,
+) -> Option<GradleClasspath> {
+    if !index_build_tooling_enabled() || !is_build_tool_project_root(project_root) {
+        return None;
+    }
+    tracing::info!(
+        "Resolving compile classpath via {} for {}",
+        if super::maven::is_maven_project_root(project_root) {
+            "Maven"
+        } else {
+            "Gradle"
+        },
+        project_root.display()
+    );
+    match resolve_classpath_via_tooling_full(project_root, progress) {
+        Ok(cp) if !cp.jars.is_empty() => {
+            if let Err(e) = persist_tooling_classpath(project_root, &cp, preserve_index) {
+                tracing::warn!(
+                    "Failed to persist tooling classpath for {}: {e:#}",
+                    project_root.display()
+                );
+            }
+            tracing::info!(
+                "Resolved {} JARs via tooling for {} ({})",
+                cp.jars.len(),
+                project_root.display(),
+                cp.log
+            );
+            Some(cp)
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "Classpath tooling returned no JARs for {}",
+                project_root.display()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Classpath tooling failed for {}: {e:#}",
+                project_root.display()
+            );
+            None
+        }
+    }
+}
+
 const MAX_OFFLINE_CLASSPATH_JARS: usize = 800;
 
 const SPRING_CACHE_GROUPS: &[&str] = &[
@@ -2582,22 +2707,13 @@ const SPRING_CACHE_GROUPS: &[&str] = &[
     "javax.annotation",
 ];
 
-/// Resolve dependency JARs without running Gradle/Maven when possible (cache file, local caches).
+/// Resolve dependency JARs for indexing — tooling cache or offline fallback (tooling runs separately).
 fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
-    let mut cp = if super::maven::is_maven_project_root(project_root) {
-        resolve_classpath_for_maven(project_root)
-    } else {
-        resolve_classpath_for_gradle(project_root)
-    };
-
-    if cp.jars.is_empty() && index_build_tooling_enabled() && is_build_tool_project_root(project_root)
-    {
-        if let Ok(tool) = resolve_classpath_via_tooling_full(project_root) {
-            if !tool.jars.is_empty() {
-                cp = tool;
-            }
-        }
+    if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        return cp;
     }
+
+    let mut cp = resolve_classpath_offline_fallback(project_root);
 
     if !cp.jars.is_empty() {
         let _ = ensure_dependency_sources(project_root, &cp.jars);
@@ -2607,17 +2723,15 @@ fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
     cp
 }
 
-fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
-    let offline = resolve_classpath_from_gradle_cache_scoped(gradle_root, true);
-    if build_tree_classpath_sufficient(gradle_root, &offline.jars) {
-        tracing::info!(
-            "Resolved {} JARs from Gradle build-file dependency tree for {}",
-            offline.jars.len(),
-            gradle_root.display()
-        );
-        return offline;
+fn resolve_classpath_offline_fallback(project_root: &Path) -> GradleClasspath {
+    if super::maven::is_maven_project_root(project_root) {
+        resolve_classpath_for_maven_offline(project_root)
+    } else {
+        resolve_classpath_for_gradle_offline(project_root)
     }
+}
 
+fn resolve_classpath_for_gradle_offline(gradle_root: &Path) -> GradleClasspath {
     let cached = cached_classpath_jars(gradle_root);
     if cached_classpath_trustworthy(gradle_root, &cached, true) {
         tracing::info!(
@@ -2633,9 +2747,10 @@ fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
         };
     }
 
+    let offline = resolve_classpath_from_gradle_cache_scoped(gradle_root, true);
     if !offline.jars.is_empty() {
         tracing::info!(
-            "Resolved {} JARs from local Gradle cache (no Gradle run) for {}",
+            "Resolved {} JARs from local Gradle cache (tooling pending) for {}",
             offline.jars.len(),
             gradle_root.display()
         );
@@ -2644,7 +2759,7 @@ fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
 
     if index_build_tooling_enabled() {
         tracing::info!(
-            "Gradle classpath empty offline for {} — run Gradle resolve in background",
+            "Gradle classpath empty offline for {} — awaiting tooling resolve",
             gradle_root.display()
         );
     }
@@ -2652,17 +2767,7 @@ fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
     GradleClasspath::default()
 }
 
-fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
-    let offline = resolve_classpath_from_m2_scoped(maven_root, true);
-    if build_tree_classpath_sufficient(maven_root, &offline.jars) {
-        tracing::info!(
-            "Resolved {} JARs from Maven pom.xml dependency tree for {}",
-            offline.jars.len(),
-            maven_root.display()
-        );
-        return offline;
-    }
-
+fn resolve_classpath_for_maven_offline(maven_root: &Path) -> GradleClasspath {
     let cached = cached_classpath_jars(maven_root);
     if cached_classpath_trustworthy(maven_root, &cached, true) {
         tracing::info!(
@@ -2678,9 +2783,10 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
         };
     }
 
+    let offline = resolve_classpath_from_m2_scoped(maven_root, true);
     if !offline.jars.is_empty() {
         tracing::info!(
-            "Resolved {} JARs from local Maven repository (no mvn run) for {}",
+            "Resolved {} JARs from local Maven repository (tooling pending) for {}",
             offline.jars.len(),
             maven_root.display()
         );
@@ -2689,7 +2795,7 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
 
     if index_build_tooling_enabled() {
         tracing::info!(
-            "Maven classpath empty offline for {} — Maven resolve runs in background",
+            "Maven classpath empty offline for {} — awaiting tooling resolve",
             maven_root.display()
         );
     }
@@ -2697,7 +2803,8 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
     GradleClasspath::default()
 }
 
-fn ensure_maven_dependencies(maven_root: &Path) -> Result<()> {
+fn ensure_maven_dependencies(maven_root: &Path, progress: IndexProgress) -> Result<()> {
+    report_index_progress(progress, "running-maven-sources", 0);
     let output = super::maven::run_maven(
         maven_root,
         &[
@@ -2811,7 +2918,8 @@ fn collect_m2_jars_under(dir: &Path, limit: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn resolve_maven_classpath_via_mvn(maven_root: &Path) -> Result<GradleClasspath> {
+fn resolve_maven_classpath_via_mvn(maven_root: &Path, progress: IndexProgress) -> Result<GradleClasspath> {
+    report_index_progress(progress, "running-maven-classpath", 0);
     let out_file = reaper_dir(maven_root).join("maven-classpath.txt");
     std::fs::create_dir_all(reaper_dir(maven_root))?;
     let out_path = out_file
@@ -3371,7 +3479,7 @@ fn collect_and_index_java_dirs(
     Ok(())
 }
 
-fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
+fn resolve_gradle_classpath(gradle_root: &Path, progress: IndexProgress) -> Result<GradleClasspath> {
     let cmd = resolve_gradle_command(gradle_root)?;
     let init = init_script_path();
     if !init.is_file() {
@@ -3393,6 +3501,7 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
     let mut gradle_log = String::new();
 
     // Resolve/download dependency JARs before printing classpath.
+    report_index_progress(progress, "running-gradle-compile", 0);
     let warm_args: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -3417,6 +3526,7 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
         "-q".into(),
         "--console=plain".into(),
     ]);
+    report_index_progress(progress, "running-gradle-classpath", 0);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let out = run_gradle_with_command(&cmd, &arg_refs)?;
@@ -5173,6 +5283,34 @@ dependencies {
             .expect("cached String location");
         assert_eq!(first.path, second.path);
         assert_eq!(first.line, second.line);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn tooling_classpath_cache_preferred_over_tree_walk() {
+        let ws = std::env::temp_dir().join("reaper-tooling-classpath-pref");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper")).unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let tooling_only = ws.join("slf4j-api-tooling.jar");
+        std::fs::write(&tooling_only, b"PK").unwrap();
+        save_classpath_jars_cache(&ws, &[tooling_only.clone()]).unwrap();
+        mark_tooling_classpath_done(&ws).unwrap();
+
+        assert!(tooling_classpath_resolved(&ws));
+        let jars = resolve_classpath_jars_preferring_build_tree(&ws, true);
+        assert!(
+            jars.iter().any(|p| p == &tooling_only),
+            "expected tooling compile classpath JAR, got {:?}",
+            jars
+        );
+        assert!(needs_tooling_classpath_resolve(&ws) == false);
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\ndependencies { implementation 'org.slf4j:slf4j-api:2.0.9' }\n").unwrap();
+        assert!(
+            needs_tooling_classpath_resolve(&ws),
+            "build file change should invalidate tooling classpath"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
