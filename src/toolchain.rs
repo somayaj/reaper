@@ -51,6 +51,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_GROOVC"),
     },
     ToolDef {
+        id: "gradle",
+        label: "Gradle",
+        kind: ToolKind::Binary,
+        defaults: &["gradle"],
+        env_key: Some("REAPER_GRADLE"),
+    },
+    ToolDef {
         id: "python",
         label: "Python (python3)",
         kind: ToolKind::Binary,
@@ -248,6 +255,28 @@ pub fn resolve_program(id: &str) -> Option<PathBuf> {
     if id == "java" {
         return crate::jdk::effective_java_home().ok();
     }
+    if id == "gradle" {
+        if let Some(path) = configured_path(id) {
+            if let Ok(bin) = crate::gradle::normalize_gradle_binary(path) {
+                return Some(bin);
+            }
+        }
+        if let Some(key) = def.env_key {
+            if let Ok(raw) = std::env::var(key) {
+                if !raw.is_empty() {
+                    if let Ok(bin) = crate::gradle::normalize_gradle_binary(PathBuf::from(raw)) {
+                        return Some(bin);
+                    }
+                }
+            }
+        }
+        for name in def.defaults {
+            if let Some(path) = find_on_path(name) {
+                return Some(path);
+            }
+        }
+        return None;
+    }
     for name in def.defaults {
         if let Some(path) = find_on_path(name) {
             return Some(path);
@@ -280,6 +309,9 @@ pub fn validate_tool_path(id: &str, path: &str) -> Result<PathBuf> {
     match def.kind {
         ToolKind::Home => crate::jdk::validate_java_home(Path::new(path)),
         ToolKind::Binary => {
+            if id == "gradle" {
+                return crate::gradle::validate_gradle_path(path);
+            }
             let p = PathBuf::from(path);
             if !p.is_file() {
                 bail!("not a file: {}", p.display());
@@ -292,6 +324,7 @@ pub fn validate_tool_path(id: &str, path: &str) -> Result<PathBuf> {
 pub fn tool_version(id: &str, path: &Path) -> Option<String> {
     match id {
         "java" => crate::jdk::java_version_string(path).ok(),
+        "gradle" => crate::gradle::gradle_version_string(path).ok(),
         _ => {
             let out = Command::new(path)
                 .arg("--version")
@@ -327,6 +360,8 @@ pub struct CompilersView {
     pub compilers: Vec<CompilerEntryView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java_installed: Option<Vec<crate::jdk::JdkInstall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradle_installed: Option<Vec<crate::gradle::GradleInstall>>,
 }
 
 pub fn compilers_view(
@@ -378,6 +413,7 @@ pub fn compilers_view(
     CompilersView {
         compilers,
         java_installed: Some(crate::jdk::list_installed_jdks()),
+        gradle_installed: Some(crate::gradle::list_installed_gradles()),
     }
 }
 

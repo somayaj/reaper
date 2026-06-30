@@ -241,6 +241,14 @@ pub fn resolve_gradle_command(project_root: &Path) -> Result<GradleCommand> {
         });
     }
 
+    if let Some(gradle) = crate::toolchain::resolve_program("gradle") {
+        return Ok(GradleCommand {
+            program: gradle,
+            cwd: project_root.clone(),
+            project_args: Vec::new(),
+        });
+    }
+
     if let Some(bundled) = bundled_gradlew() {
         return Ok(GradleCommand {
             program: bundled.clone(),
