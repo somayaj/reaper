@@ -23,6 +23,7 @@ pub struct JavaIndexStatus {
 #[derive(Default)]
 struct JobEntry {
     building: bool,
+    tooling_running: bool,
     status: JavaIndexStatus,
 }
 
@@ -99,8 +100,11 @@ impl JavaIndexJobs {
 
         let repo_key = repo.to_string();
         let ws_path = ws.to_path_buf();
+        let peek = classpath::peek_index_status(&ws_path).ok();
+        let has_symbols = peek.as_ref().is_some_and(|p| p.symbol_count > 0);
+        let needs_tooling = classpath::needs_any_tooling_classpath_resolve(&ws_path);
 
-        if let Ok(peek) = classpath::peek_index_status(&ws_path) {
+        if let Some(ref peek) = peek {
             if peek.symbol_count > 0 {
                 let mut guard = match self.inner.lock() {
                     Ok(g) => g,
@@ -108,18 +112,21 @@ impl JavaIndexJobs {
                 };
                 let entry = guard.entry(repo_key.clone()).or_default();
                 if !entry.building {
-                    entry.status = status_from_warm(&peek, None);
+                    entry.status = status_from_warm(peek, None);
                 }
-                if peek.cached && entry.status.state == "ready" {
-                    if !classpath::needs_any_tooling_classpath_resolve(&ws_path) {
-                        return;
-                    }
+                if !needs_tooling && peek.cached && entry.status.state == "ready" {
+                    return;
+                }
+                if has_symbols && needs_tooling {
+                    drop(guard);
+                    self.spawn_tooling_resolve(&repo_key, &ws_path);
+                    return;
                 }
             }
         }
 
-        let partial_count = classpath::peek_index_status(&ws_path)
-            .ok()
+        let partial_count = peek
+            .as_ref()
             .filter(|p| p.indexed && p.symbol_count > 0)
             .map(|p| p.symbol_count)
             .unwrap_or(0);
@@ -130,7 +137,7 @@ impl JavaIndexJobs {
                 Err(_) => return,
             };
             let entry = guard.entry(repo_key.clone()).or_default();
-            if entry.building {
+            if entry.building || entry.tooling_running {
                 return;
             }
             entry.building = true;
@@ -187,6 +194,69 @@ impl JavaIndexJobs {
                         error: Some(e.to_string()),
                         ..Default::default()
                     };
+                }
+            }
+        });
+    }
+
+    /// Resolve Gradle/Maven compile classpath in the background without rebuilding the Java index.
+    fn spawn_tooling_resolve(&self, repo_key: &str, ws: &Path) {
+        let should_spawn = {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let entry = guard.entry(repo_key.to_string()).or_default();
+            if entry.building || entry.tooling_running {
+                return;
+            }
+            entry.tooling_running = true;
+            true
+        };
+        if !should_spawn {
+            return;
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let repo_key = repo_key.to_string();
+        let ws_path = ws.to_path_buf();
+        std::thread::spawn(move || {
+            tracing::info!(
+                "Resolving compile classpath in background for {} (index kept)",
+                ws_path.display()
+            );
+            let progress_inner = Arc::clone(&inner);
+            let progress_repo = repo_key.clone();
+            let progress: Box<dyn Fn(&str, usize) + Send> = Box::new(move |phase: &str, count: usize| {
+                if let Ok(mut guard) = progress_inner.lock() {
+                    if let Some(entry) = guard.get_mut(&progress_repo) {
+                        if !entry.building {
+                            entry.status.phase = phase.to_string();
+                            entry.status.symbol_count = count;
+                        }
+                    }
+                }
+            });
+            if let Err(e) = classpath::resolve_classpaths_for_index(&ws_path, Some(&progress)) {
+                tracing::warn!(
+                    "Background classpath resolve failed for {}: {e:#}",
+                    ws_path.display()
+                );
+            }
+            let mut guard = match inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let Some(entry) = guard.get_mut(&repo_key) else {
+                return;
+            };
+            entry.tooling_running = false;
+            if entry.building {
+                return;
+            }
+            if let Ok(peek) = classpath::peek_index_status(&ws_path) {
+                if peek.symbol_count > 0 {
+                    entry.status = status_from_warm(&peek, None);
                 }
             }
         });

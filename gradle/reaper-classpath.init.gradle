@@ -9,7 +9,12 @@ allprojects { project ->
             dependsOn compileJava
         }
         doLast {
-            def names = ['compileClasspath', 'runtimeClasspath', 'testCompileClasspath']
+            def names = [
+                'compileClasspath',
+                'runtimeClasspath',
+                'testCompileClasspath',
+                'annotationProcessor',
+            ]
             def seenJars = new LinkedHashSet<String>()
             def seenSources = new LinkedHashSet<String>()
 
