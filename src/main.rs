@@ -3,6 +3,7 @@ mod cursor;
 mod git;
 mod agent;
 mod auth;
+mod gradle;
 mod gui;
 mod jdk;
 mod repos;

@@ -1271,7 +1271,7 @@ async function loadCompilersSettingsSection() {
   if (!list) return;
 
   const COMPILER_ORDER = [
-    'java', 'kotlin', 'groovy',
+    'java', 'kotlin', 'groovy', 'gradle',
     'python', 'ruby', 'bundle', 'rails',
     'rustc', 'cargo', 'go',
     'node', 'tsc',
@@ -1291,22 +1291,40 @@ async function loadCompilersSettingsSection() {
     return { cls: 'missing', label: 'Missing' };
   }
 
-  function renderCompilerRow(tool, installed) {
+  function renderCompilerRow(tool, { javaInstalled, gradleInstalled }) {
     const isJava = tool.id === 'java';
+    const isGradle = tool.id === 'gradle';
     const status = compilerStatus(tool);
     const placeholder = tool.kind === 'home'
       ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
-      : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
+      : isGradle
+        ? '/opt/homebrew/bin/gradle or GRADLE_HOME'
+        : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
     const version = tool.version ? `<span class="ij-compiler-version" title="${escapeHtml(tool.version)}">${escapeHtml(tool.version.split('\n')[0].slice(0, 48))}</span>` : '';
     const exts = (tool.extensions || []).length
       ? `<span class="ij-compiler-exts" title="File extensions">${escapeHtml(tool.extensions.join(' '))}</span>`
       : '';
-    const jdkSelect = isJava && installed.length
+    function installSelected(configured, installPath) {
+      if (!configured || !installPath) return false;
+      if (configured === installPath) return true;
+      const base = configured.replace(/\/$/, '');
+      return installPath === base || installPath.startsWith(`${base}/`);
+    }
+    const jdkSelect = isJava && javaInstalled.length
       ? `<div class="ij-compiler-extra">
           <label class="ij-compiler-extra-label">Installed JDKs</label>
           <select class="ij-settings-select settings-compiler-jdk-select" data-tool-id="java" title="Pick a JDK">
             <option value="">— pick installed JDK —</option>
-            ${installed.map((j) => `<option value="${escapeHtml(j.path)}"${tool.path === j.path ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
+            ${javaInstalled.map((j) => `<option value="${escapeHtml(j.path)}"${installSelected(tool.path, j.path) ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
+          </select>
+        </div>`
+      : '';
+    const gradleSelect = isGradle && gradleInstalled.length
+      ? `<div class="ij-compiler-extra">
+          <label class="ij-compiler-extra-label">Installed Gradle</label>
+          <select class="ij-settings-select settings-compiler-gradle-select" data-tool-id="gradle" title="Pick a Gradle version">
+            <option value="">— pick installed Gradle —</option>
+            ${gradleInstalled.map((g) => `<option value="${escapeHtml(g.path)}"${installSelected(tool.path || tool.effective, g.path) ? ' selected' : ''}>${escapeHtml(g.label || g.path)}</option>`).join('')}
           </select>
         </div>`
       : '';
@@ -1329,11 +1347,12 @@ async function loadCompilersSettingsSection() {
       </div>
       ${using}
       ${jdkSelect}
+      ${gradleSelect}
     </article>`;
   }
 
   function bindCompilerRows(root) {
-    root.querySelectorAll('.settings-compiler-jdk-select').forEach((sel) => {
+    root.querySelectorAll('.settings-compiler-jdk-select, .settings-compiler-gradle-select').forEach((sel) => {
       sel.addEventListener('change', () => {
         const input = root.querySelector(`.settings-compiler-input[data-tool-id="${sel.dataset.toolId}"]`);
         if (input && sel.value) input.value = sel.value;
@@ -1366,7 +1385,8 @@ async function loadCompilersSettingsSection() {
   try {
     const cfg = await api('/api/settings/compilers');
     const tools = cfg.compilers || cfg.tools || [];
-    const installed = cfg.java_installed || [];
+    const javaInstalled = cfg.java_installed || [];
+    const gradleInstalled = cfg.gradle_installed || [];
     const byId = Object.fromEntries(tools.map((t) => [t.id, t]));
     const ordered = [
       ...COMPILER_ORDER.map((id) => byId[id]).filter(Boolean),
@@ -1379,7 +1399,7 @@ async function loadCompilersSettingsSection() {
         <span>Path override</span>
         <span></span>
       </div>
-      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, installed)).join('')}</div>
+      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled })).join('')}</div>
     </div>`;
     bindCompilerRows(list);
 
