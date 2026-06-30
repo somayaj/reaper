@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper animated harvest">
   <title>Reaper — code in, crops out</title>
   <!-- Polyglot console -->
-  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
+  <g font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5" font-weight="400">
     <text x="10" y="12" fill="#629755" opacity="0">$ git
       <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.06;0.9;0.96" dur="4s" repeatCount="indefinite"/>
     </text>
@@ -32,7 +32,7 @@
   </g>
 
   <!-- Code drops -->
-  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-size="5">
+  <g font-family="Consolas,Menlo,Monaco,monospace" font-size="5">
     <text x="30" y="36" fill="#ed8b00" opacity="0">.java
       <animate attributeName="opacity" values="0;0;1;0.9;0" keyTimes="0;0.2;0.24;0.36;0.4" dur="4s" repeatCount="indefinite"/>
       <animateTransform attributeName="transform" type="translate" values="0 0;0 0;-4 14;-4 16" keyTimes="0;0.2;0.36;0.4" dur="4s" repeatCount="indefinite"/>
@@ -58,7 +58,7 @@
   </text>
 
   <!-- Crops grow then reaped -->
-  <g font-family="Consolas,'JetBrains Mono',Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+  <g font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
     <g transform="translate(14,52)">
       <g transform="translate(-14,-52)">
         <line x1="14" y1="52" x2="14" y2="49" stroke="#4a8f55" stroke-width="1" opacity="0.45"/>

@@ -266,6 +266,68 @@ pub async fn suggest_ai_completions(
     Ok(parse_ai_completion_items(&raw, line_prefix))
 }
 
+pub async fn suggest_run_target(
+    settings: &SettingsStore,
+    ws: &Path,
+    path: &str,
+    line: u32,
+    content: &str,
+    project: &workspace::RunProjectInfo,
+    heuristic: &workspace::JavaRunTarget,
+) -> Result<workspace::AiRunTargetHint> {
+    let api_key = settings
+        .gemini_api_key()
+        .ok_or_else(|| anyhow::anyhow!("gemini not configured"))?;
+
+    let mut context = String::new();
+    use std::fmt::Write;
+    writeln!(context, "File: {path}").ok();
+    writeln!(context, "Cursor line: {line}").ok();
+    writeln!(
+        context,
+        "Project: build_tool={} spring_boot={} root={}",
+        project.build_tool, project.is_spring_boot, project.project_root
+    )
+    .ok();
+    if !project.frameworks.is_empty() {
+        writeln!(context, "Project frameworks: {}", project.frameworks.join(", ")).ok();
+    }
+    writeln!(
+        context,
+        "Heuristic: class_type={} mode={} runnable={}",
+        heuristic.class_type, heuristic.mode, heuristic.runnable
+    )
+    .ok();
+    if let Some(r) = &heuristic.reason {
+        writeln!(context, "Heuristic reason: {r}").ok();
+    }
+    writeln!(context).ok();
+    writeln!(context, "--- source ---").ok();
+    let preview: String = content
+        .lines()
+        .take(220)
+        .collect::<Vec<_>>()
+        .join("\n");
+    writeln!(context, "{preview}").ok();
+
+    let client = GeminiClient::new(api_key, settings.gemini_model());
+    let raw = client.classify_java_run_target(&context).await?;
+    parse_ai_run_target_hint(&raw)
+}
+
+fn parse_ai_run_target_hint(raw: &str) -> Result<workspace::AiRunTargetHint> {
+    let unfenced = strip_inline_code_fence(raw).trim();
+    if let Ok(v) = serde_json::from_str::<workspace::AiRunTargetHint>(unfenced) {
+        return Ok(v);
+    }
+    if let (Some(start), Some(end)) = (unfenced.find('{'), unfenced.rfind('}')) {
+        if let Ok(v) = serde_json::from_str::<workspace::AiRunTargetHint>(&unfenced[start..=end]) {
+            return Ok(v);
+        }
+    }
+    bail!("could not parse AI run target response")
+}
+
 #[derive(Debug, Deserialize)]
 struct AiQuickFixEditRaw {
     #[serde(rename = "startLine", alias = "start_line", default = "default_one")]
@@ -303,6 +365,11 @@ pub async fn suggest_quick_fixes(
 ) -> Result<Vec<workspace::QuickFix>> {
     if diagnostics.is_empty() {
         return Ok(Vec::new());
+    }
+
+    let fixes = workspace::suggest_local_quick_fixes(ws, path, content, diagnostics)?;
+    if !fixes.is_empty() {
+        return Ok(fixes);
     }
 
     let context = build_quick_fix_context(path, content, diagnostics);

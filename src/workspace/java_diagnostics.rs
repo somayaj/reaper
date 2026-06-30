@@ -6,6 +6,7 @@ use super::classpath;
 use super::diagnostics::Diagnostic;
 use super::exec::run_java_command;
 use super::gradle::find_gradle_root;
+use super::maven::find_maven_root;
 use super::{safe_join};
 
 const DIAG_ROOT: &str = ".reaper/java-diagnostics";
@@ -13,15 +14,22 @@ const DIAG_OUT: &str = ".reaper/java-diagnostics-out";
 
 pub type JavaDiagnostic = Diagnostic;
 
-pub fn check_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+pub fn check_java(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Result<Vec<Diagnostic>> {
     if !rel_path.ends_with(".java") {
         return Ok(Vec::new());
     }
 
     let _ = safe_join(ws, rel_path)?;
 
-    let javac_diags = if let Some(gradle_root) = find_gradle_root(ws, rel_path)? {
-        check_gradle_java(ws, &gradle_root, rel_path, content)?
+    let project_root = find_gradle_root(ws, rel_path)?.or(find_maven_root(ws, rel_path)?);
+
+    let javac_diags = if let Some(root) = project_root {
+        check_project_java(ws, &root, rel_path, content, overlays)?
     } else {
         check_plain_java(ws, rel_path, content)?
     };
@@ -30,37 +38,24 @@ pub fn check_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagno
     Ok(merge_file_name_diags(javac_diags, local))
 }
 
-fn check_gradle_java(
+fn check_project_java(
     ws: &Path,
-    gradle_root: &Path,
+    project_root: &Path,
     rel_path: &str,
     content: &str,
+    overlays: &[(String, String)],
 ) -> Result<Vec<Diagnostic>> {
-    let jars = classpath::cached_classpath_jars(gradle_root);
+    let jars = classpath::resolve_dependency_jars_for_java_file(project_root, rel_path, content);
     if jars.is_empty() {
         tracing::debug!(
-            "Gradle classpath not resolved yet for {} — javac may report dependency errors",
+            "Project classpath not resolved yet for {} — skipping dependency false positives",
             rel_path
         );
     }
 
-    let overlay_root = ws.join(DIAG_ROOT).join("overlay");
-    let overlay_file = overlay_root.join(rel_path);
-    if let Some(parent) = overlay_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&overlay_file, content)?;
+    let overlay_root = sync_java_diagnostics_overlays(ws, rel_path, content, overlays)?;
 
-    let mut sourcepath = Vec::new();
-    for rel in ["src/main/java", "src/test/java"] {
-        if rel_path.starts_with(rel) {
-            sourcepath.push(overlay_root.join(rel));
-        }
-        let dir = gradle_root.join(rel);
-        if dir.is_dir() {
-            sourcepath.push(dir);
-        }
-    }
+    let sourcepath = build_java_sourcepath(project_root, &overlay_root);
 
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
@@ -74,6 +69,7 @@ fn check_gradle_java(
     let mut args = vec![
         "-encoding".to_string(),
         "UTF-8".to_string(),
+        "-proc:none".to_string(),
         "-d".to_string(),
         out_dir.to_string_lossy().into_owned(),
     ];
@@ -91,8 +87,8 @@ fn check_gradle_java(
                 .join(if cfg!(windows) { ";" } else { ":" }),
         );
     }
-    append_javac_release_args(&mut args, gradle_root);
-    args.push(overlay_file.to_string_lossy().into_owned());
+    append_javac_release_args(&mut args, project_root);
+    args.push(overlay_root.join(rel_path).to_string_lossy().into_owned());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_java_command(ws, "javac", &arg_refs)?;
@@ -101,7 +97,531 @@ fn check_gradle_java(
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
+    diags = filter_stale_dependency_diags(diags, project_root, rel_path, content, &jars);
+    diags = filter_spring_data_javac_false_positives(diags, project_root, content);
+    diags = filter_project_method_false_positives(
+        diags,
+        ws,
+        project_root,
+        content,
+        overlays,
+    );
+    enrich_missing_dependency_diags(&mut diags, project_root, content);
+    enrich_static_import_diags(&mut diags, content);
     Ok(diags)
+}
+
+fn sync_java_diagnostics_overlays(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Result<PathBuf> {
+    let overlay_root = ws.join(DIAG_ROOT).join("overlay");
+    let mut seen = std::collections::HashSet::new();
+    for (path, text) in std::iter::once((rel_path.to_string(), content.to_string()))
+        .chain(overlays.iter().cloned())
+    {
+        if !path.ends_with(".java") || path.starts_with(".reaper/") {
+            continue;
+        }
+        let _ = safe_join(ws, &path)?;
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let overlay_file = overlay_root.join(&path);
+        if let Some(parent) = overlay_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&overlay_file, text)?;
+    }
+    Ok(overlay_root)
+}
+
+/// All `*/src/main/java` and `*/src/test/java` roots under the project (multi-module safe).
+fn discover_java_source_prefixes(project_root: &Path) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    discover_java_source_prefixes_inner(project_root, project_root, &mut prefixes, 0);
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn discover_java_source_prefixes_inner(
+    project_root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 12 || !dir.is_dir() {
+        return;
+    }
+    for suffix in ["src/main/java", "src/test/java"] {
+        if dir.join(suffix).is_dir() {
+            let rel = dir
+                .strip_prefix(project_root)
+                .unwrap_or(dir)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let prefix = if rel.is_empty() {
+                suffix.to_string()
+            } else {
+                format!("{rel}/{suffix}")
+            };
+            out.push(prefix);
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "target"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+            || name == ".reaper"
+        {
+            continue;
+        }
+        discover_java_source_prefixes_inner(project_root, &path, out, depth + 1);
+    }
+}
+
+/// Source roots for javac — every module under the Gradle/Maven project root.
+fn build_java_sourcepath(project_root: &Path, overlay_root: &Path) -> Vec<PathBuf> {
+    let mut sourcepath = Vec::new();
+    for prefix in discover_java_source_prefixes(project_root) {
+        push_source_root(&mut sourcepath, overlay_root, project_root, &prefix);
+        if prefix.contains("/src/test/java") {
+            let main_prefix = prefix.replace("/src/test/java", "/src/main/java");
+            if main_prefix != prefix {
+                push_source_root(&mut sourcepath, overlay_root, project_root, &main_prefix);
+            }
+        }
+    }
+    sourcepath.sort();
+    sourcepath.dedup();
+    sourcepath
+}
+
+fn detect_java_source_prefix(rel_path: &str) -> Option<String> {
+    for marker in ["/src/test/java/", "/src/main/java/", "/test/java/"] {
+        if let Some(idx) = rel_path.find(marker) {
+            let end = idx + marker.len() - 1;
+            return Some(rel_path[..end].trim_end_matches('/').to_string());
+        }
+    }
+    None
+}
+
+fn push_source_root(
+    sourcepath: &mut Vec<PathBuf>,
+    overlay_root: &Path,
+    project_root: &Path,
+    prefix: &str,
+) {
+    sourcepath.push(overlay_root.join(prefix));
+    let dir = project_root.join(prefix);
+    if dir.is_dir() {
+        sourcepath.push(dir);
+    }
+}
+
+fn filter_stale_dependency_diags(
+    diags: Vec<Diagnostic>,
+    project_root: &Path,
+    rel_path: &str,
+    content: &str,
+    jars: &[PathBuf],
+) -> Vec<Diagnostic> {
+    let markers = super::java_ecosystem::project_build_markers(project_root);
+    let declares_spring_data = super::java_ecosystem::project_declares_spring_data(project_root);
+    let needs_test = classpath::file_needs_test_classpath(rel_path, content);
+    let classpath_unresolved = jars.is_empty();
+    let test_deps_missing = needs_test
+        && markers.junit
+        && !classpath::classpath_includes_test_deps(jars);
+    let spring_deps_missing = markers.spring
+        && uses_spring(content)
+        && !classpath::classpath_includes_spring_deps(jars);
+    let spring_data_missing = (markers.spring || declares_spring_data)
+        && content.contains("org.springframework.data")
+        && !classpath::classpath_includes_spring_data_deps(jars);
+    let tooling_pending = classpath::needs_tooling_classpath_resolve(project_root);
+    let force_spring_data_filter =
+        declares_spring_data && content.contains("org.springframework.data");
+
+    if !classpath_unresolved
+        && !test_deps_missing
+        && !spring_deps_missing
+        && !spring_data_missing
+        && !tooling_pending
+        && !force_spring_data_filter
+    {
+        return diags;
+    }
+
+    diags
+        .into_iter()
+        .filter(|d| {
+            !is_stale_declared_dependency_diag(
+                &d.message,
+                content,
+                &markers,
+                needs_test,
+                declares_spring_data,
+            )
+        })
+        .collect()
+}
+
+fn is_stale_declared_dependency_diag(
+    message: &str,
+    content: &str,
+    markers: &super::java_ecosystem::JavaBuildMarkers,
+    needs_test: bool,
+    declares_spring_data: bool,
+) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let missing_package = lower.contains("package") && lower.contains("does not exist");
+    let missing_symbol = lower.contains("cannot find symbol");
+
+    if markers.junit && needs_test && uses_junit(content) {
+        if lower.contains("org.junit")
+            || (missing_package && lower.contains("junit"))
+            || (missing_symbol && (lower.contains(" test") || lower.contains("symbol:   class test")))
+        {
+            return true;
+        }
+        if lower.contains("static import only from classes and interfaces")
+            && content.contains("import static org.junit")
+        {
+            return true;
+        }
+        if missing_symbol && uses_junit_assertions(content) {
+            if lower.contains("assertnotnull")
+                || lower.contains("assertequals")
+                || lower.contains("asserttrue")
+                || lower.contains("assertfalse")
+                || lower.contains("assertthrows")
+                || lower.contains("assertions")
+            {
+                return true;
+            }
+        }
+    }
+
+    if markers.spring && uses_spring(content) {
+        if lower.contains("org.springframework")
+            || (missing_package && lower.contains("springframework"))
+        {
+            return true;
+        }
+        if missing_symbol && lower.contains("springframework") {
+            return true;
+        }
+    }
+
+    if (markers.spring || declares_spring_data) && uses_spring_data_types(content) {
+        if lower.contains("org.springframework.data")
+            || (missing_package && lower.contains("springframework.data"))
+            || (missing_symbol && spring_data_symbol_in_message(&lower, content))
+        {
+            return true;
+        }
+    }
+
+    if markers.spring_test && needs_test && uses_spring(content) {
+        if lower.contains("org.springframework")
+            || (missing_package && lower.contains("springframework"))
+        {
+            return true;
+        }
+    }
+
+    if markers.lombok && content.contains("@") && lower.contains("lombok") {
+        return missing_package || missing_symbol;
+    }
+
+    false
+}
+
+fn uses_junit(content: &str) -> bool {
+    content.contains("org.junit.jupiter")
+        || content.contains("@Test")
+        || content.contains("@ParameterizedTest")
+        || content.contains("@SpringBootTest")
+}
+
+fn uses_spring(content: &str) -> bool {
+    content.contains("org.springframework")
+}
+
+fn uses_spring_data_types(content: &str) -> bool {
+    content.contains("org.springframework.data")
+        || classpath::well_known_spring_data_simple_names()
+            .any(|name| content.contains(name))
+}
+
+fn spring_data_symbol_in_message(lower_message: &str, content: &str) -> bool {
+    classpath::well_known_spring_data_simple_names().any(|name| {
+        content.contains(name) && lower_message.contains(&name.to_ascii_lowercase())
+    })
+}
+
+/// Drop javac false positives for Spring Data types when the project declares them and Gradle tests compile.
+fn filter_spring_data_javac_false_positives(
+    diags: Vec<Diagnostic>,
+    project_root: &Path,
+    content: &str,
+) -> Vec<Diagnostic> {
+    let declares_spring_data = super::java_ecosystem::project_declares_spring_data(project_root);
+    if !declares_spring_data && !uses_spring_data_types(content) {
+        return diags;
+    }
+    diags
+        .into_iter()
+        .filter(|d| {
+            !is_spring_data_well_known_false_positive(&d.message, content, declares_spring_data)
+        })
+        .collect()
+}
+
+fn is_spring_data_well_known_false_positive(
+    message: &str,
+    content: &str,
+    declares_spring_data: bool,
+) -> bool {
+    if !declares_spring_data && !uses_spring_data_types(content) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("cannot find symbol") {
+        return false;
+    }
+    spring_data_symbol_in_message(&lower, content)
+        || (lower.contains("org.springframework.data") && uses_spring_data_types(content))
+}
+
+/// Inherited Spring Data repository API methods that javac may miss offline even when Gradle tests pass.
+const SPRING_DATA_REPOSITORY_METHODS: &[&str] = &[
+    "save",
+    "saveAll",
+    "saveAndFlush",
+    "saveAllAndFlush",
+    "findById",
+    "findAll",
+    "findAllById",
+    "existsById",
+    "count",
+    "delete",
+    "deleteById",
+    "deleteAll",
+    "deleteAllById",
+    "deleteAllInBatch",
+    "deleteInBatch",
+    "flush",
+    "getOne",
+    "getById",
+    "getReferenceById",
+];
+
+fn filter_project_method_false_positives(
+    diags: Vec<Diagnostic>,
+    ws: &Path,
+    project_root: &Path,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Vec<Diagnostic> {
+    diags
+        .into_iter()
+        .filter(|d| {
+            !is_project_method_false_positive(ws, project_root, content, overlays, &d.message)
+        })
+        .collect()
+}
+
+fn is_project_method_false_positive(
+    ws: &Path,
+    project_root: &Path,
+    content: &str,
+    overlays: &[(String, String)],
+    message: &str,
+) -> bool {
+    let Some((method, type_name)) = parse_missing_method_on_type(message) else {
+        return false;
+    };
+    if is_spring_data_repository_method(&type_name, &method, project_root) {
+        return true;
+    }
+    read_project_type_source(ws, project_root, &type_name, content, overlays)
+        .is_some_and(|src| source_declares_method(&src, &method))
+}
+
+fn parse_missing_method_on_type(message: &str) -> Option<(String, String)> {
+    if !message.contains("cannot find symbol") {
+        return None;
+    }
+    let method_line = message
+        .lines()
+        .find(|l| l.contains("symbol:") && l.contains("method "))?;
+    let method_part = method_line.split("method ").nth(1)?.trim();
+    let method_name = method_part.split('(').next()?.trim();
+    if method_name.is_empty() {
+        return None;
+    }
+    let loc_line = message
+        .lines()
+        .find(|l| l.contains("location:") && l.contains("type "))?;
+    let type_name = loc_line.rsplit("type ").next()?.trim();
+    if type_name.is_empty() {
+        return None;
+    }
+    Some((method_name.to_string(), type_name.to_string()))
+}
+
+fn is_spring_data_repository_method(
+    type_name: &str,
+    method_name: &str,
+    project_root: &Path,
+) -> bool {
+    if !type_name.ends_with("Repository") {
+        return false;
+    }
+    if !super::java_ecosystem::project_declares_spring_data(project_root)
+        && !super::gradle::is_spring_boot_project(project_root)
+        && !super::maven::is_spring_boot_project(project_root)
+    {
+        return false;
+    }
+    SPRING_DATA_REPOSITORY_METHODS.contains(&method_name)
+}
+
+fn resolve_project_type_fqcn(content: &str, type_name: &str) -> Option<String> {
+    for line in content.lines() {
+        let t = line.trim();
+        if !t.starts_with("import ") || t.starts_with("import static ") {
+            continue;
+        }
+        let imp = t
+            .trim_start_matches("import ")
+            .trim_end_matches(';')
+            .trim();
+        if imp.ends_with(&format!(".{type_name}")) {
+            return Some(imp.to_string());
+        }
+    }
+    let pkg = content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("package ")
+            .map(|p| p.trim_end_matches(';').trim())
+    })?;
+    Some(format!("{pkg}.{type_name}"))
+}
+
+fn read_project_type_source(
+    ws: &Path,
+    project_root: &Path,
+    type_name: &str,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Option<String> {
+    if let Some(fqcn) = resolve_project_type_fqcn(content, type_name) {
+        let rel = format!("{}.java", fqcn.replace('.', "/"));
+        for (path, text) in overlays {
+            if path.replace('\\', "/").ends_with(&rel) {
+                return Some(text.clone());
+            }
+        }
+        let disk = ws.join(&rel);
+        if disk.is_file() {
+            return std::fs::read_to_string(disk).ok();
+        }
+    }
+
+    for (path, text) in overlays {
+        if path.ends_with(".java") && source_defines_type(text, type_name) {
+            return Some(text.clone());
+        }
+    }
+
+    for prefix in discover_java_source_prefixes(project_root) {
+        let root = project_root.join(prefix);
+        if let Some(path) = find_file_named_recursive(&root, &format!("{type_name}.java"), 0) {
+            if let Ok(rel) = path.strip_prefix(ws) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if let Some(text) = overlays.iter().find(|(p, _)| p == &rel).map(|(_, t)| t.clone())
+                {
+                    return Some(text);
+                }
+            }
+            return std::fs::read_to_string(path).ok();
+        }
+    }
+    None
+}
+
+fn source_defines_type(content: &str, type_name: &str) -> bool {
+    content.lines().any(|line| {
+        let t = line.trim();
+        t.contains(&format!("interface {type_name}"))
+            || t.contains(&format!("class {type_name}"))
+            || t.contains(&format!("enum {type_name}"))
+            || t.contains(&format!("record {type_name}"))
+    })
+}
+
+fn source_declares_method(content: &str, method_name: &str) -> bool {
+    content.lines().any(|line| {
+        super::symbols::java_method_name_on_line(line).as_deref() == Some(method_name)
+            || line.split("//").next().unwrap_or(line).contains(&format!("{method_name}("))
+    })
+}
+
+fn find_file_named_recursive(dir: &Path, file_name: &str, depth: usize) -> Option<PathBuf> {
+    if depth > 14 || !dir.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
+                return Some(path);
+            }
+        } else if path.is_dir() {
+            if let Some(found) = find_file_named_recursive(&path, file_name, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn uses_junit_assertions(content: &str) -> bool {
+    content.contains("import static org.junit.jupiter.api.Assertions")
+        || content.contains("org.junit.jupiter.api.Assertions.")
+        || content.contains("assertNotNull")
+        || content.contains("assertEquals")
+        || content.contains("assertTrue")
+        || content.contains("assertFalse")
+        || content.contains("assertThrows")
+}
+
+fn has_invalid_junit_assertion_import(content: &str) -> bool {
+    content.lines().any(|line| {
+        let t = line.trim();
+        t.starts_with("import ")
+            && !t.starts_with("import static ")
+            && t.contains(".Assertions.")
+            && !t.ends_with("Assertions;")
+    })
 }
 
 fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
@@ -139,6 +659,100 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
     Ok(diags)
 }
 
+fn enrich_missing_dependency_diags(
+    diags: &mut [Diagnostic],
+    project_root: &Path,
+    content: &str,
+) {
+    if !uses_junit(content) {
+        return;
+    }
+
+    let Some(hint) = missing_junit_dependency_hint(project_root) else {
+        return;
+    };
+
+    for d in diags.iter_mut() {
+        let lower = d.message.to_ascii_lowercase();
+        if lower.contains("org.junit")
+            || (lower.contains("package") && lower.contains("does not exist"))
+            || (lower.contains("cannot find symbol") && lower.contains("test"))
+        {
+            if !d.message.contains("pom.xml") && !d.message.contains("build.gradle") {
+                d.message = format!("{} — {hint}", d.message);
+            }
+        }
+    }
+}
+
+fn missing_junit_dependency_hint(project_root: &Path) -> Option<String> {
+    if super::maven::is_maven_project_root(project_root) {
+        let pom = std::fs::read_to_string(project_root.join("pom.xml")).ok()?;
+        let markers = super::java_ecosystem::scan_maven_pom(&pom);
+        if markers.junit {
+            return None;
+        }
+        return Some(
+            "add JUnit to pom.xml (<dependency> org.junit.jupiter:junit-jupiter test scope), then run ./mvnw dependency:resolve".into(),
+        );
+    }
+    if super::gradle::is_gradle_project_dir(project_root) {
+        let markers = super::java_ecosystem::scan_gradle_project(project_root);
+        if markers.junit {
+            return None;
+        }
+        return Some(
+            "add JUnit to build.gradle (testImplementation 'org.junit.jupiter:junit-jupiter'), then sync Gradle".into(),
+        );
+    }
+    None
+}
+
+fn enrich_static_import_diags(diags: &mut [Diagnostic], content: &str) {
+    let bad_assertion_import = has_invalid_junit_assertion_import(content);
+    let assertion_import_hint =
+        "use import static org.junit.jupiter.api.Assertions.assertNotNull; (or import org.junit.jupiter.api.Assertions and call Assertions.assertNotNull(...))";
+
+    for d in diags.iter_mut() {
+        let lower = d.message.to_ascii_lowercase();
+
+        if bad_assertion_import
+            && lower.contains("cannot find symbol")
+            && (lower.contains("assertnotnull") || lower.contains("assertions"))
+        {
+            d.message = format!("{} — {assertion_import_hint}", d.message);
+            continue;
+        }
+
+        if !lower.contains("static import only from classes and interfaces") {
+            continue;
+        }
+        let line_idx = d.line.saturating_sub(1) as usize;
+        let Some(line) = content.lines().nth(line_idx) else {
+            continue;
+        };
+        if !line.contains("import static") {
+            if line.contains(".Assertions.") {
+                d.message = format!("{} — {assertion_import_hint}", d.message);
+            }
+            continue;
+        }
+        if line.contains(".Test")
+            || line.contains(".SpringBootTest")
+            || line.contains(".ParameterizedTest")
+            || line.contains(".BeforeEach")
+            || line.contains(".AfterEach")
+            || line.contains(".BeforeAll")
+            || line.contains(".AfterAll")
+        {
+            d.message = format!(
+                "{} — annotations use a regular import (e.g. import org.junit.jupiter.api.Test), not import static",
+                d.message
+            );
+        }
+    }
+}
+
 fn append_javac_release_args(args: &mut Vec<String>, gradle_root: &Path) {
     let release = javac_release_flag(gradle_root);
     let use_legacy = crate::jdk::effective_java_home()
@@ -166,9 +780,16 @@ fn javac_release_flag(gradle_root: &Path) -> String {
     project
 }
 
-fn detect_java_release(gradle_root: &Path) -> String {
+fn detect_java_release(project_root: &Path) -> String {
+    if super::maven::is_maven_project_root(project_root) {
+        if let Ok(text) = std::fs::read_to_string(project_root.join("pom.xml")) {
+            if let Some(v) = extract_maven_java_version(&text) {
+                return v;
+            }
+        }
+    }
     for name in ["build.gradle.kts", "build.gradle"] {
-        let path = gradle_root.join(name);
+        let path = project_root.join(name);
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Some(v) = extract_release_version(&text) {
                 return v;
@@ -178,14 +799,52 @@ fn detect_java_release(gradle_root: &Path) -> String {
     "17".into()
 }
 
+fn extract_maven_java_version(pom: &str) -> Option<String> {
+    if let Some(section) = extract_xml_block(pom, "properties") {
+        for key in ["java.version", "maven.compiler.release", "maven.compiler.source"] {
+            if let Some(v) = tag_value(&section, key) {
+                let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    return Some(digits);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_xml_block(raw: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = raw.find(&open)? + open.len();
+    let end = raw[start..].find(&close)? + start;
+    Some(raw[start..end].to_string())
+}
+
+fn tag_value(section: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = section.find(&open)? + open.len();
+    let end = section[start..].find(&close)? + start;
+    let value = section[start..end].trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 /// Effective Java source level for a file: min(selected JDK major, project sourceCompatibility).
 pub fn java_language_level(ws: &Path, path: &str) -> u32 {
     let jdk_major = crate::jdk::effective_java_home()
         .ok()
         .and_then(|h| crate::jdk::java_major_version(&h))
         .unwrap_or(17);
-    if let Ok(Some(gradle_root)) = super::gradle::find_gradle_root(ws, path) {
-        let project = detect_java_release(&gradle_root)
+    let project_root = find_gradle_root(ws, path)
+        .ok()
+        .flatten()
+        .or_else(|| find_maven_root(ws, path).ok().flatten());
+    if let Some(root) = project_root {
+        let project = detect_java_release(&root)
             .parse()
             .unwrap_or(jdk_major);
         return jdk_major.min(project);
@@ -551,5 +1210,183 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     fn ignores_inner_public_class_for_file_name() {
         let content = "public class Outer {\n    public static class Inner {\n    }\n}\n";
         assert!(local_file_class_name_diags("Outer.java", content).is_empty());
+    }
+
+    #[test]
+    fn discovers_all_module_java_source_roots() {
+        let root = std::env::temp_dir().join("reaper-diag-src-roots");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("api/src/main/java")).unwrap();
+        std::fs::create_dir_all(root.join("core/src/main/java")).unwrap();
+        std::fs::create_dir_all(root.join("src/test/java")).unwrap();
+        let prefixes = discover_java_source_prefixes(&root);
+        assert!(prefixes.contains(&"api/src/main/java".to_string()));
+        assert!(prefixes.contains(&"core/src/main/java".to_string()));
+        assert!(prefixes.contains(&"src/test/java".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detects_gradle_test_source_prefix() {
+        assert_eq!(
+            detect_java_source_prefix("app/src/test/java/com/example/AppTest.java").as_deref(),
+            Some("app/src/test/java")
+        );
+        assert_eq!(
+            detect_java_source_prefix("src/test/java/com/example/AppTest.java").as_deref(),
+            Some("src/test/java")
+        );
+    }
+
+    #[test]
+    fn filters_junit_diag_when_pom_declares_junit_but_classpath_empty() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            junit: true,
+            ..Default::default()
+        };
+        let content = "import org.junit.jupiter.api.Test;\nclass T { @Test void x() {} }\n";
+        assert!(is_stale_declared_dependency_diag(
+            "package org.junit.jupiter.api does not exist",
+            content,
+            &markers,
+            true,
+            false,
+        ));
+        assert!(!is_stale_declared_dependency_diag(
+            "';' expected",
+            content,
+            &markers,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn filters_static_import_junit_diag_when_classpath_unresolved() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            junit: true,
+            ..Default::default()
+        };
+        let content = "import static org.junit.jupiter.api.Assertions.assertEquals;\nclass T {}\n";
+        assert!(is_stale_declared_dependency_diag(
+            "static import only from classes and interfaces",
+            content,
+            &markers,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn filters_assertnotnull_when_junit_declared_but_classpath_unresolved() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            junit: true,
+            ..Default::default()
+        };
+        let content = r#"
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+class AppTest {
+    @Test void x() { assertNotNull("hi"); }
+}
+"#;
+        assert!(is_stale_declared_dependency_diag(
+            "cannot find symbol\n  symbol:   method assertNotNull(String)\n  location: class AppTest",
+            content,
+            &markers,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn filters_spring_data_domain_when_spring_declared_but_classpath_unresolved() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            spring: true,
+            ..Default::default()
+        };
+        let content = "import org.springframework.data.domain.Page;\nclass Repo {}\n";
+        assert!(is_stale_declared_dependency_diag(
+            "package org.springframework.data.domain does not exist",
+            content,
+            &markers,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn filters_spring_data_when_pom_declares_starter_without_markers_spring() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers::default();
+        let content = "import org.springframework.data.domain.PageRequest;\nclass Repo {}\n";
+        assert!(is_stale_declared_dependency_diag(
+            "package org.springframework.data.domain does not exist",
+            content,
+            &markers,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn filters_pagerequest_variable_false_positive_when_spring_data_declared() {
+        let content = r#"
+import org.springframework.data.domain.PageRequest;
+class ScheduledTaskServiceIntegrationTest {
+    void x() { PageRequest.of(0, 10); }
+}
+"#;
+        assert!(is_spring_data_well_known_false_positive(
+            "error: cannot find symbol\n  symbol:   variable PageRequest\n  location: class ScheduledTaskServiceIntegrationTest",
+            content,
+            true,
+        ));
+    }
+
+    #[test]
+    fn filters_custom_repository_save_when_method_in_project_source() {
+        let ws = std::env::temp_dir().join("reaper-diag-repo-save");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/ScheduledTaskRepository.java"),
+            "package com.example;\ninterface ScheduledTaskRepository {\n  ScheduledTask save(ScheduledTask task);\n}\n",
+        )
+        .unwrap();
+        let test_content = r#"
+package com.example;
+class ScheduledTaskServiceIntegrationTest {
+    ScheduledTaskRepository taskRepository;
+    void x() { taskRepository.save(new ScheduledTask()); }
+}
+class ScheduledTask {}
+"#;
+        let msg = "error: cannot find symbol\n  symbol:   method save(ScheduledTask)\n  location: variable taskRepository of type ScheduledTaskRepository";
+        assert!(is_project_method_false_positive(
+            &ws,
+            &ws,
+            test_content,
+            &[],
+            msg,
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn filters_inherited_repository_save_for_spring_boot_project() {
+        let root = std::env::temp_dir().join("reaper-diag-spring-repo");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            "<project><dependencies><dependency><artifactId>spring-boot-starter-data-jpa</artifactId></dependency></dependencies></project>",
+        )
+        .unwrap();
+        assert!(is_spring_data_repository_method(
+            "ScheduledTaskRepository",
+            "save",
+            &root,
+        ));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

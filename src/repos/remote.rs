@@ -84,6 +84,8 @@ pub fn import_local_repo(
     let src_canon = src
         .canonicalize()
         .with_context(|| format!("resolve source path {}", src.display()))?;
+    metadata::set_local_path(config, &name, &src_canon)?;
+
     if let Some(origin) = git::remote_url(&src_canon, "origin") {
         if let Ok(clean) = normalize_remote_url(&origin) {
             if let Ok(host) = host_from_url(&clean) {
@@ -93,13 +95,6 @@ pub fn import_local_repo(
             }
         }
     }
-
-    let metadata = metadata::RepoMetadata {
-        remote_url: None,
-        remote_host: None,
-        imported: true,
-    };
-    metadata::save(config, &name, &metadata)?;
 
     summarize_repo(config, settings, &name, &path)
 }
@@ -320,8 +315,8 @@ pub fn link_remote(
 
     metadata::set_remote(config, name, &clean, &host)?;
 
-    if config.workspace_path(name).exists() {
-        workspace::ensure_upstream_remote(&config.workspace_path(name), &clean)?;
+    if let Ok(ws) = workspace::ensure_workspace(config, name) {
+        workspace::ensure_upstream_remote(&ws, &clean)?;
     }
 
     summarize_repo(config, settings, name, &config.repo_path(name))

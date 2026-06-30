@@ -245,6 +245,10 @@ pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     if before.is_empty() || before.contains('.') {
         return None;
     }
+    // Declarations have a return type or modifiers before the name; calls do not (assertNotNull(...)).
+    if !before.contains(char::is_whitespace) {
+        return None;
+    }
 
     let name = before
         .rsplit(|c: char| c.is_whitespace() || c == '<' || c == '>')
@@ -2512,6 +2516,10 @@ mod tests {
             Some("main".into())
         );
         assert_eq!(java_method_name_on_line("        SpringApplication.run(Application.class, args);"), None);
+        assert_eq!(
+            java_method_name_on_line("        assertNotNull(classUnderTest.getGreeting());"),
+            None
+        );
     }
 
     #[test]

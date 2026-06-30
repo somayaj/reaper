@@ -1,13 +1,65 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use super::gradle;
 use super::safe_join;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MavenProjectInfo {
+    pub is_maven: bool,
+    pub project_root: String,
+    pub has_wrapper: bool,
+    pub is_spring_boot: bool,
+    pub default_goal: String,
+    pub goals: Vec<String>,
+    pub application_main: Option<String>,
+    pub has_junit: bool,
+    pub has_spring_test: bool,
+    pub has_jacoco: bool,
+    pub has_lombok: bool,
+    pub has_slf4j: bool,
+}
+
 pub fn is_maven_project_root(dir: &Path) -> bool {
     dir.join("pom.xml").is_file() && !gradle::is_gradle_project_dir(dir)
+}
+
+#[derive(Debug, Clone)]
+pub struct MavenCommand {
+    pub program: PathBuf,
+    pub cwd: PathBuf,
+}
+
+/// Prefer `./mvnw` in the project root, fall back to `mvn` on PATH.
+pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
+    let mvnw = if cfg!(windows) {
+        project_root.join("mvnw.cmd")
+    } else {
+        project_root.join("mvnw")
+    };
+    if mvnw.is_file() {
+        return MavenCommand {
+            program: mvnw,
+            cwd: project_root.to_path_buf(),
+        };
+    }
+    MavenCommand {
+        program: PathBuf::from("mvn"),
+        cwd: project_root.to_path_buf(),
+    }
+}
+
+pub fn run_maven(project_root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let cmd = resolve_maven_command(project_root);
+    Command::new(&cmd.program)
+        .current_dir(&cmd.cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("spawn {}", cmd.program.display()))
 }
 
 /// Discover Maven module roots (skips Gradle projects and reactor parents without sources).
@@ -126,6 +178,102 @@ pub fn find_maven_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+pub fn maven_project_info(ws: &Path, rel_path: &str) -> Result<MavenProjectInfo> {
+    let empty = MavenProjectInfo {
+        is_maven: false,
+        project_root: String::new(),
+        has_wrapper: false,
+        is_spring_boot: false,
+        default_goal: String::new(),
+        goals: Vec::new(),
+        application_main: None,
+        has_junit: false,
+        has_spring_test: false,
+        has_jacoco: false,
+        has_lombok: false,
+        has_slf4j: false,
+    };
+
+    let _ = safe_join(ws, rel_path)?;
+    let Some(root) = find_maven_root(ws, rel_path)? else {
+        return Ok(empty);
+    };
+
+    let project_root = gradle::rel_path_for(ws, &root)?;
+    let is_spring_boot = is_spring_boot_project(&root);
+    let has_wrapper = root.join("mvnw").is_file() || root.join("mvnw.cmd").is_file();
+    let default_goal = if is_spring_boot {
+        "spring-boot:run".to_string()
+    } else {
+        "package".to_string()
+    };
+
+    let mut goals = vec![
+        "compile".to_string(),
+        "test".to_string(),
+        "package".to_string(),
+        "clean".to_string(),
+    ];
+    if is_spring_boot {
+        goals.insert(0, "spring-boot:run".to_string());
+    }
+
+    let pom_raw = std::fs::read_to_string(root.join("pom.xml")).unwrap_or_default();
+    let markers = super::java_ecosystem::scan_maven_pom(&pom_raw);
+
+    Ok(MavenProjectInfo {
+        is_maven: true,
+        project_root,
+        has_wrapper,
+        is_spring_boot,
+        default_goal,
+        goals,
+        application_main: None,
+        has_junit: markers.junit,
+        has_spring_test: markers.spring_test,
+        has_jacoco: markers.jacoco,
+        has_lombok: markers.lombok,
+        has_slf4j: markers.slf4j,
+    })
+}
+
+/// Split a Maven goal string (`spring-boot:run`, `test`, `clean package`) into argv tokens.
+pub fn parse_maven_goal(goal: &str) -> Result<Vec<String>> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        bail!("maven goal required");
+    }
+    Ok(goal
+        .split_whitespace()
+        .map(|token| normalize_maven_goal_token(token))
+        .collect())
+}
+
+/// Convert Gradle-style `-Dtest=fqcn.method` to Surefire `-Dtest=fqcn#method`.
+fn normalize_maven_goal_token(token: &str) -> String {
+    let Some(value) = token.strip_prefix("-Dtest=") else {
+        return token.to_string();
+    };
+    format!("-Dtest={}", surefire_test_pattern(value))
+}
+
+/// Gradle `--tests` uses `fqcn.method`; Maven Surefire uses `fqcn#method`.
+pub fn surefire_test_pattern(filter: &str) -> String {
+    let filter = filter.trim();
+    if let Some(last_dot) = filter.rfind('.') {
+        let method = &filter[last_dot + 1..];
+        if !method.is_empty()
+            && method
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase())
+        {
+            return format!("{}#{}", &filter[..last_dot], method);
+        }
+    }
+    filter.to_string()
+}
+
 pub fn is_spring_boot_project(root: &Path) -> bool {
     read_pom(root)
         .map(|pom| pom.looks_like_spring_boot())
@@ -167,6 +315,115 @@ pub fn collect_dependency_coordinates(maven_root: &Path) -> Vec<(String, String,
     coords
 }
 
+/// Resolve Maven dependency JARs from the local `~/.m2` cache, walking transitive deps.
+pub fn collect_transitive_jar_paths(maven_root: &Path, include_test_scope: bool) -> Vec<PathBuf> {
+    let roots = collect_dependency_coordinates(maven_root);
+    collect_transitive_jars(&roots, include_test_scope, find_m2_jar, read_m2_pom_text)
+}
+
+/// Upper bound when walking Maven/Gradle transitive dependency trees offline.
+pub const MAX_TRANSITIVE_CLASSPATH_JARS: usize = 800;
+
+/// Walk transitive Maven POM dependencies, resolving JARs and POMs via callbacks.
+pub fn collect_transitive_jars<FJ, FP>(
+    roots: &[(String, String, String)],
+    include_test_scope: bool,
+    find_jar: FJ,
+    read_pom: FP,
+) -> Vec<PathBuf>
+where
+    FJ: Fn(&str, &str, &str) -> Option<PathBuf>,
+    FP: Fn(&str, &str, &str) -> Option<String>,
+{
+    use std::collections::VecDeque;
+
+    const MAX_JARS: usize = MAX_TRANSITIVE_CLASSPATH_JARS;
+    const MAX_DEPTH: usize = 10;
+
+    let mut queue: VecDeque<(String, String, String, usize)> = roots
+        .iter()
+        .map(|(g, a, v)| (g.clone(), a.clone(), v.clone(), 0))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut jars = Vec::new();
+
+    while let Some((group, artifact, version, depth)) = queue.pop_front() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let key = format!("{group}:{artifact}:{version}");
+        if !seen.insert(key) {
+            continue;
+        }
+
+        if let Some(jar) = find_jar(&group, &artifact, &version) {
+            jars.push(jar);
+        }
+
+        let Some(raw) = read_pom(&group, &artifact, &version) else {
+            continue;
+        };
+        enqueue_transitive_deps(&raw, &mut queue, depth + 1, include_test_scope);
+
+        if jars.len() >= MAX_JARS {
+            break;
+        }
+    }
+
+    jars
+}
+
+pub fn read_m2_pom_text(group: &str, artifact: &str, version: &str) -> Option<String> {
+    let pom_path = m2_home()
+        .join(group.replace('.', "/"))
+        .join(artifact)
+        .join(version)
+        .join(format!("{artifact}-{version}.pom"));
+    std::fs::read_to_string(pom_path).ok()
+}
+
+fn read_m2_pom_model(group: &str, artifact: &str, version: &str) -> Option<PomModel> {
+    read_m2_pom_text(group, artifact, version).map(|raw| parse_pom(&raw))
+}
+
+fn enqueue_transitive_deps(
+    pom_raw: &str,
+    queue: &mut std::collections::VecDeque<(String, String, String, usize)>,
+    depth: usize,
+    include_test_scope: bool,
+) {
+    let pom = parse_pom(pom_raw);
+    let management = dependency_management_for_resolved_pom(&pom);
+
+    for dep in &pom.dependencies {
+        if dep.optional {
+            continue;
+        }
+        let scope = dep.scope.as_deref().unwrap_or("compile");
+        if scope == "test" && !include_test_scope {
+            continue;
+        }
+        if matches!(scope, "provided" | "system") {
+            continue;
+        }
+
+        let group = resolve_property(&dep.group_id, &pom.properties);
+        let artifact = resolve_property(&dep.artifact_id, &pom.properties);
+        let version = dep
+            .version
+            .as_deref()
+            .and_then(|v| resolve_version(Some(v), &pom))
+            .or_else(|| {
+                management
+                    .get(&format!("{group}:{artifact}"))
+                    .map(|(v, _)| v.clone())
+            });
+        if let Some(version) = version {
+            queue.push_back((group, artifact, version, depth));
+        }
+    }
+}
+
 fn collect_coordinates_from_pom(
     root: &Path,
     out: &mut Vec<(String, String, String)>,
@@ -181,19 +438,7 @@ fn collect_coordinates_from_pom(
         Err(_) => return,
     };
 
-    let mut management: HashMap<String, (String, String)> = HashMap::new();
-    for dep in &pom.dependency_management {
-        if let Some(version) = resolve_version(dep.version.as_deref(), &pom) {
-            let key = format!("{}:{}", dep.group_id, dep.artifact_id);
-            management.insert(key, (version, dep.artifact_id.clone()));
-        }
-    }
-
-    if let Some((group, artifact, version)) = pom.parent_coords() {
-        if let Some(parent_dir) = resolve_pom_directory(&group, &artifact, &version) {
-            collect_coordinates_from_pom(&parent_dir, out, seen, depth + 1);
-        }
-    }
+    let management = effective_dependency_management(root, &pom, 0);
 
     for dep in &pom.dependencies {
         let group = resolve_property(&dep.group_id, &pom.properties);
@@ -204,14 +449,85 @@ fn collect_coordinates_from_pom(
             .and_then(|v| resolve_version(Some(v), &pom))
             .or_else(|| {
                 management
-                    .get(&format!("{}:{}", group, artifact))
+                    .get(&format!("{group}:{artifact}"))
                     .map(|(v, _)| v.clone())
             });
         if let Some(version) = version {
-            let key = format!("{}:{}:{}", group, artifact, version);
+            let key = format!("{group}:{artifact}:{version}");
             if seen.insert(key) {
                 out.push((group, artifact, version));
             }
+        }
+    }
+}
+
+/// Effective versions from parent chain + imported BOMs (Spring Boot starter-parent, etc.).
+fn effective_dependency_management(
+    root: &Path,
+    pom: &PomModel,
+    depth: usize,
+) -> HashMap<String, (String, String)> {
+    if depth > 8 {
+        return HashMap::new();
+    }
+
+    let mut management = HashMap::new();
+    if let Some((group, artifact, version)) = pom.parent_coords() {
+        if let Some(parent_pom) = read_m2_pom_model(&group, &artifact, &version) {
+            if let Some(parent_dir) = resolve_pom_directory(&group, &artifact, &version) {
+                management = effective_dependency_management(&parent_dir, &parent_pom, depth + 1);
+            }
+        }
+    }
+    merge_pom_dependency_management(pom, &mut management);
+    let _ = root;
+    management
+}
+
+fn dependency_management_for_resolved_pom(pom: &PomModel) -> HashMap<String, (String, String)> {
+    if let (Some(g), Some(a), Some(v)) = (&pom.group_id, &pom.artifact_id, &pom.version) {
+        if let Some(dir) = resolve_pom_directory(g, a, v) {
+            return effective_dependency_management(&dir, pom, 0);
+        }
+    }
+    let mut management = HashMap::new();
+    merge_pom_dependency_management(pom, &mut management);
+    management
+}
+
+fn merge_pom_dependency_management(
+    pom: &PomModel,
+    management: &mut HashMap<String, (String, String)>,
+) {
+    for dep in &pom.dependency_management {
+        if dep.optional {
+            continue;
+        }
+        let group = resolve_property(&dep.group_id, &pom.properties);
+        let artifact = resolve_property(&dep.artifact_id, &pom.properties);
+        let scope = dep.scope.as_deref().unwrap_or("compile");
+        let version = dep
+            .version
+            .as_deref()
+            .and_then(|v| resolve_version(Some(v), pom));
+
+        if scope == "import" {
+            if let Some(version) = version {
+                if let Some(bom_pom) = read_m2_pom_model(&group, &artifact, &version) {
+                    for bom_dep in &bom_pom.dependency_management {
+                        if let Some(ver) = resolve_version(bom_dep.version.as_deref(), &bom_pom) {
+                            management
+                                .entry(format!("{}:{}", bom_dep.group_id, bom_dep.artifact_id))
+                                .or_insert((ver, bom_dep.artifact_id.clone()));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(version) = version {
+            management.insert(format!("{group}:{artifact}"), (version, artifact));
         }
     }
 }
@@ -294,6 +610,8 @@ struct PomDependency {
     group_id: String,
     artifact_id: String,
     version: Option<String>,
+    scope: Option<String>,
+    optional: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -401,10 +719,15 @@ fn parse_dependencies_in_section(
         let artifact = tag_value(&block, "artifactId").map(|a| resolve_property(&a, properties));
         let version = tag_value(&block, "version").map(|v| resolve_property(&v, properties));
         if let (Some(group_id), Some(artifact_id)) = (group, artifact) {
+            let scope = tag_value(&block, "scope");
+            let optional = tag_value(&block, "optional")
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
             out.push(PomDependency {
                 group_id,
                 artifact_id,
                 version,
+                scope,
+                optional,
             });
         }
     }
@@ -564,5 +887,80 @@ mod tests {
             g == "org.junit.jupiter" && a == "junit-jupiter" && v == "5.10.2"
         }));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_spring_boot_bom_dependency_versions() {
+        let ws = std::env::temp_dir().join("reaper-maven-spring-boot");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            &ws.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.0</version>
+    <relativePath/>
+  </parent>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>"#,
+        )
+        .unwrap();
+        let coords = collect_dependency_coordinates(&ws);
+        assert!(
+            coords.iter().any(|(g, a, _)| g == "org.springframework.boot" && a == "spring-boot-starter-web"),
+            "expected spring-boot-starter-web, got {coords:?}"
+        );
+        assert!(
+            coords.iter().any(|(g, a, _)| g == "org.springframework.boot" && a == "spring-boot-starter-test"),
+            "expected spring-boot-starter-test, got {coords:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn surefire_test_pattern_converts_method_filter() {
+        assert_eq!(
+            surefire_test_pattern(
+                "com.example.taskscheduler.health.SchedulerHealthIndicatorTest.reportsUpWithTaskCounts"
+            ),
+            "com.example.taskscheduler.health.SchedulerHealthIndicatorTest#reportsUpWithTaskCounts"
+        );
+    }
+
+    #[test]
+    fn surefire_test_pattern_leaves_class_filter() {
+        assert_eq!(
+            surefire_test_pattern("com.example.AppTest"),
+            "com.example.AppTest"
+        );
+    }
+
+    #[test]
+    fn parse_maven_goal_normalizes_dtest() {
+        let parts = parse_maven_goal(
+            "-Dtest=com.example.AppTest.appHasAGreeting test",
+        )
+        .unwrap();
+        assert_eq!(parts[0], "-Dtest=com.example.AppTest#appHasAGreeting");
+        assert_eq!(parts[1], "test");
     }
 }
