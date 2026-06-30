@@ -55,7 +55,7 @@ fn check_project_java(
 
     let overlay_root = sync_java_diagnostics_overlays(ws, rel_path, content, overlays)?;
 
-    let sourcepath = build_java_sourcepath(project_root, &overlay_root);
+    let sourcepath = classpath::project_java_sourcepath(project_root, &overlay_root);
 
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
