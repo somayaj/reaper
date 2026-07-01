@@ -1,0 +1,24 @@
+// Reaper: apply JaCoCo for IDE test coverage without editing the user's build files.
+// Loaded only for coverage runs via: gradlew -I reaper-coverage.init.gradle test jacocoTestReport …
+
+gradle.projectsLoaded {
+    rootProject.allprojects { project ->
+        project.plugins.withId('java') {
+            if (!project.plugins.hasPlugin('jacoco')) {
+                project.plugins.apply('jacoco')
+            }
+            project.tasks.withType(Test).configureEach { test ->
+                def reportTask = project.tasks.findByName('jacocoTestReport')
+                if (reportTask != null) {
+                    test.finalizedBy(reportTask)
+                }
+            }
+            project.tasks.matching { it.name == 'jacocoTestReport' }.configureEach { report ->
+                report.reports { r ->
+                    r.xml.required = true
+                    r.html.required = true
+                }
+            }
+        }
+    }
+}

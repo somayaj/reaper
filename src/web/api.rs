@@ -76,10 +76,20 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/run/info", get(run_project_info_handler))
         .route("/api/repos/{name}/workspace/run/target", get(run_target_handler).post(run_target_post))
         .route("/api/repos/{name}/workspace/run/task", post(run_project_task_handler))
+        .route("/api/repos/{name}/workspace/coverage", get(workspace_coverage_handler))
+        .route(
+            "/api/repos/{name}/workspace/coverage/report",
+            get(workspace_coverage_report_handler),
+        )
+        .route(
+            "/api/repos/{name}/workspace/open-external",
+            post(workspace_open_external),
+        )
         .route("/api/repos/{name}/workspace/maven/run", post(run_maven_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
         .route("/api/repos/{name}/workspace/hover", get(workspace_hover).post(workspace_hover_post))
         .route("/api/repos/{name}/workspace/classes", get(workspace_classes))
+        .route("/api/repos/{name}/workspace/search", get(workspace_search))
         .route("/api/repos/{name}/workspace/completions", get(workspace_completions).post(workspace_completions_post))
         .route("/api/repos/{name}/workspace/ai-completions", post(workspace_ai_completions))
         .route("/api/repos/{name}/workspace/inline-complete", post(workspace_inline_complete))
@@ -1079,6 +1089,8 @@ struct RunTaskRequest {
     path: String,
     #[serde(default)]
     task: String,
+    #[serde(default)]
+    coverage: bool,
 }
 
 async fn run_project_task_handler(
@@ -1092,9 +1104,10 @@ async fn run_project_task_handler(
     };
     let path = body.path.trim().to_string();
     let task = body.task.trim().to_string();
+    let coverage = body.coverage;
     let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = workspace::stream_workspace_run_task(&ws, &path, &task, tx.clone()) {
+        if let Err(e) = workspace::stream_workspace_run_task(&ws, &path, &task, coverage, tx.clone()) {
             let _ = tx.blocking_send(workspace::ExecStreamEvent {
                 t: "error".into(),
                 text: Some(format!("{e:#}\n")),
@@ -1104,6 +1117,51 @@ async fn run_project_task_handler(
         }
     });
     exec_stream_response(rx)
+}
+
+async fn workspace_coverage_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::coverage_for_file(&ws, &q.path) {
+        Ok(cov) => Json(cov).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_coverage_report_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::coverage_report_summary(&ws, &q.path) {
+        Ok(summary) => Json(summary).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_open_external(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<PathBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::open_in_system(&ws, &body.path) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 async fn run_maven_handler(
@@ -1305,6 +1363,26 @@ async fn workspace_classes(
     let query = q.q.unwrap_or_default();
     let limit = q.limit.unwrap_or(50);
     match workspace::search_classes(&ws, &query, limit) {
+        Ok(hits) => Json(hits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_search(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<ClassSearchQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    if workspace::is_gradle_workspace(&ws) {
+        state.java_index_jobs.ensure_building(&name, &ws);
+    }
+    let query = q.q.unwrap_or_default();
+    let limit = q.limit.unwrap_or(50);
+    match workspace::search_workspace(&ws, &query, limit) {
         Ok(hits) => Json(hits).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }

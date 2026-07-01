@@ -194,21 +194,8 @@ pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
     let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
     let col = column.saturating_sub(1) as usize;
 
-    if let Some(at) = line_text[..col.min(line_text.len())].rfind('@') {
-        let after = &line_text[at + 1..];
-        let name: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(name);
-        }
-    }
-
-    if col >= line_text.len() {
-        return word_before(line_text, line_text.len());
-    }
-    if is_ident_char(line_text.as_bytes()[col]) {
+    // Prefer the identifier under the cursor (e.g. Long in "@NotNull Long userId").
+    if col < line_text.len() && is_ident_char(line_text.as_bytes()[col]) {
         let start = (0..=col)
             .rev()
             .find(|&i| !is_ident_char(line_text.as_bytes()[i]))
@@ -219,6 +206,36 @@ pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
             .unwrap_or(line_text.len());
         return Some(line_text[start..end].to_string());
     }
+
+    if col > 0 && is_ident_char(line_text.as_bytes()[col.saturating_sub(1)]) {
+        if let Some(word) = word_before(line_text, col) {
+            return Some(word);
+        }
+    }
+
+    if col >= line_text.len() {
+        return word_before(line_text, line_text.len());
+    }
+
+    // Annotation name only when the cursor is on @ or within the annotation identifier.
+    let scan_end = (col + 1).min(line_text.len());
+    if scan_end > 0 {
+        if let Some(at) = line_text[..scan_end].rfind('@') {
+            let ann_start = at + 1;
+            let after = &line_text[ann_start..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                let ann_end = ann_start + name.len();
+                if col >= at && col <= ann_end {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
     word_before(line_text, col)
 }
 
@@ -2773,5 +2790,16 @@ public class Demo {
             java_member_qualifier(src, 1, 30, "run"),
             Some("SpringApplication".into())
         );
+    }
+
+    #[test]
+    fn word_at_prefers_type_after_annotation() {
+        let line = "    @NotNull Long userId,";
+        // column 14 = 'L' in Long (1-based)
+        assert_eq!(word_at(line, 1, 14), Some("Long".into()));
+        // column 6 = 'N' in NotNull
+        assert_eq!(word_at(line, 1, 6), Some("NotNull".into()));
+        // column 5 = '@'
+        assert_eq!(word_at(line, 1, 5), Some("NotNull".into()));
     }
 }
