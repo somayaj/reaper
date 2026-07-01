@@ -20,6 +20,7 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 "$ROOT/scripts/sync-launch-splash.sh"
 "$ROOT/scripts/vendor-monaco.sh"
 "$ROOT/scripts/vendor-google-java-format.sh"
+"$ROOT/scripts/copy-bundled-node.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
@@ -53,6 +54,7 @@ fi
 
 cp "$ROOT/gradle/reaper-classpath.init.gradle" "$APP/Contents/Resources/gradle/"
 cp "$ROOT/gradle/reaper-coverage.init.gradle" "$APP/Contents/Resources/gradle/"
+cp "$ROOT/Cargo.toml" "$APP/Contents/Resources/Cargo.toml"
 cp "$ROOT/gradlew" "$APP/Contents/Resources/gradlew"
 chmod +x "$APP/Contents/Resources/gradlew"
 cp "$ROOT/gradle/wrapper/gradle-wrapper.jar" "$APP/Contents/Resources/gradle/wrapper/"

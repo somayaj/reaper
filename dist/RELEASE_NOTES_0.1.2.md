@@ -1,4 +1,4 @@
-Reaper 0.1.2 — macOS (UI build 304)
+Reaper 0.1.2 — macOS (UI build 305)
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,15 +11,13 @@ Requires **macOS 11 (Big Sur)** or later. Drag Reaper.app to Applications, then 
 
 **First launch:** ad-hoc signed builds may require right-click → Open once, or allow in System Settings → Privacy & Security.
 
-### What's new (build 304)
-- **JaCoCo line coverage alignment** — status bar and coverage panel use JaCoCo's official LINE counter (matches HTML report per-class line %)
-- **Fix coverage HTML report open** (build 303) — "Open HTML report" opens in browser
+### What's new (build 305)
+- **Bundled Node.js** — Cursor agent bridge works on fresh Macs without Homebrew or Cursor IDE
+- JaCoCo line coverage aligned with HTML report (build 304)
+- Coverage HTML report open fix (build 303)
 
-### Prior 0.1.2 highlights
-- Welcome screen cleanup, launch splash, Cursor agent fixes
+**Tip:** Configure your Cursor API key in Settings → Cursor agent on each Mac.
 
-**Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives when done.
+SHA256 (arm64): `154c02b513c1c0ce74c7dbe0b954e9891a0cecc769ac4096bb9811d8ecc7b912`
 
-SHA256 (arm64): `e88752da2ad3fedab4e0137ffa3879c85670597b201459ddfcb4af8fb18350bb`
-
-SHA256 (x86_64): `9f80ee78d632df999af3f1ac16c22ad47e76d826eed1bc77e3078e4c8a421f5a`
+SHA256 (x86_64): `9fdd6699298594de4ab59bd6cb44fd17378a70dd4546ace6ee185e3f7da01b4f`
