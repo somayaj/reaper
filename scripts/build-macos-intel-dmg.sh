@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Build Intel Reaper.app and wrap it in a distributable macOS .dmg.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/dist/Reaper-intel.app"
+STAGING="$ROOT/dist/dmg-staging-intel"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+DMG="$ROOT/dist/reaper-${VERSION}-macos-x86_64.dmg"
+
+if [[ -z "$VERSION" ]]; then
+  echo "Could not read version from Cargo.toml" >&2
+  exit 1
+fi
+
+if [[ "${REAPER_SKIP_APP_BUILD:-}" != "1" ]]; then
+  "$ROOT/scripts/build-macos-intel-app.sh"
+elif [[ ! -d "$APP" ]]; then
+  echo "Reaper-intel.app not found at $APP (run without REAPER_SKIP_APP_BUILD=1 first)" >&2
+  exit 1
+fi
+
+echo "Preparing Intel DMG staging..."
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -R "$APP" "$STAGING/Reaper.app"
+ln -sf /Applications "$STAGING/Applications"
+xattr -cr "$STAGING"
+
+echo "Creating ${DMG}..."
+rm -f "$DMG"
+hdiutil create \
+  -volname "Reaper" \
+  -srcfolder "$STAGING" \
+  -ov \
+  -format UDZO \
+  -fs HFS+ \
+  "$DMG" >/dev/null
+
+if [[ -n "${REAPER_SIGN_IDENTITY:-}" && "${REAPER_SIGN_IDENTITY}" != "-" ]]; then
+  echo "Signing DMG with ${REAPER_SIGN_IDENTITY}…"
+  codesign --force --sign "$REAPER_SIGN_IDENTITY" --timestamp "$DMG"
+fi
+
+rm -rf "$STAGING"
+
+echo ""
+echo "Done."
+echo "  App:  $APP"
+echo "  DMG:  $DMG"

@@ -154,15 +154,14 @@ fn find_node() -> Result<PathBuf> {
         }
     }
 
+    if let Some(bundled) = crate::config::bundled_node() {
+        return Ok(bundled);
+    }
+
     if running_in_app_bundle() {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(mac_os) = exe.parent() {
-                let bundled = mac_os.join("../Resources/node/bin/node");
-                if bundled.is_file() {
-                    return Ok(bundled.canonicalize().unwrap_or(bundled));
-                }
-            }
-        }
+        bail!(
+            "Bundled Node.js missing from Reaper.app — reinstall from https://github.com/reaper-org/releases"
+        );
     }
 
     for path in [
@@ -184,7 +183,7 @@ fn find_node() -> Result<PathBuf> {
     }
 
     bail!(
-        "Node.js not found. Install with `brew install node`, set REAPER_NODE, or reinstall Reaper (bundled Node missing)"
+        "Node.js not found. Install with `brew install node`, set REAPER_NODE, or run from Reaper.app (bundled Node)"
     );
 }
 
@@ -227,6 +226,24 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
 
     tracing::info!("Installing cursor-bridge dependencies (first run, may take a minute)…");
 
+    let install_script = dir.join("install-deps.mjs");
+    if install_script.is_file() {
+        let status = Command::new(node)
+            .arg("install-deps.mjs")
+            .current_dir(dir)
+            .status()
+            .await
+            .context("install-deps.mjs failed to start")?;
+
+        if status.success() && bridge_deps_ready(dir) {
+            return Ok(());
+        }
+        if running_in_app_bundle() {
+            bail!("cursor-bridge dependencies incomplete after install-deps.mjs");
+        }
+        tracing::warn!("install-deps.mjs failed or incomplete; trying npm");
+    }
+
     if Command::new("npm")
         .arg("--version")
         .stdout(Stdio::null())
@@ -245,30 +262,13 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         if status.success() && bridge_deps_ready(dir) {
             return Ok(());
         }
-        tracing::warn!("npm install failed or incomplete; falling back to install-deps.mjs");
     }
 
-    let install_script = dir.join("install-deps.mjs");
     if !install_script.is_file() {
         bail!("cursor-bridge/install-deps.mjs missing");
     }
 
-    let status = Command::new(node)
-        .arg("install-deps.mjs")
-        .current_dir(dir)
-        .status()
-        .await
-        .context("install-deps.mjs failed to start")?;
-
-    if !status.success() {
-        bail!("install-deps.mjs failed in cursor-bridge");
-    }
-
-    if !bridge_deps_ready(dir) {
-        bail!("cursor-bridge dependencies incomplete after install");
-    }
-
-    Ok(())
+    bail!("cursor-bridge dependencies incomplete after install");
 }
 
 pub async fn reclaim_bridge_port() {
