@@ -154,6 +154,17 @@ fn find_node() -> Result<PathBuf> {
         }
     }
 
+    if running_in_app_bundle() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(mac_os) = exe.parent() {
+                let bundled = mac_os.join("../Resources/node/bin/node");
+                if bundled.is_file() {
+                    return Ok(bundled.canonicalize().unwrap_or(bundled));
+                }
+            }
+        }
+    }
+
     for path in [
         PathBuf::from("/opt/homebrew/bin/node"),
         PathBuf::from("/usr/local/bin/node"),
@@ -173,7 +184,7 @@ fn find_node() -> Result<PathBuf> {
     }
 
     bail!(
-        "Node.js not found. Install with `brew install node`, or set REAPER_NODE to Cursor's bundled node"
+        "Node.js not found. Install with `brew install node`, set REAPER_NODE, or reinstall Reaper (bundled Node missing)"
     );
 }
 

@@ -1,2 +1,4 @@
 # GitHub release zip/tarballs use git archive. Exclude everything — distribute via DMG only.
 * export-ignore
+# Keep manifest in source archives for version/reference.
+Cargo.toml -export-ignore
