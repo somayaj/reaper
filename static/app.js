@@ -4275,7 +4275,10 @@ async function openCoverageHtmlReport() {
     return;
   }
   try {
-    await api(repoApi(state.repo, '/workspace/open-external'), { method: 'POST', body: { path } });
+    await api(repoApi(state.repo, '/workspace/open-external'), {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    });
   } catch (e) {
     toast(e.message || 'Could not open report', 'error');
   }
