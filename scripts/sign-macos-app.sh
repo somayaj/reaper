@@ -26,5 +26,8 @@ xattr -cr "$APP"
 
 echo "  identity: $IDENTITY"
 codesign "${sign_args[@]}" "$APP/Contents/MacOS/reaper"
+if [[ -f "$APP/Contents/Resources/node/bin/node" ]]; then
+  codesign "${sign_args[@]}" "$APP/Contents/Resources/node/bin/node"
+fi
 codesign "${sign_args[@]}" "$APP"
 codesign --verify --verbose=4 "$APP"
