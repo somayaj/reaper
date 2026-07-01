@@ -33,19 +33,13 @@ REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
 
 GJF_BIN="$APP/Contents/Resources/google-java-format/google-java-format"
 GJF_JAR="$APP/Contents/Resources/google-java-format/google-java-format-all-deps.jar"
-if [[ ! -f "$GJF_BIN" ]]; then
-  echo "Downloading google-java-format ${GJF_VERSION} (darwin-x86-64)…"
-  curl -fsSL \
-    "https://github.com/google/google-java-format/releases/download/v${GJF_VERSION}/google-java-format_darwin-x86-64" \
-    -o "$GJF_BIN"
-  chmod +x "$GJF_BIN"
-fi
 if [[ ! -f "$GJF_JAR" ]]; then
   echo "Downloading google-java-format ${GJF_VERSION} jar…"
   curl -fsSL \
     "https://repo1.maven.org/maven2/com/google/googlejavaformat/google-java-format/${GJF_VERSION}/google-java-format-${GJF_VERSION}-all-deps.jar" \
     -o "$GJF_JAR"
 fi
+# google-java-format 1.25.2 ships a native binary for arm64 only; Intel uses the jar fallback.
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
