@@ -116,30 +116,6 @@ function reaperReleasePageUrl() {
   return `${REAPER_RELEASES_BASE}/tag/${reaperReleaseTag()}`;
 }
 
-function reaperDmgDownloadUrl(arch) {
-  return `${REAPER_RELEASES_BASE}/download/${reaperReleaseTag()}/reaper-${reaperAppVersion()}-macos-${arch}.dmg`;
-}
-
-function reaperDownloadLinksHtml() {
-  const tag = reaperReleaseTag();
-  return `
-    <div class="ij-welcome-downloads">
-      <div class="ij-welcome-downloads-title">Install Reaper on another Mac</div>
-      <p class="ij-welcome-downloads-hint">Download the DMG for your chip — requires macOS 11+.</p>
-      <div class="ij-welcome-download-actions">
-        <a class="ij-download-chip" href="${reaperDmgDownloadUrl('arm64')}" target="_blank" rel="noopener noreferrer" title="Apple Silicon M1/M2/M3/M4">
-          <span class="ij-download-chip-label">Apple Silicon</span>
-          <span class="ij-download-chip-meta">reaper-${reaperAppVersion()}-macos-arm64.dmg</span>
-        </a>
-        <a class="ij-download-chip" href="${reaperDmgDownloadUrl('x86_64')}" target="_blank" rel="noopener noreferrer" title="Intel MacBook Pro, iMac, Mac mini">
-          <span class="ij-download-chip-label">Intel</span>
-          <span class="ij-download-chip-meta">reaper-${reaperAppVersion()}-macos-x86_64.dmg</span>
-        </a>
-      </div>
-      <a class="ij-welcome-release-link" href="${reaperReleasePageUrl()}" target="_blank" rel="noopener noreferrer">All releases (${tag})</a>
-    </div>`;
-}
-
 const AGENT_PROVIDERS = {
   cursor: {
     id: 'cursor',
@@ -2470,7 +2446,6 @@ function welcomeScreenHtml() {
         <span>Chat with Cursor to edit your code</span>
       </button>
     </div>
-    ${reaperDownloadLinksHtml()}
     ${recentHtml}
     <dl class="ij-shortcuts">
       <div class="ij-shortcut"><dt>⌘⇧N</dt><dd>New repository</dd></div>
