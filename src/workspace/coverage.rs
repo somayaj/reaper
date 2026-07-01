@@ -77,7 +77,11 @@ pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<FileCoverage> {
         resolve_coverage_lines(&rel_path, &filename, &package, &xml);
     let report_rel = gradle::rel_path_for(ws, &report_path).ok();
 
-    if lines.is_empty() {
+    let (stat_file, stat_pkg) = java_file_identity(&coverage_path)
+        .unwrap_or((filename.clone(), package.clone()));
+    let line_counter = jacoco_line_stats(&xml, &stat_pkg, &stat_file, &lines);
+
+    if lines.is_empty() && line_counter.total == 0 {
         return Ok(FileCoverage {
             path: rel_path.clone(),
             lines,
@@ -94,16 +98,9 @@ pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<FileCoverage> {
         });
     }
 
-    let covered_lines = lines
-        .iter()
-        .filter(|l| l.status == "covered")
-        .count() as u32;
-    let total_lines = lines.len() as u32;
-    let line_rate = if total_lines == 0 {
-        0.0
-    } else {
-        covered_lines as f64 / total_lines as f64
-    };
+    let covered_lines = line_counter.covered;
+    let total_lines = line_counter.total;
+    let line_rate = line_counter.rate;
     let pct = (line_rate * 100.0).round() as u32;
     let summary = format!("{pct}% ({covered_lines}/{total_lines} lines)");
     let mapped_path = coverage_path != rel_path;
@@ -340,7 +337,26 @@ fn parse_line_counter_from_block(block: &str) -> CoverageCounter {
     if let Some(counter) = find_counter(block, "LINE") {
         return counter;
     }
-    let lines = parse_line_elements(block);
+    jacoco_line_stats_from_elements(&parse_line_elements(block))
+}
+
+/// JaCoCo `<counter type="LINE">` for a source file (same metric as the HTML report).
+fn jacoco_line_stats(
+    xml: &str,
+    package: &str,
+    filename: &str,
+    fallback_lines: &[LineCoverage],
+) -> CoverageCounter {
+    if let Some(block) = extract_sourcefile_block(xml, package, filename) {
+        let counter = parse_line_counter_from_block(block);
+        if counter.total > 0 {
+            return counter;
+        }
+    }
+    jacoco_line_stats_from_elements(fallback_lines)
+}
+
+fn jacoco_line_stats_from_elements(lines: &[LineCoverage]) -> CoverageCounter {
     let covered = lines
         .iter()
         .filter(|l| l.status == "covered")
@@ -907,6 +923,27 @@ mod tests {
             parse_test_filter_from_task("-Dtest=com.foo.BarTest#testX test", "maven"),
             "com.foo.BarTest#testX"
         );
+    }
+
+    #[test]
+    fn jacoco_line_stats_prefers_sourcefile_counter() {
+        let xml = r#"<?xml version="1.0"?><report>
+  <package name="com/example/web">
+    <sourcefile name="UserController.java">
+      <line nr="10" mi="0" ci="3" mb="0" cb="0"/>
+      <line nr="11" mi="2" ci="0" mb="0" cb="0"/>
+      <line nr="12" mi="1" ci="1" mb="0" cb="0"/>
+      <counter type="LINE" missed="1" covered="2"/>
+    </sourcefile>
+  </package>
+</report>"#;
+        let lines = parse_sourcefile_lines(xml, "com/example/web", "UserController.java");
+        let stats = jacoco_line_stats(xml, "com/example/web", "UserController.java", &lines);
+        // Naive element count would be 1/3 (33%); JaCoCo LINE counter is 2/3 (67%).
+        assert_eq!(stats.covered, 2);
+        assert_eq!(stats.missed, 1);
+        assert_eq!(stats.total, 3);
+        assert!((stats.rate - 2.0 / 3.0).abs() < f64::EPSILON);
     }
 
     #[test]
