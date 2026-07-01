@@ -57,11 +57,12 @@ pub struct RunContext {
 }
 
 pub fn run_project_info(ws: &Path, rel_path: &str) -> Result<RunProjectInfo> {
-    let gradle = gradle::gradle_project_info(ws, rel_path)?;
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let gradle = gradle::gradle_project_info(ws, &rel_path)?;
     if gradle.is_gradle {
         return Ok(from_gradle(gradle));
     }
-    let maven = maven::maven_project_info(ws, rel_path)?;
+    let maven = maven::maven_project_info(ws, &rel_path)?;
     if maven.is_maven {
         return Ok(from_maven(maven));
     }
@@ -74,14 +75,15 @@ pub fn run_context(
     content: Option<&str>,
     line: u32,
 ) -> Result<RunContext> {
-    let project = run_project_info(ws, rel_path)?;
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let project = run_project_info(ws, &rel_path)?;
     let target = if rel_path.ends_with(".java") {
         let content = match content {
             Some(c) => c.to_string(),
-            None => super::read_file(ws, rel_path)?,
+            None => super::read_file(ws, &rel_path)?,
         };
-        Some(detect_java_run_target(ws, rel_path, &content, line, &project)?)
-    } else if is_build_file(rel_path) && project.has_project {
+        Some(detect_java_run_target(ws, &rel_path, &content, line, &project)?)
+    } else if is_build_file(&rel_path) && project.has_project {
         Some(JavaRunTarget {
             runnable: true,
             mode: "project-task".into(),
@@ -139,19 +141,25 @@ pub fn detect_java_run_target(
             }
         }
         "spring-boot-app" => {
-            if project.is_spring_boot {
+            if project.has_project {
                 target.mode = "spring-boot".into();
-                target.task = Some(project.default_task.clone());
+                target.task = Some(build_spring_boot_task(
+                    ws,
+                    rel_path,
+                    project,
+                    target.qualified_name.as_deref(),
+                )?);
                 target.runnable = true;
             } else if main.as_ref().is_some_and(|m| m.runnable) {
                 target.mode = "main".into();
                 target.runnable = true;
                 target.reason = Some(
-                    "Spring Boot app class without Spring Boot plugin — running via java main".into(),
+                    "Spring Boot app outside a Gradle/Maven project — running via java main (limited)".into(),
                 );
             } else {
-                target.reason =
-                    Some("Spring Boot application requires a Spring Boot Gradle/Maven project".into());
+                target.reason = Some(
+                    "Spring Boot application requires a Gradle or Maven project".into(),
+                );
             }
         }
         "plain-main" => {
@@ -295,6 +303,27 @@ fn is_build_file(rel_path: &str) -> bool {
     matches!(base, "build.gradle" | "build.gradle.kts" | "pom.xml" | "settings.gradle" | "settings.gradle.kts")
 }
 
+fn build_spring_boot_task(
+    ws: &Path,
+    rel_path: &str,
+    project: &RunProjectInfo,
+    main_class: Option<&str>,
+) -> Result<String> {
+    match project.build_tool.as_str() {
+        "gradle" => gradle::gradle_boot_run_task(ws, rel_path, main_class),
+        "maven" => Ok(maven_spring_boot_run_goal(main_class)),
+        other => bail!("unsupported build tool for Spring Boot: {other}"),
+    }
+}
+
+fn maven_spring_boot_run_goal(main_class: Option<&str>) -> String {
+    if let Some(mc) = main_class.filter(|s| !s.is_empty()) {
+        format!("spring-boot:run -Dspring-boot.run.mainClass={mc}")
+    } else {
+        "spring-boot:run".into()
+    }
+}
+
 fn from_gradle(info: GradleProjectInfo) -> RunProjectInfo {
     RunProjectInfo {
         has_project: true,
@@ -360,15 +389,46 @@ fn project_frameworks(
     out
 }
 
+/// When `source` is a `@SpringBootApplication` class inside a Gradle/Maven project, run via bootRun.
+pub fn try_stream_spring_boot_main(
+    ws: &Path,
+    rel_path: &str,
+    source: &str,
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<Option<i32>> {
+    if !source.contains("@SpringBootApplication") {
+        return Ok(None);
+    }
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let project = run_project_info(ws, &rel_path)?;
+    if !project.has_project {
+        return Ok(None);
+    }
+    let main_class = java::parse_java_main(source, &super::safe_join(ws, &rel_path)?)
+        .ok()
+        .map(|m| m.qualified_name);
+    let task = build_spring_boot_task(ws, &rel_path, &project, main_class.as_deref())?;
+    Ok(Some(stream_run_task(ws, &rel_path, &task, false, tx)?))
+}
+
 pub fn stream_run_task(
     ws: &Path,
     rel_path: &str,
     task: &str,
+    coverage: bool,
     tx: async_mpsc::Sender<ExecStreamEvent>,
 ) -> Result<i32> {
-    let info = run_project_info(ws, rel_path)?;
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let info = run_project_info(ws, &rel_path)?;
     if !info.has_project {
         bail!("not inside a Gradle or Maven project");
+    }
+    if coverage {
+        let filter = super::coverage::parse_test_filter_from_task(task, &info.build_tool);
+        if filter.is_empty() {
+            bail!("test filter required for coverage run");
+        }
+        return super::coverage::stream_test_with_coverage(ws, &rel_path, &filter, tx);
     }
     let task = if task.trim().is_empty() {
         info.default_task
@@ -376,8 +436,8 @@ pub fn stream_run_task(
         task.trim().to_string()
     };
     match info.build_tool.as_str() {
-        "gradle" => exec_stream::stream_gradle(ws, rel_path, &task, tx),
-        "maven" => exec_stream::stream_maven(ws, rel_path, &task, tx),
+        "gradle" => exec_stream::stream_gradle(ws, &rel_path, &task, tx),
+        "maven" => exec_stream::stream_maven(ws, &rel_path, &task, tx),
         _ => bail!("unsupported build tool"),
     }
 }

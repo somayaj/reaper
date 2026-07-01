@@ -1506,7 +1506,7 @@
     return `${repo}:${path}:${lineNumber}:${column}:${linePrefix}`;
   }
 
-  /** Keep ghost text while typed chars match the pending suggestion (IntelliJ-style). */
+  /** Keep ghost text while typed chars match the pending suggestion. */
   function inlineGhostFromCache(cache, repo, path, lineNumber, column, linePrefix) {
     if (!cache?.text) return '';
     const key = buildInlineCacheKey(repo, path, lineNumber, column, linePrefix);

@@ -62,6 +62,7 @@ fn install_macos_menu() -> muda::Menu {
 #[cfg(target_os = "macos")]
 enum UserEvent {
     OpenWindow(String),
+    ShowWindow(tao::window::WindowId),
 }
 
 #[cfg(target_os = "macos")]
@@ -100,18 +101,31 @@ fn create_window(
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
     use tao::window::WindowBuilder;
-    use wry::{http::Request, WebViewBuilder};
+    use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
     let title = window_title_from_url(url);
     let window = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
+        .with_visible(false)
+        .with_background_color((10, 10, 10, 255))
         .build(event_loop)?;
 
+    let window_id = window.id();
+    let show_proxy = proxy.clone();
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
         .with_url(url)
+        .with_background_color((10, 10, 10, 255))
+        .with_initialization_script(
+            "document.documentElement.style.backgroundColor='#0a0a0a';",
+        )
+        .with_on_page_load_handler(move |event, _loaded_url| {
+            if matches!(event, PageLoadEvent::Finished) {
+                let _ = show_proxy.send_event(UserEvent::ShowWindow(window_id));
+            }
+        })
         .with_ipc_handler(move |req: Request<String>| {
             if let Some(next_url) = parse_ipc_open_url(req.body()) {
                 let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
@@ -157,6 +171,11 @@ pub fn run(url: &str) -> anyhow::Result<()> {
                 webviews.remove(&window_id);
                 if webviews.is_empty() {
                     *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
+                if let Some((window, _)) = webviews.get(&window_id) {
+                    window.set_visible(true);
                 }
             }
             Event::UserEvent(UserEvent::OpenWindow(next_url)) => {

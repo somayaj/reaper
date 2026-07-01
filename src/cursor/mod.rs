@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
@@ -9,10 +9,37 @@ mod spawn;
 
 pub use spawn::{bridge_dir, ensure_bridge_running, last_bridge_error, reclaim_bridge_port, stop_bridge};
 
-const DEFAULT_BRIDGE: &str = "http://127.0.0.1:8091";
+static BRIDGE_URL: RwLock<Option<String>> = RwLock::new(None);
+
+pub fn set_bridge_url(url: String) {
+    if let Ok(mut guard) = BRIDGE_URL.write() {
+        *guard = Some(url);
+    }
+}
 
 pub fn bridge_url() -> String {
-    std::env::var("REAPER_CURSOR_BRIDGE_URL").unwrap_or_else(|_| DEFAULT_BRIDGE.into())
+    std::env::var("REAPER_CURSOR_BRIDGE_URL")
+        .ok()
+        .or_else(|| BRIDGE_URL.read().ok().and_then(|guard| guard.clone()))
+        .unwrap_or_else(|| load_saved_bridge_url().unwrap_or_else(|| "http://127.0.0.1:8091".into()))
+}
+
+fn bridge_port_file() -> std::path::PathBuf {
+    crate::config::Config::resolve_data_dir().join("cursor-bridge.port")
+}
+
+pub fn load_saved_bridge_url() -> Option<String> {
+    let port = std::fs::read_to_string(bridge_port_file()).ok()?;
+    let port = port.trim().parse::<u16>().ok()?;
+    let host = std::env::var("REAPER_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    Some(format!("http://{host}:{port}"))
+}
+
+pub fn save_bridge_port(port: u16) {
+    let path = bridge_port_file();
+    if let Err(e) = std::fs::write(&path, port.to_string()) {
+        tracing::warn!("Could not write {}: {e}", path.display());
+    }
 }
 
 #[derive(Default)]
@@ -77,20 +104,22 @@ struct ListModelsRequest<'a> {
 
 pub struct CursorBridge {
     client: Client,
-    base: String,
 }
 
 impl CursorBridge {
     pub fn new() -> Self {
         Self {
             client: Client::new(),
-            base: bridge_url(),
         }
+    }
+
+    fn base(&self) -> String {
+        bridge_url()
     }
 
     pub async fn health(&self) -> bool {
         self.client
-            .get(format!("{}/health", self.base))
+            .get(format!("{}/health", self.base()))
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -106,7 +135,7 @@ impl CursorBridge {
     ) -> Result<String> {
         let resp = self
             .client
-            .post(format!("{}/sessions", self.base))
+            .post(format!("{}/sessions", self.base()))
             .json(&CreateSessionRequest {
                 cwd,
                 api_key,
@@ -140,7 +169,7 @@ impl CursorBridge {
     ) -> Result<reqwest::Response> {
         let resp = self
             .client
-            .post(format!("{}/sessions/{session_id}/chat", self.base))
+            .post(format!("{}/sessions/{session_id}/chat", self.base()))
             .json(&ChatRequest {
                 prompt,
                 model,
@@ -167,7 +196,7 @@ impl CursorBridge {
     pub async fn list_models(&self, api_key: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .post(format!("{}/models", self.base))
+            .post(format!("{}/models", self.base()))
             .json(&ListModelsRequest { api_key })
             .send()
             .await
@@ -189,7 +218,7 @@ impl CursorBridge {
     pub async fn stop_chat(&self, session_id: &str) -> Result<()> {
         let resp = self
             .client
-            .post(format!("{}/sessions/{session_id}/stop", self.base))
+            .post(format!("{}/sessions/{session_id}/stop", self.base()))
             .send()
             .await
             .context("cursor bridge stop request failed")?;
@@ -269,7 +298,7 @@ impl CursorBridge {
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let _ = self
             .client
-            .delete(format!("{}/sessions/{session_id}", self.base))
+            .delete(format!("{}/sessions/{session_id}", self.base()))
             .send()
             .await;
         Ok(())

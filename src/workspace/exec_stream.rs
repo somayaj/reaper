@@ -204,6 +204,14 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
     args.push("--no-configuration-cache".into());
     args.push("--console=plain".into());
     args.extend(parts);
+    stream_gradle_command(&cmd, &args, tx)
+}
+
+pub fn stream_gradle_command(
+    cmd: &super::gradle::GradleCommand,
+    args: &[String],
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
@@ -231,9 +239,11 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
 
 pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
     use super::java::parse_java_main;
-    use super::{read_file, safe_join};
+    use super::run_project;
+    use super::{normalize_workspace_source_path, read_file, safe_join};
 
-    let file_path = safe_join(ws, rel_path)?;
+    let rel_path = normalize_workspace_source_path(rel_path);
+    let file_path = safe_join(ws, &rel_path)?;
     if !file_path.is_file() {
         bail!("not a file");
     }
@@ -241,7 +251,11 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
         bail!("not a Java file");
     }
 
-    let source = read_file(ws, rel_path)?;
+    let source = read_file(ws, &rel_path)?;
+    if let Some(code) = run_project::try_stream_spring_boot_main(ws, &rel_path, &source, tx.clone())? {
+        return Ok(code);
+    }
+
     let info = parse_java_main(&source, &file_path)?;
     let rel = rel_path.replace('\\', "/");
 
@@ -298,6 +312,14 @@ pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sende
     let cmd = resolve_maven_command(&root);
     let mut args = vec!["-q".to_string(), "--batch-mode".to_string()];
     args.extend(parts);
+    stream_maven_command(&cmd, &args, tx)
+}
+
+pub fn stream_maven_command(
+    cmd: &super::maven::MavenCommand,
+    args: &[String],
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
