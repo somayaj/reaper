@@ -9,3 +9,7 @@
 
 # Cursor bridge deps (installed locally via install-deps.mjs)
 /cursor-bridge/node_modules/
+
+# Vendored Node.js binaries (downloaded at build time)
+/resources/node-macos-*/
+/resources/.cache/
