@@ -31,6 +31,7 @@ pub struct GradleProjectInfo {
 }
 
 pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInfo> {
+    let rel_path = super::normalize_workspace_source_path(rel_path);
     let empty = GradleProjectInfo {
         is_gradle: false,
         project_root: String::new(),
@@ -46,8 +47,8 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
         has_slf4j: false,
     };
 
-    let _ = safe_join(ws, rel_path)?;
-    let Some(root) = find_gradle_root(ws, rel_path)? else {
+    let _ = safe_join(ws, &rel_path)?;
+    let Some(root) = find_gradle_root(ws, &rel_path)? else {
         return Ok(empty);
     };
 
@@ -55,7 +56,8 @@ pub fn gradle_project_info(ws: &Path, rel_path: &str) -> Result<GradleProjectInf
     let has_wrapper = root.join("gradlew").exists() || root.join("gradlew.bat").exists();
     let build_content = read_build_file(&root).unwrap_or_default();
     let application_main = find_application_main(&build_content);
-    let is_spring_boot = is_spring_boot_project(&root);
+    let is_spring_boot = is_spring_boot_project_for_file(ws, &rel_path).unwrap_or(false)
+        || is_spring_boot_project(&root);
     let has_application = has_application_plugin(&build_content);
     let default_task = if is_spring_boot {
         "bootRun".to_string()
@@ -121,7 +123,10 @@ pub fn parse_gradle_task(task: &str) -> Result<Vec<String>> {
         } else if let Some(rest) = raw[i].strip_prefix("--tests=") {
             args.push(format!("--tests={}", normalize_test_pattern(rest)));
             i += 1;
-        } else if raw[i].contains('/') || raw[i].contains('\\') {
+        } else if (raw[i].contains('/') || raw[i].contains('\\'))
+            && !raw[i].starts_with("--")
+            && !raw[i].starts_with("-D")
+        {
             bail!("invalid gradle task");
         } else {
             args.push(raw[i].clone());
@@ -187,6 +192,21 @@ pub fn run_gradle(ws: &Path, rel_path: &str, task: &str) -> Result<GitOutput> {
         stderr: String::new(),
         exit_code: out.exit_code,
     })
+}
+
+/// Run `compileTestJava` for the resolved Gradle project (used for test-source diagnostics).
+pub fn run_gradle_compile_test_java(project_root: &Path) -> Result<GitOutput> {
+    let cmd = resolve_gradle_command(project_root)?;
+    let mut arg_owned = cmd.project_args.clone();
+    arg_owned.extend([
+        "--no-daemon".into(),
+        "--parallel".into(),
+        "--console=plain".into(),
+        "-q".into(),
+        "compileTestJava".into(),
+    ]);
+    let arg_refs: Vec<&str> = arg_owned.iter().map(String::as_str).collect();
+    run_gradle_with_command(&cmd, &arg_refs)
 }
 
 pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<GitOutput> {
@@ -426,7 +446,8 @@ fn which_gradle_on_path() -> Result<PathBuf> {
 }
 
 pub fn find_gradle_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
-    let file_path = safe_join(ws, rel_path)?;
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let file_path = safe_join(ws, &rel_path)?;
     let ws_canon = ws
         .canonicalize()
         .with_context(|| format!("resolve workspace {}", ws.display()))?;
@@ -544,8 +565,103 @@ pub fn rel_path_for(ws: &Path, path: &Path) -> Result<String> {
 
 pub fn is_spring_boot_project(root: &Path) -> bool {
     read_build_file(root)
-        .map(|content| content.contains("org.springframework.boot"))
+        .map(|content| build_file_is_spring_boot(&content))
         .unwrap_or(false)
+}
+
+/// True when the Gradle module containing `rel_path` (or an ancestor module) applies Spring Boot.
+pub fn is_spring_boot_project_for_file(ws: &Path, rel_path: &str) -> Result<bool> {
+    let Some(root) = find_gradle_root(ws, rel_path)? else {
+        return Ok(false);
+    };
+    if is_spring_boot_project(&root) {
+        return Ok(true);
+    }
+    if let Some(module) = find_gradle_module_for_source_file(ws, rel_path, &root)? {
+        let module_dir = root.join(&module);
+        if is_spring_boot_project(&module_dir) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn build_file_is_spring_boot(content: &str) -> bool {
+    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("org.springframework.boot")
+        || (compact.contains("spring-boot") && compact.contains("bootRun"))
+        || compact.contains("id(\"org.springframework.boot\")")
+        || compact.contains("id('org.springframework.boot')")
+        || compact.contains("alias(libs.plugins.spring.boot)")
+}
+
+/// Gradle task to run Spring Boot for the module containing `rel_path`, optionally pinning main class.
+pub fn gradle_boot_run_task(
+    ws: &Path,
+    rel_path: &str,
+    main_class: Option<&str>,
+) -> Result<String> {
+    let root = find_gradle_root(ws, rel_path)?
+        .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
+    let repo_root = find_gradle_wrapper_root(&root);
+    let module = find_gradle_module_for_source_file(ws, rel_path, &repo_root)?;
+    let cmd = resolve_gradle_command(&root)?;
+    let base = if cmd.project_args.iter().any(|a| a == "-p") {
+        "bootRun".to_string()
+    } else if let Some(m) = module.filter(|m| !m.is_empty()) {
+        format!(":{}:bootRun", m.replace('/', ":"))
+    } else {
+        "bootRun".to_string()
+    };
+    if let Some(mc) = main_class.filter(|s| !s.is_empty()) {
+        Ok(format!("{base} -Dspring-boot.run.main-class={mc}"))
+    } else {
+        Ok(base)
+    }
+}
+
+/// Nearest Gradle subproject directory between `rel_path` and `gradle_root` (e.g. `app` for `app/src/main/java/Foo.java`).
+pub fn find_gradle_module_for_source_file(
+    ws: &Path,
+    rel_path: &str,
+    gradle_root: &Path,
+) -> Result<Option<String>> {
+    let file_path = safe_join(ws, rel_path)?;
+    let Some(mut dir) = file_path.parent().map(|p| p.to_path_buf()) else {
+        return Ok(None);
+    };
+    let root = gradle_root
+        .canonicalize()
+        .with_context(|| format!("resolve gradle root {}", gradle_root.display()))?;
+
+    loop {
+        let dir_canon = match dir.canonicalize() {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+        if !dir_canon.starts_with(&root) {
+            break;
+        }
+        if dir_canon != root
+            && (dir.join("build.gradle").is_file() || dir.join("build.gradle.kts").is_file())
+        {
+            let rel = dir_canon
+                .strip_prefix(&root)
+                .unwrap_or(&dir_canon)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let rel = rel.trim_start_matches('/').to_string();
+            return Ok(if rel.is_empty() { None } else { Some(rel) });
+        }
+        if dir_canon == root {
+            return Ok(None);
+        }
+        dir = match dir.parent() {
+            Some(p) => p.to_path_buf(),
+            None => break,
+        };
+    }
+    Ok(None)
 }
 
 pub fn read_build_file_content(root: &Path) -> Option<String> {
@@ -726,5 +842,84 @@ mod tests {
     fn max_java_for_gradle_8_14() {
         assert_eq!(max_java_for_gradle(8, 14), 24);
         assert_eq!(max_java_for_gradle(8, 5), 21);
+    }
+
+    #[test]
+    fn spring_boot_module_and_boot_run_task() {
+        let root = std::env::temp_dir().join(format!("reaper-spring-boot-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gateway/src/main/java/com/example")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            root.join("gateway/build.gradle.kts"),
+            "plugins { id(\"org.springframework.boot\") }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("gateway/src/main/java/com/example/GatewayApplication.java"),
+            "package com.example;\npublic class GatewayApplication {}\n",
+        )
+        .unwrap();
+
+        let rel = "gateway/src/main/java/com/example/GatewayApplication.java";
+        assert!(is_spring_boot_project_for_file(&root, rel).unwrap());
+        let module = find_gradle_module_for_source_file(&root, rel, &root)
+            .expect("module lookup")
+            .expect("gateway module");
+        assert_eq!(module, "gateway");
+        let task = gradle_boot_run_task(&root, rel, Some("com.example.GatewayApplication"))
+            .expect("bootRun task");
+        assert_eq!(
+            task,
+            "bootRun -Dspring-boot.run.main-class=com.example.GatewayApplication"
+        );
+
+        let parts = parse_gradle_task(&task).expect("parse bootRun task");
+        assert!(parts
+            .iter()
+            .any(|p| p.starts_with("-Dspring-boot.run.main-class=com.example")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn spring_boot_detection_normalizes_overlay_path() {
+        let root = std::env::temp_dir().join(format!("reaper-spring-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gateway/src/main/java/com/example")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            root.join("gateway/build.gradle.kts"),
+            "plugins { id(\"org.springframework.boot\") }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("gateway/src/main/java/com/example/GatewayApplication.java"),
+            "@SpringBootApplication\npackage com.example;\npublic class GatewayApplication {}\n",
+        )
+        .unwrap();
+
+        let rel = ".reaper/java-diagnostics/overlay/gateway/src/main/java/com/example/GatewayApplication.java";
+        assert!(is_spring_boot_project_for_file(&root, rel).unwrap());
+        let task = gradle_boot_run_task(&root, rel, Some("com.example.GatewayApplication"))
+            .expect("bootRun task");
+        assert!(task.contains("bootRun"));
+        assert!(task.contains("com.example.GatewayApplication"));
+
+        let ctx = super::super::run_project::run_context(
+            &root,
+            rel,
+            Some("@SpringBootApplication\npackage com.example;\npublic class GatewayApplication { public static void main(String[] args) {} }\n"),
+            1,
+        )
+        .expect("run context");
+        assert!(ctx.project.has_project);
+        let target = ctx.target.expect("run target");
+        assert_eq!(target.mode, "spring-boot");
+        assert!(target.runnable);
+        assert!(target.task.as_deref().unwrap_or("").contains("bootRun"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

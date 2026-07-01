@@ -33,7 +33,7 @@ const TERM_ESC = {
   cyan: '\x1b[36m',
   brightCyan: '\x1b[96m',
 };
-const DEFAULT_EDITOR_FONT_SIZE = 13;
+const DEFAULT_EDITOR_FONT_SIZE = 11;
 const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 28;
 
@@ -101,6 +101,44 @@ const CURSOR_MODELS_FALLBACK = [
 
 /** Registered chat agents — add providers here as backends land. */
 const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic'];
+
+const REAPER_RELEASES_BASE = 'https://github.com/reaper-org/releases/releases';
+
+function reaperAppVersion() {
+  return document.querySelector('meta[name="reaper-app-version"]')?.content?.trim() || '0.1.2';
+}
+
+function reaperReleaseTag() {
+  return `v${reaperAppVersion()}`;
+}
+
+function reaperReleasePageUrl() {
+  return `${REAPER_RELEASES_BASE}/tag/${reaperReleaseTag()}`;
+}
+
+function reaperDmgDownloadUrl(arch) {
+  return `${REAPER_RELEASES_BASE}/download/${reaperReleaseTag()}/reaper-${reaperAppVersion()}-macos-${arch}.dmg`;
+}
+
+function reaperDownloadLinksHtml() {
+  const tag = reaperReleaseTag();
+  return `
+    <div class="ij-welcome-downloads">
+      <div class="ij-welcome-downloads-title">Install Reaper on another Mac</div>
+      <p class="ij-welcome-downloads-hint">Download the DMG for your chip — requires macOS 11+.</p>
+      <div class="ij-welcome-download-actions">
+        <a class="ij-download-chip" href="${reaperDmgDownloadUrl('arm64')}" target="_blank" rel="noopener noreferrer" title="Apple Silicon M1/M2/M3/M4">
+          <span class="ij-download-chip-label">Apple Silicon</span>
+          <span class="ij-download-chip-meta">reaper-${reaperAppVersion()}-macos-arm64.dmg</span>
+        </a>
+        <a class="ij-download-chip" href="${reaperDmgDownloadUrl('x86_64')}" target="_blank" rel="noopener noreferrer" title="Intel MacBook Pro, iMac, Mac mini">
+          <span class="ij-download-chip-label">Intel</span>
+          <span class="ij-download-chip-meta">reaper-${reaperAppVersion()}-macos-x86_64.dmg</span>
+        </a>
+      </div>
+      <a class="ij-welcome-release-link" href="${reaperReleasePageUrl()}" target="_blank" rel="noopener noreferrer">All releases (${tag})</a>
+    </div>`;
+}
 
 const AGENT_PROVIDERS = {
   cursor: {
@@ -243,7 +281,12 @@ const state = {
   conflictDecorationIds: [],
   diagDecorationIds: [],
   testRunWidgets: [],
+  testCovWidgets: [],
   testMethodsByLine: new Map(),
+  fileCoverage: new Map(),
+  coverageDecorationIds: [],
+  coveragePanelOpen: false,
+  coverageReport: null,
   conflictFiles: new Set(),
   selectedCommitHash: null,
   mainView: 'editor',
@@ -413,6 +456,19 @@ function setGlobalLoading(on, text = 'Loading…') {
   overlay?.classList.toggle('flex', on);
 }
 
+function hideLaunchSplash() {
+  const splash = $('#launch-splash');
+  if (!splash || splash.dataset.dismissing) return;
+  splash.dataset.dismissing = '1';
+  const started = window.__reaperSplashAt || Date.now();
+  const minVisible = 4500;
+  const wait = Math.max(0, minVisible - (Date.now() - started));
+  setTimeout(() => {
+    document.body?.classList.add('reaper-ui-ready');
+    splash.remove();
+  }, wait);
+}
+
 function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
   const errEl = $('#clone-error');
   const statusEl = $('#clone-status');
@@ -521,7 +577,7 @@ function escapeHtml(str) {
 let settingsTab = 'git';
 
 function editorLineHeightFor(size) {
-  return Math.round(size * (20 / 13));
+  return Math.round(size * 1.538);
 }
 
 function getEditorFontSize() {
@@ -642,9 +698,16 @@ async function initStatusFooter() {
     if (v) parts.push(`v${v}`);
     if (b) parts.push(`build-${b}`);
     el.textContent = parts.join(' · ');
-    el.title = parts.length ? `Reaper ${parts.join(' · ')}` : 'Reaper version';
+    el.title = `Reaper ${parts.join(' · ')} — click for ${reaperReleaseTag()} downloads (Apple Silicon + Intel DMG)`;
   };
   apply(version, metaBuild);
+  el.classList.add('ij-status-version-link');
+  if (!el.dataset.releaseBound) {
+    el.dataset.releaseBound = '1';
+    el.addEventListener('click', () => {
+      window.open(reaperReleasePageUrl(), '_blank', 'noopener,noreferrer');
+    });
+  }
   try {
     const info = await api('/api/version');
     if (info) {
@@ -835,7 +898,7 @@ function applyAgentTypography() {
   if (!panel) return;
   panel.style.setProperty('--ij-ui-font-size', `${size}px`);
   panel.style.setProperty('--ij-ui-font-family', spec.family);
-  panel.style.setProperty('--ij-ui-line-height', String(20 / 13));
+  panel.style.setProperty('--ij-ui-line-height', String(20 / 11));
 }
 
 function applyAgentFontSize(size) {
@@ -874,17 +937,73 @@ function setAgentFontMatchEditor(match) {
 
 function applyUiTypography() {
   const size = getEditorFontSize();
+  const spec = getEditorFontSpec();
+  ensureEditorFontLoaded(spec);
   document.documentElement.style.setProperty('--ij-ui-font-size', `${size}px`);
+  document.documentElement.style.setProperty('--ij-ui-font-family', spec.family);
 }
 
 function syncTerminalFontSize() {
+  syncTerminalTypography();
+}
+
+function terminalCssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function terminalThemeFromApp() {
+  const fg = terminalCssVar('--ij-terminal-fg', terminalCssVar('--ij-text-bright', '#a9b7c6'));
+  const bg = terminalCssVar('--ij-terminal-bg', terminalCssVar('--ij-bg', '#2b2b2b'));
+  const accent = terminalCssVar('--ij-accent', '#589df6');
+  const selection = terminalCssVar('--ij-terminal-selection', terminalCssVar('--ij-selection', '#214283'));
+  return {
+    background: bg,
+    foreground: fg,
+    cursor: accent,
+    cursorAccent: terminalCssVar('--ij-text-heading', '#ffffff'),
+    selectionBackground: selection,
+    selectionForeground: terminalCssVar('--ij-text-heading', '#ffffff'),
+    black: '#484848',
+    red: terminalCssVar('--ij-deleted', '#bc3f3c'),
+    green: terminalCssVar('--ij-added', '#629755'),
+    yellow: terminalCssVar('--ij-modified', '#ffc66d'),
+    blue: accent,
+    magenta: '#b589d6',
+    cyan: '#56b6c2',
+    white: fg,
+    brightBlack: terminalCssVar('--ij-text-dim', '#808080'),
+    brightRed: '#f44747',
+    brightGreen: terminalCssVar('--ij-run-hover', '#73c04d'),
+    brightYellow: '#ffcc66',
+    brightBlue: terminalCssVar('--ij-accent-hover', '#6ba6f7'),
+    brightMagenta: '#d8a0ff',
+    brightCyan: '#7eb8da',
+    brightWhite: terminalCssVar('--ij-text-heading', '#ffffff'),
+  };
+}
+
+function applyTerminalTheme(term) {
+  const theme = terminalThemeFromApp();
+  if (term?.xterm) {
+    term.xterm.options.theme = theme;
+  }
+}
+
+function syncTerminalTypography() {
   const size = getEditorFontSize();
+  const family = getEditorFontSpec().family;
   for (const term of state.terminals || []) {
     if (!term?.xterm) continue;
     term.xterm.options.fontSize = size;
+    term.xterm.options.fontFamily = family;
+    term.xterm.options.lineHeight = 1.28;
+    applyTerminalTheme(term);
     fitTerminal(term);
   }
 }
+
+window.syncTerminalTheme = syncTerminalTypography;
 
 function applyEditorFontSize(size) {
   const clamped = Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)));
@@ -899,7 +1018,7 @@ function applyEditorFontSize(size) {
   if (getAgentFontMatchEditor()) {
     applyAgentTypography();
   }
-  syncTerminalFontSize();
+  syncTerminalTypography();
   syncFontSizeControls(clamped);
   syncAgentFontControls();
   updateEditorFontPreview();
@@ -917,6 +1036,7 @@ function applyEditorFontFamily(fontId) {
   const spec = EDITOR_FONTS.find((f) => f.id === fontId) || EDITOR_FONTS[0];
   localStorage.setItem(EDITOR_FONT_FAMILY_KEY, spec.id);
   ensureEditorFontLoaded(spec);
+  applyUiTypography();
   if (state.editor) {
     state.editor.updateOptions({ fontFamily: spec.family });
   }
@@ -925,6 +1045,7 @@ function applyEditorFontFamily(fontId) {
   }
   syncFontFamilyControls(spec.id);
   syncAgentFontControls();
+  syncTerminalTypography();
   updateEditorFontPreview(spec);
   return spec;
 }
@@ -1816,18 +1937,18 @@ function updateBreadcrumbs(path) {
     return;
   }
   el.classList.remove('hidden');
-  const parts = path.split('/');
+  const displayPath = workspaceExplorerPath(path);
+  const parts = displayPath.split('/').filter(Boolean);
   el.innerHTML = parts.map((part, i) => {
     const seg = parts.slice(0, i + 1).join('/');
     const sep = i < parts.length - 1 ? '<span class="ij-crumb-sep"> › </span>' : '';
-    return `<button type="button" class="ij-crumb" data-crumb="${seg}">${part}</button>${sep}`;
+    return `<button type="button" class="ij-crumb" data-crumb="${escapeHtml(seg)}">${escapeHtml(part)}</button>${sep}`;
   }).join('');
   $$('.ij-crumb').forEach((btn) => {
     btn.addEventListener('click', () => {
       const target = btn.dataset.crumb;
-      if (target === path) return;
-      const node = state.tabs.includes(target) ? target : null;
-      if (node) activateTab(node);
+      if (target === displayPath) return;
+      void revealFileInExplorer(target);
     });
   });
 }
@@ -1930,8 +2051,10 @@ function indexingPhaseLabel(phase) {
     case 'classpath-resolve': return 'Resolving dependencies';
     case 'running-gradle-compile': return 'Running Gradle (compiling…)';
     case 'running-gradle-classpath': return 'Running Gradle (classpath…)';
+    case 'running-gradle-test-classpath': return 'Running Gradle (test classpath…)';
     case 'running-maven-sources': return 'Running Maven (downloading sources…)';
     case 'running-maven-classpath': return 'Running Maven (classpath…)';
+    case 'running-maven-test-classpath': return 'Running Maven (test classpath…)';
     case 'sources':
     case 'extracting-sources': return 'Extracting library sources';
     case 'indexing': return 'Indexing Java symbols';
@@ -1946,8 +2069,10 @@ function indexingPhaseLabel(phase) {
 function isBackgroundToolingPhase(phase) {
   return phase === 'running-gradle-compile'
     || phase === 'running-gradle-classpath'
+    || phase === 'running-gradle-test-classpath'
     || phase === 'running-maven-sources'
     || phase === 'running-maven-classpath'
+    || phase === 'running-maven-test-classpath'
     || phase === 'classpath-resolve';
 }
 
@@ -2345,10 +2470,12 @@ function welcomeScreenHtml() {
         <span>Chat with Cursor to edit your code</span>
       </button>
     </div>
+    ${reaperDownloadLinksHtml()}
     ${recentHtml}
     <dl class="ij-shortcuts">
       <div class="ij-shortcut"><dt>⌘⇧N</dt><dd>New repository</dd></div>
       <div class="ij-shortcut"><dt>File</dt><dd>Import repository…</dd></div>
+      <div class="ij-shortcut"><dt>⌘P</dt><dd>Search class, file, or text</dd></div>
       <div class="ij-shortcut"><dt>⌘O</dt><dd>Go to Class</dd></div>
       <div class="ij-shortcut"><dt>⌘K</dt><dd>Command palette</dd></div>
       <div class="ij-shortcut"><dt>⌘S</dt><dd>Save file</dd></div>
@@ -2453,6 +2580,7 @@ function updateGitNavUi(status = {}) {
 
 function closeAllMenus() {
   $$('.ij-menu-root.open').forEach((m) => m.classList.remove('open'));
+  hideTreeContextMenu();
 }
 
 function runMenuAction(action) {
@@ -2474,6 +2602,7 @@ function runMenuAction(action) {
     'panel-terminal': () => showTerminal(),
     'terminal-new': () => newTerminal(),
     'panel-agent': () => { switchPanel('agent'); if (state.agentDock !== 'left') toggleAgent(); },
+    'panel-coverage': () => showCoveragePanel(),
     'terminal-dock-left': () => setTerminalDock('left'),
     'terminal-dock-right': () => setTerminalDock('right'),
     'terminal-dock-bottom': () => setTerminalDock('bottom'),
@@ -2483,6 +2612,7 @@ function runMenuAction(action) {
     'toggle-sidebar': () => toggleSidebar(),
     'toggle-dotfiles': () => setShowDotfiles(!getShowDotfiles()),
     'command-palette': showPalette,
+    'search-everywhere': () => showSearchEverywhere(),
     'goto-class': showGoToClass,
     'switch-branch': showBranchPicker,
     settings: () => showSettingsModal('git'),
@@ -2508,6 +2638,7 @@ const PALETTE_COMMANDS = [
   { id: 'settings-appearance', label: 'Editor appearance', run: () => showSettingsModal('appearance') },
   { id: 'settings-compiler', label: 'Compiler', run: () => showSettingsModal('compilers') },
   { id: 'palette', label: 'Command palette', kbd: '⌘K', run: showPalette },
+  { id: 'search', label: 'Search class, file, or text', kbd: '⌘P', run: () => showSearchEverywhere(), needsRepo: true },
   { id: 'goto-class', label: 'Go to Class', kbd: '⌘O', run: showGoToClass, needsRepo: true },
   { id: 'switch-branch', label: 'Switch branch…', kbd: '⌘⇧B', run: showBranchPicker, needsRepo: true },
   { id: 'reload-project', label: 'Reload Maven/Gradle project', run: () => reloadProjectIndex(), needsRepo: true, needsBuildTool: true },
@@ -2524,7 +2655,7 @@ const PALETTE_COMMANDS = [
   { id: 'git-panel', label: 'Show Commit', kbd: 'Alt+9', run: () => switchPanel('git') },
   { id: 'terminal', label: 'Show Terminal', run: () => showTerminal() },
   { id: 'terminal-new', label: 'New Terminal', kbd: '⌘⇧`', run: () => newTerminal(), needsRepo: true },
-  { id: 'agent', label: 'Show Agent', run: toggleAgent },
+  { id: 'coverage', label: 'Coverage report', run: () => showCoveragePanel(), needsRepo: true },
   { id: 'sidebar', label: 'Toggle sidebar', run: () => toggleSidebar() },
 ];
 
@@ -2598,7 +2729,7 @@ let gotoClassIndex = 0;
 let gotoClassHits = [];
 let gotoClassTimer = null;
 
-function showGoToClass() {
+function showGoToClass(initialQuery = '') {
   if (!state.repo) {
     toast('Open a repository first', 'info');
     return;
@@ -2609,11 +2740,12 @@ function showGoToClass() {
   gotoClassHits = [];
   $('#goto-class-overlay')?.classList.add('open');
   const input = $('#goto-class-input');
+  const query = String(initialQuery || '');
   if (input) {
-    input.value = '';
+    input.value = query;
     const results = $('#goto-class-results');
     if (results) results.innerHTML = '<p class="px-4 py-3 text-xs text-gray-500">Loading…</p>';
-    scheduleGoToClassSearch('');
+    scheduleGoToClassSearch(query);
     setTimeout(() => input.focus(), 30);
   }
 }
@@ -2951,6 +3083,147 @@ function openGoToClassSelection() {
   openFileAt(hit.path, hit.line || 1, hit.column || 1);
 }
 
+let searchIndex = 0;
+let searchHits = [];
+let searchTimer = null;
+
+function showSearchEverywhere(initialQuery = '') {
+  if (!state.repo) {
+    toast('Open a repository first', 'info');
+    return;
+  }
+  closeAllMenus();
+  hidePalette();
+  hideGoToClass();
+  searchIndex = 0;
+  searchHits = [];
+  $('#search-overlay')?.classList.add('open');
+  const input = $('#search-input');
+  if (input) {
+    input.value = initialQuery;
+    const results = $('#search-results');
+    if (results) {
+      results.innerHTML = initialQuery.trim()
+        ? '<p class="px-4 py-3 text-xs text-gray-500">Searching…</p>'
+        : '<p class="px-4 py-3 text-xs text-gray-600">Type to search classes, files, or text</p>';
+    }
+    scheduleSearchEverywhere(initialQuery);
+    setTimeout(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 30);
+  }
+}
+
+function hideSearchEverywhere() {
+  $('#search-overlay')?.classList.remove('open');
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+}
+
+function searchKindLabel(kind) {
+  if (kind === 'class') return 'Class';
+  if (kind === 'file') return 'File';
+  if (kind === 'text') return 'Text';
+  return kind;
+}
+
+function scheduleSearchEverywhere(query) {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearchEverywhere(query), 140);
+}
+
+async function runSearchEverywhere(query) {
+  const results = $('#search-results');
+  if (!results || !state.repo) return;
+  const q = query.trim();
+  if (!q) {
+    results.innerHTML = '<p class="px-4 py-3 text-xs text-gray-600">Type to search classes, files, or text</p>';
+    searchHits = [];
+    return;
+  }
+  try {
+    const params = new URLSearchParams({ q: query, limit: '50' });
+    searchHits = await api(`${repoApi(state.repo, '/workspace/search')}?${params}`);
+    if (!Array.isArray(searchHits)) searchHits = [];
+    searchHits = searchHits.filter((hit) => !String(hit.path || '').toLowerCase().endsWith('.class'));
+    searchIndex = 0;
+    renderSearchHits();
+  } catch (e) {
+    results.innerHTML = `<p class="px-4 py-3 text-xs text-red-400">${escapeHtml(e.message || 'Search failed')}</p>`;
+  }
+}
+
+function renderSearchHits() {
+  const results = $('#search-results');
+  if (!results) return;
+  if (!searchHits.length) {
+    results.innerHTML = '<p class="px-4 py-3 text-xs text-gray-600">No matches</p>';
+    return;
+  }
+  searchIndex = Math.min(searchIndex, Math.max(searchHits.length - 1, 0));
+  results.innerHTML = searchHits.map((hit, i) => {
+    const kind = searchKindLabel(hit.kind);
+    return `<button type="button" class="ij-search-item ij-palette-item${i === searchIndex ? ' active' : ''}" data-search-idx="${i}">
+      <span class="ij-goto-class-main">
+        <span class="ij-goto-class-name">${escapeHtml(hit.label || hit.path)}</span>
+        <span class="ij-goto-class-qual">${escapeHtml(hit.detail || hit.path)}</span>
+      </span>
+      <span class="ij-goto-class-kind ij-search-kind-${escapeHtml(hit.kind || 'file')}">${escapeHtml(kind)}</span>
+    </button>`;
+  }).join('');
+  results.querySelectorAll('[data-search-idx]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      searchIndex = Number(btn.dataset.searchIdx);
+      openSearchSelection();
+    });
+  });
+  results.querySelector('.ij-search-item.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+function openSearchSelection() {
+  const hit = searchHits[searchIndex];
+  if (!hit?.path) return;
+  hideSearchEverywhere();
+  void openFileAt(hit.path, hit.line || 1, hit.column || 1);
+}
+
+function bindSearchEverywhere() {
+  $('#search-input')?.addEventListener('input', (e) => {
+    searchIndex = 0;
+    scheduleSearchEverywhere(e.target.value);
+  });
+  $('#search-input')?.addEventListener('keydown', (e) => {
+    if (!$('#search-overlay')?.classList.contains('open')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideSearchEverywhere();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      searchIndex = Math.min(searchIndex + 1, Math.max(searchHits.length - 1, 0));
+      renderSearchHits();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      searchIndex = Math.max(searchIndex - 1, 0);
+      renderSearchHits();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      openSearchSelection();
+    }
+  });
+  $('#search-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#search-overlay')) hideSearchEverywhere();
+  });
+}
+
 function toggleSidebar(forceCollapse) {
   const sidebar = $('#sidebar');
   if (!sidebar) return;
@@ -3276,7 +3549,12 @@ function bindMenus() {
   });
   document.addEventListener('click', (e) => {
     if (e.target.closest('.ij-menu-root')) return;
-    closeAllMenus();
+    $$('.ij-menu-root.open').forEach((m) => m.classList.remove('open'));
+    dismissTreeContextMenuIfOutside(e);
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    dismissTreeContextMenuIfOutside(e);
   });
   ['#theme-select', '#theme-select-menu', '#settings-editor-font-size', '#settings-editor-font-family', '#editor-font-size-menu', '#editor-font-size-status'].forEach((sel) => {
     $(sel)?.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -3672,8 +3950,8 @@ function listJavaTestMethods(path, content) {
 }
 
 function clearTestRunWidgets() {
-  if (!state.editor || !state.testRunWidgets?.length) return;
-  for (const widget of state.testRunWidgets) {
+  if (!state.editor) return;
+  for (const widget of state.testRunWidgets || []) {
     try {
       state.editor.removeGlyphMarginWidget(widget);
     } catch {
@@ -3681,6 +3959,18 @@ function clearTestRunWidgets() {
     }
   }
   state.testRunWidgets = [];
+  for (const widget of state.testCovWidgets || []) {
+    try {
+      state.editor.removeGlyphMarginWidget(widget);
+    } catch {
+      /* ignore stale widgets */
+    }
+  }
+  state.testCovWidgets = [];
+}
+
+function projectSupportsCoverage() {
+  return Boolean(state.runInfo?.has_project);
 }
 
 function createTestRunWidget(method) {
@@ -3710,6 +4000,35 @@ function createTestRunWidget(method) {
   };
 }
 
+function createTestCoverageWidget(method) {
+  const domNode = document.createElement('button');
+  domNode.type = 'button';
+  domNode.className = 'ij-test-cov-widget';
+  const label = method.isClass
+    ? `Run all tests with coverage in ${method.filter}`
+    : `Run ${method.filter} with coverage`;
+  domNode.title = label;
+  domNode.setAttribute('aria-label', label);
+  domNode.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  domNode.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void runProjectTestWithCoverage(method.filter);
+  });
+  const lane = monaco.editor.GlyphMarginLane?.Left ?? 1;
+  return {
+    getId: () => (method.isClass ? `ij-test-cov-class-${method.filter}` : `ij-test-cov-${method.filter}`),
+    getDomNode: () => domNode,
+    getPosition: () => ({
+      range: new monaco.Range(method.glyphLine, 1, method.glyphLine, 1),
+      lane,
+    }),
+  };
+}
+
 function applyTestRunDecorations() {
   if (!state.editor || !window.monaco) return;
   clearTestRunWidgets();
@@ -3720,14 +4039,315 @@ function applyTestRunDecorations() {
     const methods = listJavaTestMethods(state.activeTab, content);
     if (!methods.length || typeof state.editor.addGlyphMarginWidget !== 'function') return;
     clearTestRunWidgets();
-    state.testRunWidgets = methods.map((method) => {
-      const widget = createTestRunWidget(method);
-      state.editor.addGlyphMarginWidget(widget);
+    const showCoverage = projectSupportsCoverage();
+    state.testRunWidgets = [];
+    state.testCovWidgets = [];
+    for (const method of methods) {
+      const runWidget = createTestRunWidget(method);
+      state.editor.addGlyphMarginWidget(runWidget);
+      state.testRunWidgets.push(runWidget);
       state.testMethodsByLine.set(method.glyphLine, method);
-      return widget;
-    });
+      if (showCoverage) {
+        const covWidget = createTestCoverageWidget(method);
+        state.editor.addGlyphMarginWidget(covWidget);
+        state.testCovWidgets.push(covWidget);
+      }
+    }
   };
   requestAnimationFrame(() => requestAnimationFrame(paint));
+}
+
+function clearCoverageDecorations() {
+  if (!state.editor || !window.monaco) return;
+  state.coverageDecorationIds = state.editor.deltaDecorations(state.coverageDecorationIds ?? [], []);
+}
+
+function applyCoverageDecorations(path, cov) {
+  if (!state.editor || !window.monaco || state.activeTab !== path) return;
+  const lines = cov?.lines ?? [];
+  const decorations = lines.map(({ line, status }) => {
+    let className = 'ij-cov-missed';
+    let color = '#f87171';
+    let hover = 'Not covered';
+    if (status === 'covered') {
+      className = 'ij-cov-covered';
+      color = '#4ade80';
+      hover = 'Covered';
+    } else if (status === 'partial') {
+      className = 'ij-cov-partial';
+      color = '#fbbf24';
+      hover = 'Partially covered';
+    }
+    return {
+      range: new monaco.Range(line, 1, line, 1),
+      options: {
+        isWholeLine: true,
+        className,
+        overviewRuler: {
+          color,
+          position: monaco.editor.OverviewRulerLane.Left,
+        },
+        hoverMessage: { value: hover },
+      },
+    };
+  });
+  state.coverageDecorationIds = state.editor.deltaDecorations(
+    state.coverageDecorationIds ?? [],
+    decorations,
+  );
+}
+
+function updateCoverageStatus(cov) {
+  const btn = $('#status-coverage');
+  const text = $('#status-coverage-text');
+  if (!btn || !text) return;
+  if (!cov?.total_lines) {
+    btn.classList.add('hidden');
+    text.textContent = '';
+    btn.title = 'Test coverage — click to open report';
+    return;
+  }
+  btn.classList.remove('hidden');
+  const fileHint = cov.coverage_path
+    ? cov.coverage_path.split('/').pop()
+    : null;
+  text.textContent = fileHint
+    ? `Coverage ${cov.summary} · ${fileHint}`
+    : `Coverage ${cov.summary}`;
+  btn.title = `${cov.message || cov.report_path || 'Test coverage'} — click for report`;
+}
+
+function formatCoveragePct(rate) {
+  if (rate == null || Number.isNaN(rate)) return '—';
+  return `${Math.round(rate * 100)}%`;
+}
+
+function coveragePctClass(rate) {
+  const pct = Math.round((rate ?? 0) * 100);
+  if (pct >= 80) return 'ij-coverage-file-pct--good';
+  if (pct >= 50) return 'ij-coverage-file-pct--warn';
+  return 'ij-coverage-file-pct--bad';
+}
+
+function coverageBarFillClass(rate) {
+  const pct = Math.round((rate ?? 0) * 100);
+  if (pct >= 80) return '';
+  if (pct >= 50) return 'ij-coverage-metric-fill--mid';
+  return 'ij-coverage-metric-fill--low';
+}
+
+function renderCoverageMetric(label, counter) {
+  if (!counter?.total) {
+    return `<div class="ij-coverage-metric">
+      <span class="ij-coverage-metric-label">${label}</span>
+      <div class="ij-coverage-metric-bar"></div>
+      <span class="ij-coverage-metric-pct">—</span>
+    </div>`;
+  }
+  const pct = formatCoveragePct(counter.rate);
+  const width = Math.max(2, Math.round((counter.rate ?? 0) * 100));
+  return `<div class="ij-coverage-metric">
+    <span class="ij-coverage-metric-label">${label}</span>
+    <div class="ij-coverage-metric-bar" title="${counter.covered}/${counter.total} covered">
+      <div class="ij-coverage-metric-fill ${coverageBarFillClass(counter.rate)}" style="width:${width}%"></div>
+    </div>
+    <span class="ij-coverage-metric-pct">${pct}</span>
+  </div>`;
+}
+
+function renderCoveragePanel(summary) {
+  const body = $('#coverage-panel-body');
+  const subtitle = $('#coverage-panel-subtitle');
+  const htmlBtn = $('#btn-coverage-open-html');
+  if (!body) return;
+
+  state.coverageReport = summary ?? null;
+
+  if (subtitle) {
+    subtitle.textContent = summary?.project_root
+      ? summary.project_root.split('/').pop() || summary.project_root
+      : '';
+  }
+
+  if (htmlBtn) {
+    if (summary?.html_report_path) {
+      htmlBtn.classList.remove('hidden');
+      htmlBtn.disabled = false;
+    } else {
+      htmlBtn.classList.add('hidden');
+      htmlBtn.disabled = true;
+    }
+  }
+
+  if (!summary) {
+    body.innerHTML = '<p class="ij-coverage-empty">No coverage data.</p>';
+    return;
+  }
+
+  if (summary.message && !summary.files?.length) {
+    body.innerHTML = `<p class="ij-coverage-empty">${escapeHtml(summary.message)}</p>`;
+    return;
+  }
+
+  const totals = summary.totals ?? {};
+  const current = summary.current_file;
+  const activePath = summary.query_path;
+  const files = summary.files ?? [];
+
+  let html = `<div class="ij-coverage-metrics">
+    ${renderCoverageMetric('Lines', totals.lines)}
+    ${totals.branches?.total ? renderCoverageMetric('Branch', totals.branches) : ''}
+    ${totals.instructions?.total ? renderCoverageMetric('Instr', totals.instructions) : ''}
+  </div>`;
+
+  if (current) {
+    html += `<div class="ij-coverage-current">
+      <div class="ij-coverage-section-title">Current file</div>
+      <div class="ij-coverage-current-name">${escapeHtml(current.name)}</div>
+      <div class="ij-coverage-current-detail">${formatCoveragePct(current.lines?.rate)} · ${current.lines?.covered ?? 0}/${current.lines?.total ?? 0} lines</div>
+    </div>`;
+  }
+
+  if (files.length) {
+    const rows = files.map((f) => {
+      const isActive = f.path === activePath
+        || (current && f.path === current.path);
+      return `<button type="button" class="ij-coverage-file-row${isActive ? ' is-active' : ''}" data-coverage-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">
+        <span class="ij-coverage-file-name">${escapeHtml(f.name)}</span>
+        <span class="ij-coverage-file-pct ${coveragePctClass(f.lines?.rate)}">${formatCoveragePct(f.lines?.rate)}</span>
+      </button>`;
+    }).join('');
+    html += `<div>
+      <div class="ij-coverage-section-title">Source files (${files.length})</div>
+      <div class="ij-coverage-file-list">${rows}</div>
+    </div>`;
+  }
+
+  if (summary.report_path) {
+    html += `<p class="ij-coverage-report-path" title="${escapeHtml(summary.report_path)}">Report: ${escapeHtml(summary.report_path.split('/').pop())}</p>`;
+  }
+
+  body.innerHTML = html;
+  body.querySelectorAll('[data-coverage-path]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const path = btn.dataset.coveragePath;
+      if (!path) return;
+      void openCoverageFile(path);
+    });
+  });
+}
+
+async function openCoverageFile(path) {
+  if (!path) return;
+  await openFileAt(path);
+  await fetchAndApplyCoverage(path);
+  if (state.coveragePanelOpen) {
+    await refreshCoveragePanel(path);
+  }
+}
+
+async function fetchCoverageReport(path) {
+  if (!state.repo || !path) return null;
+  try {
+    return await api(
+      `${repoApi(state.repo, '/workspace/coverage/report')}?path=${encodeURIComponent(stripJavaDiagOverlayPath(path))}`,
+    );
+  } catch (e) {
+    toast(`Coverage report: ${e.message}`, 'warning');
+    return null;
+  }
+}
+
+async function refreshCoveragePanel(path) {
+  const target = path || state.activeTab;
+  if (!target) {
+    renderCoveragePanel(null);
+    return null;
+  }
+  const summary = await fetchCoverageReport(target);
+  renderCoveragePanel(summary);
+  return summary;
+}
+
+function applyCoveragePanelLayout() {
+  const dock = $('#coverage-dock-right');
+  const resizer = $('#coverage-right-resizer');
+  const open = state.coveragePanelOpen;
+  dock?.classList.toggle('hidden', !open);
+  resizer?.classList.toggle('hidden', !open);
+}
+
+function showCoveragePanel() {
+  state.coveragePanelOpen = true;
+  applyCoveragePanelLayout();
+  void refreshCoveragePanel(state.activeTab);
+}
+
+function hideCoveragePanel() {
+  state.coveragePanelOpen = false;
+  applyCoveragePanelLayout();
+}
+
+function toggleCoveragePanel() {
+  if (state.coveragePanelOpen) hideCoveragePanel();
+  else showCoveragePanel();
+}
+
+async function openCoverageHtmlReport() {
+  const path = state.coverageReport?.html_report_path;
+  if (!path || !state.repo) {
+    toast('HTML report not found — run tests with coverage first', 'info');
+    return;
+  }
+  try {
+    await api(repoApi(state.repo, '/workspace/open-external'), { method: 'POST', body: { path } });
+  } catch (e) {
+    toast(e.message || 'Could not open report', 'error');
+  }
+}
+
+async function fetchAndApplyCoverage(path) {
+  if (!state.repo || !path) return null;
+  try {
+    const cov = await api(
+      `${repoApi(state.repo, '/workspace/coverage')}?path=${encodeURIComponent(stripJavaDiagOverlayPath(path))}`,
+    );
+    const target = cov?.coverage_path || path;
+    if (cov?.lines?.length) {
+      state.fileCoverage.set(target, cov);
+      if (state.activeTab === target) {
+        applyCoverageDecorations(target, cov);
+      } else {
+        clearCoverageDecorations();
+      }
+      updateCoverageStatus(cov);
+      if (state.coveragePanelOpen) {
+        void refreshCoveragePanel(path);
+      }
+      if (cov.coverage_path && cov.coverage_path !== path && cov.message) {
+        toast(cov.message, 'info', { duration: 7000 });
+      }
+      return cov;
+    }
+    updateCoverageStatus(null);
+    clearCoverageDecorations();
+    if (cov?.message) toast(cov.message, 'info');
+    return cov;
+  } catch (e) {
+    toast(`Coverage: ${e.message}`, 'warning');
+    return null;
+  }
+}
+
+function reapplyCoverageForTab(path) {
+  const cov = state.fileCoverage?.get(path);
+  if (cov?.lines?.length) {
+    applyCoverageDecorations(path, cov);
+    updateCoverageStatus(cov);
+    return;
+  }
+  clearCoverageDecorations();
+  updateCoverageStatus(null);
 }
 
 function applyConflictDecorations() {
@@ -3965,6 +4585,10 @@ function setEditorContent(path, content) {
     state.suppressEditorChange = false;
   }
   applyTestRunDecorations();
+  reapplyCoverageForTab(path);
+  if (path?.endsWith('.java') && !state.fileCoverage?.has(path)) {
+    void fetchAndApplyCoverage(path);
+  }
 }
 
 function flushPendingEditorContent() {
@@ -4152,6 +4776,11 @@ function initEditor() {
       }
       updateConflictUi();
       applyTestRunDecorations();
+      if (state.activeTab) {
+        state.fileCoverage.delete(state.activeTab);
+        clearCoverageDecorations();
+        updateCoverageStatus(null);
+      }
       const model = state.editor.getModel();
       const position = state.editor.getPosition();
       if (model && position) {
@@ -4822,8 +5451,18 @@ async function loadTreeRoot(resetExpanded = false) {
   await loadTreeLevel('');
 }
 
+function treeSourceKind(node) {
+  if (node?.source_kind) return node.source_kind;
+  const p = String(node?.path || '').replace(/\\/g, '/');
+  if (/\/src\/(test|integrationTest|intTest|testFixtures|androidTest|unitTest|functionalTest|nativeTest)(\/|$)/.test(p)) {
+    return 'test';
+  }
+  if (/\/src\/main(\/|$)/.test(p)) return 'main';
+  return null;
+}
+
 function treeSourceKindClass(node) {
-  const k = node?.source_kind;
+  const k = treeSourceKind(node);
   return k ? ` ij-tree-source-${k}` : '';
 }
 
@@ -4859,7 +5498,6 @@ function renderTree(nodes, depth = 0, lazyMode = true) {
             <span class="ij-tree-chevron" aria-hidden="true"></span>
             <span class="ij-tree-icon ij-tree-icon-folder">${treeIconSvg('folder')}${treeIconSvg('folderOpen')}</span>
             <span class="ij-tree-label">${escapeHtml(n.name)}</span>
-            ${n.source_kind ? `<span class="ij-tree-source-badge ij-tree-source-badge-${n.source_kind}">${escapeHtml(n.source_kind)}</span>` : ''}
           </summary>
           <div class="ij-tree-children">${childrenHtml}</div>
         </details>`;
@@ -5026,15 +5664,532 @@ function renderFilteredTree() {
   treeEl.innerHTML = `<div class="ij-tree">${renderTree(nodes, 0, lazyMode)}</div>`;
   bindTreeEvents();
   if (state.activeTab) {
-    $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === state.activeTab));
+    $$('.tree-file').forEach((b) => b.classList.toggle('active', treePathMatchesTab(b.dataset.path, state.activeTab)));
   }
   scheduleTreeGapLoads();
+}
+
+function normalizeRepoPath(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+/** Map javac overlay copies (`.reaper/java-diagnostics/overlay/…`) to workspace paths. */
+function stripJavaDiagOverlayPath(path) {
+  if (!path) return path;
+  const normalized = path.replace(/\\/g, '/');
+  const prefix = '.reaper/java-diagnostics/overlay/';
+  if (normalized.startsWith(prefix)) return normalized.slice(prefix.length);
+  const idx = normalized.indexOf(`/${prefix}`);
+  if (idx >= 0) return normalized.slice(idx + prefix.length + 1);
+  return normalized;
+}
+
+function workspaceExplorerPath(path) {
+  return normalizeRepoPath(stripJavaDiagOverlayPath(path));
+}
+
+function treePathMatchesTab(treePath, tabPath) {
+  if (!tabPath) return false;
+  return workspaceExplorerPath(treePath) === workspaceExplorerPath(tabPath);
+}
+
+function treeParentDirPaths(filePath) {
+  const parts = normalizeRepoPath(filePath).split('/').filter(Boolean);
+  if (parts.length <= 1) return [];
+  parts.pop();
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    out.push(parts.slice(0, i + 1).join('/'));
+  }
+  return out;
+}
+
+async function ensureTreeRootLoaded() {
+  if (treeState.recursiveNodes || !state.repo) return;
+  if (!treeState.children.has('')) {
+    await loadTreeLevel('');
+  }
+}
+
+async function waitForTreeInflight() {
+  while (treeLoadInflight.size > 0) {
+    await Promise.allSettled([...treeLoadInflight.values()]);
+  }
+}
+
+function scrollTreeFileIntoView(path) {
+  const normalized = workspaceExplorerPath(path);
+  const btn = [...$$('.tree-file')].find((b) => treePathMatchesTab(b.dataset.path, normalized));
+  if (!btn) return false;
+  $$('.tree-file').forEach((b) => {
+    b.classList.toggle('active', treePathMatchesTab(b.dataset.path, normalized));
+  });
+  const panel = $('#panel-explorer');
+  if (panel) {
+    const panelRect = panel.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    if (btnRect.top < panelRect.top) {
+      panel.scrollTop += btnRect.top - panelRect.top - 8;
+    } else if (btnRect.bottom > panelRect.bottom) {
+      panel.scrollTop += btnRect.bottom - panelRect.bottom + 8;
+    }
+  } else {
+    btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  return true;
+}
+
+/** Expand ancestors, load lazy folders, and scroll the project tree to `path`. */
+async function revealFileInExplorer(path) {
+  const normalized = workspaceExplorerPath(path);
+  if (!normalized || !state.repo) return;
+
+  const isFile = /\.[^/]+$/.test(normalized.split('/').pop() || '');
+
+  if (document.body.classList.contains('sidebar-collapsed')) {
+    toggleSidebar(false);
+  }
+  switchPanel('explorer');
+
+  const expandSeed = isFile ? normalized : `${normalized}/_.reaper-expand`;
+  for (const dir of treeParentDirPaths(expandSeed)) {
+    treeState.expanded.add(dir);
+  }
+  if (!isFile) treeState.expanded.add(normalized);
+
+  const treeFilter = $('#tree-filter');
+  const q = treeFilter?.value?.trim() || '';
+  if (q && !normalized.toLowerCase().includes(q.toLowerCase())) {
+    treeFilter.value = '';
+    try {
+      await refreshTree();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  } else {
+    try {
+      await ensureTreeRootLoaded();
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    if (!treeState.recursiveNodes) {
+      for (const dir of treeParentDirPaths(normalized)) {
+        try {
+          await ensureTreeDirLoaded(dir);
+        } catch {
+          /* ensureTreeDirLoaded already toasts */
+        }
+      }
+      await loadExpandedTreeGaps();
+      await waitForTreeInflight();
+    }
+    renderFilteredTree();
+  }
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    if (!isFile || scrollTreeFileIntoView(normalized)) return;
+    if (!treeState.recursiveNodes) {
+      await loadExpandedTreeGaps();
+      await waitForTreeInflight();
+      renderFilteredTree();
+    }
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+}
+
+let treeContextTarget = null;
+let treeContextSuppressUntil = 0;
+
+function armTreeContextDismissGuard(ms = 500) {
+  treeContextSuppressUntil = Date.now() + ms;
+}
+
+function treeContextMenuIsOpen() {
+  return !$('#tree-context-menu')?.classList.contains('hidden');
+}
+
+function dismissTreeContextMenuIfOutside(e) {
+  if (!treeContextMenuIsOpen()) return;
+  if (Date.now() < treeContextSuppressUntil) return;
+  if (e?.target?.closest?.('#tree-context-menu')) return;
+  hideTreeContextMenu();
+}
+
+function onTreeContextMenuScroll() {
+  if (Date.now() < treeContextSuppressUntil) return;
+  hideTreeContextMenu();
+}
+
+function treeRevealLabel() {
+  return /Mac|iPhone|iPad/i.test(navigator.userAgent) ? 'Reveal in Finder' : 'Reveal in File Manager';
+}
+
+function hideTreeContextMenu() {
+  const menu = $('#tree-context-menu');
+  if (!menu) return;
+  menu.classList.add('hidden');
+  menu.setAttribute('aria-hidden', 'true');
+  menu.innerHTML = '';
+  treeContextTarget = null;
+}
+
+function positionTreeContextMenu(menu, x, y) {
+  menu.style.left = '0';
+  menu.style.top = '0';
+  menu.classList.remove('hidden');
+  menu.setAttribute('aria-hidden', 'false');
+  const rect = menu.getBoundingClientRect();
+  const pad = 8;
+  let left = x;
+  let top = y;
+  if (left + rect.width > window.innerWidth - pad) left = window.innerWidth - rect.width - pad;
+  if (top + rect.height > window.innerHeight - pad) top = window.innerHeight - rect.height - pad;
+  menu.style.left = `${Math.max(pad, left)}px`;
+  menu.style.top = `${Math.max(pad, top)}px`;
+}
+
+function parentDirForTreePath(path) {
+  const normalized = workspaceExplorerPath(path);
+  if (!normalized) return '';
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 1) return '';
+  parts.pop();
+  return parts.join('/');
+}
+
+function treeFileMenuProfile(path, kind) {
+  if (kind === 'dir') return { type: 'dir', label: 'Folder' };
+  const rel = workspaceExplorerPath(path);
+  const base = (rel.split('/').pop() || '').toLowerCase();
+  const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+
+  if (rel.endsWith('.java')) {
+    return isJavaTestFilePath(rel)
+      ? { type: 'java-test', label: 'Java Test' }
+      : { type: 'java', label: 'Java Source' };
+  }
+  if (isGradleFilePath(rel)) return { type: 'gradle', label: 'Gradle' };
+  if (isMavenFilePath(rel)) return { type: 'maven', label: 'Maven' };
+  if (base === 'dockerfile' || base.startsWith('dockerfile.')) return { type: 'dockerfile', label: 'Dockerfile' };
+  if (base === 'readme.md' || ext === 'md') return { type: 'markdown', label: 'Markdown' };
+  if (ext === 'json') return { type: 'json', label: 'JSON' };
+  if (ext === 'yaml' || ext === 'yml') return { type: 'yaml', label: 'YAML' };
+  if (ext === 'xml') return { type: 'xml', label: 'XML' };
+  if (ext === 'properties') return { type: 'properties', label: 'Properties' };
+  if (ext === 'gradle' || ext === 'kts') return { type: 'gradle', label: 'Gradle' };
+  if (['js', 'mjs', 'cjs', 'jsx'].includes(ext)) return { type: 'javascript', label: 'JavaScript' };
+  if (['ts', 'tsx'].includes(ext)) return { type: 'typescript', label: 'TypeScript' };
+  if (ext === 'py') return { type: 'python', label: 'Python' };
+  if (ext === 'rs') return { type: 'rust', label: 'Rust' };
+  if (ext === 'go') return { type: 'go', label: 'Go' };
+  if (ext === 'rb') return { type: 'ruby', label: 'Ruby' };
+  if (ext === 'sql') return { type: 'sql', label: 'SQL' };
+  if (ext === 'html' || ext === 'htm') return { type: 'html', label: 'HTML' };
+  if (ext === 'css' || ext === 'scss') return { type: 'css', label: 'CSS' };
+  return { type: 'file', label: 'File' };
+}
+
+function treeContextMenuItem(action, label, { danger = false, disabled = false } = {}) {
+  return `<button type="button" class="ij-context-menu-item${danger ? ' ij-context-menu-item--danger' : ''}" data-tree-action="${action}"${disabled ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
+}
+
+function treeContextMenuSep() {
+  return '<div class="ij-context-menu-sep"></div>';
+}
+
+function treeContextCanFormat(path) {
+  return isDiagnosablePath(workspaceExplorerPath(path));
+}
+
+function renderTreeContextMenu(target) {
+  const profile = treeFileMenuProfile(target.path, target.kind);
+  const isFile = target.kind === 'file';
+  const rows = [
+    `<div class="ij-context-menu-heading">${escapeHtml(profile.label)}</div>`,
+  ];
+
+  if (isFile) rows.push(treeContextMenuItem('open', 'Open'));
+
+  switch (profile.type) {
+    case 'dir':
+      rows.push(treeContextMenuItem('new-file', 'New File…'));
+      break;
+    case 'java':
+      if (state.runInfo?.has_project) {
+        rows.push(treeContextMenuItem('run', 'Run'));
+      }
+      rows.push(treeContextMenuItem('goto-declaration', 'Go to Declaration'));
+      rows.push(treeContextMenuItem('goto-class', 'Go to Class…'));
+      if (treeContextCanFormat(target.path)) {
+        rows.push(treeContextMenuItem('format', 'Reformat Code'));
+      }
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'java-test':
+      if (state.runInfo?.has_project) {
+        rows.push(treeContextMenuItem('run-tests', 'Run Tests'));
+        rows.push(treeContextMenuItem('run-tests-coverage', 'Run Tests with Coverage'));
+      }
+      if (treeContextCanFormat(target.path)) {
+        rows.push(treeContextMenuItem('format', 'Reformat Code'));
+      }
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'gradle':
+      if (hasAutoReloadProject()) {
+        rows.push(treeContextMenuItem('reload-project', 'Reload Gradle Project'));
+      }
+      if (state.runInfo?.has_project) {
+        rows.push(treeContextMenuItem('run-build', 'Run Gradle Task'));
+      }
+      break;
+    case 'maven':
+      if (hasAutoReloadProject()) {
+        rows.push(treeContextMenuItem('reload-project', 'Reload Maven Project'));
+      }
+      if (state.runInfo?.has_project) {
+        rows.push(treeContextMenuItem('run-build', 'Run Maven Goal'));
+      }
+      break;
+    case 'markdown':
+    case 'json':
+    case 'yaml':
+    case 'xml':
+    case 'javascript':
+    case 'typescript':
+    case 'python':
+    case 'properties':
+    case 'dockerfile':
+      if (isFile && treeContextCanFormat(target.path)) {
+        rows.push(treeContextMenuItem('format', 'Reformat Code'));
+      }
+      if (isFile) rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    default:
+      if (isFile) {
+        if (treeContextCanFormat(target.path)) {
+          rows.push(treeContextMenuItem('format', 'Reformat Code'));
+        }
+        rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      }
+      break;
+  }
+
+  rows.push(treeContextMenuSep());
+  rows.push(treeContextMenuItem('copy-path', 'Copy Path'));
+  if (state.projectFolder) {
+    rows.push(treeContextMenuItem('copy-abs-path', 'Copy Absolute Path'));
+  }
+  rows.push(treeContextMenuItem('reveal', treeRevealLabel()));
+
+  if (isFile) {
+    rows.push(treeContextMenuSep());
+    rows.push(treeContextMenuItem('delete', 'Delete…', { danger: true }));
+  }
+
+  return rows.join('');
+}
+
+async function copyTreePath(path, { absolute = false } = {}) {
+  const rel = workspaceExplorerPath(path);
+  if (!rel) return;
+  let text = rel;
+  if (absolute && state.projectFolder) {
+    text = `${state.projectFolder.replace(/\\/g, '/').replace(/\/$/, '')}/${rel}`;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(absolute ? 'Copied absolute path' : 'Copied path', 'success');
+  } catch {
+    toast('Could not copy to clipboard', 'error');
+  }
+}
+
+async function revealTreePathInSystem(path) {
+  if (!state.repo) return;
+  const rel = workspaceExplorerPath(path);
+  if (!rel) return;
+  try {
+    await api(repoApi(state.repo, '/workspace/reveal'), {
+      method: 'POST',
+      body: JSON.stringify({ path: rel }),
+    });
+  } catch (err) {
+    toast(err.message || 'Could not reveal in file manager', 'error');
+  }
+}
+
+async function deleteTreePath(path) {
+  if (!state.repo) return;
+  const rel = workspaceExplorerPath(path);
+  if (!rel) return;
+  const name = rel.split('/').pop() || rel;
+  if (!confirm(`Delete “${name}”? This cannot be undone.`)) return;
+  try {
+    await api(`${repoApi(state.repo, '/workspace/file')}?path=${encodeURIComponent(rel)}`, {
+      method: 'DELETE',
+    });
+    const openTab = state.tabs.find((t) => workspaceExplorerPath(t) === rel);
+    if (openTab) closeTab(openTab);
+    hideTreeContextMenu();
+    await refreshTree();
+    await refreshGitStatus();
+    toast('Deleted', 'success');
+  } catch (err) {
+    toast(err.message || 'Delete failed', 'error');
+  }
+}
+
+function runTreeContextAction(action) {
+  const target = treeContextTarget;
+  hideTreeContextMenu();
+  if (!target?.path) return;
+  const path = target.path;
+  switch (action) {
+    case 'open':
+      void openFileFromTree(path);
+      break;
+    case 'run':
+      void runTreeContextRun(path);
+      break;
+    case 'run-tests':
+      void runTreeContextTests(path);
+      break;
+    case 'run-tests-coverage':
+      void runTreeContextTestsWithCoverage(path);
+      break;
+    case 'run-build':
+      void runTreeContextBuild(path);
+      break;
+    case 'format':
+      void formatTreeContextFile(path);
+      break;
+    case 'reload-project':
+      void reloadProjectIndex();
+      break;
+    case 'goto-declaration':
+      void gotoTreeContextDeclaration(path);
+      break;
+    case 'goto-class': {
+      const stem = workspaceExplorerPath(path).split('/').pop()?.replace(/\.java$/i, '') || '';
+      showGoToClass(stem);
+      break;
+    }
+    case 'new-file': {
+      const parent = target.kind === 'dir' ? path : parentDirForTreePath(path);
+      showFileModal(parent ? `${parent}/` : '');
+      break;
+    }
+    case 'copy-path':
+      void copyTreePath(path);
+      break;
+    case 'copy-abs-path':
+      void copyTreePath(path, { absolute: true });
+      break;
+    case 'reveal':
+      void revealTreePathInSystem(path);
+      break;
+    case 'delete':
+      void deleteTreePath(path);
+      break;
+    default:
+      break;
+  }
+}
+
+async function openTreeFileForAction(path, line = 1, column = 1) {
+  const rel = workspaceExplorerPath(path);
+  await openFileAt(rel, line, column);
+  return rel;
+}
+
+async function runTreeContextRun(path) {
+  await openTreeFileForAction(path);
+  await refreshRunInfo();
+  await runActive();
+}
+
+async function runTreeContextTests(path) {
+  await openTreeFileForAction(path);
+  await refreshRunInfo();
+  const target = state.runTarget;
+  if (target?.mode === 'test') {
+    await runProjectTest(target.filter);
+  } else {
+    await runActive();
+  }
+}
+
+async function runTreeContextTestsWithCoverage(path) {
+  await openTreeFileForAction(path);
+  await refreshRunInfo();
+  const target = state.runTarget;
+  if (target?.mode === 'test' && target.filter) {
+    await runProjectTestWithCoverage(target.filter);
+  } else {
+    toast('Open a test class or test method to run with coverage', 'info');
+  }
+}
+
+async function runTreeContextBuild(path) {
+  await openTreeFileForAction(path);
+  await refreshRunInfo();
+  await runProjectTask();
+}
+
+async function formatTreeContextFile(path) {
+  await openTreeFileForAction(path);
+  await formatDocument();
+}
+
+async function gotoTreeContextDeclaration(path) {
+  await openTreeFileForAction(path);
+  navigateToPrimarySource(state.activeTab, { force: true });
+}
+
+function showTreeContextMenu(x, y, target) {
+  if (!state.repo || !target?.path) return;
+  closeAllMenus();
+  hideTreeContextMenu();
+  armTreeContextDismissGuard();
+  treeContextTarget = target;
+  const menu = $('#tree-context-menu');
+  if (!menu) return;
+  menu.innerHTML = renderTreeContextMenu(target);
+  menu.querySelectorAll('[data-tree-action]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      runTreeContextAction(btn.dataset.treeAction);
+    });
+  });
+  positionTreeContextMenu(menu, x, y);
+  menu.querySelector('.ij-context-menu-item')?.focus({ preventScroll: true });
 }
 
 function bindTreeEvents() {
   const treeEl = $('#file-tree');
   if (!treeEl || treeEl.dataset.treeBound) return;
   treeEl.dataset.treeBound = '1';
+
+  treeEl.addEventListener('contextmenu', (e) => {
+    const fileBtn = e.target.closest('.tree-file');
+    if (fileBtn?.dataset.path) {
+      e.preventDefault();
+      e.stopPropagation();
+      showTreeContextMenu(e.clientX, e.clientY, { path: fileBtn.dataset.path, kind: 'file' });
+      return;
+    }
+    const dirRow = e.target.closest('.ij-tree-dir-row');
+    if (dirRow) {
+      const dir = dirRow.closest('details.ij-tree-dir')?.dataset.dir;
+      if (dir != null) {
+        e.preventDefault();
+        e.stopPropagation();
+        showTreeContextMenu(e.clientX, e.clientY, { path: dir, kind: 'dir' });
+      }
+    }
+  });
 
   treeEl.addEventListener('toggle', async (e) => {
     const details = e.target;
@@ -5154,6 +6309,7 @@ async function goBackToTreeFile() {
 }
 
 async function openFile(path) {
+  path = workspaceExplorerPath(path);
   if (state.tabs.includes(path)) {
     try {
       if (!state.tabContents.has(path)) await hydrateTabContent(path);
@@ -5178,7 +6334,7 @@ async function openFile(path) {
     activateTabShell(path);
     setEditorContent(path, state.tabContents.get(path));
     renderTabs();
-    $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
+    $$('.tree-file').forEach((b) => b.classList.toggle('active', treePathMatchesTab(b.dataset.path, path)));
     navigateToPrimarySource(path);
     scheduleGradleInfoRefresh();
   } catch (err) {
@@ -5259,7 +6415,7 @@ function activateTabShell(path) {
     langEl.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
   }
   if (state.editor) updateEditorStatus(state.editor.getPosition());
-  $$('.tree-file').forEach((b) => b.classList.toggle('active', b.dataset.path === path));
+  $$('.tree-file').forEach((b) => b.classList.toggle('active', treePathMatchesTab(b.dataset.path, path)));
   updateSaveButton();
   scheduleGradleInfoRefresh();
   if (path) void refreshLanguageContextForPath(path);
@@ -5269,6 +6425,7 @@ function activateTabShell(path) {
   diagJumpIndex = 0;
   updateDiagnosticsStatusBar(path, []);
   scheduleDiagnostics();
+  void revealFileInExplorer(path);
   updateTreeBackButton();
   updateConflictUi();
 }
@@ -5798,8 +6955,22 @@ function testFilterForJavaFile(path, content, cursorLine) {
   return classFilter;
 }
 
+function springBootRunTarget(content, info) {
+  const spring = detectSpringBootApp(content);
+  if (!spring || !info?.has_project) return null;
+  return {
+    mode: 'spring-boot',
+    task: info.build_tool === 'maven'
+      ? `spring-boot:run -Dspring-boot.run.mainClass=${spring.qualifiedName}`
+      : `bootRun -Dspring-boot.run.main-class=${spring.qualifiedName}`,
+    qualifiedName: spring.qualifiedName,
+    runnable: true,
+  };
+}
+
 /** What F5 / Run should do for the active editor file. */
 function detectJavaRunTarget(path, content, runInfo, cursorLine) {
+  path = stripJavaDiagOverlayPath(path);
   if (!path?.endsWith('.java')) {
     if (runInfo?.has_project && isRunToolbarPath(path)) {
       return { mode: 'project-task' };
@@ -5817,10 +6988,20 @@ function detectJavaRunTarget(path, content, runInfo, cursorLine) {
     }
   }
 
-  if (spring && runInfo?.is_spring_boot) {
+  if (spring && (runInfo?.is_spring_boot || runInfo?.frameworks?.includes('spring-boot'))) {
     return {
       mode: 'spring-boot',
       task: runInfo.default_task,
+      qualifiedName: spring.qualifiedName,
+    };
+  }
+
+  if (spring && runInfo?.has_project) {
+    return {
+      mode: 'spring-boot',
+      task: runInfo.build_tool === 'maven'
+        ? `spring-boot:run -Dspring-boot.run.mainClass=${spring.qualifiedName}`
+        : `bootRun -Dspring-boot.run.main-class=${spring.qualifiedName}`,
       qualifiedName: spring.qualifiedName,
     };
   }
@@ -5918,10 +7099,15 @@ function serverRunTargetToClient(t) {
 }
 
 function resolveRunTarget(path, content, info, cursorLine) {
+  path = stripJavaDiagOverlayPath(path);
   if (state.serverRunTarget) {
     const target = serverRunTargetToClient(state.serverRunTarget);
     if (target.mode === 'test' && cursorLine) {
       target.filter = testFilterForJavaFile(path, content, cursorLine) || target.filter;
+    }
+    if (target.mode === 'main' || (target.classType === 'spring-boot-app' && target.mode !== 'spring-boot')) {
+      const springTarget = springBootRunTarget(content, info);
+      if (springTarget) return { ...target, ...springTarget, classType: target.classType || 'spring-boot-app' };
     }
     return target;
   }
@@ -5942,7 +7128,11 @@ async function refreshRunInfo() {
     const ctx = await api(repoApi(state.repo, '/workspace/run/target'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: state.activeTab, content, line }),
+      body: JSON.stringify({
+        path: stripJavaDiagOverlayPath(state.activeTab),
+        content,
+        line,
+      }),
     });
     state.runInfo = ctx?.has_project ? ctx : (ctx?.target ? ctx : null);
     state.serverRunTarget = ctx?.target || null;
@@ -5963,7 +7153,7 @@ async function refreshRunInfo() {
   } catch {
     try {
       const info = await api(
-        `${repoApi(state.repo, '/workspace/run/info')}?path=${encodeURIComponent(state.activeTab)}`,
+        `${repoApi(state.repo, '/workspace/run/info')}?path=${encodeURIComponent(stripJavaDiagOverlayPath(state.activeTab))}`,
       );
       state.runInfo = info?.has_project ? info : null;
       state.serverRunTarget = null;
@@ -5985,6 +7175,7 @@ async function refreshRunInfo() {
     }
   }
   updateRunButtons();
+  if (state.activeTab?.endsWith('.java')) applyTestRunDecorations();
 }
 
 async function refreshGradleInfo() {
@@ -6089,15 +7280,18 @@ function navigateToPrimarySource(path, { force = false } = {}) {
 }
 
 async function openFileAt(path, line = 1, column = 1) {
-  if (state.activeTab !== path) {
+  path = workspaceExplorerPath(path);
+  const activePath = workspaceExplorerPath(state.activeTab);
+  if (activePath !== path) {
     rememberTreeAnchorCursor();
-    if (state.tabs.includes(path)) {
-      activateTab(path);
+    if (state.tabs.some((t) => workspaceExplorerPath(t) === path)) {
+      const tab = state.tabs.find((t) => workspaceExplorerPath(t) === path);
+      activateTab(tab);
     } else {
       await openFile(path);
     }
   } else {
-    activateTab(path);
+    activateTab(state.activeTab);
   }
   if (!state.editor) return;
   state.editor.revealLineInCenter(line);
@@ -6260,7 +7454,7 @@ async function createFile(e) {
   }
 }
 
-function showFileModal() {
+function showFileModal(initialPath = '') {
   if (!state.repo) {
     toast('Select a repository first', 'error');
     return;
@@ -6269,7 +7463,7 @@ function showFileModal() {
   $('#file-modal-overlay').classList.add('flex');
   const input = $('#new-file-form input[name="path"]');
   if (input) {
-    input.value = '';
+    input.value = initialPath ? String(initialPath).replace(/\\/g, '/') : '';
     setTimeout(() => input.focus(), 50);
   }
 }
@@ -6336,7 +7530,7 @@ async function runProjectTask(taskOverride) {
   try {
     const { exitCode, output } = await runWorkspaceCommandStream(
       '/workspace/run/task',
-      { path: state.activeTab, task },
+      { path: stripJavaDiagOverlayPath(state.activeTab), task },
       { label, terminalId: term.id },
     );
     if (gradleClassfileVersionToast(output)) return;
@@ -6370,13 +7564,59 @@ async function runProjectTest(testFilter) {
   try {
     const { exitCode, output } = await runWorkspaceCommandStream(
       '/workspace/run/task',
-      { path: state.activeTab, task },
+      { path: stripJavaDiagOverlayPath(state.activeTab), task },
       { label, terminalId: term.id, kind: 'test' },
     );
     if (gradleClassfileVersionToast(output)) return;
+    return exitCode;
   } catch (e) {
     terminalLog(`error: ${e.message}`);
     if (gradleClassfileVersionToast(e.message || '')) return;
+    return -1;
+  }
+}
+
+async function runProjectTestWithCoverage(testFilter) {
+  if (!state.repo || !state.activeTab || !testFilter) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  await refreshRunInfo();
+  const info = state.runInfo;
+  if (!info?.has_project) {
+    toast('Not inside a Gradle or Maven project', 'error');
+    return;
+  }
+  const term = getActiveTerminal();
+  const filter = normalizeTestFilter(testFilter, info.build_tool);
+  if (!filter) return;
+  const task = info.build_tool === 'maven'
+    ? `-Dtest=${filter} test`
+    : `test --tests ${filter}`;
+  const toolLabel = info.build_tool === 'maven' ? 'mvn' : 'gradle';
+  const label = `◔ ${toolLabel} ${task} + jacoco  (${state.activeTab})`;
+  const path = state.activeTab;
+  try {
+    const { exitCode, output } = await runWorkspaceCommandStream(
+      '/workspace/run/task',
+      { path: stripJavaDiagOverlayPath(path), task, coverage: true },
+      { label, terminalId: term.id, kind: 'test' },
+    );
+    if (gradleClassfileVersionToast(output)) return;
+    if (exitCode === 0) {
+      const cov = await fetchAndApplyCoverage(path);
+      if (cov?.coverage_path && cov.coverage_path !== path) {
+        await openFileAt(cov.coverage_path);
+        applyCoverageDecorations(cov.coverage_path, cov);
+        updateCoverageStatus(cov);
+      }
+      showCoveragePanel();
+    } else {
+      toast('Tests failed — coverage not updated', 'warning');
+    }
+    return exitCode;
+  } catch (e) {
+    terminalLog(`error: ${e.message}`);
+    if (gradleClassfileVersionToast(e.message || '')) return;
+    return -1;
   }
 }
 
@@ -6445,7 +7685,7 @@ async function runJavaMain(qualifiedName) {
   try {
     await runWorkspaceCommandStream(
       '/workspace/java/run',
-      { path: state.activeTab },
+      { path: stripJavaDiagOverlayPath(state.activeTab) },
       { label: `▶ java ${name}`, terminalId: term.id },
     );
   } catch (e) {
@@ -7005,6 +8245,132 @@ async function checkoutBranch(branch) {
 // --- Terminal (xterm + PTY WebSocket) ---
 let terminalNextNum = 1;
 
+const TERM_SOURCE_EXT = 'java|kt|kts|scala|groovy|gradle|xml|properties|json|yaml|yml|rs|py|js|ts|tsx|jsx|go|rb|cs|cpp|c|h|hpp|md|sql|html|css|vue|swift|php|sh|toml|proto';
+const TERM_FILE_PATH = `[A-Za-z0-9_.@\\[\\]-]+(?:[\\/][A-Za-z0-9_.@\\[\\]-]+)*\\.(?:${TERM_SOURCE_EXT})`;
+
+function resolveTerminalFilePath(rawPath) {
+  let p = workspaceExplorerPath(String(rawPath || '').trim());
+  if (!p || /^https?:\/\//i.test(p)) return null;
+
+  const projectFolder = (state.projectFolder || '').replace(/\\/g, '/').replace(/\/$/, '');
+  if (projectFolder && (p === projectFolder || p.startsWith(`${projectFolder}/`))) {
+    p = p === projectFolder ? '' : p.slice(projectFolder.length + 1);
+  } else if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
+    const markers = ['/src/', '/test/', '/main/', '/java/', '/kotlin/', '/resources/'];
+    for (const mark of markers) {
+      const idx = p.indexOf(mark);
+      if (idx >= 0) {
+        p = p.slice(idx + 1);
+        break;
+      }
+    }
+    if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
+      const tail = p.match(/\/((?:src|test)\/.+)$/);
+      if (!tail) return null;
+      p = tail[1];
+    }
+  }
+
+  p = normalizeRepoPath(p.replace(/^\.\//, ''));
+  if (!p || !/\.\w+$/.test(p)) return null;
+  return p;
+}
+
+function terminalLinkRange(match) {
+  const path = match[1];
+  const start = match.index + match[0].indexOf(path);
+  if (match[0].includes('[')) {
+    return { start, end: start + match[0].slice(match[0].indexOf(path)).length };
+  }
+  let end = start + path.length + 1 + String(match[2]).length;
+  if (match[3] && /:\d+(?::|\]|$)/.test(match[0])) {
+    end += 1 + String(match[3]).length;
+  }
+  return { start, end };
+}
+
+function parseTerminalFileLocations(lineText) {
+  const out = [];
+  const seen = new Set();
+  const patterns = [
+    {
+      re: new RegExp(`(${TERM_FILE_PATH}):\\[\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\]`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: +m[3] }),
+    },
+    {
+      re: new RegExp(`(${TERM_FILE_PATH}):(\\d+):(\\d+):\\s*(?:error|warning|note|fatal)`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: +m[3] }),
+    },
+    {
+      re: new RegExp(`-->\\s+(${TERM_FILE_PATH}):(\\d+):(\\d+)`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: +m[3] }),
+    },
+    {
+      re: new RegExp(`(${TERM_FILE_PATH}):(\\d+):\\s*(?:error|warning|note|fatal)`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: 1 }),
+    },
+    {
+      re: new RegExp(`\\((${TERM_FILE_PATH}):(\\d+)\\)`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: 1 }),
+    },
+  ];
+
+  for (const { re, pick } of patterns) {
+    re.lastIndex = 0;
+    let match;
+    while ((match = re.exec(lineText)) !== null) {
+      const hit = pick(match);
+      const { start, end } = terminalLinkRange(match);
+      const key = `${hit.path}:${hit.line}:${hit.column}:${start}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...hit, start, end });
+    }
+  }
+  out.sort((a, b) => a.start - b.start);
+  return out;
+}
+
+function registerTerminalFileLinkProvider(term, xterm) {
+  if (!term || !xterm?.registerLinkProvider) return;
+  if (term.linkProviderDisposable) {
+    try { term.linkProviderDisposable.dispose(); } catch { /* ignore */ }
+    term.linkProviderDisposable = null;
+  }
+  term.linkProviderDisposable = xterm.registerLinkProvider({
+    provideLinks(bufferLineNumber, callback) {
+      const line = xterm.buffer.active.getLine(bufferLineNumber - 1);
+      if (!line) {
+        callback(undefined);
+        return;
+      }
+      const text = line.translateToString(true);
+      const hits = parseTerminalFileLocations(text);
+      if (!hits.length) {
+        callback(undefined);
+        return;
+      }
+      const links = [];
+      for (const hit of hits) {
+        const path = resolveTerminalFilePath(hit.path);
+        if (!path || !state.repo) continue;
+        const label = `${path}:${hit.line}${hit.column > 1 ? `:${hit.column}` : ''}`;
+        links.push({
+          text: label,
+          range: {
+            start: { x: hit.start + 1, y: bufferLineNumber },
+            end: { x: hit.end + 1, y: bufferLineNumber },
+          },
+          activate(_event, _text) {
+            void openFileAt(path, hit.line, hit.column || 1);
+          },
+        });
+      }
+      callback(links.length ? links : undefined);
+    },
+  });
+}
+
 function xtermApi() {
   const Terminal = globalThis.Terminal;
   const FitAddon = globalThis.FitAddon?.FitAddon;
@@ -7025,6 +8391,7 @@ function createTerminalSession(name) {
     streamLine: null,
     streamColorPartial: '',
     commandStartLine: null,
+    linkProviderDisposable: null,
   };
 }
 
@@ -7047,6 +8414,10 @@ function terminalForId(id) {
 function destroyTerminalInstance(term) {
   if (!term) return;
   disconnectTerminalWs(term);
+  if (term.linkProviderDisposable) {
+    try { term.linkProviderDisposable.dispose(); } catch { /* ignore */ }
+    term.linkProviderDisposable = null;
+  }
   if (term.xterm) {
     try { term.xterm.dispose(); } catch { /* ignore */ }
     term.xterm = null;
@@ -7151,19 +8522,15 @@ function initTerminalXterm(term, host) {
     cursorBlink: true,
     convertEol: true,
     fontSize: getEditorFontSize(),
-    lineHeight: 1.25,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-    theme: {
-      background: '#0a0e14',
-      foreground: '#c8d1dc',
-      cursor: '#7eb8da',
-      selectionBackground: '#2a4560',
-    },
-    scrollback: 4000,
+    lineHeight: 1.28,
+    fontFamily: getEditorFontSpec().family,
+    theme: terminalThemeFromApp(),
+    scrollback: 8000,
   });
   const fitAddon = new api.FitAddon();
   xterm.loadAddon(fitAddon);
   xterm.open(pane);
+  registerTerminalFileLinkProvider(term, xterm);
   xterm.onData((data) => {
     if (term.ws?.readyState === WebSocket.OPEN) {
       term.ws.send(data);
@@ -7362,7 +8729,7 @@ function terminalCommandBegin(label, terminalId, { kind } = {}) {
   const labelText = String(label || '').trim() || 'command';
   const isTest = kind === 'test' || (/\btest\b/i.test(labelText) && labelText.includes('▶'));
   const accent = isTest ? TERM_ESC.brightCyan : TERM_ESC.cyan;
-  term.xterm.write(`${TERM_ESC.dim}────────────────────────────────────────${TERM_ESC.reset}\r\n`);
+  term.xterm.write(`${TERM_ESC.dim}╭─ run ─${TERM_ESC.reset}\r\n`);
   term.xterm.write(`${accent}${TERM_ESC.bold}${labelText}${TERM_ESC.reset}\r\n`);
   scrollTerminalToLine(term, term.commandStartLine);
   term.xterm.focus();
@@ -7382,7 +8749,7 @@ function terminalCommandEnd(exitCode, terminalId) {
       term.xterm.write(`${TERM_ESC.red}${TERM_ESC.bold}✗ failed (exit ${exitCode})${TERM_ESC.reset}\r\n`);
     }
   }
-  term.xterm.write(`${TERM_ESC.dim}────────────────────────────────────────${TERM_ESC.reset}\r\n\r\n`);
+  term.xterm.write(`${TERM_ESC.dim}╰─ done ─${TERM_ESC.reset}\r\n\r\n`);
   if (typeof exitCode === 'number' && exitCode !== 0) {
     try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
   } else {
@@ -7412,8 +8779,27 @@ function finalizeTerminalStream(terminalId) {
   term.streamColorPartial = '';
 }
 
+function clearActiveTerminal() {
+  const term = getActiveTerminal();
+  if (!term?.xterm) return;
+  term.xterm.clear();
+  term.streamLine = null;
+  term.streamColorPartial = '';
+  term.xterm.focus();
+}
+
+function restartActiveTerminal() {
+  const term = getActiveTerminal();
+  const host = $('#terminal-xterm-host');
+  if (!term || !host) return;
+  spawnTerminalInstance(term, host);
+  mountActiveTerminal();
+}
+
 function bindTerminalTabs() {
   $('#btn-terminal-new')?.addEventListener('click', () => newTerminal());
+  $('#btn-terminal-clear')?.addEventListener('click', () => clearActiveTerminal());
+  $('#btn-terminal-restart')?.addEventListener('click', () => restartActiveTerminal());
   $('#terminal-tabs')?.addEventListener('click', (e) => {
     const closeBtn = e.target.closest('.ij-terminal-tab-close');
     const tab = e.target.closest('.ij-terminal-tab');
@@ -8416,13 +9802,16 @@ async function runAgentChat(prompt, opts = {}) {
             cancelled = true;
             buffer = buffer || 'Stopped.';
             textBuffer = textBuffer || buffer;
+          } else if (data.status === 'error') {
+            const errText = data.error || data.summary || 'Agent run failed';
+            if (!buffer) throw new Error(errText);
           } else if (!buffer && data.status === 'finished') {
             buffer = def.capabilities.tools
               ? 'Done — check Source Control for file changes, or reopen files in the editor.'
               : def.emptyReply();
             textBuffer = buffer;
           } else if (!buffer && data.status === 'error') {
-            throw new Error('Agent run failed');
+            throw new Error(data.error || data.summary || 'Agent run failed');
           }
         }
       }
@@ -8620,6 +10009,10 @@ function bindEvents() {
   installTerminalClipboard();
   $('#toast .ij-toast-dismiss')?.addEventListener('click', dismissToast);
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
+  $('#status-coverage')?.addEventListener('click', () => toggleCoveragePanel());
+  $('#btn-coverage-close')?.addEventListener('click', hideCoveragePanel);
+  $('#btn-coverage-refresh')?.addEventListener('click', () => void refreshCoveragePanel(state.activeTab));
+  $('#btn-coverage-open-html')?.addEventListener('click', () => void openCoverageHtmlReport());
   $('#status-ai-fix')?.addEventListener('click', (e) => {
     e.stopPropagation();
     state.editor?.runAiQuickFix?.();
@@ -8777,6 +10170,10 @@ function bindEvents() {
   });
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('#tree-context-menu')?.classList.contains('hidden')) {
+      hideTreeContextMenu();
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       if ($('#palette-overlay')?.classList.contains('open')) hidePalette();
@@ -8798,6 +10195,11 @@ function bindEvents() {
       if (isSettingsOpen()) {
         e.preventDefault();
         hideSettingsModal();
+        return;
+      }
+      if ($('#search-overlay')?.classList.contains('open')) {
+        e.preventDefault();
+        hideSearchEverywhere();
         return;
       }
       if ($('#goto-class-overlay')?.classList.contains('open')) {
@@ -8824,6 +10226,18 @@ function bindEvents() {
       e.preventDefault();
       if ($('#branch-picker-overlay')?.classList.contains('open')) hideBranchPicker();
       else showBranchPicker();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'p' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      if ($('#search-overlay')?.classList.contains('open')) hideSearchEverywhere();
+      else showSearchEverywhere();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      if ($('#search-overlay')?.classList.contains('open')) hideSearchEverywhere();
+      else showSearchEverywhere(':');
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'o' && !e.shiftKey && !e.altKey) {
@@ -8910,6 +10324,9 @@ function bindEvents() {
   $('#file-modal-overlay').addEventListener('click', (e) => {
     if (e.target === $('#file-modal-overlay')) hideFileModal();
   });
+
+  $('#panel-explorer')?.addEventListener('scroll', onTreeContextMenuScroll, true);
+  window.addEventListener('resize', hideTreeContextMenu);
 }
 
 async function init() {
@@ -8934,6 +10351,7 @@ async function init() {
   bindMenus();
   bindPalette();
   bindGoToClass();
+  bindSearchEverywhere();
   bindBranchPicker();
   bindRepoPicker();
   mountReaperIcons();
@@ -8971,6 +10389,7 @@ async function init() {
   if (initialRepo && state.repos.some((r) => r.name === initialRepo)) {
     await selectRepo(initialRepo);
   }
+  hideLaunchSplash();
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {
       await loadCursorStatus();
@@ -8978,4 +10397,7 @@ async function init() {
   }, 3000);
 }
 
-init().catch((e) => toast(e.message, 'error'));
+init().catch((e) => {
+  toast(e.message, 'error');
+  hideLaunchSplash();
+});

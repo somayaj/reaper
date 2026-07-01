@@ -4,13 +4,22 @@ allprojects { project ->
     project.tasks.register('reaperPrintClasspath') {
         group = 'reaper'
         description = 'Print classpath and source JARs for Reaper IDE indexing'
-        def compileJava = project.tasks.findByName('compileJava')
-        if (compileJava != null) {
-            dependsOn compileJava
+        // Main compile only — builds inter-module outputs. Test deps resolve via
+        // testCompileClasspath below without compiling test sources (much faster).
+        // Set -PreaperClasspathIncludeTestCompile=true (REAPER_CLASSPATH_FULL=1) to compile tests too.
+        def skipCompile = project.findProperty('reaperClasspathSkipCompile') == 'true'
+        def includeTestCompile = project.findProperty('reaperClasspathIncludeTestCompile') == 'true'
+        if (!skipCompile) {
+            def compileJava = project.tasks.findByName('compileJava')
+            if (compileJava != null) {
+                dependsOn compileJava
+            }
         }
-        def compileTestJava = project.tasks.findByName('compileTestJava')
-        if (compileTestJava != null) {
-            dependsOn compileTestJava
+        if (includeTestCompile) {
+            def compileTestJava = project.tasks.findByName('compileTestJava')
+            if (compileTestJava != null) {
+                dependsOn compileTestJava
+            }
         }
         doLast {
             def names = [

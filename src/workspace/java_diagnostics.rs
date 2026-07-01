@@ -1,16 +1,20 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use super::classpath;
 use super::diagnostics::Diagnostic;
 use super::exec::run_java_command;
-use super::gradle::find_gradle_root;
+use super::gradle::{self, find_gradle_root};
 use super::maven::find_maven_root;
 use super::{safe_join};
 
 const DIAG_ROOT: &str = ".reaper/java-diagnostics";
 const DIAG_OUT: &str = ".reaper/java-diagnostics-out";
+const TEST_COMPILE_CACHE: &str = "test-compile-cache.json";
+const TEST_COMPILE_TTL: Duration = Duration::from_secs(120);
 
 pub type JavaDiagnostic = Diagnostic;
 
@@ -45,8 +49,22 @@ fn check_project_java(
     content: &str,
     overlays: &[(String, String)],
 ) -> Result<Vec<Diagnostic>> {
+    let _ = classpath::ensure_test_classpath_for_file(project_root, rel_path, content);
+
+    if classpath::file_needs_test_classpath(rel_path, content)
+        && workspace_file_matches_disk(ws, rel_path, content)
+        && gradle::find_gradle_wrapper_root(project_root).join("gradlew").is_file()
+    {
+        if let Some(diags) =
+            gradle_test_compile_diagnostics(ws, project_root, rel_path, content)?
+        {
+            let local = local_file_class_name_diags(rel_path, content);
+            return Ok(merge_file_name_diags(diags, local));
+        }
+    }
+
     let classpath_entries =
-        classpath::resolve_dependency_jars_for_java_file(project_root, rel_path, content);
+        classpath::resolve_javac_classpath_for_file(project_root, rel_path, content);
     let jars: Vec<PathBuf> = classpath_entries
         .iter()
         .filter(|p| p.is_file())
@@ -59,9 +77,9 @@ fn check_project_java(
         );
     }
 
-    let overlay_root = sync_java_diagnostics_overlays(ws, rel_path, content, overlays)?;
+    let overlay_root = sync_java_diagnostics_overlays(ws, project_root, rel_path, content, overlays)?;
 
-    let sourcepath = classpath::project_java_sourcepath(project_root, &overlay_root);
+    let sourcepath = classpath::project_java_sourcepath(ws, project_root, &overlay_root);
 
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
@@ -94,6 +112,25 @@ fn check_project_java(
         );
     }
     append_javac_release_args(&mut args, project_root);
+    for companion in collect_imported_project_source_files(
+        ws,
+        project_root,
+        content,
+        overlays,
+    ) {
+        let rel = companion
+            .strip_prefix(ws)
+            .or_else(|_| companion.strip_prefix(project_root))
+            .unwrap_or(&companion)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let overlay_path = overlay_root.join(&rel);
+        if overlay_path.is_file() {
+            args.push(overlay_path.to_string_lossy().into_owned());
+        } else if companion.is_file() {
+            args.push(companion.to_string_lossy().into_owned());
+        }
+    }
     args.push(overlay_root.join(rel_path).to_string_lossy().into_owned());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -104,6 +141,12 @@ fn check_project_java(
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
     diags = filter_stale_dependency_diags(diags, project_root, rel_path, content, &jars);
+    diags = filter_javac_classpath_visibility_false_positives(
+        diags,
+        project_root,
+        rel_path,
+        content,
+    );
     diags = filter_spring_data_javac_false_positives(diags, project_root, content);
     diags = filter_project_method_false_positives(
         diags,
@@ -119,6 +162,13 @@ fn check_project_java(
         content,
         overlays,
     );
+    diags = filter_project_import_false_positives(
+        diags,
+        ws,
+        project_root,
+        content,
+        overlays,
+    );
     enrich_missing_dependency_diags(&mut diags, project_root, content);
     enrich_static_import_diags(&mut diags, content);
     Ok(diags)
@@ -126,6 +176,7 @@ fn check_project_java(
 
 fn sync_java_diagnostics_overlays(
     ws: &Path,
+    project_root: &Path,
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
@@ -148,12 +199,166 @@ fn sync_java_diagnostics_overlays(
         }
         std::fs::write(&overlay_file, text)?;
     }
+
+    for disk_path in collect_imported_project_source_files(ws, project_root, content, overlays) {
+        let rel = disk_path
+            .strip_prefix(ws)
+            .or_else(|_| disk_path.strip_prefix(project_root))
+            .unwrap_or(&disk_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !rel.ends_with(".java") || !seen.insert(rel.clone()) {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&disk_path) {
+            let overlay_file = overlay_root.join(&rel);
+            if let Some(parent) = overlay_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(overlay_file, text);
+        }
+    }
+
     Ok(overlay_root)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TestCompileCache {
+    stamp: String,
+    success: bool,
+    #[serde(default)]
+    log: String,
+    checked_at_ms: u64,
+}
+
+fn test_compile_cache_path(project_root: &Path) -> PathBuf {
+    project_root.join(".reaper").join(TEST_COMPILE_CACHE)
+}
+
+fn load_test_compile_cache(project_root: &Path) -> Option<TestCompileCache> {
+    let text = std::fs::read_to_string(test_compile_cache_path(project_root)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_test_compile_cache(
+    project_root: &Path,
+    stamp: &str,
+    success: bool,
+    log: &str,
+) -> Result<()> {
+    let reaper = project_root.join(".reaper");
+    std::fs::create_dir_all(&reaper)?;
+    let checked_at_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cache = TestCompileCache {
+        stamp: stamp.to_string(),
+        success,
+        log: log.to_string(),
+        checked_at_ms,
+    };
+    std::fs::write(
+        test_compile_cache_path(project_root),
+        serde_json::to_string(&cache)?,
+    )?;
+    Ok(())
+}
+
+fn test_compile_cache_fresh(project_root: &Path, stamp: &str) -> bool {
+    let Some(cache) = load_test_compile_cache(project_root) else {
+        return false;
+    };
+    if cache.stamp != stamp {
+        return false;
+    }
+    let age_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        .saturating_sub(cache.checked_at_ms);
+    age_ms < TEST_COMPILE_TTL.as_millis() as u64
+}
+
+fn workspace_file_matches_disk(ws: &Path, rel_path: &str, content: &str) -> bool {
+    safe_join(ws, rel_path)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|disk| disk == content)
+}
+
+/// Use Gradle `compileTestJava` as the source of truth for saved test sources (cached ~2 min).
+fn gradle_test_compile_diagnostics(
+    ws: &Path,
+    project_root: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Result<Option<Vec<Diagnostic>>> {
+    let stamp = classpath::classpath_cache_stamp(project_root).unwrap_or_default();
+    let (success, log) = if test_compile_cache_fresh(project_root, &stamp) {
+        let cache = load_test_compile_cache(project_root).expect("fresh cache");
+        (cache.success, cache.log)
+    } else {
+        let out = match gradle::run_gradle_compile_test_java(project_root) {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::debug!(
+                    "compileTestJava diagnostics skipped for {}: {e:#}",
+                    project_root.display()
+                );
+                return Ok(None);
+            }
+        };
+        let success = out.exit_code == 0;
+        let log = if out.stderr.is_empty() {
+            out.stdout
+        } else if out.stdout.is_empty() {
+            out.stderr
+        } else {
+            format!("{}\n{}", out.stdout, out.stderr)
+        };
+        save_test_compile_cache(project_root, &stamp, success, &log)?;
+        (success, log)
+    };
+
+    if success {
+        return Ok(Some(Vec::new()));
+    }
+
+    Ok(Some(parse_compiler_output(&log, ws, rel_path, content)))
+}
+
+fn filter_javac_classpath_visibility_false_positives(
+    diags: Vec<Diagnostic>,
+    project_root: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Vec<Diagnostic> {
+    if !classpath::file_needs_test_classpath(rel_path, content) {
+        return diags;
+    }
+    let stamp = classpath::classpath_cache_stamp(project_root).unwrap_or_default();
+    let gradle_test_ok = load_test_compile_cache(project_root)
+        .is_some_and(|c| c.success && c.stamp == stamp);
+    if !gradle_test_ok {
+        return diags;
+    }
+    diags
+        .into_iter()
+        .filter(|d| !is_classpath_visibility_false_positive(&d.message))
+        .collect()
+}
+
+fn is_classpath_visibility_false_positive(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cannot access")
+        || (lower.contains("inaccessible") && lower.contains("interface"))
+        || (lower.contains("bad class file") && lower.contains("class file has wrong version"))
+}
+
 /// Source roots for javac — every module under the Gradle/Maven project root.
-fn build_java_sourcepath(project_root: &Path, overlay_root: &Path) -> Vec<PathBuf> {
-    classpath::project_java_sourcepath(project_root, overlay_root)
+fn build_java_sourcepath(ws: &Path, project_root: &Path, overlay_root: &Path) -> Vec<PathBuf> {
+    classpath::project_java_sourcepath(ws, project_root, overlay_root)
 }
 
 fn filter_stale_dependency_diags(
@@ -201,6 +406,12 @@ fn is_stale_declared_dependency_diag(
     let missing_package = lower.contains("package") && lower.contains("does not exist");
     let missing_symbol = lower.contains("cannot find symbol");
 
+    if super::java_psi::stale_imported_dependency_diag(message, content, |pkg| {
+        classpath::classpath_includes_package(jars, pkg)
+    }) {
+        return true;
+    }
+
     if (markers.slf4j || super::java_ecosystem::file_uses_slf4j(content))
         && dependency_unresolved(classpath::classpath_includes_slf4j(jars), jars, tooling_pending)
     {
@@ -212,10 +423,16 @@ fn is_stale_declared_dependency_diag(
         }
     }
 
-    if (markers.lombok || content.contains("@Slf4j"))
-        && content.contains("@Slf4j")
-        && missing_symbol
-        && lower.contains("variable log")
+    if (markers.lombok || super::java_ecosystem::file_uses_lombok(content))
+        && is_lombok_proc_none_false_positive(
+            message,
+            content,
+            &lower,
+            missing_package,
+            missing_symbol,
+            jars,
+            tooling_pending,
+        )
     {
         return true;
     }
@@ -291,14 +508,6 @@ fn is_stale_declared_dependency_diag(
         }
     }
 
-    if markers.lombok
-        && content.contains('@')
-        && dependency_unresolved(classpath::classpath_includes_lombok(jars), jars, tooling_pending)
-        && lower.contains("lombok")
-    {
-        return missing_package || missing_symbol;
-    }
-
     if (markers.mockito || needs_test)
         && uses_mockito(content)
         && dependency_unresolved(classpath::classpath_includes_mockito(jars), jars, tooling_pending)
@@ -346,6 +555,43 @@ fn spring_data_symbol_in_message(lower_message: &str, content: &str) -> bool {
     classpath::well_known_spring_data_simple_names().any(|name| {
         content.contains(name) && lower_message.contains(&name.to_ascii_lowercase())
     })
+}
+
+fn lombok_symbol_in_message(message: &str, content: &str) -> bool {
+    super::java_psi::lombok_symbol_in_message(message, content)
+}
+
+/// javac runs with `-proc:none`, so Lombok annotations and generated members are not resolved.
+fn is_lombok_proc_none_false_positive(
+    message: &str,
+    content: &str,
+    lower: &str,
+    missing_package: bool,
+    missing_symbol: bool,
+    jars: &[PathBuf],
+    tooling_pending: bool,
+) -> bool {
+    let annotations = super::java_psi::annotation_simple_names(content);
+    if annotations.iter().any(|n| n == "Slf4j")
+        && missing_symbol
+        && (lower.contains("variable log") || lower.contains("class slf4j"))
+    {
+        return true;
+    }
+
+    let lombok_on_classpath = classpath::classpath_includes_lombok(jars);
+    let lombok_unresolved =
+        dependency_unresolved(lombok_on_classpath, jars, tooling_pending);
+
+    if lombok_unresolved {
+        return lower.contains("lombok")
+            || (missing_package && lower.contains("lombok"))
+            || (missing_symbol && lombok_symbol_in_message(message, content));
+    }
+
+    missing_symbol
+        && lombok_on_classpath
+        && lombok_symbol_in_message(message, content)
 }
 
 /// Drop javac false positives for Spring Data types when the project declares them and Gradle tests compile.
@@ -445,10 +691,22 @@ fn is_project_type_false_positive(
     let Some(type_name) = parse_missing_class_symbol(message) else {
         return false;
     };
+    if read_project_type_source(ws, project_root, &type_name, content, overlays).is_some() {
+        return true;
+    }
     if is_well_known_external_type(&type_name, content) {
         return false;
     }
-    read_project_type_source(ws, project_root, &type_name, content, overlays).is_some()
+    false
+}
+
+fn simple_type_name(type_name: &str) -> &str {
+    let base = type_name
+        .split('<')
+        .next()
+        .unwrap_or(type_name)
+        .trim();
+    base.rsplit('.').next().unwrap_or(base)
 }
 
 fn parse_missing_class_symbol(message: &str) -> Option<String> {
@@ -457,8 +715,14 @@ fn parse_missing_class_symbol(message: &str) -> Option<String> {
     }
     let class_line = message
         .lines()
-        .find(|l| l.contains("symbol:") && l.contains("class "))?;
-    let type_name = class_line.split("class ").nth(1)?.trim();
+        .find(|l| l.contains("symbol:") && l.contains("class"))?;
+    let after_symbol = class_line.split("symbol:").nth(1)?.trim();
+    let type_part = after_symbol
+        .strip_prefix("class")
+        .or_else(|| after_symbol.split("class ").nth(1))
+        .unwrap_or(after_symbol)
+        .trim();
+    let type_name = simple_type_name(type_part.split_whitespace().next().unwrap_or(type_part));
     if type_name.is_empty() {
         return None;
     }
@@ -563,6 +827,9 @@ fn is_spring_data_repository_method(
 }
 
 fn resolve_project_type_fqcn(content: &str, type_name: &str) -> Option<String> {
+    if type_name.contains('.') {
+        return Some(type_name.to_string());
+    }
     for line in content.lines() {
         let t = line.trim();
         if !t.starts_with("import ") || t.starts_with("import static ") {
@@ -584,6 +851,143 @@ fn resolve_project_type_fqcn(content: &str, type_name: &str) -> Option<String> {
     Some(format!("{pkg}.{type_name}"))
 }
 
+fn java_rel_path_for_fqcn(fqcn: &str) -> String {
+    format!("{}.java", fqcn.replace('.', "/"))
+}
+
+fn read_java_at_rel(
+    ws: &Path,
+    rel: &str,
+    overlays: &[(String, String)],
+) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    for (path, text) in overlays {
+        let p = path.replace('\\', "/");
+        if p == rel || p.ends_with(&format!("/{rel}")) {
+            return Some(text.clone());
+        }
+    }
+    let disk = ws.join(&rel);
+    if disk.is_file() {
+        return std::fs::read_to_string(disk).ok();
+    }
+    None
+}
+
+fn all_source_prefixes(ws: &Path, project_root: &Path) -> Vec<String> {
+    let mut prefixes = super::java_sources::discover_source_prefixes(ws);
+    prefixes.extend(super::java_sources::discover_source_prefixes(project_root));
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn fqcn_candidates(content: &str, type_name: &str) -> Vec<String> {
+    let simple = simple_type_name(type_name);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |fqcn: String| {
+        if seen.insert(fqcn.clone()) {
+            out.push(fqcn);
+        }
+    };
+    if simple.contains('.') {
+        push(simple.to_string());
+    }
+    if let Some(fqcn) = resolve_project_type_fqcn(content, simple) {
+        push(fqcn);
+    }
+    for line in content.lines() {
+        let t = line.trim();
+        if !t.starts_with("import ") || t.starts_with("import static ") {
+            continue;
+        }
+        let imp = t
+            .trim_start_matches("import ")
+            .trim_end_matches(';')
+            .trim();
+        if imp.ends_with(".*") {
+            let pkg = imp.trim_end_matches(".*").trim();
+            if !pkg.is_empty() {
+                push(format!("{pkg}.{simple}"));
+            }
+            continue;
+        }
+        if simple.contains('.') {
+            if imp == simple || imp.ends_with(&format!(".{simple}")) {
+                push(imp.to_string());
+            }
+        } else if imp.ends_with(&format!(".{simple}")) {
+            push(imp.to_string());
+        }
+    }
+    out
+}
+
+fn project_type_extensions() -> [&'static str; 3] {
+    ["java", "kt", "kts"]
+}
+
+fn rel_paths_for_fqcn(fqcn: &str) -> Vec<String> {
+    let path = fqcn.replace('.', "/");
+    let mut out = vec![format!("{path}.java")];
+    for ext in ["kt", "kts"] {
+        out.push(format!("{path}.{ext}"));
+    }
+    out
+}
+
+fn collect_imported_project_source_files(
+    ws: &Path,
+    project_root: &Path,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for imp in super::java_psi::type_import_fqcns(&super::java_psi::parse_imports(content)) {
+        if let Some(path) = resolve_project_type_file_path(ws, project_root, &imp, overlays) {
+            if path.extension().and_then(|e| e.to_str()) == Some("java") && seen.insert(path.clone())
+            {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn resolve_project_type_file_path(
+    ws: &Path,
+    project_root: &Path,
+    fqcn: &str,
+    overlays: &[(String, String)],
+) -> Option<PathBuf> {
+    for rel in rel_paths_for_fqcn(fqcn) {
+        if let Some(text) = read_java_at_rel(ws, &rel, overlays) {
+            if source_defines_type(&text, fqcn.rsplit('.').next().unwrap_or(fqcn)) {
+                return Some(ws.join(&rel));
+            }
+        }
+        for prefix in all_source_prefixes(ws, project_root) {
+            let nested = format!("{prefix}/{rel}");
+            if let Some(text) = read_java_at_rel(ws, &nested, overlays) {
+                if source_defines_type(&text, fqcn.rsplit('.').next().unwrap_or(fqcn)) {
+                    return Some(ws.join(&nested));
+                }
+            }
+            let disk = project_root.join(&nested);
+            if disk.is_file() {
+                return Some(disk);
+            }
+            let disk_ws = ws.join(&nested);
+            if disk_ws.is_file() {
+                return Some(disk_ws);
+            }
+        }
+    }
+    None
+}
+
 fn read_project_type_source(
     ws: &Path,
     project_root: &Path,
@@ -591,49 +995,167 @@ fn read_project_type_source(
     content: &str,
     overlays: &[(String, String)],
 ) -> Option<String> {
-    if let Some(fqcn) = resolve_project_type_fqcn(content, type_name) {
-        let rel = format!("{}.java", fqcn.replace('.', "/"));
-        for (path, text) in overlays {
-            if path.replace('\\', "/").ends_with(&rel) {
-                return Some(text.clone());
+    let simple = simple_type_name(type_name);
+    for fqcn in fqcn_candidates(content, simple) {
+        for rel in rel_paths_for_fqcn(&fqcn) {
+            if let Some(text) = read_java_at_rel(ws, &rel, overlays) {
+                if source_defines_type(&text, simple) {
+                    return Some(text);
+                }
             }
-        }
-        let disk = ws.join(&rel);
-        if disk.is_file() {
-            return std::fs::read_to_string(disk).ok();
+            for prefix in all_source_prefixes(ws, project_root) {
+                let nested = format!("{prefix}/{rel}");
+                if let Some(text) = read_java_at_rel(ws, &nested, overlays) {
+                    if source_defines_type(&text, simple) {
+                        return Some(text);
+                    }
+                }
+            }
         }
     }
 
     for (path, text) in overlays {
-        if path.ends_with(".java") && source_defines_type(text, type_name) {
+        if is_project_source_path(path) && source_defines_type(text, simple) {
             return Some(text.clone());
         }
     }
 
-    for prefix in super::java_sources::discover_source_prefixes(project_root) {
-        let root = project_root.join(prefix);
-        if let Some(path) = find_file_named_recursive(&root, &format!("{type_name}.java"), 0) {
-            if let Ok(rel) = path.strip_prefix(ws) {
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                if let Some(text) = overlays.iter().find(|(p, _)| p == &rel).map(|(_, t)| t.clone())
-                {
-                    return Some(text);
+    for ext in project_type_extensions() {
+        let file_name = format!("{simple}.{ext}");
+        for prefix in all_source_prefixes(ws, project_root) {
+            for base in [ws, project_root] {
+                let root = base.join(&prefix);
+                if !root.is_dir() {
+                    continue;
+                }
+                if let Some(path) = find_file_named_recursive(&root, &file_name, 0) {
+                    if let Some(text) = read_java_path(ws, path, overlays) {
+                        if source_defines_type(&text, simple) {
+                            return Some(text);
+                        }
+                    }
                 }
             }
-            return std::fs::read_to_string(path).ok();
+        }
+    }
+    None
+}
+
+fn is_project_source_path(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_lowercase();
+    project_type_extensions()
+        .iter()
+        .any(|ext| p.ends_with(&format!(".{ext}")))
+}
+
+fn read_java_path(
+    ws: &Path,
+    path: std::path::PathBuf,
+    overlays: &[(String, String)],
+) -> Option<String> {
+    if let Ok(rel) = path.strip_prefix(ws) {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if let Some(text) = overlays.iter().find(|(p, _)| p == &rel).map(|(_, t)| t.clone()) {
+            return Some(text);
+        }
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+fn filter_project_import_false_positives(
+    diags: Vec<Diagnostic>,
+    ws: &Path,
+    project_root: &Path,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Vec<Diagnostic> {
+    diags
+        .into_iter()
+        .filter(|d| {
+            !is_project_import_false_positive(ws, project_root, content, overlays, &d.message)
+        })
+        .collect()
+}
+
+fn is_project_import_false_positive(
+    ws: &Path,
+    project_root: &Path,
+    content: &str,
+    overlays: &[(String, String)],
+    message: &str,
+) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("package") && lower.contains("does not exist")) {
+        return false;
+    }
+    let Some(missing_pkg) = parse_missing_package(message) else {
+        return false;
+    };
+    for line in content.lines() {
+        let t = line.trim();
+        if !t.starts_with("import ") || t.starts_with("import static ") {
+            continue;
+        }
+        let imp = t
+            .trim_start_matches("import ")
+            .trim_end_matches(';')
+            .trim();
+        if !imp.starts_with(&format!("{missing_pkg}.")) && imp != missing_pkg {
+            continue;
+        }
+        if read_project_type_source(ws, project_root, imp, content, overlays).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_missing_package(message: &str) -> Option<String> {
+    for line in message.lines() {
+        let t = line.trim();
+        if !t.contains("package") || !t.contains("does not exist") {
+            continue;
+        }
+        let rest = t
+            .strip_prefix("package ")
+            .or_else(|| t.split("package ").nth(1))?;
+        let pkg = rest.split_whitespace().next()?.trim_end_matches('.');
+        if !pkg.is_empty() && pkg.contains('.') {
+            return Some(pkg.to_string());
         }
     }
     None
 }
 
 fn source_defines_type(content: &str, type_name: &str) -> bool {
-    content.lines().any(|line| {
+    let simple = simple_type_name(type_name);
+    for line in content.lines() {
         let t = line.trim();
-        t.contains(&format!("interface {type_name}"))
-            || t.contains(&format!("class {type_name}"))
-            || t.contains(&format!("enum {type_name}"))
-            || t.contains(&format!("record {type_name}"))
-    })
+        if t.is_empty() || t.starts_with("//") || t.starts_with('*') {
+            continue;
+        }
+        for keyword in [
+            "class ",
+            "interface ",
+            "enum ",
+            "record ",
+            "data class ",
+            "object ",
+        ] {
+            let Some(pos) = t.find(keyword) else {
+                continue;
+            };
+            let rest = &t[pos + keyword.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name == simple {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn source_declares_method(content: &str, method_name: &str) -> bool {
@@ -643,18 +1165,27 @@ fn source_declares_method(content: &str, method_name: &str) -> bool {
     })
 }
 
+fn should_skip_project_search_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "build" | "target" | ".gradle" | "node_modules" | ".git" | ".reaper" | "out" | "bin"
+    )
+}
+
 fn find_file_named_recursive(dir: &Path, file_name: &str, depth: usize) -> Option<PathBuf> {
-    if depth > 14 || !dir.is_dir() {
+    if depth > 16 || !dir.is_dir() {
         return None;
     }
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         if path.is_file() {
-            if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
+            if name_str == file_name {
                 return Some(path);
             }
-        } else if path.is_dir() {
+        } else if path.is_dir() && !should_skip_project_search_dir(&name_str) {
             if let Some(found) = find_file_named_recursive(&path, file_name, depth + 1) {
                 return Some(found);
             }
@@ -1299,6 +1830,32 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     }
 
     #[test]
+    fn filters_validation_imports_when_api_missing_but_jakarta_annotation_present() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            spring: true,
+            ..Default::default()
+        };
+        let content = r#"
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+public record CreateProductRequest(@NotBlank String name, @NotNull @Positive java.math.BigDecimal price) {}
+"#;
+        let ann = PathBuf::from(
+            "/cache/files-2.1/jakarta.annotation/jakarta.annotation-api/2.1.1/x/jakarta.annotation-api-2.1.1.jar",
+        );
+        assert!(is_stale_declared_dependency_diag(
+            "error: cannot find symbol\n  symbol:   class NotBlank\n  location: class CreateProductRequest",
+            content,
+            &markers,
+            false,
+            false,
+            &[ann],
+            false,
+        ));
+    }
+
+    #[test]
     fn filters_junit_diag_when_pom_declares_junit_but_classpath_empty() {
         let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
             junit: true,
@@ -1425,6 +1982,64 @@ class AppTest {
     }
 
     #[test]
+    fn filters_lombok_required_args_constructor_when_classpath_unresolved() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            lombok: true,
+            ..Default::default()
+        };
+        let content = r#"
+import lombok.RequiredArgsConstructor;
+@RequiredArgsConstructor
+class GatewayController {
+    private final String id;
+}
+"#;
+        assert!(is_stale_declared_dependency_diag(
+            "error: cannot find symbol\n  symbol:   class RequiredArgsConstructor\n  location: class GatewayController",
+            content,
+            &markers,
+            false,
+            false,
+            &[],
+            false,
+        ));
+        assert!(!is_stale_declared_dependency_diag(
+            "';' expected",
+            content,
+            &markers,
+            false,
+            false,
+            &[],
+            false,
+        ));
+    }
+
+    #[test]
+    fn filters_lombok_slf4j_annotation_without_import_when_lombok_on_classpath() {
+        let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
+            lombok: true,
+            ..Default::default()
+        };
+        let content = r#"
+@SpringBootApplication
+@Slf4j
+public class OrderServiceApplication {
+    public static void main(String[] args) {}
+}
+"#;
+        let lombok = PathBuf::from("/tmp/lombok-1.18.36.jar");
+        assert!(is_stale_declared_dependency_diag(
+            "error: cannot find symbol\n  symbol:   class Slf4j\n  location: class OrderServiceApplication",
+            content,
+            &markers,
+            false,
+            false,
+            &[lombok],
+            false,
+        ));
+    }
+
+    #[test]
     fn filters_lombok_slf4j_log_variable_without_annotation_processing() {
         let markers = crate::workspace::java_ecosystem::JavaBuildMarkers {
             lombok: true,
@@ -1459,6 +2074,81 @@ class Worker {
 }
 "#;
         let msg = "error: cannot find symbol\n  symbol:   class ScheduledTask\n  location: class Worker";
+        assert!(is_project_type_false_positive(&ws, &ws, content, &[], msg));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn filters_project_class_under_gradle_module_src_root() {
+        let ws = std::env::temp_dir().join("reaper-diag-module-class");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("app/src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("app/src/main/java/com/example/ScheduledTask.java"),
+            "package com.example;\nclass ScheduledTask {}\n",
+        )
+        .unwrap();
+        let content = r#"
+package com.example;
+import com.example.ScheduledTask;
+class Worker {
+    void x() { new ScheduledTask(); }
+}
+"#;
+        let msg = "error: cannot find symbol\n  symbol:   class ScheduledTask\n  location: class Worker";
+        assert!(is_project_type_false_positive(&ws, &ws, content, &[], msg));
+        let import_msg = "package com.example does not exist";
+        assert!(is_project_import_false_positive(
+            &ws,
+            &ws,
+            content,
+            &[],
+            import_msg,
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn filters_api_response_for_gateway_controller_across_dto_package() {
+        let ws = std::env::temp_dir().join("reaper-diag-api-response");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("api/src/main/java/com/example/dto")).unwrap();
+        std::fs::create_dir_all(ws.join("api/src/main/java/com/example/web")).unwrap();
+        std::fs::write(
+            ws.join("api/src/main/java/com/example/dto/ApiResponse.java"),
+            "package com.example.dto;\npublic class ApiResponse<T> { }\n",
+        )
+        .unwrap();
+        let content = r#"
+package com.example.web;
+import com.example.dto.ApiResponse;
+public class GatewayController {
+    ApiResponse<String> ok() { return new ApiResponse<>(); }
+}
+"#;
+        let msg = "error: cannot find symbol\n  symbol:   class ApiResponse\n  location: class GatewayController";
+        assert!(is_project_type_false_positive(&ws, &ws, content, &[], msg));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn filters_api_response_from_kotlin_source() {
+        let ws = std::env::temp_dir().join("reaper-diag-api-response-kt");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src/main/kotlin/com/example/dto")).unwrap();
+        std::fs::write(
+            ws.join("src/main/kotlin/com/example/dto/ApiResponse.kt"),
+            "package com.example.dto\ndata class ApiResponse<T>(val data: T)\n",
+        )
+        .unwrap();
+        let content = r#"
+package com.example.web;
+import com.example.dto.ApiResponse;
+class GatewayController {
+    ApiResponse<String> ok() { return null; }
+}
+"#;
+        let msg = "error: cannot find symbol\n  symbol:   class ApiResponse\n  location: class GatewayController";
         assert!(is_project_type_false_positive(&ws, &ws, content, &[], msg));
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -1538,5 +2228,15 @@ class ScheduledTask {}
             &root,
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn classpath_visibility_false_positive_matches_cannot_access() {
+        assert!(is_classpath_visibility_false_positive(
+            "cannot access Versioned\n  class file for com.fasterxml.jackson.core.Versioned not found"
+        ));
+        assert!(!is_classpath_visibility_false_positive(
+            "cannot find symbol\n  symbol:   variable foo"
+        ));
     }
 }

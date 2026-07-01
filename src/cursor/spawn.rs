@@ -10,8 +10,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use crate::config::running_in_app_bundle;
+use crate::port;
 
-use super::{CursorBridge, bridge_url};
+use super::{CursorBridge, bridge_url, load_saved_bridge_url, save_bridge_port, set_bridge_url};
 
 static BRIDGE_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 static BRIDGE_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -264,12 +265,22 @@ pub async fn reclaim_bridge_port() {
         return;
     }
 
+    let Some(url) = load_saved_bridge_url() else {
+        return;
+    };
+    set_bridge_url(url.clone());
     let bridge = CursorBridge::new();
     if !bridge.health().await {
         return;
     }
 
-    let port = std::env::var("REAPER_CURSOR_BRIDGE_PORT").unwrap_or_else(|_| "8091".into());
+    let port = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .and_then(|host_port| host_port.rsplit(':').next())
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8091);
     tracing::info!("Stopping orphaned Cursor bridge on port {port}…");
     let script = format!(
         "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
@@ -285,10 +296,36 @@ pub async fn reclaim_bridge_port() {
 pub async fn ensure_bridge_running() -> Result<()> {
     set_bridge_error(None).await;
 
+    if let Some(url) = load_saved_bridge_url() {
+        set_bridge_url(url);
+    }
+
     let bridge = CursorBridge::new();
     if bridge.health().await {
-        tracing::debug!("Cursor bridge already running at {}", bridge_url());
-        return Ok(());
+        let owned = bridge_child_slot().lock().await.is_some();
+        if owned {
+            tracing::debug!("Cursor bridge already running at {}", bridge_url());
+            return Ok(());
+        }
+        tracing::warn!(
+            "Replacing orphan Cursor bridge at {} (not managed by this Reaper process)",
+            bridge_url()
+        );
+        if let Some(url) = load_saved_bridge_url() {
+            if let Some(port) = url
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .and_then(|host_port| host_port.rsplit(':').next())
+                .and_then(|p| p.parse::<u16>().ok())
+            {
+                let script = format!(
+                    "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
+                );
+                let _ = Command::new("sh").arg("-lc").arg(script).status().await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
     }
 
     if std::env::var("REAPER_CURSOR_BRIDGE_DISABLE").is_ok() {
@@ -302,10 +339,28 @@ pub async fn ensure_bridge_running() -> Result<()> {
 
     ensure_node_modules(&node, &dir).await?;
 
-    tracing::info!("Starting Cursor bridge at {}…", dir.display());
+    let host = std::env::var("REAPER_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let bridge_port = std::env::var("REAPER_CURSOR_BRIDGE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .filter(|p| *p != port::AUTO_PORT)
+        .unwrap_or_else(|| {
+            port::pick_ephemeral_port(&host).unwrap_or_else(|_| port::random_port_candidate())
+        });
+    let bridge_port = if port::is_avoided_port(bridge_port) {
+        port::pick_ephemeral_port(&host).unwrap_or(bridge_port)
+    } else {
+        bridge_port
+    };
+    let url = format!("http://{host}:{bridge_port}");
+    set_bridge_url(url.clone());
+    save_bridge_port(bridge_port);
+    tracing::info!("Starting Cursor bridge on {url}…");
+
     let mut child = Command::new(&node)
         .arg("server.mjs")
         .current_dir(&dir)
+        .env("REAPER_CURSOR_BRIDGE_PORT", bridge_port.to_string())
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -345,7 +400,7 @@ pub async fn ensure_bridge_running() -> Result<()> {
     stop_bridge().await;
     let err = last_bridge_error()
         .await
-        .unwrap_or_else(|| "bridge did not respond on port 8091".into());
+        .unwrap_or_else(|| format!("bridge did not respond at {}", bridge_url()));
     bail!("Cursor bridge failed to start: {err}");
 }
 

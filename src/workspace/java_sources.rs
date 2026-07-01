@@ -133,6 +133,26 @@ pub fn source_kind_for_path(rel_path: &str) -> Option<&'static str> {
     classify_source_path(rel_path)
 }
 
+/// Gradle/Maven source-set directory segments under `src/`.
+const MAIN_SRC_SEGMENTS: &[&str] = &["src/main"];
+
+const TEST_SRC_SEGMENTS: &[&str] = &[
+    "src/test",
+    "src/integrationTest",
+    "src/intTest",
+    "src/testFixtures",
+    "src/androidTest",
+    "src/unitTest",
+    "src/functionalTest",
+    "src/nativeTest",
+];
+
+fn path_under_src_segment(path: &str, segment: &str) -> bool {
+    path == segment
+        || path.ends_with(&format!("/{segment}"))
+        || path.contains(&format!("/{segment}/"))
+}
+
 fn classify_source_path(rel_path: &str) -> Option<&'static str> {
     let p = rel_path.replace('\\', "/");
     let p = p.trim_end_matches('/');
@@ -153,6 +173,16 @@ fn classify_source_path(rel_path: &str) -> Option<&'static str> {
     }
     if let Some((suffix, _)) = best {
         return Some(suffix_kind(suffix));
+    }
+    for segment in TEST_SRC_SEGMENTS {
+        if path_under_src_segment(p, segment) {
+            return Some("test");
+        }
+    }
+    for segment in MAIN_SRC_SEGMENTS {
+        if path_under_src_segment(p, segment) {
+            return Some("main");
+        }
     }
     if p.ends_with("/src") && !p.contains("/src/main") && !p.contains("/src/test") {
         return Some("main");
@@ -203,7 +233,11 @@ mod tests {
     #[test]
     fn classifies_source_root_kinds() {
         assert_eq!(source_root_kind("module/src/main/java"), Some("main"));
+        assert_eq!(source_root_kind("module/src/main"), Some("main"));
+        assert_eq!(source_root_kind("app/src/main"), Some("main"));
         assert_eq!(source_root_kind("module/src/test/java"), Some("test"));
+        assert_eq!(source_root_kind("module/src/test"), Some("test"));
+        assert_eq!(source_root_kind("app/src/test"), Some("test"));
         assert_eq!(
             source_root_kind("module/src/integrationTest/java"),
             Some("test")

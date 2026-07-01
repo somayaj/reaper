@@ -345,7 +345,7 @@ fn file_has_spring_test_annotations(content: &str) -> bool {
         || content.contains("@SpringJUnitConfig")
 }
 
-fn file_uses_lombok(content: &str) -> bool {
+pub fn file_uses_lombok(content: &str) -> bool {
     const ANNOTATIONS: [&str; 12] = [
         "@Data",
         "@Getter",

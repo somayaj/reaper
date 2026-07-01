@@ -49,6 +49,31 @@
     'editorLightBulbAutoFix.foreground': '#FFCC33',
   };
 
+  const MENU_WIDGET_COLORS_DARK = {
+    'menu.background': '#3C3F41',
+    'menu.foreground': '#BBBBBB',
+    'menu.selectionBackground': '#214283',
+    'menu.selectionForeground': '#FFFFFF',
+    'menu.border': '#515658',
+    'menu.separatorBackground': '#515658',
+  };
+
+  const MENU_WIDGET_COLORS_LIGHT = {
+    'menu.background': '#FFFFFF',
+    'menu.foreground': '#333333',
+    'menu.selectionBackground': '#0060C0',
+    'menu.selectionForeground': '#FFFFFF',
+    'menu.border': '#E2E8F0',
+    'menu.separatorBackground': '#E2E8F0',
+  };
+
+  function monacoWidgetColors(base) {
+    if (base === 'vs') {
+      return { ...SUGGEST_INLINE_COLORS, ...MENU_WIDGET_COLORS_LIGHT };
+    }
+    return { ...SUGGEST_INLINE_COLORS, ...MENU_WIDGET_COLORS_DARK };
+  }
+
   const MONACO_THEMES = {
     'reaper-darcula': {
       base: 'vs-dark',
@@ -312,6 +337,9 @@
     if (typeof monaco !== 'undefined' && window.__reaperMonacoThemesDefined) {
       monaco.editor.setTheme(theme.monaco);
     }
+    if (typeof window.syncTerminalTheme === 'function') {
+      window.syncTerminalTheme();
+    }
   }
 
   /** Hover/suggest widgets render in #editor-overflow-root, outside .monaco-editor. */
@@ -333,8 +361,17 @@
       '--vscode-editorHoverWidget-foreground': text,
       '--vscode-editorHoverWidget-border': border,
       '--vscode-widget-shadow': 'rgba(0, 0, 0, 0.36)',
+      '--vscode-menu-background': panel,
+      '--vscode-menu-foreground': text,
+      '--vscode-menu-selectionBackground': selected,
+      '--vscode-menu-selectionForeground': '#FFFFFF',
+      '--vscode-menu-border': border,
+      '--vscode-menu-separatorBackground': border,
     };
-    Object.entries(vars).forEach(([key, value]) => el.style.setProperty(key, value));
+    Object.entries(vars).forEach(([key, value]) => {
+      el.style.setProperty(key, value);
+      document.documentElement.style.setProperty(key, value);
+    });
   }
 
   function defineMonacoThemes() {
@@ -343,7 +380,7 @@
     Object.entries(MONACO_THEMES).forEach(([id, spec]) => {
       monaco.editor.defineTheme(id, {
         ...spec,
-        colors: { ...spec.colors, ...DIAG_EDITOR_COLORS, ...SUGGEST_INLINE_COLORS },
+        colors: { ...spec.colors, ...DIAG_EDITOR_COLORS, ...monacoWidgetColors(spec.base) },
       });
     });
   }

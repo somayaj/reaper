@@ -22,7 +22,7 @@ impl Config {
             port: std::env::var("REAPER_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(8080),
+                .unwrap_or(crate::port::AUTO_PORT),
             repos_dir: data_dir.join("repos"),
             workspaces_dir: data_dir.join("workspaces"),
             metadata_dir: data_dir.join("metadata"),

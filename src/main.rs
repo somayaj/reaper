@@ -1,5 +1,6 @@
 mod config;
 mod cursor;
+mod port;
 mod git;
 mod agent;
 mod auth;
@@ -95,8 +96,9 @@ fn init_tracing() {
     }
 }
 
-async fn prepare_state() -> anyhow::Result<AppState> {
-    let config = Config::from_env();
+async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
+    let mut config = Config::from_env();
+    config.port = bound_port;
     config.ensure_dirs()?;
 
     let settings = SettingsStore::load(&config.settings_path)?;
@@ -112,36 +114,67 @@ async fn prepare_state() -> anyhow::Result<AppState> {
     Ok(AppState::new(config, settings))
 }
 
-async fn bind_listener(host: &str, start_port: u16) -> anyhow::Result<(tokio::net::TcpListener, SocketAddr)> {
-    let ip: std::net::IpAddr = host.parse()?;
-    let end = start_port.saturating_add(20);
-    for port in start_port..=end {
-        let addr = SocketAddr::from((ip, port));
+async fn bind_listener(host: &str, preferred: u16) -> anyhow::Result<(tokio::net::TcpListener, SocketAddr)> {
+    use std::net::IpAddr;
+
+    let ip: IpAddr = host.parse()?;
+
+    if preferred != port::AUTO_PORT {
+        let addr = SocketAddr::from((ip, preferred));
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
-                if port != start_port {
-                    tracing::warn!(
-                        "Port {start_port} in use; listening on {port} instead (stop other Reaper instances or set REAPER_PORT)"
-                    );
-                }
-                return Ok((listener, addr));
+                let bound = listener.local_addr()?;
+                return Ok((listener, bound));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::warn!(
+                    "Port {preferred} in use; choosing a random available port (set REAPER_PORT to pin a port)"
+                );
+            }
             Err(e) => return Err(e.into()),
         }
     }
-    anyhow::bail!(
-        "Could not bind to {host} on ports {start_port}–{end}. Quit other Reaper instances or set REAPER_PORT."
-    );
+
+    if let Ok(listener) = tokio::net::TcpListener::bind(SocketAddr::from((ip, 0))).await {
+        let bound = listener.local_addr()?;
+        tracing::info!("Bound to random port {bound} (set REAPER_PORT to use a fixed port)");
+        return Ok((listener, bound));
+    }
+
+    for _ in 0..48 {
+        let port = port::random_port_candidate();
+        if port::is_avoided_port(port) {
+            continue;
+        }
+        let addr = SocketAddr::from((ip, port));
+        if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+            let bound = listener.local_addr()?;
+            tracing::info!("Bound to random port {bound}");
+            return Ok((listener, bound));
+        }
+    }
+
+    anyhow::bail!("Could not bind to {host} on a random available port")
+}
+
+fn persist_server_port(data_dir: &std::path::Path, port: u16) {
+    let path = data_dir.join("reaper.port");
+    if let Err(e) = std::fs::write(&path, port.to_string()) {
+        tracing::warn!("Could not write {}: {e}", path.display());
+    }
 }
 
 async fn run_server_mode() -> anyhow::Result<()> {
     init_tracing();
 
-    let state = prepare_state().await?;
-    let config = state.config.clone();
+    let config = Config::from_env();
+    config.ensure_dirs()?;
 
     let (listener, addr) = bind_listener(&config.host, config.port).await?;
+    persist_server_port(&config.data_dir, addr.port());
+
+    let state = prepare_state(addr.port()).await?;
+    let config = state.config.clone();
 
     tracing::info!("Reaper listening on http://{addr}");
     tracing::info!("Data directory: {}", config.data_dir.display());
@@ -164,9 +197,14 @@ fn run_gui_mode() -> anyhow::Result<()> {
             .build()
             .expect("tokio runtime");
         let result = rt.block_on(async {
-            let state = prepare_state().await?;
-            let config = state.config.clone();
+            let config = Config::from_env();
+            config.ensure_dirs()?;
+
             let (listener, addr) = bind_listener(&config.host, config.port).await?;
+            persist_server_port(&config.data_dir, addr.port());
+
+            let state = prepare_state(addr.port()).await?;
+            let config = state.config.clone();
             let url = format!("http://{addr}");
 
             tracing::info!("Reaper listening on {url}");

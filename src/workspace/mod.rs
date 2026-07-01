@@ -15,6 +15,8 @@ mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod java_classpath;
+mod java_psi;
 mod java_sources;
 mod java_ecosystem;
 mod java_format;
@@ -22,9 +24,11 @@ mod languages;
 mod project_jobs;
 mod project_profile;
 mod quick_fix;
+mod coverage;
 mod run_project;
 mod spring_props;
 mod symbols;
+mod workspace_search;
 
 use std::path::{Path, PathBuf};
 
@@ -138,7 +142,7 @@ pub fn build_tree_level(ws: &Path, rel_dir: Option<&str>) -> Result<Vec<FileNode
     Ok(nodes)
 }
 
-fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
+pub(crate) fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
     if name == ".git" {
         return true;
     }
@@ -151,6 +155,32 @@ fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
             "node_modules" | "target" | "build" | ".gradle" | "dist" | "out" | "bin"
                 | ".idea" | ".vscode" | "vendor" | "tmp" | "log" | "storage" | ".reaper"
         );
+    }
+    false
+}
+
+/// Skip compiled artifacts and dependency indexes in workspace search results.
+pub(crate) fn should_skip_search_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let lower = p.to_lowercase();
+    if lower.ends_with(".class") {
+        return true;
+    }
+    if lower.contains(".reaper/classpath-jar/") {
+        return true;
+    }
+    for seg in [
+        "/build/",
+        "/target/",
+        "/out/",
+        "/bin/",
+        "/.gradle/",
+        "/classes/java/",
+        "/classes/kotlin/",
+    ] {
+        if lower.contains(seg) {
+            return true;
+        }
     }
     false
 }
@@ -336,6 +366,20 @@ pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+const JAVA_DIAG_OVERLAY_PREFIX: &str = ".reaper/java-diagnostics/overlay/";
+
+/// Map diagnostics overlay copies back to workspace-relative source paths.
+pub fn normalize_workspace_source_path(rel_path: &str) -> String {
+    let path = rel_path.replace('\\', "/");
+    if let Some(rest) = path.strip_prefix(JAVA_DIAG_OVERLAY_PREFIX) {
+        return rest.to_string();
+    }
+    if let Some(idx) = path.find(JAVA_DIAG_OVERLAY_PREFIX) {
+        return path[idx + JAVA_DIAG_OVERLAY_PREFIX.len()..].to_string();
+    }
+    path
 }
 
 pub fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
@@ -754,13 +798,68 @@ pub fn stream_workspace_gradle(
     exec_stream::stream_gradle(ws, rel_path, task, tx)
 }
 
+pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<coverage::FileCoverage> {
+    coverage::coverage_for_file(ws, rel_path)
+}
+
+pub fn coverage_report_summary(
+    ws: &Path,
+    rel_path: &str,
+) -> Result<coverage::CoverageReportSummary> {
+    coverage::coverage_report_summary(ws, rel_path)
+}
+
+pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
+    let path = safe_join(ws, rel_path)?;
+    if !path.exists() {
+        bail!("path not found");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let status = Command::new("open")
+            .arg(&path)
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let status = Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+        return Ok(());
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        use std::process::Command;
+        let status = Command::new("xdg-open")
+            .arg(&path)
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+    }
+    Ok(())
+}
+
 pub fn stream_workspace_run_task(
     ws: &Path,
     rel_path: &str,
     task: &str,
+    coverage: bool,
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
-    run_project::stream_run_task(ws, rel_path, task, tx)
+    run_project::stream_run_task(ws, rel_path, task, coverage, tx)
 }
 
 pub fn stream_workspace_maven(
@@ -777,7 +876,8 @@ pub fn stream_workspace_java_main(
     rel_path: &str,
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
-    exec_stream::stream_java_main(ws, rel_path, tx)
+    let rel_path = normalize_workspace_source_path(rel_path);
+    exec_stream::stream_java_main(ws, &rel_path, tx)
 }
 
 pub fn java_file_context(
@@ -837,6 +937,14 @@ pub fn uses_spring_property_completions(from_path: &str) -> bool {
     spring_props::is_spring_config_file(from_path)
 }
 
+pub fn search_workspace(
+    ws: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<workspace_search::WorkspaceSearchHit>> {
+    workspace_search::search_workspace(ws, query, limit)
+}
+
 pub fn search_classes(ws: &Path, query: &str, limit: usize) -> Result<Vec<symbols::ClassSearchHit>> {
     let limit = limit.clamp(1, 100);
     let skip_java = classpath::is_gradle_workspace(ws);
@@ -882,19 +990,52 @@ fn dedupe_search_classes(
     scored: Vec<(u32, symbols::ClassSearchHit)>,
     limit: usize,
 ) -> Vec<symbols::ClassSearchHit> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    fn path_rank(path: &str) -> u32 {
+        let p = path.replace('\\', "/");
+        if p.ends_with(".java") || p.ends_with(".kt") {
+            return 0;
+        }
+        if p.contains("/src/") {
+            return 10;
+        }
+        if should_skip_search_path(&p) {
+            return 1000;
+        }
+        100
+    }
+
+    let mut best: std::collections::HashMap<String, (u32, symbols::ClassSearchHit)> =
+        std::collections::HashMap::new();
     for (score, hit) in scored {
-        let key = format!("{}:{}:{}", hit.name, hit.path, hit.line);
-        if seen.insert(key) {
-            out.push((score, hit));
+        if should_skip_search_path(&hit.path) {
+            continue;
+        }
+        let key = if hit.qualified.contains('.') {
+            hit.qualified.clone()
+        } else {
+            format!("{}:{}", hit.name, hit.path)
+        };
+        let rank = path_rank(&hit.path);
+        let entry_score = score.saturating_sub(rank);
+        match best.get(&key) {
+            Some((existing_score, existing)) => {
+                if entry_score > *existing_score
+                    || (entry_score == *existing_score
+                        && path_rank(&hit.path) < path_rank(&existing.path))
+                {
+                    best.insert(key, (entry_score, hit));
+                }
+            }
+            None => {
+                best.insert(key, (entry_score, hit));
+            }
         }
     }
+    let mut out: Vec<_> = best.into_values().collect();
     out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     out.into_iter()
         .take(limit)
         .map(|(_, hit)| hit)
-        .filter(|hit| !hit.path.to_lowercase().ends_with(".class"))
         .collect()
 }
 
