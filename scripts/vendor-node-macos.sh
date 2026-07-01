@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NODE_VERSION:-20.19.3}"
+VERSION="${NODE_VERSION:-22.13.1}"
 ARCH="${REAPER_MACOS_ARCH:-$(uname -m)}"
 
 case "$ARCH" in
@@ -22,8 +22,12 @@ URL="https://nodejs.org/dist/v${VERSION}/${TARBALL}"
 CACHE="$ROOT/resources/.cache/${TARBALL}"
 
 if [[ -f "$BIN" ]]; then
-  echo "Node.js ${VERSION} (${ARCH}) already present at $BIN"
-  exit 0
+  CURRENT="$("$BIN" --version 2>/dev/null || true)"
+  if [[ "$CURRENT" == "v${VERSION}" ]]; then
+    echo "Node.js ${VERSION} (${ARCH}) already present at $BIN"
+    exit 0
+  fi
+  echo "Replacing Node.js ${CURRENT:-unknown} with ${VERSION} at $BIN"
 fi
 
 mkdir -p "$DEST/bin" "$(dirname "$CACHE")"
