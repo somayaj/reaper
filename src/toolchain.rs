@@ -255,6 +255,11 @@ pub fn resolve_program(id: &str) -> Option<PathBuf> {
     if id == "java" {
         return crate::jdk::effective_java_home().ok();
     }
+    if id == "node" {
+        if let Some(path) = crate::config::bundled_node() {
+            return Some(path);
+        }
+    }
     if id == "gradle" {
         if let Some(path) = configured_path(id) {
             if let Ok(bin) = crate::gradle::normalize_gradle_binary(path) {

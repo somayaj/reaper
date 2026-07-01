@@ -63,15 +63,16 @@ cp "$ROOT/gradle/wrapper/gradle-wrapper.properties" "$APP/Contents/Resources/gra
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
   if [[ ! -f "$ROOT/cursor-bridge/node_modules/@connectrpc/connect/package.json" ]]; then
     echo "Installing cursor-bridge dependencies for bundle…"
-    if command -v npm >/dev/null 2>&1; then
+    ARCH="$(uname -m)"
+    export REAPER_MACOS_ARCH="$ARCH"
+    "$ROOT/scripts/vendor-node-macos.sh"
+    BUILD_NODE="$ROOT/resources/node-macos-${ARCH}/bin/node"
+    if [[ -x "$BUILD_NODE" ]]; then
+      (cd "$ROOT/cursor-bridge" && "$BUILD_NODE" install-deps.mjs)
+    elif command -v npm >/dev/null 2>&1; then
       (cd "$ROOT/cursor-bridge" && npm install --omit=dev)
     else
-      NODE="${REAPER_NODE:-/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node}"
-      if [[ -x "$NODE" ]]; then
-        (cd "$ROOT/cursor-bridge" && "$NODE" install-deps.mjs)
-      else
-        echo "Warning: cursor-bridge node_modules missing and npm/node unavailable" >&2
-      fi
+      echo "Warning: cursor-bridge node_modules missing and bundled node/npm unavailable" >&2
     fi
   fi
   cp -R "$ROOT/cursor-bridge/." "$APP/Contents/Resources/cursor-bridge/"
