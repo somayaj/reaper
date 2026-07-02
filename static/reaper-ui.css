@@ -5393,6 +5393,9 @@ main { background: var(--ij-bg); }
 }
 
 .ij-coverage-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 10px;
   border-top: 1px solid var(--ij-border);
   shrink: 0;
@@ -5417,6 +5420,12 @@ main { background: var(--ij-bg); }
 .ij-coverage-footer-btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.ij-coverage-empty-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--ij-text-muted, #888);
 }
 
 .ij-coverage-empty {
