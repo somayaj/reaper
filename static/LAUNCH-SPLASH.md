@@ -1,6 +1,6 @@
 # Launch splash
 
-Black screen · **Starting IDE...** · logo assembles like a puzzle, then harvest animation runs.
+Black screen · **Starting IDE...** · four logo puzzle pieces snap together, then harvest animation runs.
 
 ## Preview
 
@@ -9,13 +9,13 @@ cargo run -- --server
 # http://127.0.0.1:<port>/launch-splash-preview.html
 ```
 
-Puzzle → harvest loop repeats so you can tune timing.
+Pane snap → harvest loop repeats so you can tune timing.
 
 ## Edit
 
 | File | What |
 |------|------|
-| `launch-logo.svg` | Logo split into 4 puzzle pieces (frame, console, field, harvest) |
+| `launch-logo.svg` | Logo split into 4 puzzle pieces (each a clipped slice of the same artwork) |
 | `launch-splash-layout.css` | Piece fly-in / roll keyframes |
 | `logo-animated.css` | Harvest loop (after assemble) |
 | `launch-splash.js` | Triggers `is-assembled` ~1.35s after load |

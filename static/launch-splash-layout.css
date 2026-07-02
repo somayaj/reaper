@@ -1,4 +1,4 @@
-/* Launch splash — 3D puzzle snap, then full logo + harvest. See static/LAUNCH-SPLASH.md */
+/* Launch splash — logo puzzle pieces snap together, then full logo + harvest. See static/LAUNCH-SPLASH.md */
 html,
 body {
   background: #0a0a0a !important;
@@ -57,7 +57,7 @@ body {
   pointer-events: auto;
 }
 
-/* Puzzle stage fades out on merge */
+/* Puzzle stage fades out on merge (pieces → unified logo) */
 .puzzle-stage {
   opacity: 1;
   transition: opacity 0.35s ease;
@@ -69,7 +69,7 @@ body {
   pointer-events: none;
 }
 
-/* 3D puzzle pieces snap in */
+/* 3D logo puzzle pieces snap in */
 .splash-piece {
   transform-box: view-box;
   transform-origin: 32px 32px;
