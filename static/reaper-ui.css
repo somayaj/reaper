@@ -444,9 +444,9 @@
   --ij-diff-hunk: #6e6e6e;
   --ij-tree-folder: #e0e0e0;
   --ij-tree-file: #a0a0a0;
-  --ij-tree-source-main: #9ca3af;
-  --ij-tree-source-test: #d4d4d4;
-  --ij-tree-source-generated: #737373;
+  --ij-tree-source-main: #4ade80;
+  --ij-tree-source-test: #c084fc;
+  --ij-tree-source-generated: #fbbf24;
   --ij-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
   --c-surface-950: #0a0a0a;
   --c-surface-900: #141414;
