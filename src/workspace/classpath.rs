@@ -3056,11 +3056,45 @@ fn extract_sources_jar(
     let out = dest_root.join(&name);
     if !out.join(".extracted").is_file() {
         let _ = std::fs::remove_dir_all(&out);
-        extract_zip(sources, &out)?;
-        std::fs::write(out.join(".extracted"), sources.to_string_lossy().as_ref())?;
+        if !is_valid_zip_file(sources) {
+            tracing::warn!(
+                "Skipping dependency sources — not a valid zip: {}",
+                sources.display()
+            );
+            return Ok(None);
+        }
+        if let Err(e) = extract_zip(sources, &out) {
+            tracing::warn!(
+                "Skipping dependency sources — unzip failed for {}: {e:#}",
+                sources.display()
+            );
+            let _ = std::fs::remove_dir_all(&out);
+            return Ok(None);
+        }
+        if let Err(e) = std::fs::write(out.join(".extracted"), sources.to_string_lossy().as_ref()) {
+            tracing::warn!(
+                "Skipping dependency sources — could not mark {} as extracted: {e:#}",
+                sources.display()
+            );
+            let _ = std::fs::remove_dir_all(&out);
+            return Ok(None);
+        }
     }
     let _ = ws;
     Ok(Some(out))
+}
+
+fn is_valid_zip_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 4];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    // Local file header (PK\x03\x04) or empty archive (PK\x05\x06).
+    header == [0x50, 0x4B, 0x03, 0x04] || header == [0x50, 0x4B, 0x05, 0x06]
 }
 
 #[derive(Debug, Default)]
@@ -6766,6 +6800,33 @@ dependencies {
         std::env::set_var("REAPER_CLASSPATH_FULL", "1");
         assert!(classpath_resolve_full());
         assert_eq!(maven_build_classpath_scope(), "test");
+    }
+
+    #[test]
+    fn is_valid_zip_file_rejects_truncated_jar() {
+        let dir = std::env::temp_dir().join(format!("reaper-zip-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad-sources.jar");
+        std::fs::write(&bad, b"PK").unwrap();
+        assert!(!is_valid_zip_file(&bad));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_sources_jar_skips_invalid_zip() {
+        let dir = std::env::temp_dir().join(format!("reaper-src-jar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sources = dir.join("itu-1.0-sources.jar");
+        std::fs::write(&sources, b"not-a-zip").unwrap();
+        let dest = dir.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let ws = dir.join("ws");
+        let mut seen = HashSet::new();
+        let out = extract_sources_jar(&ws, &dest, &sources, &mut seen).unwrap();
+        assert!(out.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -483,6 +483,8 @@ fn empty_coverage_message(rel_path: &str, test_filename: &str) -> String {
 fn is_test_source_path(rel_path: &str) -> bool {
     let p = rel_path.replace('\\', "/");
     p.contains("/src/test/java/")
+        || p.contains("/src/integrationtest/java/")
+        || p.contains("/src/inttest/java/")
         || p.ends_with("Test.java")
         || p.ends_with("Tests.java")
         || p.ends_with("IT.java")
@@ -491,20 +493,31 @@ fn is_test_source_path(rel_path: &str) -> bool {
 /// Map `…/src/test/java/…/UserServiceTest.java` → `…/src/main/java/…/UserService.java`.
 fn production_source_candidates(rel_path: &str) -> Vec<String> {
     let p = rel_path.replace('\\', "/");
-    let Some(test_idx) = p.find("/src/test/java/") else {
-        return Vec::new();
-    };
+    for (test_marker, main_marker) in [
+        ("/src/test/java/", "/src/main/java/"),
+        ("/src/integrationtest/java/", "/src/main/java/"),
+        ("/src/inttest/java/", "/src/main/java/"),
+    ] {
+        if let Some(candidates) = production_source_candidates_for_marker(&p, test_marker, main_marker) {
+            if !candidates.is_empty() {
+                return candidates;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn production_source_candidates_for_marker(
+    p: &str,
+    test_marker: &str,
+    main_marker: &str,
+) -> Option<Vec<String>> {
+    let test_idx = p.find(test_marker)?;
     let prefix = &p[..test_idx];
-    let tail = &p[test_idx + "/src/test/java/".len()..];
-    let Some(filename) = tail.rsplit('/').next() else {
-        return Vec::new();
-    };
-    let Some((package_dir, _)) = tail.rsplit_once('/') else {
-        return Vec::new();
-    };
-    let Some(stem) = filename.strip_suffix(".java") else {
-        return Vec::new();
-    };
+    let tail = &p[test_idx + test_marker.len()..];
+    let filename = tail.rsplit('/').next()?;
+    let (package_dir, _) = tail.rsplit_once('/')?;
+    let stem = filename.strip_suffix(".java")?;
 
     let mut out = Vec::new();
     for suffix in ["Test", "Tests", "IT", "TestCase"] {
@@ -513,11 +526,11 @@ fn production_source_candidates(rel_path: &str) -> Vec<String> {
                 continue;
             }
             out.push(format!(
-                "{prefix}/src/main/java/{package_dir}/{base}.java"
+                "{prefix}{main_marker}{package_dir}/{base}.java"
             ));
         }
     }
-    out
+    Some(out)
 }
 
 fn empty_coverage(path: String, has_jacoco: bool, message: Option<String>) -> FileCoverage {
