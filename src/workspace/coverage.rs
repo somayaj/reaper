@@ -46,18 +46,14 @@ pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<FileCoverage> {
     let has_jacoco = project.frameworks.iter().any(|f| f == "jacoco");
 
     let Some((filename, package)) = java_file_identity(&rel_path) else {
-        return Ok(empty_coverage(
-            rel_path,
-            has_jacoco,
-            Some("not a Java source path".into()),
-        ));
+        return Ok(empty_coverage(rel_path, false, None));
     };
 
     if !project.has_project {
         return Ok(empty_coverage(
             rel_path,
             false,
-            Some("not inside a Gradle or Maven project".into()),
+            None,
         ));
     }
 
@@ -67,7 +63,7 @@ pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<FileCoverage> {
         return Ok(empty_coverage(
             rel_path,
             has_jacoco,
-            Some("JaCoCo report not found — run tests with coverage first".into()),
+            None,
         ));
     };
 
@@ -542,16 +538,17 @@ fn empty_coverage(path: String, has_jacoco: bool, message: Option<String>) -> Fi
 /// `(filename, package-with-slashes)` e.g. `("Foo.java", "com/example")`.
 fn java_file_identity(rel_path: &str) -> Option<(String, String)> {
     let p = rel_path.replace('\\', "/");
-    for marker in ["/src/main/java/", "/src/test/java/"] {
-        let Some(idx) = p.find(marker) else {
+    for suffix in super::java_sources::discovery_suffixes() {
+        let marker = format!("/{suffix}/");
+        let Some(idx) = p.find(&marker) else {
             continue;
         };
         let tail = &p[idx + marker.len()..];
+        if !tail.ends_with(".java") {
+            continue;
+        }
         let filename = tail.rsplit('/').next()?.to_string();
         let package = tail.rsplit_once('/')?.0.to_string();
-        if package.is_empty() {
-            return Some((filename, String::new()));
-        }
         return Some((filename, package));
     }
     None
@@ -742,12 +739,21 @@ fn stream_gradle_coverage(
     args.push("--no-daemon".into());
     args.push("--no-configuration-cache".into());
     args.push("--console=plain".into());
-    // --tests applies only to the test task; must come before jacocoTestReport.
+    push_gradle_coverage_tasks(&mut args, test_filter);
+    exec_stream::stream_gradle_command(&cmd, &args, tx)
+}
+
+/// Compile main + test sources, run filtered tests, then refresh the JaCoCo report.
+fn push_gradle_coverage_tasks(args: &mut Vec<String>, test_filter: &str) {
+    args.extend([
+        "compileJava".into(),
+        "compileTestJava".into(),
+    ]);
+    // --tests applies only to the test task; must come immediately after it.
     args.push("test".into());
     args.push("--tests".into());
     args.push(test_filter.to_string());
     args.push("jacocoTestReport".into());
-    exec_stream::stream_gradle_command(&cmd, &args, tx)
 }
 
 fn stream_maven_coverage(
@@ -764,6 +770,8 @@ fn stream_maven_coverage(
         "-q".to_string(),
         "--batch-mode".to_string(),
         format!("-Dtest={test_filter}"),
+        "compile".to_string(),
+        "test-compile".to_string(),
     ];
     if has_jacoco {
         args.push("test".into());
@@ -862,6 +870,36 @@ mod tests {
     </sourcefile>
   </package>
 </report>"#;
+
+    #[test]
+    fn gradle_coverage_tasks_compile_before_test() {
+        let mut args = Vec::new();
+        push_gradle_coverage_tasks(
+            &mut args,
+            "com.example.web.UserControllerTest",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "compileJava",
+                "compileTestJava",
+                "test",
+                "--tests",
+                "com.example.web.UserControllerTest",
+                "jacocoTestReport",
+            ]
+        );
+    }
+
+    #[test]
+    fn java_file_identity_from_integration_test_path() {
+        let (name, pkg) = java_file_identity(
+            "services/api/src/integrationTest/java/com/example/api/ApiIT.java",
+        )
+        .unwrap();
+        assert_eq!(name, "ApiIT.java");
+        assert_eq!(pkg, "com/example/api");
+    }
 
     #[test]
     fn java_file_identity_from_test_path() {

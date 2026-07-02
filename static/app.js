@@ -4028,6 +4028,20 @@ function applyTestRunDecorations() {
         state.testCovWidgets.push(covWidget);
       }
     }
+    if (showCoverage && !methods.length && isJavaMainSourceFile(state.activeTab)) {
+      const fqcn = javaFqcnFromSource(state.activeTab, content);
+      const classLine = findJavaTestClassLine(content.split('\n'));
+      if (fqcn && classLine >= 0) {
+        const covWidget = createTestCoverageWidget({
+          name: fqcn.split('.').pop(),
+          glyphLine: classLine + 1,
+          filter: `${fqcn}Test`,
+          isClass: true,
+        });
+        state.editor.addGlyphMarginWidget(covWidget);
+        state.testCovWidgets.push(covWidget);
+      }
+    }
   };
   requestAnimationFrame(() => requestAnimationFrame(paint));
 }
@@ -4160,7 +4174,8 @@ function renderCoveragePanel(summary) {
   }
 
   if (summary.message && !summary.files?.length) {
-    body.innerHTML = `<p class="ij-coverage-empty">${escapeHtml(summary.message)}</p>`;
+    body.innerHTML = `<p class="ij-coverage-empty">${escapeHtml(summary.message)}</p>
+      <p class="ij-coverage-empty ij-coverage-empty-hint">Use <strong>Run with coverage</strong> below to compile, run matching tests, and refresh the report.</p>`;
     return;
   }
 
@@ -4309,7 +4324,6 @@ async function fetchAndApplyCoverage(path) {
     }
     updateCoverageStatus(null);
     clearCoverageDecorations();
-    if (cov?.message) toast(cov.message, 'info');
     return cov;
   } catch (e) {
     toast(`Coverage: ${e.message}`, 'warning');
@@ -4564,7 +4578,7 @@ function setEditorContent(path, content) {
   }
   applyTestRunDecorations();
   reapplyCoverageForTab(path);
-  if (path?.endsWith('.java') && !state.fileCoverage?.has(path)) {
+  if (path?.endsWith('.java') && state.coveragePanelOpen) {
     void fetchAndApplyCoverage(path);
   }
 }
@@ -5896,6 +5910,9 @@ function renderTreeContextMenu(target) {
     case 'java':
       if (state.runInfo?.has_project) {
         rows.push(treeContextMenuItem('run', 'Run'));
+        if (projectSupportsCoverage()) {
+          rows.push(treeContextMenuItem('run-tests-coverage', 'Run Tests with Coverage'));
+        }
       }
       rows.push(treeContextMenuItem('goto-declaration', 'Go to Declaration'));
       rows.push(treeContextMenuItem('goto-class', 'Go to Class…'));
@@ -6102,11 +6119,14 @@ async function runTreeContextTests(path) {
 async function runTreeContextTestsWithCoverage(path) {
   await openTreeFileForAction(path);
   await refreshRunInfo();
-  const target = state.runTarget;
-  if (target?.mode === 'test' && target.filter) {
-    await runProjectTestWithCoverage(target.filter);
+  const content = state.tabContents.get(state.activeTab) ?? state.editor?.getModel()?.getValue() ?? '';
+  const line = state.editor?.getPosition()?.lineNumber || 1;
+  const filter = coverageTestFilterForFile(state.activeTab, content, line)
+    || (state.runTarget?.mode === 'test' ? state.runTarget.filter : null);
+  if (filter) {
+    await runProjectTestWithCoverage(filter);
   } else {
-    toast('Open a test class or test method to run with coverage', 'info');
+    toast('Open a Java source or test class to run with coverage', 'info');
   }
 }
 
@@ -6933,6 +6953,41 @@ function testFilterForJavaFile(path, content, cursorLine) {
   return classFilter;
 }
 
+function isJavaMainSourceFile(path) {
+  if (!path?.endsWith('.java') || isJavaTestFilePath(path)) return false;
+  const normalized = stripJavaDiagOverlayPath(path).replace(/\\/g, '/');
+  if (normalized.includes('/src/main/java/') || normalized.includes('/main/java/')) return true;
+  return !normalized.includes('/src/test/') && !normalized.includes('/test/java/');
+}
+
+/** Test filter for coverage runs from a test or production Java file. */
+function coverageTestFilterForFile(path, content, cursorLine) {
+  path = stripJavaDiagOverlayPath(path);
+  if (!path?.endsWith('.java')) return null;
+  if (isJavaTestClass(path, content)) {
+    return testFilterForJavaFile(path, content, cursorLine);
+  }
+  const fqcn = javaFqcnFromSource(path, content);
+  if (!fqcn || isJavaTestFilePath(path)) return null;
+  return `${fqcn}Test`;
+}
+
+async function runActiveFileWithCoverage() {
+  if (!state.repo || !state.activeTab?.endsWith('.java')) {
+    toast('Open a Java file to run with coverage', 'info');
+    return;
+  }
+  const path = state.activeTab;
+  const content = state.editor?.getModel()?.getValue() ?? state.tabContents.get(path) ?? '';
+  const line = state.editor?.getPosition()?.lineNumber || 1;
+  const filter = coverageTestFilterForFile(path, content, line);
+  if (!filter) {
+    toast('Could not determine a test filter for this file', 'info');
+    return;
+  }
+  await runProjectTestWithCoverage(filter);
+}
+
 function springBootRunTarget(content, info) {
   const spring = detectSpringBootApp(content);
   if (!spring || !info?.has_project) return null;
@@ -7569,8 +7624,12 @@ async function runProjectTestWithCoverage(testFilter) {
   const task = info.build_tool === 'maven'
     ? `-Dtest=${filter} test`
     : `test --tests ${filter}`;
+  const compileTask = info.build_tool === 'maven'
+    ? 'compile test-compile'
+    : 'compileJava compileTestJava';
+  const reportTask = info.build_tool === 'maven' ? 'jacoco:report' : 'jacocoTestReport';
   const toolLabel = info.build_tool === 'maven' ? 'mvn' : 'gradle';
-  const label = `◔ ${toolLabel} ${task} + jacoco  (${state.activeTab})`;
+  const label = `◔ ${toolLabel} ${compileTask} ${task} ${reportTask}  (${state.activeTab})`;
   const path = state.activeTab;
   try {
     const { exitCode, output } = await runWorkspaceCommandStream(
@@ -9990,6 +10049,7 @@ function bindEvents() {
   $('#status-coverage')?.addEventListener('click', () => toggleCoveragePanel());
   $('#btn-coverage-close')?.addEventListener('click', hideCoveragePanel);
   $('#btn-coverage-refresh')?.addEventListener('click', () => void refreshCoveragePanel(state.activeTab));
+  $('#btn-coverage-run')?.addEventListener('click', () => void runActiveFileWithCoverage());
   $('#btn-coverage-open-html')?.addEventListener('click', () => void openCoverageHtmlReport());
   $('#status-ai-fix')?.addEventListener('click', (e) => {
     e.stopPropagation();
