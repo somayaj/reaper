@@ -3725,6 +3725,8 @@ function isJavaTestFilePath(path) {
   if (!path?.endsWith('.java')) return false;
   const normalized = path.replace(/\\/g, '/').toLowerCase();
   return normalized.includes('/src/test/java/')
+    || normalized.includes('/src/integrationtest/java/')
+    || normalized.includes('/src/inttest/java/')
     || normalized.includes('/test/java/')
     || normalized.endsWith('test.java')
     || normalized.endsWith('tests.java')
@@ -3867,14 +3869,18 @@ function findTestAnnotationLineIndex(lines, start, sigIdx) {
   return start;
 }
 
-function findJavaTestClassLine(lines) {
+function findJavaTypeDeclarationLine(lines) {
   for (let i = 0; i < lines.length; i += 1) {
     const t = lines[i].trim();
-    if (/^(public\s+|protected\s+|private\s+)?(abstract\s+|static\s+)?class\s+[A-Za-z_]\w*/.test(t) && !t.includes('(')) {
+    if (/^(public\s+|protected\s+|private\s+)?(abstract\s+|static\s+)?(class|record|enum)\s+[A-Za-z_]\w*/.test(t) && !t.includes('(')) {
       return i;
     }
   }
   return -1;
+}
+
+function findJavaTestClassLine(lines) {
+  return findJavaTypeDeclarationLine(lines);
 }
 
 function listJavaTestMethods(path, content) {
@@ -3945,7 +3951,37 @@ function clearTestRunWidgets() {
 }
 
 function projectSupportsCoverage() {
-  return Boolean(state.runInfo?.has_project);
+  return Boolean(state.repo);
+}
+
+function classLevelTestMethods(path, content) {
+  if (!isJavaTestFilePath(path)) return [];
+  const fqcn = javaFqcnFromSource(path, content);
+  const classLine = findJavaTypeDeclarationLine(content.split('\n'));
+  if (!fqcn || classLine < 0) return [];
+  return [{
+    name: fqcn.split('.').pop(),
+    line: classLine + 1,
+    glyphLine: classLine + 1,
+    end_line: classLine + 1,
+    filter: fqcn,
+    isClass: true,
+  }];
+}
+
+function coverageHasLineData(cov) {
+  return Boolean(cov?.lines?.length);
+}
+
+function coverageHasUsableData(cov) {
+  return Boolean(
+    cov && (
+      cov.lines?.length
+      || cov.total_lines > 0
+      || cov.report_path
+      || cov.summary
+    ),
+  );
 }
 
 function createTestRunWidget(method) {
@@ -4009,12 +4045,33 @@ function applyTestRunDecorations() {
   clearTestRunWidgets();
   state.testMethodsByLine = new Map();
   if (!state.activeTab?.endsWith('.java')) return;
+  if (typeof state.editor.addGlyphMarginWidget !== 'function') return;
   const paint = () => {
+    const path = state.activeTab;
     const content = state.editor.getModel()?.getValue() ?? '';
-    const methods = listJavaTestMethods(state.activeTab, content);
-    if (!methods.length || typeof state.editor.addGlyphMarginWidget !== 'function') return;
-    clearTestRunWidgets();
+    let methods = listJavaTestMethods(path, content);
+    if (!methods.length) {
+      methods = classLevelTestMethods(path, content);
+    }
     const showCoverage = projectSupportsCoverage();
+    if (!methods.length) {
+      if (showCoverage && isJavaMainSourceFile(path)) {
+        const fqcn = javaFqcnFromSource(path, content);
+        const classLine = findJavaTypeDeclarationLine(content.split('\n'));
+        if (fqcn && classLine >= 0) {
+          const covWidget = createTestCoverageWidget({
+            name: fqcn.split('.').pop(),
+            glyphLine: classLine + 1,
+            filter: `${fqcn}Test`,
+            isClass: true,
+          });
+          state.testCovWidgets = [covWidget];
+          state.editor.addGlyphMarginWidget(covWidget);
+        }
+      }
+      return;
+    }
+    clearTestRunWidgets();
     state.testRunWidgets = [];
     state.testCovWidgets = [];
     for (const method of methods) {
@@ -4024,20 +4081,6 @@ function applyTestRunDecorations() {
       state.testMethodsByLine.set(method.glyphLine, method);
       if (showCoverage) {
         const covWidget = createTestCoverageWidget(method);
-        state.editor.addGlyphMarginWidget(covWidget);
-        state.testCovWidgets.push(covWidget);
-      }
-    }
-    if (showCoverage && !methods.length && isJavaMainSourceFile(state.activeTab)) {
-      const fqcn = javaFqcnFromSource(state.activeTab, content);
-      const classLine = findJavaTestClassLine(content.split('\n'));
-      if (fqcn && classLine >= 0) {
-        const covWidget = createTestCoverageWidget({
-          name: fqcn.split('.').pop(),
-          glyphLine: classLine + 1,
-          filter: `${fqcn}Test`,
-          isClass: true,
-        });
         state.editor.addGlyphMarginWidget(covWidget);
         state.testCovWidgets.push(covWidget);
       }
@@ -4306,9 +4349,12 @@ async function fetchAndApplyCoverage(path) {
       `${repoApi(state.repo, '/workspace/coverage')}?path=${encodeURIComponent(stripJavaDiagOverlayPath(path))}`,
     );
     const target = cov?.coverage_path || path;
-    if (cov?.lines?.length) {
+    if (coverageHasUsableData(cov)) {
       state.fileCoverage.set(target, cov);
-      if (state.activeTab === target) {
+      if (target !== path) {
+        state.fileCoverage.set(path, cov);
+      }
+      if (coverageHasLineData(cov) && state.activeTab === target) {
         applyCoverageDecorations(target, cov);
       } else {
         clearCoverageDecorations();
@@ -4324,6 +4370,9 @@ async function fetchAndApplyCoverage(path) {
     }
     updateCoverageStatus(null);
     clearCoverageDecorations();
+    if (state.coveragePanelOpen) {
+      void refreshCoveragePanel(path);
+    }
     return cov;
   } catch (e) {
     toast(`Coverage: ${e.message}`, 'warning');
@@ -4332,10 +4381,20 @@ async function fetchAndApplyCoverage(path) {
 }
 
 function reapplyCoverageForTab(path) {
-  const cov = state.fileCoverage?.get(path);
-  if (cov?.lines?.length) {
-    applyCoverageDecorations(path, cov);
+  if (!path) return;
+  let cov = state.fileCoverage?.get(path);
+  if (!coverageHasLineData(cov) && cov?.coverage_path) {
+    cov = state.fileCoverage.get(cov.coverage_path) || cov;
+  }
+  const decoratePath = cov?.coverage_path || path;
+  if (coverageHasLineData(cov) && state.activeTab === decoratePath) {
+    applyCoverageDecorations(decoratePath, cov);
     updateCoverageStatus(cov);
+    return;
+  }
+  if (coverageHasUsableData(cov)) {
+    updateCoverageStatus(cov);
+    clearCoverageDecorations();
     return;
   }
   clearCoverageDecorations();
@@ -4578,7 +4637,7 @@ function setEditorContent(path, content) {
   }
   applyTestRunDecorations();
   reapplyCoverageForTab(path);
-  if (path?.endsWith('.java') && state.coveragePanelOpen) {
+  if (path?.endsWith('.java') && state.repo) {
     void fetchAndApplyCoverage(path);
   }
 }
@@ -7640,6 +7699,7 @@ async function runProjectTestWithCoverage(testFilter) {
     if (gradleClassfileVersionToast(output)) return;
     if (exitCode === 0) {
       const cov = await fetchAndApplyCoverage(path);
+      await refreshCoveragePanel(path);
       if (cov?.coverage_path && cov.coverage_path !== path) {
         await openFileAt(cov.coverage_path);
         applyCoverageDecorations(cov.coverage_path, cov);
