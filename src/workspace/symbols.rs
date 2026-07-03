@@ -50,27 +50,19 @@ pub struct HoverInfo {
 pub fn hover_info_from_location(content: &str, hit: &SymbolLocation) -> HoverInfo {
     let line_idx = hit.line.saturating_sub(1) as usize;
     let source_line = content.lines().nth(line_idx);
-    let signature = source_line.and_then(|line| {
-        java_member_signature_on_line(line, &hit.name).or_else(|| {
-            let trimmed = line.split("//").next()?.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(
-                    trimmed
-                        .split('{')
-                        .next()
-                        .unwrap_or(trimmed)
-                        .split(';')
-                        .next()
-                        .unwrap_or(trimmed)
-                        .trim()
-                        .to_string(),
-                )
-            }
+    let c_like = is_c_like_path(&hit.path);
+    let signature = if c_like {
+        c_signature_at_line(content, hit.line).or_else(|| {
+            source_line.and_then(|line| signature_from_source_line(line, &hit.name))
         })
-    });
-    let documentation = java_javadoc_before_line(content, hit.line);
+    } else {
+        source_line.and_then(|line| signature_from_source_line(line, &hit.name))
+    };
+    let documentation = if c_like {
+        c_doc_comment_before_line(content, hit.line)
+    } else {
+        java_javadoc_before_line(content, hit.line)
+    };
     HoverInfo {
         name: hit.name.clone(),
         kind: hit.kind.clone(),
@@ -194,21 +186,8 @@ pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
     let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
     let col = column.saturating_sub(1) as usize;
 
-    if let Some(at) = line_text[..col.min(line_text.len())].rfind('@') {
-        let after = &line_text[at + 1..];
-        let name: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(name);
-        }
-    }
-
-    if col >= line_text.len() {
-        return word_before(line_text, line_text.len());
-    }
-    if is_ident_char(line_text.as_bytes()[col]) {
+    // Prefer the identifier under the cursor (e.g. Long in "@NotNull Long userId").
+    if col < line_text.len() && is_ident_char(line_text.as_bytes()[col]) {
         let start = (0..=col)
             .rev()
             .find(|&i| !is_ident_char(line_text.as_bytes()[i]))
@@ -219,6 +198,36 @@ pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
             .unwrap_or(line_text.len());
         return Some(line_text[start..end].to_string());
     }
+
+    if col > 0 && is_ident_char(line_text.as_bytes()[col.saturating_sub(1)]) {
+        if let Some(word) = word_before(line_text, col) {
+            return Some(word);
+        }
+    }
+
+    if col >= line_text.len() {
+        return word_before(line_text, line_text.len());
+    }
+
+    // Annotation name only when the cursor is on @ or within the annotation identifier.
+    let scan_end = (col + 1).min(line_text.len());
+    if scan_end > 0 {
+        if let Some(at) = line_text[..scan_end].rfind('@') {
+            let ann_start = at + 1;
+            let after = &line_text[ann_start..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                let ann_end = ann_start + name.len();
+                if col >= at && col <= ann_end {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
     word_before(line_text, col)
 }
 
@@ -1040,11 +1049,13 @@ pub(crate) fn find_in_content(symbol: &str, path: &str, content: &str) -> Option
 fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Option<SymbolLocation> {
     let trimmed = line.trim();
     if trimmed.starts_with("//")
-        || trimmed.starts_with('#')
         || trimmed.starts_with('*')
         || trimmed.starts_with("import ")
         || trimmed.starts_with("package ")
     {
+        return None;
+    }
+    if trimmed.starts_with('#') && !trimmed.starts_with("#define") {
         return None;
     }
 
@@ -1059,6 +1070,7 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
         ("object", "object"),
         ("mod", "mod"),
         ("type", "type"),
+        ("namespace", "namespace"),
         ("def", "def"),
         ("fun", "fun"),
         ("fn", "fn"),
@@ -1169,6 +1181,45 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
     let lower_path = path.to_lowercase();
     if lower_path.ends_with(".sh") || lower_path.ends_with(".bash") || lower_path.ends_with(".zsh") {
         if let Some(name) = shell_function_name(trimmed) {
+            if name == symbol {
+                let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "function".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
+        }
+    }
+
+    if is_c_like_path(path) {
+        if let Some(name) = c_macro_name_on_line(line) {
+            if name == symbol {
+                let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "macro".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
+        }
+        if let Some(name) = c_typedef_name_on_line(line) {
+            if name == symbol {
+                let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
+                return Some(SymbolLocation {
+                    name: symbol.to_string(),
+                    kind: "typedef".into(),
+                    path: path.to_string(),
+                    line: line_no,
+                    column: col,
+                });
+            }
+        }
+        if let Some(name) = c_function_name_on_line(line) {
             if name == symbol {
                 let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
                 return Some(SymbolLocation {
@@ -1404,6 +1455,10 @@ pub fn format_content(ws: &Path, rel_path: &str, content: &str) -> Result<String
     if ext == "py" {
         return try_stdin_command(ws, "black", &["-q", "-"], content)
             .or_else(|_| try_stdin_command(ws, "autopep8", &["-"], content));
+    }
+    if ext == "sql" {
+        return try_tool_stdin(ws, "sqlfluff", &["format", "-"], content)
+            .or_else(|_| try_stdin_command(ws, "sqlfluff", &["format", "-"], content));
     }
     if matches!(ext, "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "json" | "css" | "scss" | "less" | "md" | "html" | "xml") {
         let parser = match ext {
@@ -1968,12 +2023,7 @@ fn collect_symbols_in_content(content: &str, rel_path: &str, out: &mut Vec<Class
         }
     }
     if matches!(ext, "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh") {
-        collect_keyword_symbols(
-            content,
-            rel_path,
-            out,
-            &[("struct", "struct"), ("class", "class"), ("enum", "enum")],
-        );
+        collect_c_cpp_symbols(content, rel_path, out);
     }
     if ext == "lua" {
         collect_keyword_symbols(content, rel_path, out, &[("function", "method")]);
@@ -2100,6 +2150,193 @@ fn collect_shell_functions(content: &str, rel_path: &str, out: &mut Vec<ClassSea
             continue;
         }
         if let Some(name) = shell_function_name(trimmed) {
+            push_symbol_hit(out, &name, &name, "function", rel_path, idx, line);
+        }
+    }
+}
+
+fn is_c_like_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.ends_with(".c")
+        || lower.ends_with(".h")
+        || lower.ends_with(".cpp")
+        || lower.ends_with(".cc")
+        || lower.ends_with(".cxx")
+        || lower.ends_with(".hpp")
+        || lower.ends_with(".hh")
+}
+
+fn signature_from_source_line(line: &str, name: &str) -> Option<String> {
+    java_member_signature_on_line(line, name).or_else(|| {
+        let trimmed = line.split("//").next()?.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(
+                trimmed
+                    .split('{')
+                    .next()
+                    .unwrap_or(trimmed)
+                    .split(';')
+                    .next()
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .to_string(),
+            )
+        }
+    })
+}
+
+fn c_signature_at_line(content: &str, line: u32) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = line.saturating_sub(1) as usize;
+    let mut sig = lines.get(idx)?.split("//").next()?.trim().to_string();
+    let mut i = idx;
+    while !sig.contains(')') && i + 1 < lines.len() {
+        i += 1;
+        let part = lines[i].split("//").next()?.trim();
+        if part.is_empty() {
+            continue;
+        }
+        sig.push(' ');
+        sig.push_str(part);
+        if sig.contains(')') {
+            break;
+        }
+    }
+    let sig = sig
+        .split('{')
+        .next()
+        .unwrap_or(&sig)
+        .trim_end_matches(';')
+        .trim()
+        .to_string();
+    if sig.is_empty() { None } else { Some(sig) }
+}
+
+fn c_doc_comment_before_line(content: &str, line: u32) -> Option<String> {
+    if line == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut end = line.saturating_sub(1) as usize;
+    while end > 0 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut docs = Vec::new();
+    let mut i = end.saturating_sub(1);
+    loop {
+        let t = lines[i].trim();
+        if t.starts_with("///") {
+            docs.push(t.trim_start_matches("///").trim().to_string());
+        } else {
+            break;
+        }
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    if !docs.is_empty() {
+        docs.reverse();
+        return Some(docs.join("\n"));
+    }
+    java_javadoc_before_line(content, line)
+}
+
+fn c_function_name_on_line(line: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    for kw in [
+        "if", "while", "for", "switch", "catch", "return", "sizeof", "else",
+    ] {
+        if trimmed.starts_with(kw) {
+            return None;
+        }
+    }
+    let paren = trimmed.find('(')?;
+    let before = trimmed[..paren].trim();
+    if before.is_empty() {
+        return None;
+    }
+    let token = before.split_whitespace().next_back()?;
+    let name = token.rsplit("::").next().unwrap_or(token);
+    let name = name.trim_start_matches('*').trim_start_matches('&');
+    if name.is_empty()
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    if is_keyword(name) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn c_macro_name_on_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("#define ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn c_typedef_name_on_line(line: &str) -> Option<String> {
+    let trimmed = line.split("//").next()?.trim().trim_end_matches(';');
+    let rest = trimmed.strip_prefix("typedef ")?.trim();
+    let token = rest.split_whitespace().next_back()?;
+    let name = token
+        .trim_start_matches('*')
+        .trim_start_matches('(')
+        .trim_end_matches(')');
+    if name.is_empty()
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn collect_c_cpp_symbols(content: &str, rel_path: &str, out: &mut Vec<ClassSearchHit>) {
+    collect_keyword_symbols(
+        content,
+        rel_path,
+        out,
+        &[
+            ("struct", "struct"),
+            ("class", "class"),
+            ("enum", "enum"),
+            ("namespace", "namespace"),
+        ],
+    );
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(name) = c_macro_name_on_line(line) {
+            push_symbol_hit(out, &name, &name, "macro", rel_path, idx, line);
+        }
+        if let Some(name) = c_typedef_name_on_line(line) {
+            push_symbol_hit(out, &name, &name, "typedef", rel_path, idx, line);
+        }
+        if let Some(name) = c_function_name_on_line(line) {
             push_symbol_hit(out, &name, &name, "function", rel_path, idx, line);
         }
     }
@@ -2572,6 +2809,79 @@ public class Demo {
     }
 
     #[test]
+    fn c_function_definition_and_hover() {
+        let src = r#"/// Adds two integers.
+int add(int a, int b) {
+    return a + b;
+}
+
+#define MAX_ITEMS 100
+typedef unsigned long size_t;
+"#;
+        let hit = definition_on_line("int add(int a, int b) {", "add", "math.c", 2)
+            .expect("function def");
+        assert_eq!(hit.kind, "function");
+        let info = hover_info_from_location(src, &hit);
+        assert_eq!(info.documentation.as_deref(), Some("Adds two integers."));
+        assert!(info.signature.as_ref().is_some_and(|s| s.contains("add(int a, int b)")));
+
+        let macro_hit =
+            definition_on_line("#define MAX_ITEMS 100", "MAX_ITEMS", "math.c", 6).expect("macro");
+        assert_eq!(macro_hit.kind, "macro");
+
+        let typedef_hit = definition_on_line("typedef unsigned long size_t;", "size_t", "math.c", 7)
+            .expect("typedef");
+        assert_eq!(typedef_hit.kind, "typedef");
+    }
+
+    #[test]
+    fn cpp_class_method_definition() {
+        let hit = definition_on_line(
+            "void Widget::draw() const {",
+            "draw",
+            "widget.cpp",
+            10,
+        )
+        .expect("method def");
+        assert_eq!(hit.kind, "function");
+        assert_eq!(hit.name, "draw");
+    }
+
+    #[test]
+    fn indexes_c_cpp_symbols() {
+        let ws = std::env::temp_dir().join("reaper-c-cpp-symbols");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("demo.c"),
+            "struct Node { int value; };\n\nint process(int x) { return x; }\n\n#define BUF_SIZE 256\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("demo.h"),
+            "typedef int item_id;\n\nvoid init(void);\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        collect_symbols_in_content(
+            &std::fs::read_to_string(ws.join("demo.c")).unwrap(),
+            "demo.c",
+            &mut out,
+        );
+        collect_symbols_in_content(
+            &std::fs::read_to_string(ws.join("demo.h")).unwrap(),
+            "demo.h",
+            &mut out,
+        );
+        let names: Vec<_> = out.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"Node"));
+        assert!(names.contains(&"process"));
+        assert!(names.contains(&"BUF_SIZE"));
+        assert!(names.contains(&"item_id"));
+        assert!(names.contains(&"init"));
+    }
+
+    #[test]
     fn indexes_go_rust_sql_and_shell_symbols() {
         let ws = std::env::temp_dir().join("reaper-multi-lang-symbols");
         let _ = std::fs::remove_dir_all(&ws);
@@ -2773,5 +3083,16 @@ public class Demo {
             java_member_qualifier(src, 1, 30, "run"),
             Some("SpringApplication".into())
         );
+    }
+
+    #[test]
+    fn word_at_prefers_type_after_annotation() {
+        let line = "    @NotNull Long userId,";
+        // column 14 = 'L' in Long (1-based)
+        assert_eq!(word_at(line, 1, 14), Some("Long".into()));
+        // column 6 = 'N' in NotNull
+        assert_eq!(word_at(line, 1, 6), Some("NotNull".into()));
+        // column 5 = '@'
+        assert_eq!(word_at(line, 1, 5), Some("NotNull".into()));
     }
 }

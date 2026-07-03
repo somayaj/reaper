@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-ARCH="$(uname -m)"
+ARCH="${REAPER_MACOS_ARCH:-$(uname -m)}"
 TAG="v${VERSION}"
 DMG="$ROOT/dist/reaper-${VERSION}-macos-${ARCH}.dmg"
 DMG_NAME="$(basename "$DMG")"
@@ -52,7 +52,11 @@ if [[ "${REAPER_SKIP_BUILD:-}" == "1" ]]; then
     exit 1
   fi
 else
-  "$ROOT/scripts/build-macos-dmg.sh"
+  if [[ "$ARCH" == "x86_64" ]]; then
+    "$ROOT/scripts/build-macos-intel-dmg.sh"
+  else
+    "$ROOT/scripts/build-macos-dmg.sh"
+  fi
 fi
 
 if [[ -n "${REAPER_RELEASES_DIR:-}" && -d "$REAPER_RELEASES_DIR/.git" ]]; then
@@ -148,10 +152,11 @@ fi
 cleanup_stray_release_assets() {
   while IFS= read -r asset_name; do
     [[ -z "$asset_name" ]] && continue
-    if [[ "$asset_name" != "$DMG_NAME" ]]; then
-      echo "Removing stray release asset: ${asset_name}"
-      gh release delete-asset "$TAG" "$asset_name" --repo "$GH_REPO" --yes
-    fi
+    case "$asset_name" in
+      reaper-*-macos-arm64.dmg|reaper-*-macos-x86_64.dmg) continue ;;
+    esac
+    echo "Removing stray release asset: ${asset_name}"
+    gh release delete-asset "$TAG" "$asset_name" --repo "$GH_REPO" --yes
   done < <(gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name')
 }
 

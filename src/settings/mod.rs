@@ -30,6 +30,12 @@ struct SettingsFile {
     /// Repository opened automatically on startup when no URL repo is set.
     #[serde(default)]
     default_repo: Option<String>,
+    /// Most recently opened repository (resume on next launch).
+    #[serde(default)]
+    last_repo: Option<String>,
+    /// Java dependency index: "standard" (2000 JARs + background) or "light" (400 JARs).
+    #[serde(default)]
+    java_index_mode: Option<String>,
 }
 
 #[derive(Clone)]
@@ -67,6 +73,8 @@ pub struct GeminiSettingsView {
 #[derive(Debug, Serialize)]
 pub struct GeneralSettingsView {
     pub default_repo: Option<String>,
+    pub last_repo: Option<String>,
+    pub java_index_mode: String,
 }
 
 impl SettingsStore {
@@ -267,28 +275,34 @@ impl SettingsStore {
     }
 
     pub fn token_for_host(&self, host: &str) -> Option<String> {
-        if let Ok(guard) = self.inner.read() {
-            if let Some(token) = guard.tokens.get(host) {
-                if !token.is_empty() && host != GEMINI_SETTINGS_KEY {
-                    return Some(token.clone());
-                }
+        for key in token_host_lookup_keys(host) {
+            if let Some(token) = self.token_from_settings(&key) {
+                return Some(token);
             }
-            if let Some(token) = guard.tokens.get("*") {
-                if !token.is_empty() {
-                    return Some(token.clone());
+            if let Ok(env_token) = std::env::var(env_key_for_host(&key)) {
+                if !env_token.is_empty() {
+                    return Some(env_token);
                 }
             }
         }
 
-        if let Ok(env_token) = std::env::var(env_key_for_host(host)) {
-            if !env_token.is_empty() {
-                return Some(env_token);
-            }
-        }
+        self.token_from_settings("*").or_else(|| {
+            std::env::var("REAPER_PAT")
+                .ok()
+                .filter(|t| !t.is_empty())
+        })
+    }
 
-        std::env::var("REAPER_PAT")
-            .ok()
-            .filter(|t| !t.is_empty())
+    fn token_from_settings(&self, host: &str) -> Option<String> {
+        if host == GEMINI_SETTINGS_KEY || host == CURSOR_SETTINGS_KEY {
+            return None;
+        }
+        let guard = self.inner.read().ok()?;
+        let token = guard.tokens.get(host)?;
+        if token.is_empty() {
+            return None;
+        }
+        Some(token.clone())
     }
 
     pub fn has_token_for_host(&self, host: &str) -> bool {
@@ -315,13 +329,64 @@ impl SettingsStore {
     }
 
     pub fn general_view(&self) -> GeneralSettingsView {
-        let default_repo = self
+        let (default_repo, last_repo, java_index_mode) = self
             .inner
             .read()
             .ok()
-            .and_then(|guard| guard.default_repo.clone())
-            .filter(|name| !name.is_empty());
-        GeneralSettingsView { default_repo }
+            .map(|guard| {
+                (
+                    guard
+                        .default_repo
+                        .clone()
+                        .filter(|name| !name.is_empty()),
+                    guard
+                        .last_repo
+                        .clone()
+                        .filter(|name| !name.is_empty()),
+                    guard
+                        .java_index_mode
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| "standard".into()),
+                )
+            })
+            .unwrap_or_else(|| (None, None, "standard".into()));
+        GeneralSettingsView {
+            default_repo,
+            last_repo,
+            java_index_mode,
+        }
+    }
+
+    /// Repo to prefetch on startup: explicit default, else last opened.
+    pub fn prefetch_repo(&self) -> Option<String> {
+        self.inner.read().ok().and_then(|guard| {
+            guard
+                .default_repo
+                .clone()
+                .filter(|name| !name.is_empty())
+                .or_else(|| guard.last_repo.clone().filter(|name| !name.is_empty()))
+        })
+    }
+
+    pub fn set_last_repo(&self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.last_repo = Some(name.to_string());
+        self.save(&guard)
+    }
+
+    pub fn set_java_index_mode(&self, mode: &str) -> Result<()> {
+        let mode = mode.trim();
+        if mode != "standard" && mode != "light" && mode != "lazy" {
+            anyhow::bail!("java_index_mode must be \"standard\", \"light\", or \"lazy\"");
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.java_index_mode = Some(mode.to_string());
+        self.save(&guard)
     }
 
     pub fn set_default_repo(&self, name: Option<String>) -> Result<()> {
@@ -580,6 +645,40 @@ fn env_key_for_host(host: &str) -> String {
         "REAPER_PAT_{}",
         host.replace('.', "_").replace('-', "_").to_uppercase()
     )
+}
+
+/// Host keys to try when resolving a PAT (aliases such as www.github.com → github.com).
+fn token_host_lookup_keys(host: &str) -> Vec<String> {
+    let trimmed = host.trim().to_lowercase();
+    let base = trimmed.split(':').next().unwrap_or(&trimmed).to_string();
+    let mut keys = vec![base.clone()];
+    if base == "www.github.com" {
+        keys.push("github.com".into());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+#[cfg(test)]
+mod token_host_tests {
+    use super::token_host_lookup_keys;
+
+    #[test]
+    fn github_www_alias() {
+        assert_eq!(
+            token_host_lookup_keys("www.github.com"),
+            vec!["github.com".to_string(), "www.github.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn strips_port() {
+        assert_eq!(
+            token_host_lookup_keys("github.com:443"),
+            vec!["github.com".to_string()]
+        );
+    }
 }
 
 fn stored_gemini_model(guard: &SettingsFile) -> String {

@@ -1,17 +1,38 @@
-// Reaper: print resolved compile/runtime classpath JARs and source JARs for IDE indexing.
-// stdout: JAR:/absolute/path  SOURCES:/absolute/path
+// Reaper: print resolved compile/runtime classpath JARs, project output dirs, and source roots.
+// stdout: JAR:/path  SOURCES:/path  CLASSES:/path  SRCROOT:/path
 allprojects { project ->
     project.tasks.register('reaperPrintClasspath') {
         group = 'reaper'
         description = 'Print classpath and source JARs for Reaper IDE indexing'
-        def compileJava = project.tasks.findByName('compileJava')
-        if (compileJava != null) {
-            dependsOn compileJava
+        // Main compile only — builds inter-module outputs. Test deps resolve via
+        // testCompileClasspath below without compiling test sources (much faster).
+        // Set -PreaperClasspathIncludeTestCompile=true (REAPER_CLASSPATH_FULL=1) to compile tests too.
+        def skipCompile = project.findProperty('reaperClasspathSkipCompile') == 'true'
+        def includeTestCompile = project.findProperty('reaperClasspathIncludeTestCompile') == 'true'
+        if (!skipCompile) {
+            def compileJava = project.tasks.findByName('compileJava')
+            if (compileJava != null) {
+                dependsOn compileJava
+            }
+        }
+        if (includeTestCompile) {
+            def compileTestJava = project.tasks.findByName('compileTestJava')
+            if (compileTestJava != null) {
+                dependsOn compileTestJava
+            }
         }
         doLast {
-            def names = ['compileClasspath', 'runtimeClasspath', 'testCompileClasspath']
+            def names = [
+                'compileClasspath',
+                'runtimeClasspath',
+                'testCompileClasspath',
+                'testRuntimeClasspath',
+                'annotationProcessor',
+            ]
             def seenJars = new LinkedHashSet<String>()
             def seenSources = new LinkedHashSet<String>()
+            def seenClasses = new LinkedHashSet<String>()
+            def seenSrcRoots = new LinkedHashSet<String>()
 
             for (name in names) {
                 def conf = project.configurations.findByName(name)
@@ -69,6 +90,28 @@ allprojects { project ->
                     }
                 } catch (Exception ignored) {
                     // Resolution metadata unavailable for this configuration.
+                }
+            }
+
+            project.sourceSets.all { sourceSet ->
+                sourceSet.java.srcDirs.each { dir ->
+                    if (dir.isDirectory() && seenSrcRoots.add(dir.absolutePath)) {
+                        println 'SRCROOT:' + dir.absolutePath
+                    }
+                }
+                try {
+                    sourceSet.output.generatedSourcesDirs.files.each { dir ->
+                        if (dir.isDirectory() && seenSrcRoots.add(dir.absolutePath)) {
+                            println 'SRCROOT:' + dir.absolutePath
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Older Gradle API without generatedSourcesDirs.
+                }
+                sourceSet.output.classesDirs.files.each { dir ->
+                    if (dir.isDirectory() && seenClasses.add(dir.absolutePath)) {
+                        println 'CLASSES:' + dir.absolutePath
+                    }
                 }
             }
         }

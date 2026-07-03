@@ -298,9 +298,11 @@ fn check_dart(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic
 }
 
 fn check_sql(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+    use super::exec::run_tool_command;
+
     write_overlay(ws, rel_path, content)?;
     let rel = overlay_rel(rel_path);
-    let out = run_command(ws, "sqlfluff", &["lint", &rel, "--format", "human"]);
+    let out = run_tool_command(ws, "sqlfluff", &["lint", &rel, "--format", "human"]);
     let Ok(out) = out else {
         return Ok(Vec::new());
     };

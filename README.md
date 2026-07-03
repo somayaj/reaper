@@ -10,6 +10,11 @@ A local **developer git studio** built in Rust. Host bare repositories over HTTP
 - **Source control** — staged/unstaged changes, commit & push from the UI
 - **Git terminal** — run whitelisted git commands against the workspace
 - **Commit history** — browse recent commits per repository
+- **Build & run** — Gradle, Maven, Spring Boot, and native C/C++ (CMake) from toolbar or gutter
+- **C/C++ & languages** — Monaco editor with clangd navigation, 25+ languages, editor regression suite
+- **Package manifest** — dockable panel for Cargo, npm, Ruby, Go, and CMake dependencies
+- **Database viewer** — schema browser for project databases
+- **Test coverage** — JaCoCo widgets on Java test files
 
 ## Requirements
 
@@ -22,14 +27,14 @@ A local **developer git studio** built in Rust. Host bare repositories over HTTP
 cargo run
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+Open the URL printed at startup (for example `http://127.0.0.1:54321`). Reaper picks a random available port each run so it does not collide with other local servers. The chosen port is also written to `~/reaper/reaper.port`.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REAPER_HOST` | `127.0.0.1` | Bind address |
-| `REAPER_PORT` | `8080` | HTTP port |
+| `REAPER_PORT` | random | HTTP port (`0` or unset = random available port; set to pin e.g. `8765`) |
 | `REAPER_DATA_DIR` | `~/reaper` | Root for repos, workspaces, metadata, and settings |
 | `REAPER_PAT` | — | Default PAT for private HTTPS remotes |
 | `REAPER_PAT_GITHUB_COM` | — | Host-specific PAT (dots → underscores, uppercased) |
@@ -37,10 +42,10 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
 ## Clone a hosted repo
 
-After creating a repo named `my-app` in the UI:
+After creating a repo named `my-app` in the UI (check the startup log or `~/reaper/reaper.port` for the port):
 
 ```bash
-git clone http://127.0.0.1:8080/git/my-app.git
+git clone http://127.0.0.1:<port>/git/my-app.git
 ```
 
 ## Architecture
@@ -66,6 +71,12 @@ Git smart HTTP:
 - `GET /git/{name}.git/info/refs?service=git-upload-pack`
 - `POST /git/{name}.git/git-upload-pack`
 - `POST /git/{name}.git/git-receive-pack`
+
+## Releases
+
+macOS DMGs (Apple Silicon and Intel) are published at [reaper-org/releases](https://github.com/reaper-org/releases/releases). Build locally with `./scripts/build-macos-dmg.sh` (arm64) or `./scripts/build-macos-intel-dmg.sh` (x86_64), then `./scripts/release-macos.sh`.
+
+Editor regression tests run automatically on `cargo build` (skip with `REAPER_SKIP_EDITOR_TESTS=1`).
 
 ## License
 

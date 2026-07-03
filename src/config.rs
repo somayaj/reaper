@@ -22,7 +22,7 @@ impl Config {
             port: std::env::var("REAPER_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(8080),
+                .unwrap_or(crate::port::AUTO_PORT),
             repos_dir: data_dir.join("repos"),
             workspaces_dir: data_dir.join("workspaces"),
             metadata_dir: data_dir.join("metadata"),
@@ -125,6 +125,19 @@ pub fn running_in_app_bundle() -> bool {
                 .contains(".app/Contents/MacOS/")
         })
         .unwrap_or(false)
+}
+
+/// Node.js shipped inside Reaper.app (Cursor agent bridge; not the host install).
+pub fn bundled_node() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let bundled = mac_os.join("../Resources/node/bin/node");
+            if bundled.is_file() {
+                return Some(bundled.canonicalize().unwrap_or(bundled));
+            }
+        }
+    }
+    None
 }
 
 fn valid_segment(s: &str) -> bool {
