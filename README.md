@@ -10,6 +10,11 @@ A local **developer git studio** built in Rust. Host bare repositories over HTTP
 - **Source control** — staged/unstaged changes, commit & push from the UI
 - **Git terminal** — run whitelisted git commands against the workspace
 - **Commit history** — browse recent commits per repository
+- **Build & run** — Gradle, Maven, Spring Boot, and native C/C++ (CMake) from toolbar or gutter
+- **C/C++ & languages** — Monaco editor with clangd navigation, 25+ languages, editor regression suite
+- **Package manifest** — dockable panel for Cargo, npm, Ruby, Go, and CMake dependencies
+- **Database viewer** — schema browser for project databases
+- **Test coverage** — JaCoCo widgets on Java test files
 
 ## Requirements
 
@@ -66,6 +71,12 @@ Git smart HTTP:
 - `GET /git/{name}.git/info/refs?service=git-upload-pack`
 - `POST /git/{name}.git/git-upload-pack`
 - `POST /git/{name}.git/git-receive-pack`
+
+## Releases
+
+macOS DMGs (Apple Silicon and Intel) are published at [reaper-org/releases](https://github.com/reaper-org/releases/releases). Build locally with `./scripts/build-macos-dmg.sh` (arm64) or `./scripts/build-macos-intel-dmg.sh` (x86_64), then `./scripts/release-macos.sh`.
+
+Editor regression tests run automatically on `cargo build` (skip with `REAPER_SKIP_EDITOR_TESTS=1`).
 
 ## License
 

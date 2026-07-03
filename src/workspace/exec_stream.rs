@@ -10,6 +10,8 @@ use tokio::sync::mpsc as async_mpsc;
 
 use crate::git::{self, GitOutput};
 use crate::jdk;
+use crate::process_registry;
+use crate::toolchain;
 
 use super::exec::run_shell_command;
 use super::shell;
@@ -58,11 +60,17 @@ fn pump_reader<R: Read + Send + 'static>(
 }
 
 fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    process_registry::configure_command(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    let label = cmd
+        .get_program()
+        .to_string_lossy()
+        .into_owned();
     let mut child = cmd
         .spawn()
         .with_context(|| "failed to spawn process".to_string())?;
+    let _guard = process_registry::guard_for_exec_child(&mut child, &label);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -88,7 +96,7 @@ fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -
         }
     });
 
-    let status = child.wait().context("failed to wait on process")?;
+    let status = process_registry::wait_on_child(&mut child).context("failed to wait on process")?;
     for pump in pumps {
         let _ = pump.join();
     }
@@ -106,6 +114,7 @@ pub fn stream_shell(ws: &Path, cwd_rel: Option<&str>, command: &str, tx: async_m
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let mut cmd = Command::new(&shell);
     cmd.args(["-lc", command]).current_dir(work_dir);
+    toolchain::apply_compiler_env(&mut cmd);
     let code = stream_process(&mut cmd, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),
@@ -332,9 +341,7 @@ pub fn stream_maven_command(
 
     let mut command = Command::new(&cmd.program);
     command.args(&arg_refs).current_dir(&cmd.cwd);
-    if let Ok(home) = super::gradle::gradle_java_home_for_project(&cmd.cwd) {
-        jdk::apply_java_home(&mut command, &home);
-    }
+    jdk::apply_java_env(&mut command);
     let code = stream_process(&mut command, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),

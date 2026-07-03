@@ -319,18 +319,26 @@ async fn get_general(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct SetGeneralRequest {
     default_repo: Option<String>,
+    java_index_mode: Option<String>,
 }
 
 async fn set_general(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SetGeneralRequest>,
 ) -> impl IntoResponse {
-    let name = body
-        .default_repo
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty());
-    if let Err(e) = state.settings.set_default_repo(name) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Some(mode) = body.java_index_mode.as_deref() {
+        if let Err(e) = state.settings.set_java_index_mode(mode) {
+            return api_error(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if body.default_repo.is_some() {
+        let name = body
+            .default_repo
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        if let Err(e) = state.settings.set_default_repo(name) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
     }
     Json(state.settings.general_view()).into_response()
 }

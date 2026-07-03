@@ -21,7 +21,9 @@
     if (!base) return 'plaintext';
 
     if (base === 'dockerfile' || base.startsWith('dockerfile.')) return 'dockerfile';
-    if (base === 'makefile' || base === 'gnumakefile') return 'makefile';
+    if (base === 'makefile' || base === 'gnumakefile' || base.startsWith('makefile.') || base.endsWith('.mk')) {
+      return 'makefile';
+    }
     if (base === 'cmakelists.txt') return 'cmake';
     if (base.endsWith('.gradle.kts')) return 'kotlin';
     if (base.endsWith('.gradle')) return 'groovy';
@@ -47,7 +49,7 @@
       groovy: 'groovy', gvy: 'groovy', gy: 'groovy', gsh: 'groovy',
       kt: 'kotlin', kts: 'kotlin',
       gradle: 'groovy',
-      c: 'c', h: 'c',
+      c: 'cpp', h: 'cpp',
       cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
       cs: 'csharp',
       rb: 'ruby',
@@ -157,8 +159,8 @@
       php: ['php'],
       csharp: ['csc'],
       swift: ['swiftc'],
-      c: ['clang', 'gcc'],
-      cpp: ['clang', 'gcc'],
+      c: ['clangd', 'clang', 'gcc'],
+      cpp: ['clangd', 'clang', 'gcc'],
       shell: ['bash'],
       lua: ['luac'],
       dart: ['dart'],
@@ -174,7 +176,7 @@
     const labels = {
       java: 'Java', kotlin: 'Kotlin', groovy: 'Groovy', python: 'Python',
       ruby: 'Ruby', bundle: 'Bundler', rustc: 'rustc', cargo: 'cargo', go: 'Go',
-      node: 'Node', tsc: 'tsc', php: 'PHP', clang: 'clang', gcc: 'gcc',
+      node: 'Node', tsc: 'tsc', php: 'PHP', clangd: 'clangd', clang: 'clang', gcc: 'gcc',
       swiftc: 'swiftc', luac: 'luac', csc: 'csc', dart: 'dart', bash: 'bash',
       yamllint: 'yamllint', jsonlint: 'jsonlint', ajv: 'ajv',
     };
@@ -184,9 +186,19 @@
   function langLabel(lang) {
     const labels = {
       groovy: 'Groovy', kotlin: 'Kotlin', javascript: 'JavaScript', typescript: 'TypeScript',
-      plaintext: 'Plain Text', ini: 'Properties',
+      plaintext: 'Plain Text', ini: 'Properties', cpp: 'C/C++',
     };
     return labels[lang] || (lang.charAt(0).toUpperCase() + lang.slice(1));
+  }
+
+  function langLabelForPath(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    if (base.endsWith('.c')) return 'C';
+    if (base.endsWith('.h')) return 'C header';
+    if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(base)) return 'C++';
+    if (base === 'makefile' || base === 'gnumakefile') return 'Makefile';
+    if (base.endsWith('.mk') || base.startsWith('makefile.')) return 'Makefile';
+    return langLabel(langForPath(path));
   }
 
   function registerGroovy() {
@@ -261,6 +273,68 @@
       ],
     });
   }
+
+  const MAKEFILE_KEYWORDS = [
+    'ifeq', 'ifneq', 'ifdef', 'ifndef', 'else', 'endif',
+    'include', 'sinclude', 'define', 'endef', 'export', 'unexport',
+    'vpath', 'override', '-include', 'undefine',
+    '.PHONY', '.SUFFIXES', '.DEFAULT', '.PRECIOUS', '.SECONDARY',
+    '.INTERMEDIATE', '.IGNORE', '.SILENT', '.EXPORT_ALL_VARIABLES',
+    '.DELETE_ON_ERROR', '.LOW_RESOLUTION_TIME',
+  ];
+
+  function registerMakefile() {
+    if (window.__reaperMakefileRegistered) return;
+    window.__reaperMakefileRegistered = true;
+
+    try {
+      monaco.languages.register({ id: 'makefile', aliases: ['Makefile', 'Make', 'make'] });
+    } catch {
+      /* already registered */
+    }
+
+    monaco.languages.setMonarchTokensProvider('makefile', {
+      defaultToken: '',
+      tokenPostfix: '.makefile',
+      ignoreCase: true,
+      keywords: MAKEFILE_KEYWORDS,
+      varRef: /\$\([^)]*\)|\$\{[^}]*\}|\$[@*<+%?|!:]/,
+      tokenizer: {
+        root: [
+          [/^\s*#.*$/, 'comment'],
+          [/^\t+[^\n]*/, 'string'],
+          [/^[ ]{4,}[^\s#].*/, 'string'],
+          [/@varRef/, 'variable'],
+          [/\.[A-Z][A-Z0-9_]*/, 'keyword'],
+          [/[A-Za-z_.][\w.-]*(?=\s*(?::=|\?=|\+=|=))/, 'variable.name'],
+          [/[A-Za-z_.][\w.-]*(?=\s*:)/, 'type.identifier'],
+          [/@keywords/, 'keyword'],
+          [/:=|\?=|\+=|=/, 'operator'],
+          [/::/, 'delimiter'],
+          [/:/, 'delimiter'],
+          [/"([^"\\]|\\.)*"/, 'string'],
+          [/'([^'\\]|\\.)*'/, 'string'],
+        ],
+      },
+    });
+
+    monaco.languages.setLanguageConfiguration('makefile', {
+      comments: { lineComment: '#' },
+      brackets: [['(', ')']],
+      autoClosingPairs: [
+        { open: '(', close: ')' },
+        { open: '"', close: '"' },
+        { open: "'", close: "'" },
+      ],
+    });
+  }
+
+  function ensureReaperCustomLanguage(lang) {
+    if (lang === 'groovy') registerGroovy();
+    if (lang === 'makefile') registerMakefile();
+  }
+
+  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile']);
 
   const DEF_PREFIXES = [
     'class', 'module', 'interface', 'enum', 'record', 'struct', 'trait', 'mod', 'type', 'object',
@@ -751,8 +825,11 @@
       html += '</div>';
     }
     if (info.documentation) {
-      html += `<div class="reaper-java-hover-doc panel-scroll">${javadocHtmlFromText(info.documentation)}</div>`;
-    } else if (info.kind === 'method' || info.kind === 'field') {
+      const docHtml = info.documentation.includes('Parameters:')
+        ? info.documentation.split('\n').map((line) => `<div class="reaper-javadoc-line">${escapeHtml(line)}</div>`).join('')
+        : javadocHtmlFromText(info.documentation);
+      html += `<div class="reaper-java-hover-doc panel-scroll">${docHtml}</div>`;
+    } else if (['method', 'field', 'function', 'macro', 'typedef', 'struct', 'class', 'enum', 'namespace'].includes(info.kind)) {
       html += '<div class="reaper-java-hover-empty">No documentation available.</div>';
     }
     html += '</div>';
@@ -960,6 +1037,813 @@
       position.lineNumber,
       word.endColumn,
     );
+  }
+
+  const SQL_DOCS = {
+    SELECT: {
+      kind: 'keyword',
+      signature: 'SELECT [ DISTINCT ] expr [, ...] | *',
+      documentation: 'Retrieves rows from tables, views, or subqueries. Use DISTINCT to remove duplicate rows.',
+    },
+    FROM: {
+      kind: 'keyword',
+      signature: 'FROM table_reference [, ...]',
+      documentation: 'Names the source relation(s) for the query — tables, views, subqueries, or JOIN expressions.',
+    },
+    WHERE: {
+      kind: 'keyword',
+      signature: 'WHERE condition',
+      documentation: 'Filters rows after FROM/JOIN. Only rows matching the condition are returned.',
+    },
+    INSERT: {
+      kind: 'keyword',
+      signature: 'INSERT INTO table [( columns )] VALUES ( ... )',
+      documentation: 'Adds new rows to a table. Column list is optional when supplying values for all columns.',
+    },
+    UPDATE: {
+      kind: 'keyword',
+      signature: 'UPDATE table SET column = expr [, ...] [ WHERE ... ]',
+      documentation: 'Modifies existing rows. Always use WHERE unless you intend to update every row.',
+    },
+    DELETE: {
+      kind: 'keyword',
+      signature: 'DELETE FROM table [ WHERE ... ]',
+      documentation: 'Removes rows from a table. Omitting WHERE deletes all rows.',
+    },
+    CREATE: {
+      kind: 'keyword',
+      signature: 'CREATE TABLE | INDEX | VIEW ...',
+      documentation: 'Defines a new database object such as a table, index, view, or extension.',
+    },
+    DROP: {
+      kind: 'keyword',
+      signature: 'DROP TABLE | INDEX | VIEW ...',
+      documentation: 'Removes an existing database object.',
+    },
+    ALTER: {
+      kind: 'keyword',
+      signature: 'ALTER TABLE table action [, ...]',
+      documentation: 'Changes the structure of an existing table — add/drop/rename columns, constraints, etc.',
+    },
+    TABLE: {
+      kind: 'keyword',
+      signature: 'TABLE name ( column type [, ...] )',
+      documentation: 'Declares a relational table with named columns and data types.',
+    },
+    INDEX: {
+      kind: 'keyword',
+      signature: 'CREATE INDEX name ON table ( column [, ...] )',
+      documentation: 'Creates an index to speed up lookups and joins on the listed columns.',
+    },
+    VIEW: {
+      kind: 'keyword',
+      signature: 'CREATE VIEW name AS query',
+      documentation: 'Defines a stored query exposed as a virtual table.',
+    },
+    JOIN: {
+      kind: 'keyword',
+      signature: '[ INNER | LEFT | RIGHT | FULL ] JOIN table ON condition',
+      documentation: 'Combines rows from two relations. INNER keeps matches only; LEFT keeps all left rows.',
+    },
+    INNER: {
+      kind: 'keyword',
+      signature: 'INNER JOIN table ON condition',
+      documentation: 'Returns rows where the join condition matches in both relations.',
+    },
+    LEFT: {
+      kind: 'keyword',
+      signature: 'LEFT [ OUTER ] JOIN table ON condition',
+      documentation: 'Returns all rows from the left relation plus matching rows from the right (NULL if no match).',
+    },
+    RIGHT: {
+      kind: 'keyword',
+      signature: 'RIGHT [ OUTER ] JOIN table ON condition',
+      documentation: 'Returns all rows from the right relation plus matching rows from the left.',
+    },
+    FULL: {
+      kind: 'keyword',
+      signature: 'FULL [ OUTER ] JOIN table ON condition',
+      documentation: 'Returns rows when there is a match in either relation; unmatched sides are NULL-padded.',
+    },
+    OUTER: {
+      kind: 'keyword',
+      signature: 'LEFT | RIGHT | FULL OUTER JOIN',
+      documentation: 'Used with JOIN to preserve non-matching rows from the outer side(s).',
+    },
+    ON: {
+      kind: 'keyword',
+      signature: 'ON join_condition',
+      documentation: 'Specifies how two relations are matched in a JOIN.',
+    },
+    AS: {
+      kind: 'keyword',
+      signature: 'expr AS alias | table AS alias',
+      documentation: 'Assigns a temporary name to a column or table reference in the query.',
+    },
+    AND: {
+      kind: 'keyword',
+      signature: 'condition AND condition',
+      documentation: 'Logical AND — both conditions must be true.',
+    },
+    OR: {
+      kind: 'keyword',
+      signature: 'condition OR condition',
+      documentation: 'Logical OR — at least one condition must be true.',
+    },
+    NOT: {
+      kind: 'keyword',
+      signature: 'NOT condition | NOT IN | NOT NULL',
+      documentation: 'Negates a boolean expression or membership test.',
+    },
+    IN: {
+      kind: 'keyword',
+      signature: 'expr IN ( value [, ...] ) | expr IN ( subquery )',
+      documentation: 'Tests whether a value equals any member of a list or subquery result.',
+    },
+    EXISTS: {
+      kind: 'keyword',
+      signature: 'EXISTS ( subquery )',
+      documentation: 'True when the subquery returns at least one row.',
+    },
+    BETWEEN: {
+      kind: 'keyword',
+      signature: 'expr BETWEEN low AND high',
+      documentation: 'True when expr is greater than or equal to low and less than or equal to high.',
+    },
+    LIKE: {
+      kind: 'keyword',
+      signature: "expr LIKE pattern [ ESCAPE 'char' ]",
+      documentation: 'Pattern match using % (any sequence) and _ (single character). Case-sensitive in PostgreSQL.',
+    },
+    ILIKE: {
+      kind: 'keyword',
+      signature: "expr ILIKE pattern [ ESCAPE 'char' ]",
+      documentation: 'Case-insensitive LIKE (PostgreSQL).',
+    },
+    IS: {
+      kind: 'keyword',
+      signature: 'expr IS NULL | IS NOT NULL | IS TRUE | IS FALSE',
+      documentation: 'Tests NULL or boolean truth — use IS NULL instead of = NULL.',
+    },
+    NULL: {
+      kind: 'keyword',
+      signature: 'NULL',
+      documentation: 'Represents a missing or unknown value. Comparisons with NULL yield NULL, not true/false.',
+    },
+    DISTINCT: {
+      kind: 'keyword',
+      signature: 'SELECT DISTINCT ... | COUNT(DISTINCT col)',
+      documentation: 'Removes duplicate rows or counts unique values.',
+    },
+    ORDER: {
+      kind: 'keyword',
+      signature: 'ORDER BY column [ ASC | DESC ] [, ...]',
+      documentation: 'Sorts the result set. ASC is default; DESC reverses order.',
+    },
+    BY: {
+      kind: 'keyword',
+      signature: 'ORDER BY ... | GROUP BY ...',
+      documentation: 'Introduces sort keys (ORDER BY) or grouping columns (GROUP BY).',
+    },
+    GROUP: {
+      kind: 'keyword',
+      signature: 'GROUP BY column [, ...]',
+      documentation: 'Collapses rows sharing the same grouping column values for aggregate queries.',
+    },
+    HAVING: {
+      kind: 'keyword',
+      signature: 'HAVING aggregate_condition',
+      documentation: 'Filters groups after aggregation — like WHERE for grouped results.',
+    },
+    LIMIT: {
+      kind: 'keyword',
+      signature: 'LIMIT count [ OFFSET skip ]',
+      documentation: 'Caps the number of rows returned.',
+    },
+    OFFSET: {
+      kind: 'keyword',
+      signature: 'OFFSET skip',
+      documentation: 'Skips the first N rows — often paired with LIMIT for pagination.',
+    },
+    UNION: {
+      kind: 'keyword',
+      signature: 'query UNION [ ALL ] query',
+      documentation: 'Combines result sets vertically. UNION removes duplicates; UNION ALL keeps them.',
+    },
+    ALL: {
+      kind: 'keyword',
+      signature: 'UNION ALL | SELECT ALL',
+      documentation: 'With UNION, keeps duplicate rows from combined queries.',
+    },
+    EXCEPT: {
+      kind: 'keyword',
+      signature: 'query EXCEPT query',
+      documentation: 'Returns rows from the first query not present in the second (PostgreSQL).',
+    },
+    INTERSECT: {
+      kind: 'keyword',
+      signature: 'query INTERSECT query',
+      documentation: 'Returns rows common to both queries.',
+    },
+    VALUES: {
+      kind: 'keyword',
+      signature: 'VALUES ( row ), ( row ), ...',
+      documentation: 'Constructs a inline table literal, often used with INSERT or as a subquery source.',
+    },
+    SET: {
+      kind: 'keyword',
+      signature: 'UPDATE ... SET column = expr [, ...]',
+      documentation: 'Assigns new values to columns in an UPDATE statement.',
+    },
+    INTO: {
+      kind: 'keyword',
+      signature: 'INSERT INTO table ... | SELECT ... INTO TEMP',
+      documentation: 'Target table for INSERT, or creates a table from a SELECT result.',
+    },
+    DEFAULT: {
+      kind: 'keyword',
+      signature: 'column DEFAULT expression',
+      documentation: 'Uses the column default when no value is supplied on INSERT.',
+    },
+    PRIMARY: {
+      kind: 'keyword',
+      signature: 'PRIMARY KEY ( column [, ...] )',
+      documentation: 'Uniquely identifies each row; indexed automatically.',
+    },
+    KEY: {
+      kind: 'keyword',
+      signature: 'PRIMARY KEY | FOREIGN KEY',
+      documentation: 'Declares primary or foreign key constraints.',
+    },
+    FOREIGN: {
+      kind: 'keyword',
+      signature: 'FOREIGN KEY ( col ) REFERENCES other_table ( col )',
+      documentation: 'Enforces referential integrity to another table column.',
+    },
+    REFERENCES: {
+      kind: 'keyword',
+      signature: 'REFERENCES table ( column )',
+      documentation: 'Target table/column for a foreign key constraint.',
+    },
+    UNIQUE: {
+      kind: 'keyword',
+      signature: 'UNIQUE ( column [, ...] ) | column type UNIQUE',
+      documentation: 'Ensures all values in the column(s) are distinct.',
+    },
+    CONSTRAINT: {
+      kind: 'keyword',
+      signature: 'CONSTRAINT name ...',
+      documentation: 'Names a table constraint (PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY).',
+    },
+    CHECK: {
+      kind: 'keyword',
+      signature: 'CHECK ( condition )',
+      documentation: 'Requires rows to satisfy a boolean expression.',
+    },
+    CASCADE: {
+      kind: 'keyword',
+      signature: 'ON DELETE CASCADE | ON UPDATE CASCADE',
+      documentation: 'Propagates deletes/updates to dependent foreign-key rows.',
+    },
+    RETURNING: {
+      kind: 'keyword',
+      signature: 'INSERT | UPDATE | DELETE ... RETURNING column [, ...]',
+      documentation: 'Returns modified rows from a write statement (PostgreSQL).',
+    },
+    WITH: {
+      kind: 'keyword',
+      signature: 'WITH [ RECURSIVE ] name AS ( query ) SELECT ...',
+      documentation: 'Common Table Expression (CTE) — names a subquery used in the main statement.',
+    },
+    RECURSIVE: {
+      kind: 'keyword',
+      signature: 'WITH RECURSIVE cte AS ( ... )',
+      documentation: 'Allows a CTE to reference itself for hierarchical/graph queries.',
+    },
+    CASE: {
+      kind: 'keyword',
+      signature: 'CASE WHEN cond THEN result ... [ ELSE default ] END',
+      documentation: 'Conditional expression — SQL equivalent of if/else.',
+    },
+    WHEN: {
+      kind: 'keyword',
+      signature: 'CASE WHEN condition THEN result',
+      documentation: 'Branch condition inside a CASE expression.',
+    },
+    THEN: {
+      kind: 'keyword',
+      signature: 'WHEN condition THEN result',
+      documentation: 'Result value when the matching WHEN condition is true.',
+    },
+    ELSE: {
+      kind: 'keyword',
+      signature: 'CASE ... ELSE default END',
+      documentation: 'Fallback result when no WHEN branch matches.',
+    },
+    END: {
+      kind: 'keyword',
+      signature: 'CASE ... END',
+      documentation: 'Closes a CASE expression.',
+    },
+    TRUE: {
+      kind: 'literal',
+      signature: 'TRUE',
+      documentation: 'Boolean true literal.',
+    },
+    FALSE: {
+      kind: 'literal',
+      signature: 'FALSE',
+      documentation: 'Boolean false literal.',
+    },
+    COUNT: {
+      kind: 'function',
+      signature: 'COUNT(*) | COUNT(column) | COUNT(DISTINCT column)',
+      documentation: 'Aggregate: counts rows or non-NULL values.',
+    },
+    SUM: {
+      kind: 'function',
+      signature: 'SUM(numeric_column)',
+      documentation: 'Aggregate: total of numeric values (ignores NULL).',
+    },
+    AVG: {
+      kind: 'function',
+      signature: 'AVG(numeric_column)',
+      documentation: 'Aggregate: arithmetic mean of numeric values.',
+    },
+    MIN: {
+      kind: 'function',
+      signature: 'MIN(expr)',
+      documentation: 'Aggregate or scalar: smallest value.',
+    },
+    MAX: {
+      kind: 'function',
+      signature: 'MAX(expr)',
+      documentation: 'Aggregate or scalar: largest value.',
+    },
+    COALESCE: {
+      kind: 'function',
+      signature: 'COALESCE(value, fallback [, ...])',
+      documentation: 'Returns the first argument that is not NULL.',
+    },
+    NULLIF: {
+      kind: 'function',
+      signature: 'NULLIF(a, b)',
+      documentation: 'Returns NULL when a equals b; otherwise returns a.',
+    },
+    CAST: {
+      kind: 'function',
+      signature: 'CAST(expr AS type) | expr::type',
+      documentation: 'Converts a value to another data type.',
+    },
+    EXTRACT: {
+      kind: 'function',
+      signature: 'EXTRACT(field FROM timestamp)',
+      documentation: 'Pulls part of a date/time (YEAR, MONTH, DAY, HOUR, etc.).',
+    },
+    NOW: {
+      kind: 'function',
+      signature: 'NOW()',
+      documentation: 'Current transaction timestamp (PostgreSQL). Same as CURRENT_TIMESTAMP.',
+    },
+    CURRENT_TIMESTAMP: {
+      kind: 'function',
+      signature: 'CURRENT_TIMESTAMP',
+      documentation: 'Current date and time at the start of the current transaction.',
+    },
+    CURRENT_DATE: {
+      kind: 'function',
+      signature: 'CURRENT_DATE',
+      documentation: 'Current date (no time component).',
+    },
+    VARCHAR: {
+      kind: 'type',
+      signature: 'VARCHAR(n) | CHARACTER VARYING(n)',
+      documentation: 'Variable-length character string with optional max length.',
+    },
+    TEXT: {
+      kind: 'type',
+      signature: 'TEXT',
+      documentation: 'Unlimited-length character string (PostgreSQL).',
+    },
+    INTEGER: {
+      kind: 'type',
+      signature: 'INTEGER | INT',
+      documentation: '4-byte signed integer.',
+    },
+    BIGINT: {
+      kind: 'type',
+      signature: 'BIGINT',
+      documentation: '8-byte signed integer.',
+    },
+    BOOLEAN: {
+      kind: 'type',
+      signature: 'BOOLEAN | BOOL',
+      documentation: 'True/false logical type.',
+    },
+    TIMESTAMP: {
+      kind: 'type',
+      signature: 'TIMESTAMP [ WITH TIME ZONE ]',
+      documentation: 'Date and time without (or with) time zone.',
+    },
+    UUID: {
+      kind: 'type',
+      signature: 'UUID',
+      documentation: '128-bit universally unique identifier (PostgreSQL).',
+    },
+    SERIAL: {
+      kind: 'type',
+      signature: 'SERIAL | BIGSERIAL',
+      documentation: 'Auto-incrementing integer column (PostgreSQL shorthand for INTEGER + sequence).',
+    },
+    JSONB: {
+      kind: 'type',
+      signature: 'JSONB',
+      documentation: 'Binary JSON storage with indexing support (PostgreSQL).',
+    },
+    ARRAY: {
+      kind: 'type',
+      signature: 'type[] | ARRAY[ ... ]',
+      documentation: 'PostgreSQL array type or array literal constructor.',
+    },
+    ASC: {
+      kind: 'keyword',
+      signature: 'ORDER BY column ASC',
+      documentation: 'Ascending sort order (default).',
+    },
+    DESC: {
+      kind: 'keyword',
+      signature: 'ORDER BY column DESC',
+      documentation: 'Descending sort order.',
+    },
+  };
+
+  function sqlDocForWord(word) {
+    if (!word) return null;
+    return SQL_DOCS[word.toUpperCase()] || null;
+  }
+
+  const C_DOCS = {
+    if: { kind: 'keyword', signature: 'if (condition) statement', documentation: 'Executes statement when condition is non-zero (true).' },
+    else: { kind: 'keyword', signature: 'else statement', documentation: 'Alternative branch when the preceding if condition is false.' },
+    for: { kind: 'keyword', signature: 'for (init; condition; step) statement', documentation: 'Counted loop — init once, test condition each iteration, run step after body.' },
+    while: { kind: 'keyword', signature: 'while (condition) statement', documentation: 'Repeats statement while condition is non-zero.' },
+    do: { kind: 'keyword', signature: 'do statement while (condition);', documentation: 'Executes statement at least once, then repeats while condition holds.' },
+    switch: { kind: 'keyword', signature: 'switch (expr) { case ...: ... }', documentation: 'Multi-way branch on integer expression value.' },
+    case: { kind: 'keyword', signature: 'case constant: statements', documentation: 'Labels a branch inside switch; falls through unless break is used.' },
+    break: { kind: 'keyword', signature: 'break;', documentation: 'Exits the innermost loop or switch.' },
+    continue: { kind: 'keyword', signature: 'continue;', documentation: 'Skips to the next iteration of the innermost loop.' },
+    return: { kind: 'keyword', signature: 'return [expr];', documentation: 'Exits the current function, optionally with a value.' },
+    struct: { kind: 'keyword', signature: 'struct name { members... };', documentation: 'Defines a composite type grouping named members.' },
+    union: { kind: 'keyword', signature: 'union name { members... };', documentation: 'Defines a type whose members share the same storage.' },
+    enum: { kind: 'keyword', signature: 'enum name { A, B, ... };', documentation: 'Defines a set of named integer constants.' },
+    typedef: { kind: 'keyword', signature: 'typedef existing type alias;', documentation: 'Creates a synonym for an existing type name.' },
+    static: { kind: 'keyword', signature: 'static ...', documentation: 'File-local linkage for globals/functions, or persistent storage for locals.' },
+    extern: { kind: 'keyword', signature: 'extern type name;', documentation: 'Declares a symbol defined in another translation unit.' },
+    const: { kind: 'keyword', signature: 'const type name = value;', documentation: 'Read-only object — value must not be modified through this name.' },
+    volatile: { kind: 'keyword', signature: 'volatile type name;', documentation: 'Inhibits certain optimizations; required for hardware-mapped or signal-handled memory.' },
+    inline: { kind: 'keyword', signature: 'inline type fn(...);', documentation: 'Hint to embed function body at call sites (C99+).' },
+    sizeof: { kind: 'operator', signature: 'sizeof(type) | sizeof expr', documentation: 'Yields the size in bytes of a type or expression.' },
+    void: { kind: 'type', signature: 'void', documentation: 'Absence of value — used for functions that return nothing.' },
+    int: { kind: 'type', signature: 'int', documentation: 'Signed integer type, typically 32 bits.' },
+    char: { kind: 'type', signature: 'char', documentation: 'Smallest addressable unit; often used for bytes and narrow characters.' },
+    short: { kind: 'type', signature: 'short', documentation: 'Signed integer, at least 16 bits.' },
+    long: { kind: 'type', signature: 'long', documentation: 'Integer at least as wide as int; long long is wider still.' },
+    float: { kind: 'type', signature: 'float', documentation: 'Single-precision IEEE floating point.' },
+    double: { kind: 'type', signature: 'double', documentation: 'Double-precision IEEE floating point.' },
+    signed: { kind: 'type', signature: 'signed int', documentation: 'Explicitly signed integer (default for char/int).' },
+    unsigned: { kind: 'type', signature: 'unsigned int', documentation: 'Non-negative integer type.' },
+    bool: { kind: 'type', signature: '_Bool / bool (C99+)', documentation: 'Boolean type — 0 is false, non-zero is true.' },
+    true: { kind: 'constant', signature: 'true / 1', documentation: 'Boolean true (C99 stdbool.h).' },
+    false: { kind: 'constant', signature: 'false / 0', documentation: 'Boolean false (C99 stdbool.h).' },
+    NULL: { kind: 'constant', signature: '#define NULL ((void*)0)', documentation: 'Null pointer constant (stddef.h).' },
+    printf: { kind: 'function', signature: 'int printf(const char *fmt, ...);', documentation: 'stdio.h — formatted output to stdout. Returns characters written or negative on error.' },
+    fprintf: { kind: 'function', signature: 'int fprintf(FILE *stream, const char *fmt, ...);', documentation: 'stdio.h — formatted output to a FILE stream.' },
+    sprintf: { kind: 'function', signature: 'int sprintf(char *buf, const char *fmt, ...);', documentation: 'stdio.h — formatted output into a char buffer (unsafe; prefer snprintf).' },
+    snprintf: { kind: 'function', signature: 'int snprintf(char *buf, size_t n, const char *fmt, ...);', documentation: 'stdio.h — bounded formatted output into a buffer (C99).' },
+    scanf: { kind: 'function', signature: 'int scanf(const char *fmt, ...);', documentation: 'stdio.h — formatted input from stdin.' },
+    fgets: { kind: 'function', signature: 'char *fgets(char *s, int n, FILE *stream);', documentation: 'stdio.h — reads a line into buffer s, at most n-1 chars.' },
+    fputs: { kind: 'function', signature: 'int fputs(const char *s, FILE *stream);', documentation: 'stdio.h — writes string s to stream (no automatic newline).' },
+    puts: { kind: 'function', signature: 'int puts(const char *s);', documentation: 'stdio.h — writes string and newline to stdout.' },
+    fopen: { kind: 'function', signature: 'FILE *fopen(const char *path, const char *mode);', documentation: 'stdio.h — opens a file; mode e.g. "r", "w", "a", "rb". Returns NULL on failure.' },
+    fclose: { kind: 'function', signature: 'int fclose(FILE *stream);', documentation: 'stdio.h — closes an open FILE stream.' },
+    malloc: { kind: 'function', signature: 'void *malloc(size_t size);', documentation: 'stdlib.h — allocates size bytes; contents are indeterminate. Returns NULL on failure.' },
+    calloc: { kind: 'function', signature: 'void *calloc(size_t count, size_t size);', documentation: 'stdlib.h — allocates and zero-initializes count * size bytes.' },
+    realloc: { kind: 'function', signature: 'void *realloc(void *ptr, size_t size);', documentation: 'stdlib.h — resizes an existing allocation; may move memory.' },
+    free: { kind: 'function', signature: 'void free(void *ptr);', documentation: 'stdlib.h — releases memory from malloc/calloc/realloc. Passing NULL is a no-op.' },
+    exit: { kind: 'function', signature: 'void exit(int status);', documentation: 'stdlib.h — terminates process; status 0 means success.' },
+    abort: { kind: 'function', signature: 'void abort(void);', documentation: 'stdlib.h — abnormal termination, raising SIGABRT.' },
+    atoi: { kind: 'function', signature: 'int atoi(const char *s);', documentation: 'stdlib.h — parses decimal int from string; no error reporting.' },
+    strlen: { kind: 'function', signature: 'size_t strlen(const char *s);', documentation: 'string.h — length of null-terminated string, excluding the terminator.' },
+    strcpy: { kind: 'function', signature: 'char *strcpy(char *dest, const char *src);', documentation: 'string.h — copies src into dest including NUL (buffer must be large enough).' },
+    strncpy: { kind: 'function', signature: 'char *strncpy(char *dest, const char *src, size_t n);', documentation: 'string.h — copies at most n bytes; may not NUL-terminate if src longer than n.' },
+    strcmp: { kind: 'function', signature: 'int strcmp(const char *a, const char *b);', documentation: 'string.h — lexicographic compare; returns <0, 0, or >0.' },
+    strncmp: { kind: 'function', signature: 'int strncmp(const char *a, const char *b, size_t n);', documentation: 'string.h — compare at most n characters.' },
+    strcat: { kind: 'function', signature: 'char *strcat(char *dest, const char *src);', documentation: 'string.h — appends src to dest; dest must have room.' },
+    strchr: { kind: 'function', signature: 'char *strchr(const char *s, int c);', documentation: 'string.h — finds first occurrence of byte c in s.' },
+    strstr: { kind: 'function', signature: 'char *strstr(const char *haystack, const char *needle);', documentation: 'string.h — finds first occurrence of needle in haystack.' },
+    memcpy: { kind: 'function', signature: 'void *memcpy(void *dest, const void *src, size_t n);', documentation: 'string.h — copies n bytes; regions must not overlap (use memmove).' },
+    memmove: { kind: 'function', signature: 'void *memmove(void *dest, const void *src, size_t n);', documentation: 'string.h — copies n bytes; safe when regions overlap.' },
+    memset: { kind: 'function', signature: 'void *memset(void *s, int c, size_t n);', documentation: 'string.h — fills n bytes of s with byte c.' },
+    memcmp: { kind: 'function', signature: 'int memcmp(const void *a, const void *b, size_t n);', documentation: 'string.h — compares first n bytes of two blocks.' },
+    assert: { kind: 'macro', signature: 'assert(expr);', documentation: 'assert.h — aborts if expr is false when NDEBUG is not defined.' },
+  };
+
+  const CPP_DOCS = {
+    class: { kind: 'keyword', signature: 'class Name { ... };', documentation: 'Defines a user type with members, access control, and optional inheritance.' },
+    namespace: { kind: 'keyword', signature: 'namespace name { ... }', documentation: 'Groups declarations under a named scope; use name::symbol to refer to members.' },
+    using: { kind: 'keyword', signature: 'using alias = type; | using namespace ns;', documentation: 'Creates a type alias or imports names from another namespace.' },
+    template: { kind: 'keyword', signature: 'template<typename T> ...', documentation: 'Defines a generic function, class, or alias parameterized by types or values.' },
+    typename: { kind: 'keyword', signature: 'template<typename T>', documentation: 'Declares a template type parameter or dependent type name.' },
+    virtual: { kind: 'keyword', signature: 'virtual return_type fn();', documentation: 'Enables dynamic dispatch — derived overrides are called through base pointers/references.' },
+    override: { kind: 'keyword', signature: 'return_type fn() override;', documentation: 'Marks a member function as overriding a virtual base function (C++11).' },
+    final: { kind: 'keyword', signature: 'class C final { ... };', documentation: 'Prevents further derivation from a class, or further overriding of a virtual function.' },
+    public: { kind: 'keyword', signature: 'public: members...', documentation: 'Access specifier — members are accessible everywhere.' },
+    private: { kind: 'keyword', signature: 'private: members...', documentation: 'Access specifier — members accessible only within the class and friends.' },
+    protected: { kind: 'keyword', signature: 'protected: members...', documentation: 'Access specifier — members accessible in the class, friends, and derived classes.' },
+    friend: { kind: 'keyword', signature: 'friend class Other;', documentation: 'Grants another class or function access to private/protected members.' },
+    explicit: { kind: 'keyword', signature: 'explicit Type(args);', documentation: 'Prevents implicit conversions from constructor arguments.' },
+    noexcept: { kind: 'keyword', signature: 'void fn() noexcept;', documentation: 'Declares that a function does not throw exceptions (C++11).' },
+    constexpr: { kind: 'keyword', signature: 'constexpr int fn();', documentation: 'Expression or function evaluable at compile time (C++11/14/17).' },
+    decltype: { kind: 'keyword', signature: 'decltype(expr)', documentation: 'Deduces the type of an expression at compile time.' },
+    auto: { kind: 'keyword', signature: 'auto x = expr;', documentation: 'Deduces variable type from its initializer (C++11).' },
+    nullptr: { kind: 'constant', signature: 'nullptr', documentation: 'Null pointer constant with its own type (C++11); prefer over NULL.' },
+    new: { kind: 'operator', signature: 'new Type(args) | new Type[n]', documentation: 'Allocates dynamic storage and constructs object(s); throws std::bad_alloc on failure.' },
+    delete: { kind: 'operator', signature: 'delete ptr; | delete[] ptr;', documentation: 'Destroys and deallocates memory allocated by new / new[].' },
+    this: { kind: 'keyword', signature: 'this', documentation: 'Pointer to the current object inside a non-static member function.' },
+    operator: { kind: 'keyword', signature: 'return_type operator op(...);', documentation: 'Defines or overloads an operator for a user-defined type.' },
+    try: { kind: 'keyword', signature: 'try { ... } catch (...) { ... }', documentation: 'Begins an exception-handling block.' },
+    catch: { kind: 'keyword', signature: 'catch (const E& e) { ... }', documentation: 'Handles exceptions thrown in the matching try block.' },
+    throw: { kind: 'keyword', signature: 'throw expr;', documentation: 'Raises an exception; use throw; to rethrow the current exception.' },
+    static_cast: { kind: 'operator', signature: 'static_cast<T>(expr)', documentation: 'Well-defined compile-time cast between related types (e.g. base ↔ derived, numeric).' },
+    dynamic_cast: { kind: 'operator', signature: 'dynamic_cast<T>(expr)', documentation: 'Safe downcast for polymorphic types; returns nullptr/reference failure at runtime.' },
+    reinterpret_cast: { kind: 'operator', signature: 'reinterpret_cast<T>(expr)', documentation: 'Low-level bitwise reinterpretation between unrelated pointer types.' },
+    const_cast: { kind: 'operator', signature: 'const_cast<T>(expr)', documentation: 'Adds or removes const/volatile qualifiers (only safe when object was not originally const).' },
+    cout: { kind: 'object', signature: 'std::ostream std::cout', documentation: 'iostream — standard character output stream (stdout). Use with << operator.' },
+    cin: { kind: 'object', signature: 'std::istream std::cin', documentation: 'iostream — standard character input stream (stdin). Use with >> operator.' },
+    cerr: { kind: 'object', signature: 'std::ostream std::cerr', documentation: 'iostream — unbuffered standard error stream.' },
+    endl: { kind: 'function', signature: 'std::endl', documentation: 'iostream — inserts newline and flushes the output stream.' },
+    string: { kind: 'type', signature: 'std::string', documentation: 'string — dynamic growable sequence of char; prefer over C strings in C++.' },
+    vector: { kind: 'type', signature: 'std::vector<T>', documentation: 'vector — dynamic contiguous array; O(1) amortized push_back, random access.' },
+    map: { kind: 'type', signature: 'std::map<Key, T>', documentation: 'map — ordered associative container (red-black tree); keys sorted, unique.' },
+    set: { kind: 'type', signature: 'std::set<T>', documentation: 'set — ordered unique elements (red-black tree).' },
+    unordered_map: { kind: 'type', signature: 'std::unordered_map<Key, T>', documentation: 'unordered_map — hash table map; average O(1) lookup, no ordering.' },
+    unordered_set: { kind: 'type', signature: 'std::unordered_set<T>', documentation: 'unordered_set — hash set of unique elements.' },
+    pair: { kind: 'type', signature: 'std::pair<T1, T2>', documentation: 'utility — heterogeneous two-element tuple; created with std::make_pair or {a, b}.' },
+    optional: { kind: 'type', signature: 'std::optional<T>', documentation: 'optional — value that may or may not be present (C++17).' },
+    variant: { kind: 'type', signature: 'std::variant<Ts...>', documentation: 'variant — type-safe union holding one of several types (C++17).' },
+    unique_ptr: { kind: 'type', signature: 'std::unique_ptr<T>', documentation: 'memory — exclusive-ownership smart pointer; non-copyable, movable.' },
+    shared_ptr: { kind: 'type', signature: 'std::shared_ptr<T>', documentation: 'memory — reference-counted shared ownership smart pointer.' },
+    weak_ptr: { kind: 'type', signature: 'std::weak_ptr<T>', documentation: 'memory — non-owning reference to shared_ptr-managed object; breaks cycles.' },
+    make_unique: { kind: 'function', signature: 'std::make_unique<T>(args...)', documentation: 'memory — creates a std::unique_ptr<T> (C++14).' },
+    make_shared: { kind: 'function', signature: 'std::make_shared<T>(args...)', documentation: 'memory — creates a std::shared_ptr<T> with single allocation.' },
+    move: { kind: 'function', signature: 'std::move(expr)', documentation: 'utility — casts to rvalue reference to enable move semantics (does not move by itself).' },
+    forward: { kind: 'function', signature: 'std::forward<T>(expr)', documentation: 'utility — perfect-forwards an argument preserving value category.' },
+    sort: { kind: 'function', signature: 'std::sort(first, last)', documentation: 'algorithm — sorts range in ascending order; O(n log n).' },
+    find: { kind: 'function', signature: 'std::find(first, last, value)', documentation: 'algorithm — linear search; returns iterator to first match or end.' },
+    size: { kind: 'method', signature: 'size_type container.size() const', documentation: 'Returns the number of elements in a sequence container.' },
+    push_back: { kind: 'method', signature: 'void vector.push_back(const T& val)', documentation: 'Appends element to end of vector/string; may reallocate.' },
+    emplace_back: { kind: 'method', signature: 'void vector.emplace_back(args...)', documentation: 'Constructs element in place at end of container (C++11).' },
+    begin: { kind: 'method', signature: 'iterator container.begin()', documentation: 'Returns iterator to the first element.' },
+    end: { kind: 'method', signature: 'iterator container.end()', documentation: 'Returns past-the-end iterator (not dereferenceable).' },
+    std: { kind: 'namespace', signature: 'namespace std { ... }', documentation: 'Standard C++ library namespace — vector, string, cout, etc. live here.' },
+  };
+
+  function isCLikePath(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    return /\.(c|h|cpp|cc|cxx|hpp|hh|hxx)$/.test(base);
+  }
+
+  function isCppPath(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    return /\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(base);
+  }
+
+  function cDocForWord(word) {
+    if (!word) return null;
+    return C_DOCS[word] || C_DOCS[word.toLowerCase()] || null;
+  }
+
+  function cppDocForWord(word) {
+    if (!word) return null;
+    return CPP_DOCS[word] || CPP_DOCS[word.toLowerCase()] || null;
+  }
+
+  function clikeDocForWord(word, path) {
+    if (isCppPath(path)) {
+      return cppDocForWord(word) || cDocForWord(word);
+    }
+    return cDocForWord(word) || cppDocForWord(word);
+  }
+
+  function clikeHoverWord(model, position) {
+    let wordObj = model.getWordAtPosition(position);
+    const line = model.getLineContent(position.lineNumber);
+    if (!wordObj?.word) {
+      const col = Math.max(0, position.column - 1);
+      if (col < line.length && /[\w$]/.test(line[col])) {
+        let start = col;
+        let end = col + 1;
+        while (start > 0 && /[\w$]/.test(line[start - 1])) start -= 1;
+        while (end < line.length && /[\w$]/.test(line[end])) end += 1;
+        wordObj = { word: line.slice(start, end), startColumn: start + 1, endColumn: end + 1 };
+      }
+    }
+    const word = wordObj?.word || '';
+    if (!word) return null;
+    const before = line.slice(0, (wordObj?.startColumn || position.column) - 1);
+    const stdMatch = before.match(/(?:^|[^:\w])std::(\w*)$/);
+    if (stdMatch && word) {
+      return {
+        word,
+        qualified: `std::${word}`,
+        range: new monaco.Range(position.lineNumber, wordObj.startColumn, position.lineNumber, wordObj.endColumn),
+      };
+    }
+    return {
+      word,
+      qualified: word,
+      range: new monaco.Range(position.lineNumber, wordObj.startColumn, position.lineNumber, wordObj.endColumn),
+    };
+  }
+
+  function resolveEditorPath(helpers, model) {
+    const tab = helpers.getActivePath?.() || '';
+    if (tab) return tab;
+    const uriPath = decodeURIComponent(model?.uri?.path || '').replace(/^\//, '');
+    return uriPath || '';
+  }
+
+  function isCLikeContext(path, model) {
+    if (isCLikePath(path)) return true;
+    const lang = model?.getLanguageId?.() || '';
+    return lang === 'cpp' || lang === 'c';
+  }
+
+  function clikeHoverMarkdown(info, markers) {
+    if (!info?.name) return '';
+    const parts = [];
+    if (info.signature) {
+      parts.push(`\`\`\`c\n${info.signature}\n\`\`\``);
+    } else {
+      parts.push(`**${info.name}** · ${info.kind || 'symbol'}`);
+    }
+    if (info.documentation) {
+      parts.push(String(info.documentation).trim());
+    } else if (['function', 'method', 'macro', 'typedef', 'struct', 'class'].includes(info.kind)) {
+      parts.push('*No documentation available.*');
+    }
+    if (markers?.length) {
+      parts.push('---');
+      for (const m of markers) {
+        const tone = (typeof monaco !== 'undefined'
+          && m.severity === monaco.MarkerSeverity.Error) ? 'Error' : 'Warning';
+        parts.push(`**${tone}:** ${String(m.message || '').trim()}`);
+      }
+    }
+    return parts.join('\n\n');
+  }
+
+  function clikeHoverResult(info, markers, range) {
+    if (!info?.name) return null;
+    const md = clikeHoverMarkdown(info, markers);
+    if (!md) return null;
+    return {
+      range: info.range || range,
+      contents: [{ value: md, isTrusted: true }],
+    };
+  }
+
+  function extractCCommentBefore(lines, lineIdx) {
+    const out = [];
+    for (let i = lineIdx - 1; i >= 0 && i >= lineIdx - 12; i -= 1) {
+      const t = lines[i].trim();
+      if (!t) {
+        if (out.length) break;
+        continue;
+      }
+      if (t.startsWith('*/')) {
+        let block = t;
+        for (let j = i - 1; j >= 0; j -= 1) {
+          block = `${lines[j]}\n${block}`;
+          if (lines[j].trim().startsWith('/*')) break;
+        }
+        out.unshift(block.replace(/^\/\*+\s*|\s*\*+\/$/g, '').replace(/^\s*\*\s?/gm, '').trim());
+        break;
+      }
+      if (t.startsWith('//')) {
+        out.unshift(t.replace(/^\/\/+\s?/, '').trim());
+        continue;
+      }
+      break;
+    }
+    return out.filter(Boolean).join('\n').trim();
+  }
+
+  function lookupCLikeLocalSymbol(model, position, path) {
+    const hit = clikeHoverWord(model, position);
+    if (!hit?.word) return null;
+    if (clikeDocForWord(hit.word, path)) return null;
+    const word = hit.word;
+    const content = model.getValue();
+    const lines = content.split('\n');
+    const wordRe = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const defRes = [
+      new RegExp(`\\b${wordRe}\\s*\\([^)]*\\)\\s*\\{`),
+      new RegExp(`\\b(?:struct|union|enum|class)\\s+${wordRe}\\b`),
+      new RegExp(`\\btypedef\\b[^;]*\\b${wordRe}\\s*;`),
+      new RegExp(`#\\s*define\\s+${wordRe}\\b`),
+    ];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (!defRes.some((re) => re.test(line))) continue;
+      if (line.trim().startsWith('//')) continue;
+      let kind = 'function';
+      if (/\bstruct\b/.test(line)) kind = 'struct';
+      else if (/\bclass\b/.test(line)) kind = 'class';
+      else if (/\benum\b/.test(line)) kind = 'enum';
+      else if (/\btypedef\b/.test(line)) kind = 'typedef';
+      else if (/^\s*#\s*define/.test(line)) kind = 'macro';
+      const sig = line.trim().split('{')[0].split(';')[0].trim();
+      const doc = extractCCommentBefore(lines, i);
+      return {
+        name: word,
+        kind,
+        signature: sig,
+        documentation: doc,
+        range: hit.range,
+      };
+    }
+    return null;
+  }
+
+  function lookupCLikeHover(helpers, model, position) {
+    const path = resolveEditorPath(helpers, model);
+    if (!isCLikeContext(path, model)) return null;
+    const hit = clikeHoverWord(model, position);
+    if (!hit) return null;
+    const doc = clikeDocForWord(hit.word, path);
+    if (!doc) return null;
+    const displayName = hit.qualified !== hit.word ? hit.qualified : hit.word;
+    return {
+      name: displayName,
+      kind: doc.kind || 'keyword',
+      signature: doc.signature,
+      documentation: doc.documentation,
+      range: hit.range,
+    };
+  }
+
+  function lookupSchemaSqlHover(helpers, word) {
+    const schema = helpers.getDbSchema?.();
+    if (!schema?.tables?.length || !word) return null;
+    const lower = word.toLowerCase();
+    for (const table of schema.tables) {
+      const label = table.schema && table.schema !== 'main'
+        ? `${table.schema}.${table.name}`
+        : table.name;
+      if (table.name.toLowerCase() === lower || label.toLowerCase() === lower) {
+        const cols = (table.columns || [])
+          .map((c) => `${c.name} ${c.type_name}${c.nullable ? '' : ' NOT NULL'}`)
+          .join('\n');
+        return {
+          name: label,
+          kind: 'table',
+          signature: `TABLE ${label}`,
+          documentation: cols
+            ? `Columns:\n${cols}`
+            : 'Table with no columns in schema cache.',
+        };
+      }
+      for (const col of table.columns || []) {
+        if (col.name.toLowerCase() === lower) {
+          return {
+            name: col.name,
+            kind: 'column',
+            signature: `${col.name} ${col.type_name}${col.nullable ? '' : ' NOT NULL'}`,
+            documentation: `Column on table ${label}.`,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  function lookupSqlHover(helpers, model, position) {
+    const wordObj = model.getWordAtPosition(position);
+    const word = wordObj?.word || '';
+    if (!word) return null;
+    const range = wordRangeAt(model, position);
+    const schemaHit = lookupSchemaSqlHover(helpers, word);
+    if (schemaHit) return { ...schemaHit, range };
+    const doc = sqlDocForWord(word);
+    if (!doc) return null;
+    return {
+      name: word.toUpperCase(),
+      kind: doc.kind || 'keyword',
+      signature: doc.signature,
+      documentation: doc.documentation,
+      range,
+    };
   }
 
   function sanitizeInlineGhostText(text) {
@@ -1199,17 +2083,18 @@
     if (/\.java$/i.test(base)) return 'java';
     if (/\.(kt|kts)$/i.test(base)) return 'kotlin';
     if (/\.(groovy|gradle)$/i.test(base)) return 'groovy';
+    if (/\.(c|h)$/i.test(base)) return 'cpp';
+    if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/i.test(base)) return 'cpp';
+    if (/\.(md|mdx|markdown)$/i.test(base)) return 'markdown';
+    if (/^(makefile|gnumakefile)$/i.test(base) || base.endsWith('.mk') || base.startsWith('makefile.')) {
+      return 'makefile';
+    }
     return fromPath || 'plaintext';
   }
 
   function ensureModelLanguageForPath(path, model) {
-    const expected = langForPath(path || '');
-    if (!expected || expected === 'plaintext' || !model) return expected;
-    if (model.getLanguageId() !== expected) {
-      ensureMonacoBasicLanguage(expected);
-      monaco.editor.setModelLanguage(model, expected);
-    }
-    return expected;
+    applyEditorLanguage(path, model);
+    return langForPath(path || '');
   }
 
   function jdkStaticMemberItems(qualifier, memberPrefix, content = '') {
@@ -2223,11 +3108,40 @@
     return `${repo}:${path}:${line}:${column}:${text.length}:${hash >>> 0}`;
   }
 
+  function reaperUriForPath(path) {
+    let normalized = String(path || '').replace(/\\/g, '/');
+    if (!normalized) return monaco.Uri.parse('reaper://workspace/');
+    const isAbs = normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized);
+    if (!isAbs) normalized = normalized.replace(/^\/+/, '');
+    return monaco.Uri.parse(`reaper://workspace/${encodeURIComponent(normalized)}`);
+  }
+
+  function pathFromReaperUri(uri) {
+    if (!uri || uri.scheme !== 'reaper' || uri.authority !== 'workspace') return '';
+    const raw = uri.path.replace(/^\//, '');
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+
+  function definitionLocationFromHit(hit) {
+    if (!hit?.path) return null;
+    const nameLen = (hit.name || 'symbol').length;
+    const line = Math.max(1, hit.line || 1);
+    const col = Math.max(1, hit.column || 1);
+    return {
+      uri: reaperUriForPath(hit.path),
+      range: new monaco.Range(line, col, line, col + nameLen),
+    };
+  }
+
   async function lookupDefinition(helpers, model, position) {
-    if (!helpers.repoApi || !helpers.getRepo || !helpers.openFileAt) return null;
+    if (!helpers.repoApi || !helpers.getRepo) return null;
     const repo = helpers.getRepo();
     if (!repo) return null;
-    const path = helpers.getActivePath?.() || '';
+    const path = resolveEditorPath(helpers, model);
     if (!path) return null;
 
     const line = position.lineNumber;
@@ -2237,7 +3151,7 @@
     const cacheKey = definitionCacheKey(repo, path, line, column, content ?? model.getValue());
     const cached = definitionCache.get(cacheKey);
     if (cached) {
-      return navigateToDefinition(helpers, cached);
+      return definitionLocationFromHit(cached);
     }
 
     try {
@@ -2255,8 +3169,9 @@
       if (!hit?.path) return null;
       if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
       definitionCache.set(cacheKey, hit);
-      return navigateToDefinition(helpers, hit);
-    } catch {
+      return definitionLocationFromHit(hit);
+    } catch (err) {
+      console.warn('[ReaperLang] lookupDefinition failed:', err);
       return null;
     }
   }
@@ -2265,7 +3180,7 @@
     if (!helpers.repoApi || !helpers.getRepo) return null;
     const repo = helpers.getRepo();
     if (!repo) return null;
-    const path = helpers.getActivePath?.() || '';
+    const path = resolveEditorPath(helpers, model);
     if (!path) return null;
 
     const line = position.lineNumber;
@@ -2313,24 +3228,22 @@
     return info?.name ? info : null;
   }
 
-  async function navigateToDefinition(helpers, hit) {
-    await helpers.openFileAt(hit.path, hit.line || 1, hit.column || 1);
-    const editor = helpers.getEditor?.();
-    const activeModel = editor?.getModel();
-    if (!activeModel) return null;
-    const nameLen = (hit.name || 'symbol').length;
-    const line = Math.max(1, hit.line || 1);
-    const col = Math.max(1, hit.column || 1);
-    return {
-      uri: activeModel.uri,
-      range: new monaco.Range(line, col, line, col + nameLen),
-    };
-  }
-
   function setupEditorFeatures(editor, helpers) {
-    completionDebug(helpers, ['debug active', `build=${document.querySelector('meta[name="reaper-ui-build"]')?.content?.trim() || '?'}`]);
+    const origGetActivePath = helpers.getActivePath;
+    helpers = {
+      ...helpers,
+      getActivePath() {
+        const tab = origGetActivePath?.() || '';
+        if (tab) return tab;
+        const model = (helpers.getEditor?.() || editor)?.getModel?.();
+        return model ? resolveEditorPath({ getActivePath: origGetActivePath }, model) : '';
+      },
+    };
 
-    registerGroovy();
+    completionDebug(helpers, ['debug active', `build=${document.querySelector('meta[name="reaper-ui-build"]')?.content?.trim() || '?'}`, 'rev=342']);
+
+    try { registerGroovy(); } catch (e) { console.warn('[ReaperLang] registerGroovy failed', e); }
+    try { registerMakefile(); } catch (e) { console.warn('[ReaperLang] registerMakefile failed', e); }
 
     const langs = new Set(ALL_EDITOR_LANGS);
     const activeEditor = () => helpers.getEditor?.() || editor;
@@ -3090,8 +4003,22 @@
 
     function markersAtEditorPosition(model, position) {
       return monaco.editor.getModelMarkers({ resource: model.uri })
-        .filter((m) => position.lineNumber >= m.startLineNumber
-          && position.lineNumber <= m.endLineNumber);
+        .filter((m) => positionInMarker(position, m));
+    }
+
+    function enrichSymInfoFromCLikeBuiltin(symInfo, cLikeInfo) {
+      if (!symInfo?.name || !cLikeInfo) return symInfo;
+      if (symInfo.name !== cLikeInfo.name && symInfo.name !== cLikeInfo.name.split('::').pop()) {
+        return symInfo;
+      }
+      const hasDoc = !!(symInfo.documentation || symInfo.signature);
+      if (hasDoc) return symInfo;
+      return {
+        ...symInfo,
+        kind: symInfo.kind || cLikeInfo.kind,
+        signature: symInfo.signature || cLikeInfo.signature,
+        documentation: symInfo.documentation || cLikeInfo.documentation,
+      };
     }
 
     function hoverResultForMarkers(model, position, markers, range) {
@@ -3115,21 +4042,97 @@
       };
     }
 
+    monaco.languages.registerHoverProvider({ language: 'cpp' }, {
+      provideHover(model, position) {
+        return provideClikeHover(model, position);
+      },
+    });
+    monaco.languages.registerHoverProvider({ language: 'c' }, {
+      provideHover(model, position) {
+        return provideClikeHover(model, position);
+      },
+    });
+
+    function provideClikeHover(model, position) {
+      const range = wordRangeAt(model, position);
+      const path = resolveEditorPath(helpers, model);
+      if (!isCLikeContext(path, model)) return null;
+      const markers = markersAtEditorPosition(model, position);
+      const cLikeInfo = lookupCLikeHover(helpers, model, position);
+      if (cLikeInfo) {
+        return clikeHoverResult(cLikeInfo, markers, range);
+      }
+      const cLikeLocal = lookupCLikeLocalSymbol(model, position, path);
+      if (cLikeLocal) {
+        return clikeHoverResult(cLikeLocal, markers, range);
+      }
+      if (markers.length) {
+        return hoverResultForMarkers(model, position, markers, range);
+      }
+      return lookupSymbolHover(helpers, model, position).then((symInfo) => {
+        if (!symInfo?.name) return null;
+        const enriched = enrichSymInfoFromCLikeBuiltin(symInfo, null);
+        return clikeHoverResult(enriched, [], enriched?.range || range);
+      });
+    }
+
     monaco.languages.registerHoverProvider(REAPER_DOC_SELECTOR, {
       provideHover(model, position) {
         const range = wordRangeAt(model, position);
+        const path = resolveEditorPath(helpers, model);
+        const lang = model.getLanguageId();
+        if (lang === 'cpp' || lang === 'c') return null;
         const markers = markersAtEditorPosition(model, position);
 
-        // Return synchronously on error lines — async symbol lookup triggers
-        // Monaco's "Loading..." placeholder and slows the problem hover.
+        if (model.getLanguageId() === 'sql') {
+          if (markers.length) {
+            return hoverResultForMarkers(model, position, markers, range);
+          }
+          const sqlInfo = lookupSqlHover(helpers, model, position);
+          if (!sqlInfo) return null;
+          const html = hoverHtmlFromInfo(sqlInfo);
+          if (!html) return null;
+          return {
+            range: sqlInfo.range || range,
+            contents: [{
+              value: html,
+              supportHtml: true,
+              isTrusted: true,
+            }],
+          };
+        }
+
+        // Merge symbol docs with diagnostics when both apply (Java, etc.).
         if (markers.length) {
-          return hoverResultForMarkers(model, position, markers, range);
+          return lookupSymbolHover(helpers, model, position).then((symInfo) => {
+            if (symInfo?.name) {
+              const html = buildEditorHoverHtml(symInfo, markers);
+              if (html) {
+                return {
+                  range,
+                  contents: [{
+                    value: html,
+                    supportHtml: true,
+                    isTrusted: true,
+                  }],
+                };
+              }
+            }
+            return hoverResultForMarkers(model, position, markers, range);
+          });
         }
 
         return lookupSymbolHover(helpers, model, position).then((symInfo) => {
           if (!symInfo?.name) return null;
           const html = buildEditorHoverHtml(symInfo, []);
-          if (!html) return null;
+          if (!html) {
+            const md = hoverMarkdownFromInfo(symInfo);
+            if (!md) return null;
+            return {
+              range,
+              contents: [{ value: md, isTrusted: true }],
+            };
+          }
           return {
             range,
             contents: [{
@@ -4728,9 +5731,12 @@
 
     monaco.editor.registerEditorOpener({
       openCodeEditor(_source, resource, selection) {
-        if (!helpers.openFileAt) return false;
-        const path = decodeURIComponent(resource.path.replace(/^\//, ''));
-        helpers.openFileAt(path, selection?.startLineNumber || 1, selection?.startColumn || 1);
+        if (!helpers.openFileAt || resource?.scheme !== 'reaper' || resource?.authority !== 'workspace') {
+          return false;
+        }
+        const path = pathFromReaperUri(resource);
+        if (!path) return false;
+        void helpers.openFileAt(path, selection?.startLineNumber || 1, selection?.startColumn || 1);
         return true;
       },
     });
@@ -4774,6 +5780,11 @@
         const loc = await lookupDefinition(helpers, model, pos);
         if (!loc) {
           helpers.toast?.('No definition found — wait for Java index or add import', 'info');
+          return;
+        }
+        const path = pathFromReaperUri(loc.uri);
+        if (path) {
+          await helpers.openFileAt(path, loc.range.startLineNumber, loc.range.startColumn);
         }
       },
     });
@@ -4803,6 +5814,13 @@
     });
 
     editor.addAction({
+      id: 'reaper.goToLine',
+      label: 'Go to Line…',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG],
+      run: () => helpers.goToLine?.(),
+    });
+
+    editor.addAction({
       id: 'reaper.inlineSuggest.acceptEnter',
       label: 'Accept Inline Suggestion',
       keybindings: [monaco.KeyCode.Enter],
@@ -4822,6 +5840,8 @@
     } else {
       console.warn('[Reaper] dot handler not attached');
     }
+
+    return helpers;
   }
 
   function isDiagnosablePath(path) {
@@ -4833,18 +5853,47 @@
     return langForPath(path) !== 'plaintext';
   }
 
-  function ensureMonacoBasicLanguage(lang) {
-    if (typeof require === 'undefined' || !lang || lang === 'plaintext') return;
-    const safe = String(lang).replace(/[^a-z0-9_-]/gi, '');
-    if (!safe) return;
+  function ensureMonacoBasicLanguage(lang, onReady) {
+    const done = typeof onReady === 'function' ? onReady : () => {};
+    if (typeof require === 'undefined' || !lang || lang === 'plaintext') {
+      done();
+      return;
+    }
+    const loadLang = lang === 'c' ? 'cpp' : lang;
+    const safe = String(loadLang).replace(/[^a-z0-9_-]/gi, '');
+    if (!safe || REAPER_CUSTOM_LANGS.has(safe)) {
+      done();
+      return;
+    }
     try {
-      require([`vs/basic-languages/${safe}/${safe}`], () => {});
+      require([`vs/basic-languages/${safe}/${safe}`], () => done(), () => done());
     } catch {
-      /* optional tokenizer module */
+      done();
     }
   }
 
+  function applyEditorLanguage(path, model, onReady) {
+    const expected = langForPath(path || '');
+    const done = typeof onReady === 'function' ? onReady : () => {};
+    if (!model || !expected || expected === 'plaintext') {
+      done(expected);
+      return;
+    }
+    ensureReaperCustomLanguage(expected);
+    ensureMonacoBasicLanguage(expected, () => {
+      const prev = model.getLanguageId?.();
+      if (prev !== expected) {
+        monaco.editor.setModelLanguage(model, expected);
+      } else if (REAPER_CUSTOM_LANGS.has(expected)) {
+        monaco.editor.setModelLanguage(model, 'plaintext');
+        monaco.editor.setModelLanguage(model, expected);
+      }
+      done(expected);
+    });
+  }
+
   Object.assign(window.ReaperLang || {}, {
+    bundleRev: '342',
     completionRev: () => REAPER_COMPLETION_REV,
     clearCompletionCache: clearIndexCompleteCache,
     coreOnly: false,
@@ -4861,13 +5910,17 @@
     editorLinePrefix,
     langForPath,
     langLabel,
+    langLabelForPath,
     compilerToolIdsForPath,
     compilerLabelsForPath,
     isDiagnosablePath,
     registerGroovy,
+    registerMakefile,
     setupEditorFeatures,
     extractSymbols,
     ensureMonacoBasicLanguage,
+    applyEditorLanguage,
+    ensureReaperCustomLanguage,
     handleDotCompletion: (ed) => {
       if (typeof reaperDotCompletionHandler === 'function') {
         return reaperDotCompletionHandler(ed);
@@ -4875,4 +5928,5 @@
       return window.ReaperLang?.handleDotCompletion?.(ed) ?? -1;
     },
   });
+  window.__reaperLangBundleLoaded = true;
 })();
