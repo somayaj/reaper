@@ -8,6 +8,7 @@ use super::gradle;
 use super::java_ecosystem;
 use super::languages::{self, merge_languages, push_unique};
 use super::maven;
+use super::native_build_tasks;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ProjectProfile {
@@ -61,6 +62,7 @@ fn detect_from_markers(
     let has_gradle = ws.join("build.gradle").is_file() || ws.join("build.gradle.kts").is_file();
     let has_maven = ws.join("pom.xml").is_file();
     let has_gemfile = ws.join("Gemfile").is_file();
+    let has_rakefile = ws.join("Rakefile").is_file() || ws.join("rakefile").is_file();
     let has_cargo = ws.join("Cargo.toml").is_file();
     let has_go = ws.join("go.mod").is_file();
     let has_python = ws.join("pyproject.toml").is_file()
@@ -72,6 +74,15 @@ fn detect_from_markers(
     let has_swift = ws.join("Package.swift").is_file();
     let has_dart = ws.join("pubspec.yaml").is_file();
     let has_cmake = ws.join("CMakeLists.txt").is_file();
+    let has_meson = ws.join("meson.build").is_file();
+    let has_make = ws.join("Makefile").is_file()
+        || ws.join("makefile").is_file()
+        || ws.join("GNUmakefile").is_file();
+    let has_vcpkg = ws.join("vcpkg.json").is_file();
+    let has_conan = ws.join("conanfile.txt").is_file();
+    let has_docker_compose = native_build_tasks::workspace_has_compose(ws);
+    let has_dockerfile = ws.join("Dockerfile").is_file() || ws.join("dockerfile").is_file();
+    let has_gemspec = has_extension_at_root(ws, "gemspec");
     let has_dotnet = ws.join("global.json").is_file() || has_extension_at_root(ws, "sln") || has_extension_at_root(ws, "csproj");
 
     if has_gradle || has_maven {
@@ -81,6 +92,10 @@ fn detect_from_markers(
         }
         push_unique(frameworks, if has_gradle { "gradle" } else { "maven" });
         if has_gradle {
+            push_unique(languages, "groovy");
+            if ws.join("grails-app").is_dir() {
+                push_unique(frameworks, "grails");
+            }
             for root in gradle::find_all_gradle_roots(ws)? {
                 if gradle::is_spring_boot_project(&root) {
                     push_unique(frameworks, "spring-boot");
@@ -104,12 +119,20 @@ fn detect_from_markers(
         }
     }
 
-    if has_gemfile {
+    if has_gemfile || has_gemspec || has_rakefile {
         push_unique(languages, "ruby");
-        push_unique(indexers, "ruby");
+        if has_gemfile || has_gemspec {
+            push_unique(indexers, "ruby");
+        }
         if ws.join("config/application.rb").is_file() || ws.join("config/routes.rb").is_file() {
             push_unique(frameworks, "rails");
             push_unique(indexers, "rails");
+        } else if has_rakefile
+            && (ws.join("config").is_dir()
+                || ws.join("bin/rails").is_file()
+                || ws.join("bin/rake").is_file())
+        {
+            push_unique(frameworks, "rails");
         }
     }
     if has_cargo {
@@ -150,9 +173,26 @@ fn detect_from_markers(
             push_unique(frameworks, "flutter");
         }
     }
-    if has_cmake {
+    if has_cmake || has_meson || has_make || has_vcpkg || has_conan {
         push_unique(languages, "cpp");
-        push_unique(frameworks, "cmake");
+        if has_cmake {
+            push_unique(frameworks, "cmake");
+        }
+        if has_meson {
+            push_unique(frameworks, "meson");
+        }
+        if has_make {
+            push_unique(frameworks, "make");
+        }
+        if has_vcpkg {
+            push_unique(frameworks, "vcpkg");
+        }
+        if has_conan {
+            push_unique(frameworks, "conan");
+        }
+    }
+    if has_docker_compose || has_dockerfile {
+        push_unique(frameworks, "docker");
     }
     if has_dotnet {
         push_unique(languages, "csharp");
@@ -210,6 +250,29 @@ mod tests {
         assert!(profile.languages.contains(&"java".to_string()));
         assert!(profile.frameworks.contains(&"spring-boot".to_string()));
         assert!(profile.indexers.contains(&"java".to_string()));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn detects_makefile_cpp_project() {
+        let ws = std::env::temp_dir().join("reaper-profile-make");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("Makefile"), "all:\n\ttrue\n").unwrap();
+        let profile = detect(&ws).unwrap();
+        assert!(profile.languages.contains(&"cpp".to_string()));
+        assert!(profile.frameworks.contains(&"make".to_string()));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn detects_gemspec_ruby() {
+        let ws = std::env::temp_dir().join("reaper-profile-gemspec");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("mygem.gemspec"), "Gem::Specification.new {}\n").unwrap();
+        let profile = detect(&ws).unwrap();
+        assert!(profile.languages.contains(&"ruby".to_string()));
         let _ = std::fs::remove_dir_all(&ws);
     }
 

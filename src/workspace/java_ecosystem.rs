@@ -15,6 +15,7 @@ pub struct JavaBuildMarkers {
     pub lombok: bool,
     pub jacoco: bool,
     pub slf4j: bool,
+    pub mockito: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +89,11 @@ pub fn scan_build_content(content: &str) -> JavaBuildMarkers {
             || compact.contains("spring-boot-starter-logging")
             || compact.contains("logback-classic")
             || compact.contains("ch.qos.logback"),
+        mockito: compact.contains("mockito-core")
+            || compact.contains("mockito-junit-jupiter")
+            || compact.contains("org.mockito")
+            || compact.contains("mockito-inline")
+            || (compact.contains("mockito") && compact.contains("test")),
     }
 }
 
@@ -339,7 +345,7 @@ fn file_has_spring_test_annotations(content: &str) -> bool {
         || content.contains("@SpringJUnitConfig")
 }
 
-fn file_uses_lombok(content: &str) -> bool {
+pub fn file_uses_lombok(content: &str) -> bool {
     const ANNOTATIONS: [&str; 12] = [
         "@Data",
         "@Getter",
@@ -357,7 +363,7 @@ fn file_uses_lombok(content: &str) -> bool {
     ANNOTATIONS.iter().any(|a| content.contains(a))
 }
 
-fn file_uses_slf4j(content: &str) -> bool {
+pub fn file_uses_slf4j(content: &str) -> bool {
     content.contains("import org.slf4j.")
         || content.contains("LoggerFactory.getLogger")
         || content.contains("@Slf4j")

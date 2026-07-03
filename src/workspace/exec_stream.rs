@@ -10,6 +10,8 @@ use tokio::sync::mpsc as async_mpsc;
 
 use crate::git::{self, GitOutput};
 use crate::jdk;
+use crate::process_registry;
+use crate::toolchain;
 
 use super::exec::run_shell_command;
 use super::shell;
@@ -58,11 +60,17 @@ fn pump_reader<R: Read + Send + 'static>(
 }
 
 fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    process_registry::configure_command(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    let label = cmd
+        .get_program()
+        .to_string_lossy()
+        .into_owned();
     let mut child = cmd
         .spawn()
         .with_context(|| "failed to spawn process".to_string())?;
+    let _guard = process_registry::guard_for_exec_child(&mut child, &label);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -88,7 +96,7 @@ fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -
         }
     });
 
-    let status = child.wait().context("failed to wait on process")?;
+    let status = process_registry::wait_on_child(&mut child).context("failed to wait on process")?;
     for pump in pumps {
         let _ = pump.join();
     }
@@ -106,6 +114,7 @@ pub fn stream_shell(ws: &Path, cwd_rel: Option<&str>, command: &str, tx: async_m
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let mut cmd = Command::new(&shell);
     cmd.args(["-lc", command]).current_dir(work_dir);
+    toolchain::apply_compiler_env(&mut cmd);
     let code = stream_process(&mut cmd, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),
@@ -204,6 +213,14 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
     args.push("--no-configuration-cache".into());
     args.push("--console=plain".into());
     args.extend(parts);
+    stream_gradle_command(&cmd, &args, tx)
+}
+
+pub fn stream_gradle_command(
+    cmd: &super::gradle::GradleCommand,
+    args: &[String],
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
@@ -231,9 +248,11 @@ pub fn stream_gradle(ws: &Path, rel_path: &str, task: &str, tx: async_mpsc::Send
 
 pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
     use super::java::parse_java_main;
-    use super::{read_file, safe_join};
+    use super::run_project;
+    use super::{normalize_workspace_source_path, read_file, safe_join};
 
-    let file_path = safe_join(ws, rel_path)?;
+    let rel_path = normalize_workspace_source_path(rel_path);
+    let file_path = safe_join(ws, &rel_path)?;
     if !file_path.is_file() {
         bail!("not a file");
     }
@@ -241,7 +260,11 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
         bail!("not a Java file");
     }
 
-    let source = read_file(ws, rel_path)?;
+    let source = read_file(ws, &rel_path)?;
+    if let Some(code) = run_project::try_stream_spring_boot_main(ws, &rel_path, &source, tx.clone())? {
+        return Ok(code);
+    }
+
     let info = parse_java_main(&source, &file_path)?;
     let rel = rel_path.replace('\\', "/");
 
@@ -298,6 +321,14 @@ pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sende
     let cmd = resolve_maven_command(&root);
     let mut args = vec!["-q".to_string(), "--batch-mode".to_string()];
     args.extend(parts);
+    stream_maven_command(&cmd, &args, tx)
+}
+
+pub fn stream_maven_command(
+    cmd: &super::maven::MavenCommand,
+    args: &[String],
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let label = format!("$ {} {}", cmd.program.display(), arg_refs.join(" "));
@@ -310,9 +341,7 @@ pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sende
 
     let mut command = Command::new(&cmd.program);
     command.args(&arg_refs).current_dir(&cmd.cwd);
-    if let Ok(home) = super::gradle::gradle_java_home_for_project(&cmd.cwd) {
-        jdk::apply_java_home(&mut command, &home);
-    }
+    jdk::apply_java_env(&mut command);
     let code = stream_process(&mut command, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),

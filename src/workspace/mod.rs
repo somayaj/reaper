@@ -5,7 +5,11 @@ pub mod exec_stream;
 mod ruby_nav;
 mod shell;
 mod solargraph;
+mod clangd;
 pub mod terminal;
+mod build_tasks;
+mod native_build_tasks;
+mod package_manifest;
 mod classpath;
 pub use classpath::CompletionItem;
 mod gradle;
@@ -15,15 +19,21 @@ mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod java_classpath;
+mod java_psi;
+mod java_sources;
 mod java_ecosystem;
 mod java_format;
 mod languages;
 mod project_jobs;
 mod project_profile;
 mod quick_fix;
+mod coverage;
+mod db_viewer;
 mod run_project;
 mod spring_props;
 mod symbols;
+mod workspace_search;
 
 use std::path::{Path, PathBuf};
 
@@ -112,6 +122,9 @@ pub struct FileNode {
     pub children: Option<Vec<FileNode>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_children: bool,
+    /// `main`, `test`, or `generated` for Maven/Gradle source roots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
 }
 
 pub fn build_tree(ws: &Path) -> Result<Vec<FileNode>> {
@@ -134,7 +147,7 @@ pub fn build_tree_level(ws: &Path, rel_dir: Option<&str>) -> Result<Vec<FileNode
     Ok(nodes)
 }
 
-fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
+pub(crate) fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
     if name == ".git" {
         return true;
     }
@@ -147,6 +160,32 @@ fn should_skip_tree_name(name: &str, is_dir: bool) -> bool {
             "node_modules" | "target" | "build" | ".gradle" | "dist" | "out" | "bin"
                 | ".idea" | ".vscode" | "vendor" | "tmp" | "log" | "storage" | ".reaper"
         );
+    }
+    false
+}
+
+/// Skip compiled artifacts and dependency indexes in workspace search results.
+pub(crate) fn should_skip_search_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let lower = p.to_lowercase();
+    if lower.ends_with(".class") {
+        return true;
+    }
+    if lower.contains(".reaper/classpath-jar/") {
+        return true;
+    }
+    for seg in [
+        "/build/",
+        "/target/",
+        "/out/",
+        "/bin/",
+        "/.gradle/",
+        "/classes/java/",
+        "/classes/kotlin/",
+    ] {
+        if lower.contains(seg) {
+            return true;
+        }
     }
     false
 }
@@ -181,18 +220,20 @@ fn collect_children(ws: &Path, dir: &Path, nodes: &mut Vec<FileNode>, recursive:
             };
             nodes.push(FileNode {
                 name,
-                path: rel,
+                path: rel.clone(),
                 node_type: "dir".into(),
                 children,
                 has_children,
+                source_kind: java_sources::source_root_kind(&rel).map(str::to_string),
             });
         } else {
             nodes.push(FileNode {
                 name,
-                path: rel,
+                path: rel.clone(),
                 node_type: "file".into(),
                 children: None,
                 has_children: false,
+                source_kind: java_sources::source_kind_for_path(&rel).map(str::to_string),
             });
         }
     }
@@ -330,6 +371,20 @@ pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+const JAVA_DIAG_OVERLAY_PREFIX: &str = ".reaper/java-diagnostics/overlay/";
+
+/// Map diagnostics overlay copies back to workspace-relative source paths.
+pub fn normalize_workspace_source_path(rel_path: &str) -> String {
+    let path = rel_path.replace('\\', "/");
+    if let Some(rest) = path.strip_prefix(JAVA_DIAG_OVERLAY_PREFIX) {
+        return rest.to_string();
+    }
+    if let Some(idx) = path.find(JAVA_DIAG_OVERLAY_PREFIX) {
+        return path[idx + JAVA_DIAG_OVERLAY_PREFIX.len()..].to_string();
+    }
+    path
 }
 
 pub fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
@@ -712,13 +767,27 @@ pub fn run_project_info(ws: &Path, rel_path: &str) -> Result<run_project::RunPro
     run_project::run_project_info(ws, rel_path)
 }
 
+pub fn build_tasks_tree(
+    ws: &Path,
+    rel_path: &str,
+    compose_content: Option<&str>,
+) -> Result<build_tasks::BuildTasksTree> {
+    build_tasks::build_tasks_tree(ws, rel_path, compose_content)
+}
+
+pub fn package_manifest_view(ws: &Path, rel_path: &str) -> Result<package_manifest::PackageManifestView> {
+    package_manifest::package_manifest_view(ws, rel_path)
+}
+
 pub fn run_context(
     ws: &Path,
     rel_path: &str,
     content: Option<&str>,
     line: u32,
+    database_url: Option<&str>,
+    db_ssl: Option<&metadata::DbSslSettings>,
 ) -> Result<run_project::RunContext> {
-    run_project::run_context(ws, rel_path, content, line)
+    run_project::run_context(ws, rel_path, content, line, database_url, db_ssl)
 }
 
 pub use run_project::{AiRunTargetHint, JavaRunTarget, RunContext, RunProjectInfo};
@@ -748,13 +817,101 @@ pub fn stream_workspace_gradle(
     exec_stream::stream_gradle(ws, rel_path, task, tx)
 }
 
+pub fn coverage_for_file(ws: &Path, rel_path: &str) -> Result<coverage::FileCoverage> {
+    coverage::coverage_for_file(ws, rel_path)
+}
+
+pub fn coverage_report_summary(
+    ws: &Path,
+    rel_path: &str,
+) -> Result<coverage::CoverageReportSummary> {
+    coverage::coverage_report_summary(ws, rel_path)
+}
+
+pub fn db_connection_view(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+) -> db_viewer::DbConnectionView {
+    db_viewer::connection_view(ws, database_url, ssl)
+}
+
+pub fn effective_database_url(ws: &Path, stored: Option<&str>) -> Option<String> {
+    db_viewer::effective_database_url(ws, stored)
+}
+
+pub fn db_schema(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+) -> db_viewer::DbSchemaResponse {
+    db_viewer::fetch_schema(ws, database_url, ssl)
+}
+
+pub fn db_query(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+    sql: &str,
+    limit: u32,
+) -> db_viewer::DbQueryResult {
+    db_viewer::run_query(ws, database_url, ssl, sql, limit)
+}
+
+pub use db_viewer::{DbConnectionRequest, DbQueryRequest, DbQueryResult, DbSchemaResponse};
+pub use metadata::DbSslSettings;
+
+pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
+    let path = safe_join(ws, rel_path)?;
+    if !path.exists() {
+        bail!("path not found");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let status = Command::new("open")
+            .arg(&path)
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let status = Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+        return Ok(());
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        use std::process::Command;
+        let status = Command::new("xdg-open")
+            .arg(&path)
+            .status()
+            .context("open in default application")?;
+        if !status.success() {
+            bail!("failed to open path");
+        }
+    }
+    Ok(())
+}
+
 pub fn stream_workspace_run_task(
     ws: &Path,
     rel_path: &str,
     task: &str,
+    coverage: bool,
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
-    run_project::stream_run_task(ws, rel_path, task, tx)
+    run_project::stream_run_task(ws, rel_path, task, coverage, tx)
 }
 
 pub fn stream_workspace_maven(
@@ -771,7 +928,21 @@ pub fn stream_workspace_java_main(
     rel_path: &str,
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
-    exec_stream::stream_java_main(ws, rel_path, tx)
+    let rel_path = normalize_workspace_source_path(rel_path);
+    exec_stream::stream_java_main(ws, &rel_path, tx)
+}
+
+pub fn stream_workspace_sql_file(
+    ws: &Path,
+    rel_path: &str,
+    content: Option<&str>,
+    database_url: Option<&str>,
+    db_ssl: Option<&metadata::DbSslSettings>,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    let rel_path = normalize_workspace_source_path(rel_path);
+    let command = db_viewer::prepare_sql_run_command(ws, &rel_path, content, database_url, db_ssl)?;
+    exec_stream::stream_shell(ws, None, &command, tx)
 }
 
 pub fn java_file_context(
@@ -831,6 +1002,14 @@ pub fn uses_spring_property_completions(from_path: &str) -> bool {
     spring_props::is_spring_config_file(from_path)
 }
 
+pub fn search_workspace(
+    ws: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<workspace_search::WorkspaceSearchHit>> {
+    workspace_search::search_workspace(ws, query, limit)
+}
+
 pub fn search_classes(ws: &Path, query: &str, limit: usize) -> Result<Vec<symbols::ClassSearchHit>> {
     let limit = limit.clamp(1, 100);
     let skip_java = classpath::is_gradle_workspace(ws);
@@ -876,19 +1055,52 @@ fn dedupe_search_classes(
     scored: Vec<(u32, symbols::ClassSearchHit)>,
     limit: usize,
 ) -> Vec<symbols::ClassSearchHit> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    fn path_rank(path: &str) -> u32 {
+        let p = path.replace('\\', "/");
+        if p.ends_with(".java") || p.ends_with(".kt") {
+            return 0;
+        }
+        if p.contains("/src/") {
+            return 10;
+        }
+        if should_skip_search_path(&p) {
+            return 1000;
+        }
+        100
+    }
+
+    let mut best: std::collections::HashMap<String, (u32, symbols::ClassSearchHit)> =
+        std::collections::HashMap::new();
     for (score, hit) in scored {
-        let key = format!("{}:{}:{}", hit.name, hit.path, hit.line);
-        if seen.insert(key) {
-            out.push((score, hit));
+        if should_skip_search_path(&hit.path) {
+            continue;
+        }
+        let key = if hit.qualified.contains('.') {
+            hit.qualified.clone()
+        } else {
+            format!("{}:{}", hit.name, hit.path)
+        };
+        let rank = path_rank(&hit.path);
+        let entry_score = score.saturating_sub(rank);
+        match best.get(&key) {
+            Some((existing_score, existing)) => {
+                if entry_score > *existing_score
+                    || (entry_score == *existing_score
+                        && path_rank(&hit.path) < path_rank(&existing.path))
+                {
+                    best.insert(key, (entry_score, hit));
+                }
+            }
+            None => {
+                best.insert(key, (entry_score, hit));
+            }
         }
     }
+    let mut out: Vec<_> = best.into_values().collect();
     out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     out.into_iter()
         .take(limit)
         .map(|(_, hit)| hit)
-        .filter(|hit| !hit.path.to_lowercase().ends_with(".class"))
         .collect()
 }
 
@@ -917,6 +1129,12 @@ pub fn find_symbol_hover_with_content(
         Some(c) => c.to_string(),
         None => read_file(ws, from_path)?,
     };
+
+    if languages::is_c_like_path(from_path) {
+        if let Some(info) = clangd::find_hover(ws, from_path, line, column, &content)? {
+            return Ok(Some(info));
+        }
+    }
 
     if classpath::is_java_like(from_path) {
         let items = java_completions(ws, from_path, line, column, "", Some(&content), &[])?;
@@ -1018,6 +1236,13 @@ pub fn find_hover_with_content(
         Some(c) => c.to_string(),
         None => read_file(ws, from_path)?,
     };
+
+    if languages::is_c_like_path(from_path) {
+        if let Some(info) = clangd::find_hover(ws, from_path, line, column, &content)? {
+            return Ok(Some(info));
+        }
+    }
+
     let hit = find_definition_with_content(ws, from_path, line, column, Some(&content))?;
     let Some(hit) = hit else {
         return Ok(None);
@@ -1051,6 +1276,11 @@ pub fn find_definition_with_content(
             return Ok(Some(hit));
         }
         if let Some(hit) = ruby_nav::find_definition(ws, line, column, &content)? {
+            return Ok(Some(hit));
+        }
+    }
+    if languages::is_c_like_path(from_path) {
+        if let Some(hit) = clangd::find_definition(ws, from_path, line, column, &content)? {
             return Ok(Some(hit));
         }
     }
@@ -1120,14 +1350,6 @@ pub fn language_compiler_context(ws: &Path, rel_path: &str) -> language_compiler
     language_compiler_context::detect(ws, rel_path)
 }
 
-pub fn java_language_level(ws: &Path, rel_path: &str) -> u32 {
-    java_diagnostics::java_language_level(ws, rel_path)
-}
-
-pub fn language_compiler_context(ws: &Path, rel_path: &str) -> language_compiler_context::LanguageCompilerContext {
-    language_compiler_context::detect(ws, rel_path)
-}
-
 pub fn compiler_tool_ids_for_path(path: &str) -> Vec<&'static str> {
     languages::compiler_tool_ids_for_path(path)
 }
@@ -1181,4 +1403,27 @@ pub fn should_prefer_ai_statement_inline(
     line: u32,
 ) -> bool {
     inline_context::should_prefer_ai_statement_inline(path, line_prefix, content, line)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_file_accepts_absolute_paths_outside_workspace() {
+        let ws = std::env::temp_dir().join(format!("reaper-abs-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let external = std::env::temp_dir().join(format!("reaper-ext-header-{}.h", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&external).unwrap();
+            writeln!(f, "int printf(const char*, ...);").unwrap();
+        }
+        let abs = external.to_string_lossy().into_owned();
+        let content = read_file(&ws, &abs).expect("read absolute path");
+        assert!(content.contains("printf"));
+        let _ = std::fs::remove_file(&external);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }

@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/dist/Reaper.app"
 BINARY="$ROOT/target/release/reaper"
 
+echo "Running editor regression suite…"
+"$ROOT/scripts/test-editor-regression.sh"
+
 echo "Building release binary…"
 env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
 
@@ -17,8 +20,10 @@ chmod +x "$APP/Contents/MacOS/reaper"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 
 "$ROOT/scripts/stamp-ui-build.sh"
+"$ROOT/scripts/sync-launch-splash.sh"
 "$ROOT/scripts/vendor-monaco.sh"
 "$ROOT/scripts/vendor-google-java-format.sh"
+"$ROOT/scripts/copy-bundled-node.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then
@@ -51,6 +56,8 @@ if [[ -n "$VERSION" ]]; then
 fi
 
 cp "$ROOT/gradle/reaper-classpath.init.gradle" "$APP/Contents/Resources/gradle/"
+cp "$ROOT/gradle/reaper-coverage.init.gradle" "$APP/Contents/Resources/gradle/"
+cp "$ROOT/Cargo.toml" "$APP/Contents/Resources/Cargo.toml"
 cp "$ROOT/gradlew" "$APP/Contents/Resources/gradlew"
 chmod +x "$APP/Contents/Resources/gradlew"
 cp "$ROOT/gradle/wrapper/gradle-wrapper.jar" "$APP/Contents/Resources/gradle/wrapper/"
@@ -59,15 +66,16 @@ cp "$ROOT/gradle/wrapper/gradle-wrapper.properties" "$APP/Contents/Resources/gra
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
   if [[ ! -f "$ROOT/cursor-bridge/node_modules/@connectrpc/connect/package.json" ]]; then
     echo "Installing cursor-bridge dependencies for bundle…"
-    if command -v npm >/dev/null 2>&1; then
+    ARCH="$(uname -m)"
+    export REAPER_MACOS_ARCH="$ARCH"
+    "$ROOT/scripts/vendor-node-macos.sh"
+    BUILD_NODE="$ROOT/resources/node-macos-${ARCH}/bin/node"
+    if [[ -x "$BUILD_NODE" ]]; then
+      (cd "$ROOT/cursor-bridge" && "$BUILD_NODE" install-deps.mjs)
+    elif command -v npm >/dev/null 2>&1; then
       (cd "$ROOT/cursor-bridge" && npm install --omit=dev)
     else
-      NODE="${REAPER_NODE:-/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node}"
-      if [[ -x "$NODE" ]]; then
-        (cd "$ROOT/cursor-bridge" && "$NODE" install-deps.mjs)
-      else
-        echo "Warning: cursor-bridge node_modules missing and npm/node unavailable" >&2
-      fi
+      echo "Warning: cursor-bridge node_modules missing and bundled node/npm unavailable" >&2
     fi
   fi
   cp -R "$ROOT/cursor-bridge/." "$APP/Contents/Resources/cursor-bridge/"

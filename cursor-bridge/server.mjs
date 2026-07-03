@@ -68,6 +68,13 @@ function emitTool(res, text, extra = {}) {
 }
 
 function handleSdkMessage(res, event) {
+  if (event.type === "status") {
+    if (event.status === "ERROR" && event.message) {
+      emit(res, { type: "error", error: event.message });
+    }
+    return;
+  }
+
   if (event.type === "assistant") {
     for (const block of event.message?.content || []) {
       if (block.type === "text" && block.text) {
@@ -228,16 +235,27 @@ const server = http.createServer(async (req, res) => {
 
         if (session.activeChat?.run === run) {
           const result = await run.wait();
+          if (result.status === "error") {
+            const detail =
+              result.result?.trim() ||
+              run.result?.trim() ||
+              "Cursor agent run failed — try Settings → Retry bridge, or restart Reaper";
+            console.error("cursor-bridge agent run error:", JSON.stringify(result));
+            emit(res, { type: "error", error: detail });
+          }
           emit(res, {
             type: "done",
             status: result.status,
             runId: result.id,
             summary: result.result || null,
+            error: result.status === "error" ? result.result || null : null,
           });
         }
       } catch (err) {
         if (session.activeChat?.run === run) {
-          emit(res, { type: "error", error: err instanceof Error ? err.message : String(err) });
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("cursor-bridge chat error:", message);
+          emit(res, { type: "error", error: message });
         }
       } finally {
         if (session.activeChat?.run === run) {

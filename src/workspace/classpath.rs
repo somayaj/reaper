@@ -4,17 +4,109 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::gradle::{find_gradle_root, resolve_gradle_command, run_gradle_with_command};
+use super::java_psi::{self, ImportMap};
 use super::symbols::{ClassSearchHit, SymbolLocation, class_name_match_score};
 
+const PEEK_INDEX_CACHE_TTL: Duration = Duration::from_secs(10);
+const NEEDS_REFRESH_CACHE_TTL: Duration = Duration::from_secs(15);
+
+static PEEK_INDEX_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, WarmIndexStatus)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEEDS_REFRESH_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, bool)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn workspace_cache_key(ws: &Path) -> PathBuf {
+    ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf())
+}
+
+pub fn invalidate_workspace_index_caches(ws: &Path) {
+    let key = workspace_cache_key(ws);
+    super::gradle::invalidate_gradle_roots_cache(ws);
+    super::maven::invalidate_maven_roots_cache(ws);
+    if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
+        guard.remove(&key);
+    }
+    if let Ok(mut guard) = NEEDS_REFRESH_CACHE.lock() {
+        guard.remove(&key);
+    }
+}
 const INDEX_PATH: &str = "java-index.json";
 /// Bump when index shape/rules change so stale caches rebuild once.
-const INDEX_VERSION: u32 = 9;
+const INDEX_VERSION: u32 = 12;
+
+/// Priority JARs indexed synchronously at startup (standard profile).
+const STARTUP_JAR_LIMIT_STANDARD: usize = 2000;
+/// Fewer JARs for light profile; no background continuation.
+const STARTUP_JAR_LIMIT_LIGHT: usize = 400;
+const BACKGROUND_JAR_SLEEP_MS: u64 = 250;
+const FOREGROUND_JAR_YIELD_EVERY: usize = 8;
+const FOREGROUND_JAR_SLEEP_MS: u64 = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaIndexProfile {
+    Standard,
+    Light,
+    Lazy,
+}
+
+impl JavaIndexProfile {
+    fn current() -> Self {
+        if std::env::var("REAPER_JAVA_INDEX_LIGHT").ok().as_deref() == Some("1") {
+            return Self::Light;
+        }
+        if std::env::var("REAPER_JAVA_INDEX_LAZY").ok().as_deref() == Some("1") {
+            return Self::Lazy;
+        }
+        #[derive(Deserialize, Default)]
+        struct SettingsSnippet {
+            #[serde(default)]
+            java_index_mode: Option<String>,
+        }
+        let path = crate::config::Config::resolve_data_dir().join("settings.json");
+        let mode = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<SettingsSnippet>(&text).ok())
+            .and_then(|s| s.java_index_mode);
+        match mode.as_deref() {
+            Some("light") => Self::Light,
+            Some("lazy") => Self::Lazy,
+            _ => Self::Standard,
+        }
+    }
+
+    fn startup_jar_limit(self) -> usize {
+        match self {
+            Self::Standard => STARTUP_JAR_LIMIT_STANDARD,
+            Self::Light | Self::Lazy => STARTUP_JAR_LIMIT_LIGHT,
+        }
+    }
+
+    fn background_enabled(self) -> bool {
+        matches!(self, Self::Standard | Self::Lazy)
+    }
+
+    fn index_all_modules_on_startup(self) -> bool {
+        !matches!(self, Self::Lazy)
+    }
+}
+
+/// True when Java indexes load per module as files are opened.
+pub fn java_index_is_lazy() -> bool {
+    JavaIndexProfile::current() == JavaIndexProfile::Lazy
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct JarIndexOptions {
+    skip_jars: usize,
+    max_jars: Option<usize>,
+    throttle: bool,
+}
 
 /// JDK module directories inside extracted `src.zip` (Java 9+ layout).
 const JDK_SOURCE_MODULES: &[&str] = &[
@@ -315,6 +407,57 @@ fn cached_gradle_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
     Ok(root)
 }
 
+/// Maven/Gradle/plain-Java module root for a workspace-relative path.
+pub fn index_root_for_path(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
+    cached_gradle_root(ws, from_path)
+}
+
+fn merge_warm_status(combined: &mut WarmIndexStatus, index: &JavaIndex, meta: &IndexMeta, cached: bool) {
+    combined.indexed = true;
+    combined.project_root = Some(index.project_root.clone());
+    combined.symbol_count += index.symbols.len();
+    combined.cached = combined.cached && cached;
+    combined.dependency_jars += meta.dependency_jars;
+    combined.source_jars += meta.source_jars;
+    combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
+    combined.spring_symbols += meta.spring_symbols;
+    combined.jdk_symbols += meta.jdk_symbols;
+    combined.jars_indexed += meta.jars_indexed;
+    combined.jars_total += meta.jars_total;
+    combined.index_complete = combined.index_complete && meta.index_complete;
+}
+
+/// Index one module (Maven/Gradle root) — used for on-demand lazy loading.
+pub fn warm_single_root_index(
+    ws: &Path,
+    root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+) -> Result<WarmIndexStatus> {
+    if crate::process_registry::is_shutdown_requested() {
+        bail!("Reaper is shutting down");
+    }
+    let cached = is_index_cached(ws, root)?;
+    let index = if cached {
+        load_index(ws, root)?
+    } else {
+        build_index(ws, root, progress)?
+    };
+    let meta = index_meta(root);
+    let mut status = empty_warm_status();
+    merge_warm_status(&mut status, &index, &meta, cached);
+    Ok(status)
+}
+
+/// Continue staged JAR indexing for one module root.
+pub fn continue_background_index_root_pub(
+    ws: &Path,
+    root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    continue_background_index_root(ws, root, progress, jar_progress)
+}
+
 fn definition_cache_key(
     gradle_root: &Path,
     from_path: &str,
@@ -457,6 +600,18 @@ pub struct WarmIndexStatus {
     pub jdk_sources: bool,
     pub spring_symbols: usize,
     pub jdk_symbols: usize,
+    /// JARs indexed so far (staged indexing).
+    #[serde(default)]
+    pub jars_indexed: usize,
+    #[serde(default)]
+    pub jars_total: usize,
+    /// False while background JAR indexing is still running.
+    #[serde(default = "default_index_complete")]
+    pub index_complete: bool,
+}
+
+fn default_index_complete() -> bool {
+    true
 }
 
 pub fn is_gradle_workspace(ws: &Path) -> bool {
@@ -530,16 +685,38 @@ fn find_plain_java_root(ws: &Path, rel_path: &str) -> Option<PathBuf> {
 }
 
 const TOOLING_CLASSPATH_DONE: &str = "tooling-classpath.done";
+const TEST_CLASSPATH_DONE: &str = "tooling-test-classpath.done";
 const CLASSPATH_JARS_CACHE: &str = "classpath-jars.json";
+const CLASSPATH_OUTPUTS_CACHE: &str = "classpath-outputs.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ProjectClasspathOutputs {
+    #[serde(default)]
+    classes_dirs: Vec<String>,
+    #[serde(default)]
+    source_dirs: Vec<String>,
+}
+
+type IndexProgress<'a> = Option<&'a Box<dyn Fn(&str, usize) + Send>>;
+
+fn report_index_progress(progress: IndexProgress, phase: &str, count: usize) {
+    if let Some(cb) = progress {
+        cb(phase, count);
+    }
+}
 
 /// Drop cached Java indexes so the next warm_index rebuilds (e.g. after branch checkout).
 pub fn invalidate_caches(ws: &Path) -> Result<()> {
+    invalidate_workspace_index_caches(ws);
     for root in find_all_index_roots(ws)? {
         invalidate_lookup_cache(&root);
         let reaper = reaper_dir(&root);
         let _ = std::fs::remove_file(reaper.join("classpath.stamp"));
         let _ = std::fs::remove_file(reaper.join(TOOLING_CLASSPATH_DONE));
+        let _ = std::fs::remove_file(reaper.join(TEST_CLASSPATH_DONE));
+        let _ = std::fs::remove_file(reaper.join("test-compile-cache.json"));
         let _ = std::fs::remove_file(reaper.join(CLASSPATH_JARS_CACHE));
+        let _ = std::fs::remove_file(reaper.join(CLASSPATH_OUTPUTS_CACHE));
         let _ = std::fs::remove_file(reaper.join(INDEX_PATH));
         let _ = std::fs::remove_file(reaper.join(META_PATH));
     }
@@ -578,8 +755,256 @@ pub fn save_classpath_jars_cache_pub(project_root: &Path, jars: &[PathBuf]) -> R
     save_classpath_jars_cache(project_root, jars)
 }
 
+fn load_project_classpath_outputs(project_root: &Path) -> ProjectClasspathOutputs {
+    let path = reaper_dir(project_root).join(CLASSPATH_OUTPUTS_CACHE);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ProjectClasspathOutputs::default();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_project_classpath_outputs(project_root: &Path, outputs: &ProjectClasspathOutputs) -> Result<()> {
+    std::fs::create_dir_all(reaper_dir(project_root))?;
+    std::fs::write(
+        reaper_dir(project_root).join(CLASSPATH_OUTPUTS_CACHE),
+        serde_json::to_string_pretty(outputs)?,
+    )?;
+    Ok(())
+}
+
+fn outputs_to_paths(outputs: &ProjectClasspathOutputs) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let classes = outputs
+        .classes_dirs
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect();
+    let sources = outputs
+        .source_dirs
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect();
+    (classes, sources)
+}
+
+fn paths_to_outputs(classes_dirs: &[PathBuf], source_dirs: &[PathBuf]) -> ProjectClasspathOutputs {
+    ProjectClasspathOutputs {
+        classes_dirs: classes_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        source_dirs: source_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+    }
+}
+
+/// Compiled project output dirs (e.g. build/classes/java/main) from last Gradle/Maven resolve.
+pub fn cached_project_classes_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let (mut classes, _) = outputs_to_paths(&load_project_classpath_outputs(project_root));
+    for dir in discover_project_output_dirs(project_root).0 {
+        if !classes.iter().any(|p| p == &dir) {
+            classes.push(dir);
+        }
+    }
+    classes
+}
+
+/// Project Java source roots including generated sources (annotation processors, etc.).
+pub fn cached_project_source_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let (_, mut sources) = outputs_to_paths(&load_project_classpath_outputs(project_root));
+    for dir in discover_project_output_dirs(project_root).1 {
+        if !sources.iter().any(|p| p == &dir) {
+            sources.push(dir);
+        }
+    }
+    sources
+}
+
+fn discover_project_output_dirs(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    discover_gradle_output_dirs(project_root)
+}
+
+fn discover_gradle_output_dirs(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut classes = Vec::new();
+    let mut sources = Vec::new();
+    let mut seen_classes = HashSet::new();
+    let mut seen_sources = HashSet::new();
+    discover_gradle_output_dirs_inner(
+        project_root,
+        project_root,
+        0,
+        &mut classes,
+        &mut sources,
+        &mut seen_classes,
+        &mut seen_sources,
+    );
+    (classes, sources)
+}
+
+fn discover_gradle_output_dirs_inner(
+    project_root: &Path,
+    dir: &Path,
+    depth: usize,
+    classes: &mut Vec<PathBuf>,
+    sources: &mut Vec<PathBuf>,
+    seen_classes: &mut HashSet<PathBuf>,
+    seen_sources: &mut HashSet<PathBuf>,
+) {
+    if depth > 12 || !dir.is_dir() {
+        return;
+    }
+    for suffix in [
+        "build/classes/java/main",
+        "build/classes/java/test",
+        "build/classes/kotlin/main",
+        "build/classes/kotlin/test",
+        "target/classes",
+        "target/test-classes",
+    ] {
+        let p = dir.join(suffix);
+        if p.is_dir() && seen_classes.insert(p.clone()) {
+            classes.push(p);
+        }
+    }
+    for generated_rel in [
+        "build/generated/sources",
+        "build/generated/source",
+        "build/generated/sources/headers",
+        "target/generated-sources",
+        "target/generated-test-sources",
+    ] {
+        let generated = dir.join(generated_rel);
+        if !generated.is_dir() {
+            continue;
+        }
+        if generated_rel.starts_with("target/") {
+            let annotations = generated.join("annotations");
+            if annotations.is_dir() && seen_sources.insert(annotations.clone()) {
+                sources.push(annotations);
+            }
+        }
+        collect_java_dirs_under(&generated, sources, seen_sources);
+        collect_java_source_roots_with_files(&generated, sources, seen_sources);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "target"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+            || name == ".reaper"
+        {
+            continue;
+        }
+        discover_gradle_output_dirs_inner(
+            project_root,
+            &path,
+            depth + 1,
+            classes,
+            sources,
+            seen_classes,
+            seen_sources,
+        );
+    }
+}
+
+fn collect_java_dirs_under(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "main" || name == "test" {
+            if seen.insert(path.clone()) {
+                out.push(path);
+            }
+            continue;
+        }
+        if name == "java" {
+            let main = path.join("main");
+            let test = path.join("test");
+            if main.is_dir() {
+                if seen.insert(main.clone()) {
+                    out.push(main);
+                }
+            } else if seen.insert(path.clone()) {
+                out.push(path);
+            }
+            if test.is_dir() && seen.insert(test.clone()) {
+                out.push(test);
+            }
+            continue;
+        }
+        collect_java_dirs_under(&path, out, seen);
+    }
+}
+
+/// Any directory under generated output that directly contains `.java` files (MapStruct, etc.).
+fn collect_java_source_roots_with_files(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut has_java = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if path.extension().and_then(|e| e.to_str()) == Some("java") {
+                has_java = true;
+                break;
+            }
+        }
+    }
+    if has_java && seen.insert(dir.to_path_buf()) {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_java_source_roots_with_files(&path, out, seen);
+        }
+    }
+}
+
 pub fn index_build_tooling_enabled() -> bool {
     std::env::var("REAPER_INDEX_SKIP_BUILD").as_deref() != Ok("1")
+}
+
+/// Full classpath tooling: compile test sources and resolve Maven test scope + source artifacts.
+/// Default is lightweight — main compile only; test dependency JARs still resolve via Gradle configs.
+pub fn classpath_resolve_full() -> bool {
+    std::env::var("REAPER_CLASSPATH_FULL").as_deref() == Ok("1")
+}
+
+fn maven_dependency_scope_flag() -> &'static str {
+    if classpath_resolve_full() {
+        "-DincludeScope=test"
+    } else {
+        "-DincludeScope=compile"
+    }
+}
+
+fn maven_build_classpath_scope() -> &'static str {
+    if classpath_resolve_full() { "test" } else { "compile" }
 }
 
 pub fn project_roots(ws: &Path) -> Result<Vec<PathBuf>> {
@@ -595,25 +1020,47 @@ pub fn needs_tooling_classpath_resolve(project_root: &Path) -> bool {
     if !index_build_tooling_enabled() || !is_build_tool_project_root(project_root) {
         return false;
     }
-    !reaper_dir(project_root)
-        .join(TOOLING_CLASSPATH_DONE)
-        .is_file()
+    !tooling_classpath_resolved(project_root)
 }
 
 pub fn mark_tooling_classpath_done(project_root: &Path) -> Result<()> {
+    remove_test_classpath_marker(project_root);
     std::fs::create_dir_all(reaper_dir(project_root))?;
     std::fs::write(
         reaper_dir(project_root).join(TOOLING_CLASSPATH_DONE),
         project_root.display().to_string(),
     )?;
+    if let Ok(stamp) = classpath_stamp(project_root) {
+        std::fs::write(reaper_dir(project_root).join("classpath.stamp"), stamp)?;
+    }
     Ok(())
+}
+
+fn tooling_classpath_stamp_valid(project_root: &Path) -> bool {
+    let reaper = reaper_dir(project_root);
+    let Ok(current) = classpath_stamp(project_root) else {
+        return false;
+    };
+    let Ok(stored) = std::fs::read_to_string(reaper.join("classpath.stamp")) else {
+        // Tooling finished; index rebuild may not have written a stamp yet.
+        return true;
+    };
+    stored == current
+}
+
+/// True when Gradle/Maven compile classpath was saved via tooling (not tree-walk alone).
+pub fn tooling_classpath_resolved(project_root: &Path) -> bool {
+    reaper_dir(project_root)
+        .join(TOOLING_CLASSPATH_DONE)
+        .is_file()
+        && tooling_classpath_stamp_valid(project_root)
 }
 
 pub fn invalidate_root_index_cache(project_root: &Path) {
     invalidate_lookup_cache(project_root);
     let reaper = reaper_dir(project_root);
     let _ = std::fs::remove_file(reaper.join("java-index.json"));
-    let _ = std::fs::remove_file(reaper.join("classpath.stamp"));
+    // Keep classpath.stamp when tooling cache is still valid (build files unchanged).
 }
 
 pub fn needs_any_tooling_classpath_resolve(ws: &Path) -> bool {
@@ -632,104 +1079,63 @@ pub fn resolve_classpaths_for_index(
     ws: &Path,
     progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
 ) -> Result<()> {
+    if !JavaIndexProfile::current().index_all_modules_on_startup() {
+        let _ = ws;
+        return Ok(());
+    }
     let roots = project_roots(ws)?;
     for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            bail!("Reaper is shutting down");
+        }
         if !is_build_tool_project_root(&root) {
             continue;
         }
         if let Some(cb) = progress {
             cb("classpath-resolve", 0);
         }
-        resolve_root_classpath(&root)?;
+        resolve_root_classpath(&root, progress)?;
     }
     let _ = ws;
     Ok(())
 }
 
-fn resolve_root_classpath(root: &Path) -> Result<Vec<PathBuf>> {
-    let tree = resolve_dependency_tree_jars(root, true);
-    if build_tree_classpath_sufficient(root, &tree) {
-        let _ = ensure_dependency_sources(root, &tree);
-        save_classpath_jars_cache_pub(root, &tree)?;
-        mark_tooling_classpath_done(root)?;
+fn resolve_root_classpath(root: &Path, progress: IndexProgress) -> Result<Vec<PathBuf>> {
+    if gradle_classpath_from_tooling_cache(root).is_none() {
+        let _ = try_resolve_classpath_via_tooling(root, progress);
+    }
+
+    let jars: Vec<PathBuf> = resolve_full_project_classpath(root)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect();
+
+    if !jars.is_empty() {
+        let _ = ensure_dependency_sources(root, &jars);
+        let _ = save_classpath_jars_cache_pub(root, &jars);
         tracing::info!(
-            "Resolved {} JARs from build-file dependency tree for {} before index",
-            tree.len(),
+            "Resolved {} classpath JARs for {} before index",
+            jars.len(),
             root.display()
         );
-        return Ok(tree);
     }
 
-    let cached = cached_classpath_jars(root);
-    if !cached.is_empty()
-        && !needs_tooling_classpath_resolve(root)
-        && cached_classpath_trustworthy(root, &cached, true)
-    {
-        let _ = ensure_dependency_sources(root, &cached);
-        return Ok(cached);
-    }
-
-    if index_build_tooling_enabled() && is_build_tool_project_root(root) {
-        tracing::info!(
-            "Resolving Maven/Gradle classpath via tooling for {} before index",
-            root.display()
-        );
-        match resolve_classpath_via_tooling_full(root) {
-            Ok(cp) if !cp.jars.is_empty() => {
-                let _ = ensure_dependency_sources(root, &cp.jars);
-                save_classpath_jars_cache_pub(root, &cp.jars)?;
-                mark_tooling_classpath_done(root)?;
-                invalidate_root_index_cache(root);
-                tracing::info!(
-                    "Resolved {} JARs via tooling for {} ({})",
-                    cp.jars.len(),
-                    root.display(),
-                    cp.log
-                );
-                return Ok(cp.jars);
-            }
-            Ok(_) => tracing::warn!(
-                "Classpath tooling returned no JARs for {}",
-                root.display()
-            ),
-            Err(e) => tracing::warn!(
-                "Classpath tooling failed for {}: {e:#}",
-                root.display()
-            ),
-        }
-    }
-
-    let offline = if super::maven::is_maven_project_root(root) {
-        resolve_classpath_from_m2(root)
-    } else {
-        resolve_classpath_from_gradle_cache(root)
-    };
-    if !offline.jars.is_empty() {
-        let _ = ensure_dependency_sources(root, &offline.jars);
-        save_classpath_jars_cache_pub(root, &offline.jars)?;
-        mark_tooling_classpath_done(root)?;
-        tracing::info!(
-            "Resolved {} JARs offline for {} before index ({})",
-            offline.jars.len(),
-            root.display(),
-            offline.log
-        );
-        return Ok(offline.jars);
-    }
-
-    Ok(Vec::new())
+    Ok(jars)
 }
 
 /// Run Maven/Gradle to download dependency JARs and sources (blocking).
 pub fn resolve_classpath_via_tooling(project_root: &Path) -> Result<Vec<PathBuf>> {
-    Ok(resolve_classpath_via_tooling_full(project_root)?.jars)
+    Ok(resolve_classpath_via_tooling_full(project_root, None)?.jars)
 }
 
-fn resolve_classpath_via_tooling_full(project_root: &Path) -> Result<GradleClasspath> {
+fn resolve_classpath_via_tooling_full(
+    project_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
     if super::maven::is_maven_project_root(project_root) {
-        resolve_maven_classpath_via_tooling(project_root)
+        resolve_maven_classpath_via_tooling(project_root, progress)
     } else {
-        resolve_gradle_classpath(project_root)
+        resolve_gradle_classpath(project_root, progress)
     }
 }
 
@@ -755,20 +1161,23 @@ fn ensure_dependency_sources(project_root: &Path, jars: &[PathBuf]) -> Result<()
         jars.len()
     );
     if super::maven::is_maven_project_root(project_root) {
-        ensure_maven_dependencies(project_root)?;
+        ensure_maven_dependencies(project_root, None)?;
     } else if super::gradle::is_gradle_project_dir(project_root) {
-        let _ = resolve_gradle_classpath(project_root);
+        let _ = resolve_gradle_classpath(project_root, None);
     }
     Ok(())
 }
 
-fn resolve_maven_classpath_via_tooling(maven_root: &Path) -> Result<GradleClasspath> {
-    ensure_maven_dependencies(maven_root)?;
+fn resolve_maven_classpath_via_tooling(
+    maven_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
+    ensure_maven_dependencies(maven_root, progress)?;
     let resolved = resolve_classpath_from_m2(maven_root);
     if !resolved.jars.is_empty() {
         return Ok(resolved);
     }
-    resolve_maven_classpath_via_mvn(maven_root)
+    resolve_maven_classpath_via_mvn(maven_root, progress)
 }
 
 pub fn compile_classpath_jars(gradle_root: &Path) -> Result<Vec<PathBuf>> {
@@ -786,58 +1195,218 @@ pub fn resolve_dependency_tree_jars(project_root: &Path, include_test_scope: boo
     Vec::new()
 }
 
-fn build_tree_classpath_sufficient(project_root: &Path, jars: &[PathBuf]) -> bool {
-    if jars.is_empty() {
-        return false;
-    }
-    if super::java_ecosystem::project_declares_spring_data(project_root)
-        && !classpath_includes_spring_data_deps(jars)
-    {
-        return false;
-    }
-    true
+fn build_tree_classpath_sufficient(_project_root: &Path, jars: &[PathBuf]) -> bool {
+    !jars.is_empty()
 }
 
-fn cached_classpath_trustworthy(
-    project_root: &Path,
-    cached: &[PathBuf],
-    include_test_scope: bool,
-) -> bool {
+fn cached_classpath_trustworthy(project_root: &Path, cached: &[PathBuf]) -> bool {
     if cached.is_empty() {
         return false;
     }
-    if !build_tree_classpath_sufficient(project_root, cached) {
-        return false;
-    }
-    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
-    if tree.is_empty() {
+    if tooling_classpath_resolved(project_root) {
         return true;
     }
-    let cached_set: HashSet<&PathBuf> = cached.iter().collect();
-    tree.iter().all(|jar| cached_set.contains(jar))
+    !resolve_dependency_tree_jars(project_root, true).is_empty()
+}
+
+/// Full project classpath: tooling + declared build-file transitive tree + compiled/generated outputs.
+pub fn resolve_full_project_classpath(project_root: &Path) -> Vec<PathBuf> {
+    let mut entries = resolve_dependency_tree_jars(project_root, true);
+
+    let tooling_jars = if tooling_classpath_resolved(project_root) {
+        cached_classpath_jars(project_root)
+    } else if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        cp.jars
+    } else {
+        let cached = cached_classpath_jars(project_root);
+        if cached_classpath_trustworthy(project_root, &cached) {
+            cached
+        } else {
+            Vec::new()
+        }
+    };
+    entries = merge_classpath_jars(&tooling_jars, &entries);
+    entries.extend(cached_project_classes_dirs(project_root));
+    entries = super::java_classpath::complete_classpath(entries, true);
+    dedupe_classpath_entries(filter_existing_classpath_entries(entries))
+}
+
+/// Dependency JAR files only (transitive tree + tooling cache).
+pub fn resolve_dependency_jars_for_project(project_root: &Path) -> Vec<PathBuf> {
+    resolve_full_project_classpath(project_root)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 fn resolve_classpath_jars_preferring_build_tree(
     project_root: &Path,
-    include_test_scope: bool,
+    _include_test_scope: bool,
 ) -> Vec<PathBuf> {
-    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
-    if build_tree_classpath_sufficient(project_root, &tree) {
-        return tree;
-    }
-    let cached = cached_classpath_jars(project_root);
-    if cached_classpath_trustworthy(project_root, &cached, include_test_scope) {
-        return cached;
-    }
-    if !tree.is_empty() {
-        return tree;
-    }
-    cached
+    resolve_full_project_classpath(project_root)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 /// Cached dependency JARs for javac — never triggers Maven/Gradle during diagnostics.
 pub fn resolve_dependency_jars_cached(project_root: &Path) -> Vec<PathBuf> {
     resolve_classpath_jars_preferring_build_tree(project_root, true)
+}
+
+/// True when test-scoped tooling has run (or was satisfied from the main classpath resolve).
+pub fn test_classpath_resolved(project_root: &Path) -> bool {
+    reaper_dir(project_root)
+        .join(TEST_CLASSPATH_DONE)
+        .is_file()
+        && tooling_classpath_resolved(project_root)
+        && tooling_classpath_stamp_valid(project_root)
+}
+
+fn mark_test_classpath_done(project_root: &Path) -> Result<()> {
+    std::fs::create_dir_all(reaper_dir(project_root))?;
+    std::fs::write(reaper_dir(project_root).join(TEST_CLASSPATH_DONE), "")?;
+    Ok(())
+}
+
+fn remove_test_classpath_marker(project_root: &Path) {
+    let _ = std::fs::remove_file(reaper_dir(project_root).join(TEST_CLASSPATH_DONE));
+}
+
+fn cached_test_classpath_sufficient(project_root: &Path, content: &str) -> bool {
+    let jars = merge_classpath_jars(
+        &cached_classpath_jars(project_root),
+        &resolve_dependency_tree_jars(project_root, true),
+    );
+    test_classpath_satisfied(content, &jars)
+}
+
+fn test_classpath_satisfied(content: &str, jars: &[PathBuf]) -> bool {
+    if jars.is_empty() {
+        return false;
+    }
+    if classpath_includes_test_deps(jars) {
+        return true;
+    }
+    let needs_junit = content.contains("org.junit")
+        || content.contains("@Test")
+        || content.contains("@ParameterizedTest")
+        || content.contains("@RepeatedTest");
+    let needs_mockito = content.contains("mockito") || content.contains("@Mock");
+    let needs_spring_test = content.contains("springframework.boot.test")
+        || content.contains("@SpringBootTest")
+        || content.contains("@WebMvcTest")
+        || content.contains("@DataJpaTest");
+    if needs_junit && !classpath_includes_junit(jars) {
+        return false;
+    }
+    if needs_mockito && !classpath_includes_mockito(jars) {
+        return false;
+    }
+    if needs_spring_test
+        && !jars.iter().any(|p| {
+            let s = p.to_string_lossy().to_ascii_lowercase();
+            s.contains("spring-boot-starter-test") || s.contains("spring-boot-test")
+        })
+    {
+        return false;
+    }
+    needs_junit || needs_mockito || needs_spring_test
+}
+
+/// Resolve test-scoped dependencies on demand when a test file is opened for diagnostics.
+pub fn ensure_test_classpath_for_file(
+    project_root: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Result<()> {
+    if !file_needs_test_classpath(rel_path, content) {
+        return Ok(());
+    }
+    if classpath_resolve_full() || !index_build_tooling_enabled() {
+        return Ok(());
+    }
+    if !tooling_classpath_resolved(project_root) {
+        return Ok(());
+    }
+    if test_classpath_resolved(project_root) {
+        return Ok(());
+    }
+    if cached_test_classpath_sufficient(project_root, content) {
+        mark_test_classpath_done(project_root)?;
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Lazy-resolving test classpath for {} ({})",
+        project_root.display(),
+        rel_path
+    );
+    resolve_test_classpath_via_tooling(project_root, None)?;
+    Ok(())
+}
+
+fn merge_test_classpath_into_cache(project_root: &Path, cp: &GradleClasspath) -> Result<()> {
+    let mut jars = cached_classpath_jars(project_root);
+    jars = merge_classpath_jars(&jars, &cp.jars);
+    jars = merge_with_build_file_dependency_tree(project_root, &jars, true);
+    if !jars.is_empty() {
+        save_classpath_jars_cache_pub(project_root, &jars)?;
+    }
+
+    if !cp.classes_dirs.is_empty() || !cp.project_source_dirs.is_empty() {
+        let (existing_classes, existing_sources) =
+            outputs_to_paths(&load_project_classpath_outputs(project_root));
+        let classes_dirs = merge_classpath_jars(&existing_classes, &cp.classes_dirs);
+        let source_dirs = merge_classpath_jars(&existing_sources, &cp.project_source_dirs);
+        save_project_classpath_outputs(
+            project_root,
+            &paths_to_outputs(&classes_dirs, &source_dirs),
+        )?;
+    }
+
+    mark_test_classpath_done(project_root)?;
+    invalidate_lookup_cache(project_root);
+    Ok(())
+}
+
+fn resolve_test_classpath_via_tooling(
+    project_root: &Path,
+    progress: IndexProgress,
+) -> Result<()> {
+    let cp = if super::maven::is_maven_project_root(project_root) {
+        resolve_maven_test_classpath_via_tooling(project_root, progress)?
+    } else {
+        resolve_gradle_classpath_test_supplement(project_root, progress)?
+    };
+    merge_test_classpath_into_cache(project_root, &cp)
+}
+
+fn resolve_maven_test_classpath_via_tooling(
+    maven_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
+    report_index_progress(progress, "running-maven-test-classpath", 0);
+    let output = super::maven::run_maven(
+        maven_root,
+        &["-q", "dependency:resolve", "-DincludeScope=test"],
+    )?;
+    if !output.status.success() {
+        bail!(
+            "mvn dependency:resolve (test) failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut cp = resolve_classpath_from_m2_scoped(maven_root, true);
+    cp.log = "lazy test scope via mvn dependency:resolve".into();
+    Ok(cp)
+}
+
+fn resolve_gradle_classpath_test_supplement(
+    gradle_root: &Path,
+    progress: IndexProgress,
+) -> Result<GradleClasspath> {
+    resolve_gradle_classpath_inner(gradle_root, progress, true)
 }
 
 /// True when javac needs test-scoped dependency JARs for this file.
@@ -849,6 +1418,11 @@ pub fn file_needs_test_classpath(rel_path: &str, content: &str) -> bool {
         || content.contains("org.junit.jupiter")
         || content.contains("org.junit.")
         || content.contains("org.springframework.boot.test")
+        || content.contains("org.mockito")
+        || content.contains("@Mock")
+        || content.contains("@InjectMocks")
+        || content.contains("@Spy")
+        || content.contains("MockitoExtension")
 }
 
 /// Whether resolved JAR paths include Spring Data API types (commons/jpa/etc.), not just Boot starters.
@@ -888,15 +1462,77 @@ pub fn classpath_includes_spring_deps(jars: &[PathBuf]) -> bool {
 
 /// Whether resolved JAR paths include common test-scoped libraries.
 pub fn classpath_includes_test_deps(jars: &[PathBuf]) -> bool {
+    classpath_includes_junit(jars)
+        || classpath_includes_mockito(jars)
+        || jars.iter().any(|p| {
+            let s = p.to_string_lossy().to_ascii_lowercase();
+            s.contains("spring-boot-test")
+                || s.contains("spring-test")
+                || s.contains("assertj")
+        })
+}
+
+pub fn classpath_includes_junit(jars: &[PathBuf]) -> bool {
     jars.iter().any(|p| {
         let s = p.to_string_lossy().to_ascii_lowercase();
-        s.contains("junit-jupiter")
-            || s.contains("/junit/")
-            || s.contains("spring-boot-test")
-            || s.contains("spring-test")
-            || s.contains("mockito")
-            || s.contains("assertj")
+        s.contains("junit-jupiter") || s.contains("/junit/")
     })
+}
+
+pub fn classpath_includes_mockito(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        p.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("mockito")
+    })
+}
+
+pub fn classpath_includes_slf4j(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.contains("slf4j") || s.contains("logback") || s.contains("log4j")
+    })
+}
+
+pub fn classpath_includes_lombok(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        p.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("lombok")
+    })
+}
+
+pub fn classpath_includes_validation(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.contains("jakarta.validation-api")
+            || s.contains("javax.validation-api")
+            || s.contains("/jakarta.validation/")
+            || s.contains("/javax.validation/")
+    })
+}
+
+/// Whether any resolved JAR likely provides types for `package`.
+pub fn classpath_includes_package(jars: &[PathBuf], package: &str) -> bool {
+    let pkg = package.trim();
+    if pkg.is_empty() {
+        return false;
+    }
+    if pkg.starts_with("jakarta.validation") || pkg.starts_with("javax.validation") {
+        return classpath_includes_validation(jars);
+    }
+    jars.iter().any(|jar| jar_provides_package(jar, pkg))
+}
+
+fn jar_provides_package(jar: &Path, package: &str) -> bool {
+    if let Some(coord) = super::java_classpath::coord_from_jar_path(jar) {
+        let group = coord.group.to_ascii_lowercase();
+        let pkg = package.to_ascii_lowercase();
+        return pkg == group || pkg.starts_with(&format!("{group}."));
+    }
+    let s = jar.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let pkg = package.to_ascii_lowercase();
+    s.contains(&format!("/{}/", pkg.replace('.', "/")))
 }
 
 fn merge_classpath_jars(primary: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> {
@@ -910,36 +1546,62 @@ fn merge_classpath_jars(primary: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> 
     out
 }
 
-/// Classpath for live javac diagnostics — includes test-scoped Maven transitives when needed.
+/// Union tooling/offline JARs with Maven/Gradle build-file transitive tree (all declared scopes).
+fn merge_with_build_file_dependency_tree(
+    project_root: &Path,
+    jars: &[PathBuf],
+    include_test_scope: bool,
+) -> Vec<PathBuf> {
+    let tree = resolve_dependency_tree_jars(project_root, include_test_scope);
+    merge_classpath_jars(jars, &tree)
+}
+
+/// Classpath for live javac diagnostics — transitive libraries + compiled/generated output dirs.
 pub fn resolve_dependency_jars_for_java_file(
     project_root: &Path,
     rel_path: &str,
     content: &str,
 ) -> Vec<PathBuf> {
-    let needs_test =
-        file_needs_test_classpath(rel_path, content) || is_java_test_source_path(rel_path);
-    let mut jars = filter_existing_jars(resolve_classpath_jars_preferring_build_tree(
-        project_root,
-        needs_test,
+    resolve_javac_classpath_for_file(project_root, rel_path, content)
+}
+
+/// Build a javac `-classpath`: expanded dependency JARs first, then module output dirs.
+/// JAR-first ordering avoids "cannot access …" when `.class` outputs reference types from
+/// libraries that would otherwise appear later on the classpath.
+pub fn resolve_javac_classpath_for_file(
+    project_root: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Vec<PathBuf> {
+    let include_test = file_needs_test_classpath(rel_path, content);
+    let mut jars = collect_dependency_jars_for_javac(project_root, include_test);
+    jars = super::java_classpath::complete_classpath(jars, include_test);
+    jars = dedupe_classpath_entries(filter_existing_classpath_entries(
+        jars.into_iter().filter(|p| p.is_file()).collect(),
     ));
 
-    if needs_test && !classpath_includes_test_deps(&jars) {
-        let with_test = filter_existing_jars(resolve_dependency_tree_jars(project_root, true));
-        if !with_test.is_empty() {
-            jars = merge_classpath_jars(&jars, &with_test);
-        }
-    }
+    let mut dirs = cached_project_classes_dirs(project_root);
+    dirs.retain(|p| p.is_dir());
 
-    if super::java_ecosystem::project_declares_spring_data(project_root)
-        && !classpath_includes_spring_data_deps(&jars)
-    {
-        let full_tree = filter_existing_jars(resolve_dependency_tree_jars(project_root, true));
-        if !full_tree.is_empty() {
-            jars = merge_classpath_jars(&jars, &full_tree);
-        }
-    }
+    let mut entries = jars;
+    entries.extend(dirs);
+    dedupe_classpath_entries(filter_existing_classpath_entries(entries))
+}
 
-    jars
+fn collect_dependency_jars_for_javac(project_root: &Path, include_test: bool) -> Vec<PathBuf> {
+    let mut jars = if tooling_classpath_resolved(project_root) {
+        cached_classpath_jars(project_root)
+    } else if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        cp.jars
+    } else {
+        cached_classpath_jars(project_root)
+    };
+    jars = merge_classpath_jars(&jars, &resolve_dependency_tree_jars(project_root, include_test));
+    jars.into_iter().filter(|p| p.is_file()).collect()
+}
+
+pub fn classpath_cache_stamp(project_root: &Path) -> Option<String> {
+    classpath_stamp(project_root).ok()
 }
 
 /// Cached or resolved dependency JARs for javac (offline only — tooling runs in background).
@@ -1051,6 +1713,29 @@ fn filter_existing_jars(jars: Vec<PathBuf>) -> Vec<PathBuf> {
     jars.into_iter().filter(|p| p.is_file()).collect()
 }
 
+fn filter_existing_classpath_entries(entries: Vec<PathBuf>) -> Vec<PathBuf> {
+    entries
+        .into_iter()
+        .filter(|p| p.is_file() || p.is_dir())
+        .collect()
+}
+
+fn dedupe_classpath_entries(entries: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for entry in entries {
+        let key = entry
+            .canonicalize()
+            .unwrap_or_else(|_| entry.clone())
+            .display()
+            .to_string();
+        if seen.insert(key) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
 pub fn warm_index(ws: &Path) -> Result<WarmIndexStatus> {
     warm_index_with_progress(ws, None)
 }
@@ -1059,6 +1744,9 @@ pub fn warm_index_with_progress(
     ws: &Path,
     progress: Option<Box<dyn Fn(&str, usize) + Send>>,
 ) -> Result<WarmIndexStatus> {
+    if !JavaIndexProfile::current().index_all_modules_on_startup() {
+        return compute_peek_index_status(ws);
+    }
     let roots = find_all_index_roots(ws)?;
     if roots.is_empty() {
         return Ok(empty_warm_status());
@@ -1074,9 +1762,15 @@ pub fn warm_index_with_progress(
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     };
 
     for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            bail!("Reaper is shutting down");
+        }
         let cached = is_index_cached(ws, &root)?;
         let index = if cached {
             load_index(ws, &root)?
@@ -1093,6 +1787,9 @@ pub fn warm_index_with_progress(
         combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
         combined.spring_symbols += meta.spring_symbols;
         combined.jdk_symbols += meta.jdk_symbols;
+        combined.jars_indexed += meta.jars_indexed;
+        combined.jars_total += meta.jars_total;
+        combined.index_complete = combined.index_complete && meta.index_complete;
     }
 
     Ok(combined)
@@ -1100,6 +1797,25 @@ pub fn warm_index_with_progress(
 
 /// Read index status from disk without building (for UI polling).
 pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
+    let key = workspace_cache_key(ws);
+    if let Ok(guard) = PEEK_INDEX_CACHE.lock() {
+        if let Some((at, status)) = guard.get(&key) {
+            if at.elapsed() < PEEK_INDEX_CACHE_TTL {
+                return Ok(status.clone());
+            }
+        }
+    }
+
+    let status = compute_peek_index_status(ws)?;
+    if status.index_complete && status.symbol_count > 0 {
+        if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
+            guard.insert(key, (Instant::now(), status.clone()));
+        }
+    }
+    Ok(status)
+}
+
+fn compute_peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
     let roots = find_all_index_roots(ws)?;
     if roots.is_empty() {
         return Ok(empty_warm_status());
@@ -1115,6 +1831,9 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     };
 
     for root in roots {
@@ -1130,18 +1849,39 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
             combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
             combined.spring_symbols += meta.spring_symbols;
             combined.jdk_symbols += meta.jdk_symbols;
+            combined.jars_indexed += meta.jars_indexed;
+            combined.jars_total += meta.jars_total;
+            combined.index_complete = combined.index_complete && meta.index_complete;
         }
     }
 
     Ok(combined)
 }
 
-/// True when a cached Java index should be rebuilt (classpath tooling pending, missing Spring Data types, etc.).
+/// True when a cached Java index should be fully rebuilt (missing types, empty deps, etc.).
+/// Pending Gradle/Maven tooling alone does not require a rebuild — see `tooling_classpath_pending`.
 pub fn java_index_needs_refresh(ws: &Path) -> bool {
-    if needs_any_tooling_classpath_resolve(ws) {
-        return true;
+    let key = workspace_cache_key(ws);
+    if let Ok(guard) = NEEDS_REFRESH_CACHE.lock() {
+        if let Some((at, needs)) = guard.get(&key) {
+            if at.elapsed() < NEEDS_REFRESH_CACHE_TTL {
+                return *needs;
+            }
+        }
     }
+
+    let needs = compute_java_index_needs_refresh(ws);
+    if let Ok(mut guard) = NEEDS_REFRESH_CACHE.lock() {
+        guard.insert(key, (Instant::now(), needs));
+    }
+    needs
+}
+
+fn compute_java_index_needs_refresh(ws: &Path) -> bool {
     let Ok(roots) = find_all_index_roots(ws) else {
+        return false;
+    };
+    let Ok(peek) = peek_index_status(ws) else {
         return false;
     };
     for root in roots {
@@ -1153,14 +1893,17 @@ pub fn java_index_needs_refresh(ws: &Path) -> bool {
         {
             return true;
         }
-        if let Ok(peek) = peek_index_status(ws) {
-            let markers = super::java_ecosystem::project_build_markers(&root);
-            if markers.spring && peek.indexed && peek.dependency_jars == 0 {
-                return true;
-            }
+        let markers = super::java_ecosystem::project_build_markers(&root);
+        if markers.spring && peek.indexed && peek.dependency_jars == 0 {
+            return true;
         }
     }
     false
+}
+
+/// True when compile classpath still needs Gradle/Maven resolve (diagnostics may be incomplete).
+pub fn tooling_classpath_pending(ws: &Path) -> bool {
+    needs_any_tooling_classpath_resolve(ws)
 }
 
 fn index_missing_spring_data_domain(ws: &Path, root: &Path) -> bool {
@@ -1267,7 +2010,154 @@ fn empty_warm_status() -> WarmIndexStatus {
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     }
+}
+
+/// Continue staged JAR indexing for roots that saved a partial index.
+pub fn continue_background_index(
+    ws: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    let roots = find_all_index_roots(ws)?;
+    for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            break;
+        }
+        continue_background_index_root(ws, &root, progress, jar_progress)?;
+    }
+    Ok(())
+}
+
+pub fn background_index_pending(ws: &Path) -> bool {
+    find_all_index_roots(ws)
+        .ok()
+        .is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|root| index_meta(root).index_version >= INDEX_VERSION && !index_meta(root).index_complete)
+        })
+}
+
+fn continue_background_index_root(
+    ws: &Path,
+    gradle_root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    let meta = index_meta(gradle_root);
+    if meta.index_complete || meta.index_version < INDEX_VERSION {
+        return Ok(());
+    }
+    if !JavaIndexProfile::current().background_enabled() {
+        return Ok(());
+    }
+
+    let Some(mut index) = try_load_index(ws, gradle_root)? else {
+        return Ok(());
+    };
+
+    let jars = cached_classpath_jars(gradle_root);
+    if jars.is_empty() {
+        return Ok(());
+    }
+
+    let jar_refs = prioritize_jars_for_fallback(&jars);
+    let jars_total = jar_refs.len();
+    if meta.jars_indexed >= jars_total {
+        write_index_meta(
+            gradle_root,
+            &IndexMeta {
+                index_complete: true,
+                ..meta
+            },
+        )?;
+        return Ok(());
+    }
+
+    if let Some(cb) = progress {
+        cb("jar-index-background", index.symbols.len());
+    }
+    if let Some(cb) = jar_progress {
+        cb(meta.jars_indexed, jars_total);
+    }
+
+    let jar_cb = |done: usize, total: usize| {
+        if let Some(cb) = jar_progress {
+            cb(done, total);
+        }
+    };
+    let jars_done = index_jar_classpath_fallback(
+        ws,
+        gradle_root,
+        &jars,
+        &[],
+        &mut index.symbols,
+        progress,
+        JarIndexOptions {
+            skip_jars: meta.jars_indexed,
+            max_jars: None,
+            throttle: true,
+        },
+        Some(&jar_cb),
+    )?;
+
+    index.symbols.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+
+    let spring_symbols = index
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("org.springframework.")
+                || s.path.contains("/org/springframework/")
+        })
+        .count();
+    let jdk_symbols = index
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("java.") || s.path.contains(".reaper/java-sources/jdk/")
+        })
+        .count();
+
+    std::fs::write(
+        reaper_dir(gradle_root).join("java-index.json"),
+        serde_json::to_string(&index)?,
+    )?;
+
+    let jars_done = jars_done.min(jars_total);
+    write_index_meta(
+        gradle_root,
+        &IndexMeta {
+            spring_symbols,
+            jdk_symbols,
+            jars_indexed: jars_done,
+            jars_total,
+            index_complete: jars_done >= jars_total,
+            ..meta
+        },
+    )?;
+
+    invalidate_lookup_cache(gradle_root);
+
+    if let Some(cb) = progress {
+        cb(
+            if jars_done >= jars_total {
+                "ready"
+            } else {
+                "jar-index-background"
+            },
+            index.symbols.len(),
+        );
+    }
+    if let Some(cb) = jar_progress {
+        cb(jars_done, jars_total);
+    }
+
+    Ok(())
 }
 
 pub fn find_external_definition(
@@ -1520,7 +2410,7 @@ pub fn java_completions(
     let mut items = Vec::new();
 
     for sym in lookup.symbols.iter() {
-        if at_annotation && sym.kind != "annotation" {
+        if at_annotation && !is_annotation_index_symbol(sym) {
             continue;
         }
         if type_preferred && sym.kind == "method" {
@@ -1813,14 +2703,19 @@ fn member_completions_for_qualifier(
 fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     let mut dirs = java_project_source_dirs(gradle_root);
     if dirs.is_empty() {
-        for rel in ["src/main/java", "src/test/java", "src"] {
+        for rel in super::java_sources::discovery_suffixes() {
             let p = gradle_root.join(rel);
             if p.is_dir() {
                 dirs.push(p);
             }
         }
+        let plain = gradle_root.join("src");
+        if plain.is_dir() {
+            dirs.push(plain);
+        }
     }
     dirs.extend(library_source_dirs(gradle_root));
+    dirs.extend(cached_project_source_dirs(gradle_root));
     let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
     if jdk.is_dir() {
         dirs.push(jdk);
@@ -1828,66 +2723,12 @@ fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Every `*/src/main/java` and `*/src/test/java` directory under a Gradle/Maven root.
+/// Every Maven/Gradle source root under a project (multi-module safe).
 fn java_project_source_dirs(project_root: &Path) -> Vec<PathBuf> {
-    discover_java_source_prefixes(project_root)
+    super::java_sources::discover_source_prefixes(project_root)
         .into_iter()
         .map(|prefix| project_root.join(prefix))
         .collect()
-}
-
-fn discover_java_source_prefixes(project_root: &Path) -> Vec<String> {
-    let mut prefixes = Vec::new();
-    discover_java_source_prefixes_inner(project_root, project_root, &mut prefixes, 0);
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
-}
-
-fn discover_java_source_prefixes_inner(
-    project_root: &Path,
-    dir: &Path,
-    out: &mut Vec<String>,
-    depth: usize,
-) {
-    if depth > 12 || !dir.is_dir() {
-        return;
-    }
-    for suffix in ["src/main/java", "src/test/java"] {
-        if dir.join(suffix).is_dir() {
-            let rel = dir
-                .strip_prefix(project_root)
-                .unwrap_or(dir)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let prefix = if rel.is_empty() {
-                suffix.to_string()
-            } else {
-                format!("{rel}/{suffix}")
-            };
-            out.push(prefix);
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        if name == "build"
-            || name == "target"
-            || name == ".gradle"
-            || name == "node_modules"
-            || name == ".git"
-            || name == ".reaper"
-        {
-            continue;
-        }
-        discover_java_source_prefixes_inner(project_root, &path, out, depth + 1);
-    }
 }
 
 fn read_project_java_source(
@@ -2239,6 +3080,8 @@ fn classpath_stamp(gradle_root: &Path) -> Result<String> {
             "settings.gradle",
             "settings.gradle.kts",
             "gradle.properties",
+            "gradle/libs.versions.toml",
+            "gradle/wrapper/gradle-wrapper.properties",
         ] {
             let path = gradle_root.join(name);
             if path.is_file() {
@@ -2246,7 +3089,12 @@ fn classpath_stamp(gradle_root: &Path) -> Result<String> {
                 parts.push(format!(
                     "{name}:{}:{}",
                     meta.len(),
-                    meta.modified()?.elapsed()?.as_nanos()
+                    meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
                 ));
             }
         }
@@ -2266,6 +3114,12 @@ struct IndexMeta {
     jdk_symbols: usize,
     #[serde(default)]
     index_version: u32,
+    #[serde(default)]
+    jars_indexed: usize,
+    #[serde(default)]
+    jars_total: usize,
+    #[serde(default = "default_index_complete")]
+    index_complete: bool,
 }
 
 const META_PATH: &str = "java-index-meta.json";
@@ -2342,6 +3196,13 @@ fn build_index(
 
     index_all_java_source_trees(ws, gradle_root, &mut symbols, progress)?;
 
+    for dir in &classpath.project_source_dirs {
+        if dir.is_dir() {
+            index_java_dir(ws, dir, &mut symbols, progress)?;
+            report(progress, "indexing", symbols.len());
+        }
+    }
+
     let spring_from_sources = symbols
         .iter()
         .filter(|s| {
@@ -2349,16 +3210,45 @@ fn build_index(
                 || s.path.contains("/org/springframework/")
         })
         .count();
+    let mut jars_indexed = 0usize;
+    let mut jars_total = 0usize;
+    let mut index_complete = true;
     if !classpath.jars.is_empty() {
         report(progress, "jar-index", symbols.len());
-        index_jar_classpath_fallback(
+        let profile = JavaIndexProfile::current();
+        let jar_refs = prioritize_jars_for_fallback(&classpath.jars);
+        jars_total = jar_refs.len();
+        let startup_limit = profile.startup_jar_limit();
+        let staged = profile.background_enabled() && jars_total > startup_limit;
+        let jar_options = if jars_total > startup_limit {
+            JarIndexOptions {
+                skip_jars: 0,
+                max_jars: Some(startup_limit),
+                throttle: jars_total > 600,
+            }
+        } else {
+            JarIndexOptions {
+                throttle: jars_total > 600,
+                ..Default::default()
+            }
+        };
+        jars_indexed = index_jar_classpath_fallback(
             ws,
             gradle_root,
             &classpath.jars,
             &source_dirs,
             &mut symbols,
             progress,
+            jar_options,
+            None,
         )?;
+        index_complete = !staged || jars_indexed >= jars_total;
+        if staged {
+            tracing::info!(
+                "Staged Java index for {}: {jars_indexed}/{jars_total} priority JARs — remainder in background",
+                gradle_root.display()
+            );
+        }
     } else {
         tracing::info!(
             "Skipping JAR classpath fallback for {} ({} symbols, {} Spring from sources, no JARs)",
@@ -2366,6 +3256,16 @@ fn build_index(
             symbols.len(),
             spring_from_sources
         );
+    }
+    if !classpath.classes_dirs.is_empty() {
+        report(progress, "jar-index", symbols.len());
+        index_classes_dirs_fallback(
+            ws,
+            gradle_root,
+            &classpath.classes_dirs,
+            &mut symbols,
+            progress,
+        )?;
     }
     report(progress, "indexing", symbols.len());
 
@@ -2397,6 +3297,12 @@ fn build_index(
     if !classpath.jars.is_empty() {
         save_classpath_jars_cache(gradle_root, &classpath.jars)?;
     }
+    if !classpath.classes_dirs.is_empty() || !classpath.project_source_dirs.is_empty() {
+        let _ = save_project_classpath_outputs(
+            gradle_root,
+            &paths_to_outputs(&classpath.classes_dirs, &classpath.project_source_dirs),
+        );
+    }
     std::fs::write(
         reaper_dir(gradle_root).join("java-index.json"),
         serde_json::to_string(&index)?,
@@ -2414,6 +3320,9 @@ fn build_index(
             spring_symbols,
             jdk_symbols,
             index_version: INDEX_VERSION,
+            jars_indexed,
+            jars_total,
+            index_complete,
         },
     )?;
 
@@ -2549,21 +3458,170 @@ fn extract_sources_jar(
     let out = dest_root.join(&name);
     if !out.join(".extracted").is_file() {
         let _ = std::fs::remove_dir_all(&out);
-        extract_zip(sources, &out)?;
-        std::fs::write(out.join(".extracted"), sources.to_string_lossy().as_ref())?;
+        if !is_valid_zip_file(sources) {
+            tracing::warn!(
+                "Skipping dependency sources — not a valid zip: {}",
+                sources.display()
+            );
+            return Ok(None);
+        }
+        if let Err(e) = extract_zip(sources, &out) {
+            tracing::warn!(
+                "Skipping dependency sources — unzip failed for {}: {e:#}",
+                sources.display()
+            );
+            let _ = std::fs::remove_dir_all(&out);
+            return Ok(None);
+        }
+        if let Err(e) = std::fs::write(out.join(".extracted"), sources.to_string_lossy().as_ref()) {
+            tracing::warn!(
+                "Skipping dependency sources — could not mark {} as extracted: {e:#}",
+                sources.display()
+            );
+            let _ = std::fs::remove_dir_all(&out);
+            return Ok(None);
+        }
     }
     let _ = ws;
     Ok(Some(out))
+}
+
+fn is_valid_zip_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 4];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    // Local file header (PK\x03\x04) or empty archive (PK\x05\x06).
+    header == [0x50, 0x4B, 0x03, 0x04] || header == [0x50, 0x4B, 0x05, 0x06]
 }
 
 #[derive(Debug, Default)]
 struct GradleClasspath {
     jars: Vec<PathBuf>,
     source_jars: Vec<PathBuf>,
+    classes_dirs: Vec<PathBuf>,
+    project_source_dirs: Vec<PathBuf>,
     log: String,
 }
 
-const MAX_OFFLINE_CLASSPATH_JARS: usize = 800;
+fn gradle_classpath_from_tooling_cache(project_root: &Path) -> Option<GradleClasspath> {
+    if !tooling_classpath_resolved(project_root) {
+        return None;
+    }
+    let jars = cached_classpath_jars(project_root);
+    if jars.is_empty() {
+        return None;
+    }
+    let source_jars = discover_source_jars_for_jars(&jars);
+    let (classes_dirs, project_source_dirs) =
+        outputs_to_paths(&load_project_classpath_outputs(project_root));
+    Some(GradleClasspath {
+        jars,
+        source_jars,
+        classes_dirs,
+        project_source_dirs,
+        log: "from Gradle/Maven compile classpath cache".into(),
+    })
+}
+
+fn persist_tooling_classpath(project_root: &Path, cp: &GradleClasspath, preserve_index: bool) -> Result<()> {
+    if cp.jars.is_empty() && cp.classes_dirs.is_empty() && cp.project_source_dirs.is_empty() {
+        return Ok(());
+    }
+    if !cp.jars.is_empty() {
+        let jars = merge_with_build_file_dependency_tree(project_root, &cp.jars, true);
+        save_classpath_jars_cache_pub(project_root, &jars)?;
+        if classpath_resolve_full() || classpath_includes_test_deps(&jars) {
+            let _ = mark_test_classpath_done(project_root);
+        }
+    }
+    if !cp.classes_dirs.is_empty() || !cp.project_source_dirs.is_empty() {
+        save_project_classpath_outputs(
+            project_root,
+            &paths_to_outputs(&cp.classes_dirs, &cp.project_source_dirs),
+        )?;
+    }
+    mark_tooling_classpath_done(project_root)?;
+    if preserve_index {
+        invalidate_lookup_cache(project_root);
+    } else {
+        invalidate_root_index_cache(project_root);
+    }
+    Ok(())
+}
+
+fn has_materialized_java_index(project_root: &Path) -> bool {
+    let path = reaper_dir(project_root).join(INDEX_PATH);
+    path.is_file()
+        && std::fs::metadata(&path)
+            .map(|m| m.len() > 2)
+            .unwrap_or(false)
+}
+
+fn try_resolve_classpath_via_tooling(
+    project_root: &Path,
+    progress: IndexProgress,
+) -> Option<GradleClasspath> {
+    try_resolve_classpath_via_tooling_inner(
+        project_root,
+        has_materialized_java_index(project_root),
+        progress,
+    )
+}
+
+fn try_resolve_classpath_via_tooling_inner(
+    project_root: &Path,
+    preserve_index: bool,
+    progress: IndexProgress,
+) -> Option<GradleClasspath> {
+    if !index_build_tooling_enabled() || !is_build_tool_project_root(project_root) {
+        return None;
+    }
+    tracing::info!(
+        "Resolving compile classpath via {} for {}",
+        if super::maven::is_maven_project_root(project_root) {
+            "Maven"
+        } else {
+            "Gradle"
+        },
+        project_root.display()
+    );
+    match resolve_classpath_via_tooling_full(project_root, progress) {
+        Ok(cp) if !cp.jars.is_empty() || !cp.classes_dirs.is_empty() || !cp.project_source_dirs.is_empty() => {
+            if let Err(e) = persist_tooling_classpath(project_root, &cp, preserve_index) {
+                tracing::warn!(
+                    "Failed to persist tooling classpath for {}: {e:#}",
+                    project_root.display()
+                );
+            }
+            tracing::info!(
+                "Resolved {} JARs via tooling for {} ({})",
+                cp.jars.len(),
+                project_root.display(),
+                cp.log
+            );
+            Some(cp)
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "Classpath tooling returned no JARs for {}",
+                project_root.display()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Classpath tooling failed for {}: {e:#}",
+                project_root.display()
+            );
+            None
+        }
+    }
+}
 
 const SPRING_CACHE_GROUPS: &[&str] = &[
     "org.springframework",
@@ -2582,60 +3640,88 @@ const SPRING_CACHE_GROUPS: &[&str] = &[
     "javax.annotation",
 ];
 
-/// Resolve dependency JARs without running Gradle/Maven when possible (cache file, local caches).
+/// Resolve dependency JARs for indexing — tooling cache or offline fallback (tooling runs separately).
 fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
-    let mut cp = if super::maven::is_maven_project_root(project_root) {
-        resolve_classpath_for_maven(project_root)
+    let base = if let Some(cp) = gradle_classpath_from_tooling_cache(project_root) {
+        cp
     } else {
-        resolve_classpath_for_gradle(project_root)
+        let mut cp = resolve_classpath_offline_fallback(project_root);
+        if !cp.jars.is_empty() {
+            let _ = ensure_dependency_sources(project_root, &cp.jars);
+            cp.source_jars = discover_source_jars_for_jars(&cp.jars);
+        }
+        cp
     };
 
-    if cp.jars.is_empty() && index_build_tooling_enabled() && is_build_tool_project_root(project_root)
-    {
-        if let Ok(tool) = resolve_classpath_via_tooling_full(project_root) {
-            if !tool.jars.is_empty() {
-                cp = tool;
-            }
+    let jars: Vec<PathBuf> = resolve_full_project_classpath(project_root)
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect();
+    let source_jars = if jars.is_empty() {
+        Vec::new()
+    } else {
+        discover_source_jars_for_jars(&jars)
+    };
+
+    let mut classes_dirs = base.classes_dirs;
+    let mut project_source_dirs = base.project_source_dirs;
+    let (disc_classes, disc_sources) = discover_project_output_dirs(project_root);
+    for dir in disc_classes {
+        if !classes_dirs.iter().any(|p| p == &dir) {
+            classes_dirs.push(dir);
+        }
+    }
+    for dir in disc_sources {
+        if !project_source_dirs.iter().any(|p| p == &dir) {
+            project_source_dirs.push(dir);
         }
     }
 
-    if !cp.jars.is_empty() {
-        let _ = ensure_dependency_sources(project_root, &cp.jars);
-        cp.source_jars = discover_source_jars_for_jars(&cp.jars);
+    GradleClasspath {
+        jars,
+        source_jars,
+        classes_dirs,
+        project_source_dirs,
+        log: if base.log.is_empty() {
+            "from build-file dependency tree".into()
+        } else {
+            format!("{} + build-file tree", base.log)
+        },
     }
-
-    cp
 }
 
-fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
-    let offline = resolve_classpath_from_gradle_cache_scoped(gradle_root, true);
-    if build_tree_classpath_sufficient(gradle_root, &offline.jars) {
-        tracing::info!(
-            "Resolved {} JARs from Gradle build-file dependency tree for {}",
-            offline.jars.len(),
-            gradle_root.display()
-        );
-        return offline;
+fn resolve_classpath_offline_fallback(project_root: &Path) -> GradleClasspath {
+    if super::maven::is_maven_project_root(project_root) {
+        resolve_classpath_for_maven_offline(project_root)
+    } else {
+        resolve_classpath_for_gradle_offline(project_root)
     }
+}
 
+fn resolve_classpath_for_gradle_offline(gradle_root: &Path) -> GradleClasspath {
     let cached = cached_classpath_jars(gradle_root);
-    if cached_classpath_trustworthy(gradle_root, &cached, true) {
+    if cached_classpath_trustworthy(gradle_root, &cached) {
         tracing::info!(
             "Using {} cached classpath JARs for {}",
             cached.len(),
             gradle_root.display()
         );
         let source_jars = discover_source_jars_for_jars(&cached);
+        let (classes_dirs, project_source_dirs) =
+            outputs_to_paths(&load_project_classpath_outputs(gradle_root));
         return GradleClasspath {
             jars: cached,
             source_jars,
+            classes_dirs,
+            project_source_dirs,
             log: "from classpath-jars.json cache".into(),
         };
     }
 
+    let offline = resolve_classpath_from_gradle_cache_scoped(gradle_root, true);
     if !offline.jars.is_empty() {
         tracing::info!(
-            "Resolved {} JARs from local Gradle cache (no Gradle run) for {}",
+            "Resolved {} JARs from local Gradle cache (tooling pending) for {}",
             offline.jars.len(),
             gradle_root.display()
         );
@@ -2644,7 +3730,7 @@ fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
 
     if index_build_tooling_enabled() {
         tracing::info!(
-            "Gradle classpath empty offline for {} — run Gradle resolve in background",
+            "Gradle classpath empty offline for {} — awaiting tooling resolve",
             gradle_root.display()
         );
     }
@@ -2652,19 +3738,9 @@ fn resolve_classpath_for_gradle(gradle_root: &Path) -> GradleClasspath {
     GradleClasspath::default()
 }
 
-fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
-    let offline = resolve_classpath_from_m2_scoped(maven_root, true);
-    if build_tree_classpath_sufficient(maven_root, &offline.jars) {
-        tracing::info!(
-            "Resolved {} JARs from Maven pom.xml dependency tree for {}",
-            offline.jars.len(),
-            maven_root.display()
-        );
-        return offline;
-    }
-
+fn resolve_classpath_for_maven_offline(maven_root: &Path) -> GradleClasspath {
     let cached = cached_classpath_jars(maven_root);
-    if cached_classpath_trustworthy(maven_root, &cached, true) {
+    if cached_classpath_trustworthy(maven_root, &cached) {
         tracing::info!(
             "Using {} cached classpath JARs for {}",
             cached.len(),
@@ -2675,12 +3751,14 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
             jars: cached,
             source_jars,
             log: "from classpath-jars.json cache".into(),
+            ..Default::default()
         };
     }
 
+    let offline = resolve_classpath_from_m2_scoped(maven_root, true);
     if !offline.jars.is_empty() {
         tracing::info!(
-            "Resolved {} JARs from local Maven repository (no mvn run) for {}",
+            "Resolved {} JARs from local Maven repository (tooling pending) for {}",
             offline.jars.len(),
             maven_root.display()
         );
@@ -2689,7 +3767,7 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
 
     if index_build_tooling_enabled() {
         tracing::info!(
-            "Maven classpath empty offline for {} — Maven resolve runs in background",
+            "Maven classpath empty offline for {} — awaiting tooling resolve",
             maven_root.display()
         );
     }
@@ -2697,20 +3775,33 @@ fn resolve_classpath_for_maven(maven_root: &Path) -> GradleClasspath {
     GradleClasspath::default()
 }
 
-fn ensure_maven_dependencies(maven_root: &Path) -> Result<()> {
+fn ensure_maven_dependencies(maven_root: &Path, progress: IndexProgress) -> Result<()> {
+    report_index_progress(progress, "running-maven-classpath", 0);
+    let output = super::maven::run_maven(
+        maven_root,
+        &["-q", "dependency:resolve", maven_dependency_scope_flag()],
+    )?;
+    if !output.status.success() {
+        bail!(
+            "mvn dependency:resolve failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if !classpath_resolve_full() {
+        return Ok(());
+    }
+    report_index_progress(progress, "running-maven-sources", 0);
     let output = super::maven::run_maven(
         maven_root,
         &[
             "-q",
-            "dependency:resolve",
-            "-DincludeScope=test",
             "dependency:resolve-sources",
             "dependency:sources",
         ],
     )?;
     if !output.status.success() {
         bail!(
-            "mvn dependency:resolve failed: {}",
+            "mvn dependency:resolve-sources failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -2722,10 +3813,8 @@ fn resolve_classpath_from_m2(maven_root: &Path) -> GradleClasspath {
 }
 
 fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool) -> GradleClasspath {
-    let jar_list: Vec<PathBuf> = super::maven::collect_transitive_jar_paths(maven_root, include_test_scope)
-        .into_iter()
-        .take(MAX_OFFLINE_CLASSPATH_JARS)
-        .collect();
+    let jar_list: Vec<PathBuf> =
+        super::maven::collect_transitive_jar_paths(maven_root, include_test_scope);
 
     if !jar_list.is_empty() {
         return GradleClasspath {
@@ -2735,6 +3824,7 @@ fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool)
                 "from Maven repository transitive ({} JARs, test={include_test_scope})",
                 jar_list.len()
             ),
+            ..Default::default()
         };
     }
 
@@ -2743,47 +3833,38 @@ fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool)
         if let Some(jar) = super::maven::find_m2_jar(&group, &artifact, &version) {
             jars.insert(jar);
         }
-        if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-            break;
-        }
     }
 
     if super::maven::is_spring_boot_project(maven_root) {
         let files_root = super::maven::m2_home();
         for group in SPRING_CACHE_GROUPS {
-            let remaining = MAX_OFFLINE_CLASSPATH_JARS.saturating_sub(jars.len());
-            if remaining == 0 {
-                break;
-            }
-            for jar in list_jars_in_m2_group(&files_root, group, remaining) {
+            for jar in list_jars_in_m2_group(&files_root, group) {
                 jars.insert(jar);
-                if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                    break;
-                }
             }
         }
     }
 
-    let jar_list: Vec<PathBuf> = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
+    let jar_list: Vec<PathBuf> = jars.into_iter().collect();
     GradleClasspath {
         jars: jar_list.clone(),
         source_jars: discover_source_jars_for_jars(&jar_list),
         log: format!("from Maven repository ({} JARs)", jar_list.len()),
+        ..Default::default()
     }
 }
 
-fn list_jars_in_m2_group(m2_root: &Path, group: &str, limit: usize) -> Vec<PathBuf> {
+fn list_jars_in_m2_group(m2_root: &Path, group: &str) -> Vec<PathBuf> {
     let group_dir = m2_root.join(group.replace('.', "/"));
     if !group_dir.is_dir() {
         return Vec::new();
     }
     let mut jars = Vec::new();
-    collect_m2_jars_under(&group_dir, limit, &mut jars);
+    collect_m2_jars_under(&group_dir, &mut jars);
     jars
 }
 
-fn collect_m2_jars_under(dir: &Path, limit: usize, out: &mut Vec<PathBuf>) {
-    if out.len() >= limit || !dir.is_dir() {
+fn collect_m2_jars_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -2797,32 +3878,28 @@ fn collect_m2_jars_under(dir: &Path, limit: usize, out: &mut Vec<PathBuf>) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !name.contains("-sources") && !name.contains("-javadoc") {
                     out.push(path);
-                    if out.len() >= limit {
-                        return;
-                    }
                 }
             }
         } else if path.is_dir() {
-            collect_m2_jars_under(&path, limit, out);
-            if out.len() >= limit {
-                return;
-            }
+            collect_m2_jars_under(&path, out);
         }
     }
 }
 
-fn resolve_maven_classpath_via_mvn(maven_root: &Path) -> Result<GradleClasspath> {
+fn resolve_maven_classpath_via_mvn(maven_root: &Path, progress: IndexProgress) -> Result<GradleClasspath> {
+    report_index_progress(progress, "running-maven-classpath", 0);
     let out_file = reaper_dir(maven_root).join("maven-classpath.txt");
     std::fs::create_dir_all(reaper_dir(maven_root))?;
     let out_path = out_file
         .to_str()
         .context("classpath output path")?;
+    let scope = maven_build_classpath_scope();
     let output = super::maven::run_maven(
         maven_root,
         &[
             "-q",
             "dependency:build-classpath",
-            "-Dmdep.includeScope=test",
+            &format!("-Dmdep.includeScope={scope}"),
             "-Dmdep.outputFile",
             out_path,
         ],
@@ -2844,17 +3921,12 @@ fn resolve_maven_classpath_via_mvn(maven_root: &Path) -> Result<GradleClasspath>
         jars,
         source_jars,
         log: "from mvn dependency:build-classpath".into(),
+        ..Default::default()
     })
 }
 
 fn gradle_user_home() -> PathBuf {
-    std::env::var("GRADLE_USER_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".gradle"))
-                .unwrap_or_else(|_| PathBuf::from(".gradle"))
-        })
+    super::java_classpath::gradle_user_home()
 }
 
 fn resolve_classpath_from_gradle_cache(gradle_root: &Path) -> GradleClasspath {
@@ -2876,18 +3948,13 @@ fn resolve_classpath_from_gradle_cache_scoped(
     if jar_list.is_empty() {
         let mut jars = HashSet::new();
         for (group, artifact, version) in &roots {
-            if let Some(jar) = find_cached_jar(&files_root, group, artifact, version)
+            if let Some(jar) = super::java_classpath::find_cached_jar(&files_root, group, artifact, version)
                 .or_else(|| super::maven::find_m2_jar(group, artifact, version))
             {
                 jars.insert(jar);
             }
-            if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                break;
-            }
         }
-        jar_list = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
-    } else {
-        jar_list.truncate(MAX_OFFLINE_CLASSPATH_JARS);
+        jar_list = jars.into_iter().collect();
     }
 
     if jar_list.is_empty()
@@ -2896,18 +3963,15 @@ fn resolve_classpath_from_gradle_cache_scoped(
     {
         let mut jars = HashSet::new();
         for group in SPRING_CACHE_GROUPS {
-            let remaining = MAX_OFFLINE_CLASSPATH_JARS.saturating_sub(jars.len());
-            if remaining == 0 {
-                break;
-            }
-            for jar in list_jars_in_cache_group(&files_root, group, remaining) {
+            for jar in list_jars_in_cache_group(&files_root, group) {
                 jars.insert(jar);
-                if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                    break;
-                }
             }
         }
-        jar_list = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
+        jar_list = jars.into_iter().collect();
+    }
+
+    if jar_list.is_empty() {
+        return GradleClasspath::default();
     }
 
     GradleClasspath {
@@ -2918,6 +3982,7 @@ fn resolve_classpath_from_gradle_cache_scoped(
             jar_list.len(),
             roots.len()
         ),
+        ..Default::default()
     }
 }
 
@@ -2930,49 +3995,14 @@ fn collect_transitive_gradle_jar_paths(
         roots,
         include_test_scope,
         |group, artifact, version| {
-            find_cached_jar(files_root, group, artifact, version)
+            super::java_classpath::find_cached_jar(files_root, group, artifact, version)
                 .or_else(|| super::maven::find_m2_jar(group, artifact, version))
         },
         |group, artifact, version| {
-            read_gradle_cached_pom(files_root, group, artifact, version)
+            super::java_classpath::read_gradle_cached_pom(files_root, group, artifact, version)
                 .or_else(|| super::maven::read_m2_pom_text(group, artifact, version))
         },
     )
-}
-
-fn read_gradle_cached_pom(
-    files_root: &Path,
-    group: &str,
-    artifact: &str,
-    version: &str,
-) -> Option<String> {
-    let version_dir = files_root.join(group).join(artifact).join(version);
-    if !version_dir.is_dir() {
-        return None;
-    }
-    let expected = format!("{artifact}-{version}.pom");
-    for hash_entry in std::fs::read_dir(&version_dir).into_iter().flatten().flatten() {
-        let hash_dir = hash_entry.path();
-        if !hash_dir.is_dir() {
-            continue;
-        }
-        let pom = hash_dir.join(&expected);
-        if pom.is_file() {
-            return std::fs::read_to_string(pom).ok();
-        }
-        for file_entry in std::fs::read_dir(&hash_dir).into_iter().flatten().flatten() {
-            let path = file_entry.path();
-            if path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".pom"))
-            {
-                return std::fs::read_to_string(path).ok();
-            }
-        }
-    }
-    None
 }
 
 fn discover_source_jars_for_jars(jars: &[PathBuf]) -> Vec<PathBuf> {
@@ -2989,44 +4019,17 @@ fn discover_source_jars_for_jars(jars: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-fn find_cached_jar(files_root: &Path, group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
-    let version_dir = files_root.join(group).join(artifact).join(version);
-    if !version_dir.is_dir() {
-        return None;
-    }
-    for hash_entry in std::fs::read_dir(&version_dir).into_iter().flatten().flatten() {
-        let hash_dir = hash_entry.path();
-        if !hash_dir.is_dir() {
-            continue;
-        }
-        for file_entry in std::fs::read_dir(&hash_dir).into_iter().flatten().flatten() {
-            let path = file_entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.ends_with(".jar") && !name.ends_with("-sources.jar") {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-fn list_jars_in_cache_group(files_root: &Path, group: &str, max: usize) -> Vec<PathBuf> {
+fn list_jars_in_cache_group(files_root: &Path, group: &str) -> Vec<PathBuf> {
     let group_dir = files_root.join(group);
-    if !group_dir.is_dir() || max == 0 {
+    if !group_dir.is_dir() {
         return Vec::new();
     }
     let mut jars = Vec::new();
-    collect_jars_under(&group_dir, &mut jars, max);
+    collect_jars_under(&group_dir, &mut jars);
     jars
 }
 
-fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>, max: usize) {
-    if out.len() >= max {
-        return;
-    }
+fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -3038,16 +4041,10 @@ fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>, max: usize) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !name.ends_with("-sources.jar") {
                     out.push(path);
-                    if out.len() >= max {
-                        return;
-                    }
                 }
             }
         } else if path.is_dir() {
-            collect_jars_under(&path, out, max);
-            if out.len() >= max {
-                return;
-            }
+            collect_jars_under(&path, out);
         }
     }
 }
@@ -3061,16 +4058,474 @@ fn collect_gradle_dependency_coordinates(gradle_root: &Path) -> Vec<(String, Str
         return super::maven::collect_dependency_coordinates(gradle_root);
     }
     let catalog = load_gradle_version_catalog(gradle_root);
+    let management = load_gradle_effective_versions(gradle_root, &catalog);
+    let files_root = gradle_user_home().join("caches/modules-2/files-2.1");
     let mut coords = Vec::new();
     let mut seen = HashSet::new();
-    collect_coordinates_from_dir(gradle_root, 0, 5, &mut coords, &mut seen, &catalog);
+    collect_resolved_coordinates_from_dir(
+        gradle_root,
+        0,
+        5,
+        &mut coords,
+        &mut seen,
+        &catalog,
+        &management,
+        &files_root,
+    );
     coords
+}
+
+fn collect_resolved_coordinates_from_dir(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<(String, String, String)>,
+    seen: &mut HashSet<String>,
+    catalog: &GradleVersionCatalog,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) {
+    if depth > max_depth || !dir.is_dir() {
+        return;
+    }
+    for name in [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for coord in parse_gradle_coordinates(&text, catalog, management, files_root) {
+                    let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                    if seen.insert(key) {
+                        out.push(coord);
+                    }
+                }
+            }
+        }
+    }
+    if depth >= max_depth {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "out"
+            || name == "bin"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+        {
+            continue;
+        }
+        collect_resolved_coordinates_from_dir(
+            &path,
+            depth + 1,
+            max_depth,
+            out,
+            seen,
+            catalog,
+            management,
+            files_root,
+        );
+    }
+}
+
+fn load_gradle_effective_versions(
+    gradle_root: &Path,
+    catalog: &GradleVersionCatalog,
+) -> HashMap<String, String> {
+    let mut texts = Vec::new();
+    collect_gradle_build_texts(gradle_root, 0, 5, &mut texts);
+    let files_root = gradle_user_home().join("caches/modules-2/files-2.1");
+    let mut management = HashMap::new();
+    for text in &texts {
+        for (group, artifact, version) in collect_declared_bom_coordinates(text, catalog) {
+            merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+        }
+        for decl in parse_gradle_plugin_declarations(text, catalog) {
+            for (group, artifact, version) in plugin_import_boms(&decl.id, &decl.version) {
+                merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+            }
+        }
+        for (group, artifact, version) in collect_dependency_management_boms(text, catalog) {
+            merge_bom_managed_versions(&files_root, &group, &artifact, &version, &mut management);
+        }
+    }
+    management
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GradlePluginDecl {
+    id: String,
+    version: String,
+}
+
+/// Known Gradle plugins that import a Maven BOM for dependency versions.
+fn plugin_import_boms(plugin_id: &str, version: &str) -> Vec<(String, String, String)> {
+    let v = version.to_string();
+    match plugin_id {
+        "org.springframework.boot" => vec![(
+            "org.springframework.boot".into(),
+            "spring-boot-dependencies".into(),
+            v,
+        )],
+        "org.jetbrains.kotlin.jvm"
+        | "org.jetbrains.kotlin.android"
+        | "org.jetbrains.kotlin.multiplatform"
+        | "org.jetbrains.kotlin.plugin.spring"
+        | "org.jetbrains.kotlin.plugin.jpa" => vec![(
+            "org.jetbrains.kotlin".into(),
+            "kotlin-bom".into(),
+            v,
+        )],
+        "io.quarkus" | "io.quarkus.gradle" => vec![(
+            "io.quarkus.platform".into(),
+            "quarkus-bom".into(),
+            v,
+        )],
+        "io.micronaut.application" | "io.micronaut.library" | "io.micronaut.minimal.application" => {
+            vec![("io.micronaut.platform".into(), "micronaut-platform".into(), v)]
+        }
+        "org.springframework.dependency-management" | "io.spring.dependency-management" => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_gradle_plugin_declarations(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<GradlePluginDecl> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for block in extract_named_blocks(text, "plugins") {
+        ingest_plugin_block(&block, catalog, &mut out, &mut seen);
+    }
+    for block in extract_named_blocks(text, "pluginManagement") {
+        for plugins in extract_named_blocks(&block, "plugins") {
+            ingest_plugin_block(&plugins, catalog, &mut out, &mut seen);
+        }
+    }
+    out
+}
+
+fn ingest_plugin_block(
+    block: &str,
+    catalog: &GradleVersionCatalog,
+    out: &mut Vec<GradlePluginDecl>,
+    seen: &mut HashSet<String>,
+) {
+    for line in block.lines() {
+        let line = line.split("//").next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(decl) = parse_plugin_line(line, catalog) {
+            let key = format!("{}:{}", decl.id, decl.version);
+            if seen.insert(key) {
+                out.push(decl);
+            }
+        }
+    }
+}
+
+fn parse_plugin_line(line: &str, catalog: &GradleVersionCatalog) -> Option<GradlePluginDecl> {
+    if line.contains("alias(") {
+        return parse_plugin_catalog_alias(line, catalog);
+    }
+    if !line.contains("id") {
+        return None;
+    }
+    let tokens = extract_quoted_tokens(line);
+    let id = tokens.first()?.clone();
+    if id == "java" || id == "application" || id == "idea" || id == "eclipse" {
+        return None;
+    }
+    let version = line
+        .split("version")
+        .nth(1)
+        .and_then(|rest| {
+            parse_toml_string_value(rest.split([' ', ',', ')', ';']).next()?.trim())
+        })
+        .or_else(|| tokens.get(1).cloned())?;
+    if version.is_empty() || version.contains('$') {
+        return None;
+    }
+    Some(GradlePluginDecl { id, version })
+}
+
+fn parse_plugin_catalog_alias(line: &str, catalog: &GradleVersionCatalog) -> Option<GradlePluginDecl> {
+    let idx = line.find("libs.plugins.")?;
+    let rest = &line[idx + 13..];
+    let alias: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    catalog.resolve_plugin(&alias).map(|(id, version)| GradlePluginDecl { id, version })
+}
+
+/// `dependencyManagement { imports { mavenBom '...' } }` blocks (io.spring.dependency-management).
+fn collect_dependency_management_boms(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for block in extract_named_blocks(text, "dependencyManagement") {
+        for imports in extract_named_blocks(&block, "imports") {
+            for line in imports.lines() {
+                let line = line.split("//").next().unwrap_or(line);
+                if !line.to_ascii_lowercase().contains("mavenbom") {
+                    continue;
+                }
+                for token in extract_quoted_tokens(line) {
+                    if let Some(coord) = parse_coordinate_token(&token) {
+                        let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                        if seen.insert(key) {
+                            out.push(coord);
+                        }
+                    }
+                }
+                for alias in extract_version_catalog_aliases(line) {
+                    if let Some(coord) = catalog.resolve(&alias) {
+                        let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                        if seen.insert(key) {
+                            out.push(coord);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_named_blocks(text: &str, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut search = 0usize;
+    while search < text.len() {
+        let Some(rel) = text[search..].find(name) else {
+            break;
+        };
+        let idx = search + rel;
+        let after_name = idx + name.len();
+        let rest = text[after_name..].trim_start();
+        let Some(brace_start) = rest.find('{') else {
+            search = after_name + 1;
+            continue;
+        };
+        if let Some(block) = extract_balanced_block(&rest[brace_start..]) {
+            out.push(block);
+        }
+        search = after_name + brace_start + 1;
+    }
+    out
+}
+
+fn extract_balanced_block(s: &str) -> Option<String> {
+    let s = s.strip_prefix('{')?;
+    let mut depth = 1usize;
+    let mut end = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(s[..end].to_string())
+}
+
+fn extract_spring_boot_plugin_version(text: &str) -> Option<String> {
+    parse_gradle_plugin_declarations(text, &GradleVersionCatalog::default())
+        .into_iter()
+        .find(|p| p.id == "org.springframework.boot")
+        .map(|p| p.version)
+}
+
+fn collect_gradle_build_texts(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<String>) {
+    if depth > max_depth || !dir.is_dir() {
+        return;
+    }
+    for name in [
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push(text);
+            }
+        }
+    }
+    if depth >= max_depth {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == "build"
+            || name == "out"
+            || name == "bin"
+            || name == ".gradle"
+            || name == "node_modules"
+            || name == ".git"
+        {
+            continue;
+        }
+        collect_gradle_build_texts(&path, depth + 1, max_depth, out);
+    }
+}
+
+fn collect_declared_bom_coordinates(
+    text: &str,
+    catalog: &GradleVersionCatalog,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("platform(")
+            || lower.contains("enforcedplatform(")
+            || lower.contains("mavenbom")
+            || lower.contains("bom("))
+        {
+            continue;
+        }
+        for token in extract_quoted_tokens(line) {
+            if let Some(coord) = parse_coordinate_token(&token) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
+            }
+        }
+        for alias in extract_version_catalog_aliases(line) {
+            if let Some(coord) = catalog.resolve(&alias) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn merge_bom_managed_versions(
+    files_root: &Path,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    out: &mut HashMap<String, String>,
+) {
+    let mut merged = super::maven::bom_managed_versions(group, artifact, version);
+    if merged.is_empty() {
+        if let Some(raw) = super::java_classpath::read_gradle_cached_pom(files_root, group, artifact, version) {
+            merged = super::maven::bom_managed_versions_from_pom(&raw);
+        }
+    }
+    for (ga, ver) in merged {
+        out.entry(ga).or_insert(ver);
+    }
+}
+
+fn resolve_gradle_coordinate(
+    group: String,
+    artifact: String,
+    version: Option<String>,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) -> Option<(String, String, String)> {
+    let key = format!("{group}:{artifact}");
+    let version = version
+        .or_else(|| management.get(&key).cloned())
+        .or_else(|| find_latest_cached_version(files_root, &group, &artifact))
+        .or_else(|| find_latest_m2_version(&group, &artifact))?;
+    Some((group, artifact, version))
+}
+
+fn find_latest_m2_version(group: &str, artifact: &str) -> Option<String> {
+    let dir = super::maven::m2_home()
+        .join(group.replace('.', "/"))
+        .join(artifact);
+    latest_version_in_dir(&dir)
+}
+
+fn find_latest_cached_version(files_root: &Path, group: &str, artifact: &str) -> Option<String> {
+    latest_version_in_dir(&files_root.join(group).join(artifact))
+}
+
+fn latest_version_in_dir(dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !name.starts_with('.') {
+                    versions.push(name.to_string());
+                }
+            }
+        }
+    }
+    versions.sort_by(|a, b| compare_version_tokens(b, a));
+    versions.into_iter().next()
+}
+
+fn compare_version_tokens(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts = version_tokens(a);
+    let b_parts = version_tokens(b);
+    for (av, bv) in a_parts.iter().zip(b_parts.iter()) {
+        let ord = av.cmp(bv);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a_parts.len().cmp(&b_parts.len())
+}
+
+fn version_tokens(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
 struct GradleVersionCatalog {
     versions: HashMap<String, String>,
     libraries: HashMap<String, (String, String, String)>,
+    plugins: HashMap<String, (String, String)>,
 }
 
 fn load_gradle_version_catalog(gradle_root: &Path) -> GradleVersionCatalog {
@@ -3111,6 +4566,11 @@ fn parse_gradle_version_catalog(raw: &str) -> GradleVersionCatalog {
                     catalog.libraries.insert(key, coord);
                 }
             }
+            "plugins" => {
+                if let Some((id, version)) = parse_catalog_plugin_value(value, &catalog.versions) {
+                    catalog.plugins.insert(key, (id, version));
+                }
+            }
             _ => {}
         }
     }
@@ -3132,6 +4592,26 @@ fn parse_toml_string_value(raw: &str) -> Option<String> {
         return Some(raw.to_string());
     }
     None
+}
+
+fn parse_catalog_plugin_value(
+    raw: &str,
+    versions: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let raw = raw.trim();
+    if raw.starts_with('"') || raw.starts_with('\'') {
+        let id = parse_toml_string_value(raw)?;
+        return Some((id, String::new()));
+    }
+    if !raw.starts_with('{') {
+        return None;
+    }
+    let id = extract_catalog_field(raw, "id")?;
+    let version = extract_catalog_field(raw, "version").or_else(|| {
+        let alias = extract_catalog_field(raw, "version.ref")?;
+        versions.get(&alias).cloned()
+    })?;
+    Some((id, version))
 }
 
 fn parse_catalog_library_value(
@@ -3173,77 +4653,96 @@ impl GradleVersionCatalog {
         }
         self.libraries.get(accessor).cloned()
     }
-}
 
-fn collect_coordinates_from_dir(
-    dir: &Path,
-    depth: usize,
-    max_depth: usize,
-    out: &mut Vec<(String, String, String)>,
-    seen: &mut HashSet<String>,
-    catalog: &GradleVersionCatalog,
-) {
-    if depth > max_depth || !dir.is_dir() {
-        return;
-    }
-    for name in ["build.gradle", "build.gradle.kts"] {
-        let path = dir.join(name);
-        if path.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for coord in parse_gradle_coordinates(&text, catalog) {
-                    let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
-                    if seen.insert(key) {
-                        out.push(coord);
-                    }
-                }
-            }
+    fn resolve_plugin(&self, accessor: &str) -> Option<(String, String)> {
+        let key = accessor.replace('.', "-");
+        if let Some(entry) = self.plugins.get(&key) {
+            return Some(entry.clone());
         }
-    }
-    if depth >= max_depth {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        if name == "build"
-            || name == "out"
-            || name == "bin"
-            || name == ".gradle"
-            || name == "node_modules"
-            || name == ".git"
-        {
-            continue;
-        }
-        collect_coordinates_from_dir(&path, depth + 1, max_depth, out, seen, catalog);
+        self.plugins.get(accessor).cloned()
     }
 }
 
 fn parse_gradle_coordinates(
     content: &str,
     catalog: &GradleVersionCatalog,
+    management: &HashMap<String, String>,
+    files_root: &Path,
 ) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for line in content.lines() {
         let line = line.split("//").next().unwrap_or(line);
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("platform(")
+            || lower.contains("enforcedplatform(")
+            || lower.contains("mavenbom")
+        {
+            continue;
+        }
         for token in extract_quoted_tokens(line) {
-            if let Some(coord) = parse_coordinate_token(&token) {
-                out.push(coord);
+            if let Some(coord) = resolve_coordinate_token(&token, management, files_root) {
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
             }
         }
         for alias in extract_version_catalog_aliases(line) {
             if let Some(coord) = catalog.resolve(&alias) {
-                out.push(coord);
+                let key = format!("{}:{}:{}", coord.0, coord.1, coord.2);
+                if seen.insert(key) {
+                    out.push(coord);
+                }
             }
         }
     }
     out
+}
+
+fn resolve_coordinate_token(
+    token: &str,
+    management: &HashMap<String, String>,
+    files_root: &Path,
+) -> Option<(String, String, String)> {
+    if let Some(coord) = parse_coordinate_token(token) {
+        return Some(coord);
+    }
+    let (group, artifact, version) = parse_coordinate_parts(token)?;
+    resolve_gradle_coordinate(group, artifact, version, management, files_root)
+}
+
+fn parse_coordinate_parts(token: &str) -> Option<(String, String, Option<String>)> {
+    let token = token.trim();
+    let parts: Vec<&str> = token.split(':').collect();
+    match parts.len() {
+        2 => {
+            let group = parts[0].trim();
+            let artifact = parts[1].trim();
+            if group.is_empty() || artifact.is_empty() {
+                None
+            } else {
+                Some((group.to_string(), artifact.to_string(), None))
+            }
+        }
+        3 => {
+            let group = parts[0].trim();
+            let artifact = parts[1].trim();
+            let version = parts[2].trim();
+            if group.is_empty() || artifact.is_empty() || version.is_empty() {
+                None
+            } else if version.contains('$') || version.contains('{') {
+                Some((group.to_string(), artifact.to_string(), None))
+            } else {
+                Some((
+                    group.to_string(),
+                    artifact.to_string(),
+                    Some(version.to_string()),
+                ))
+            }
+        }
+        _ => None,
+    }
 }
 
 fn extract_version_catalog_aliases(line: &str) -> Vec<String> {
@@ -3371,7 +4870,15 @@ fn collect_and_index_java_dirs(
     Ok(())
 }
 
-fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
+fn resolve_gradle_classpath(gradle_root: &Path, progress: IndexProgress) -> Result<GradleClasspath> {
+    resolve_gradle_classpath_inner(gradle_root, progress, classpath_resolve_full())
+}
+
+fn resolve_gradle_classpath_inner(
+    gradle_root: &Path,
+    progress: IndexProgress,
+    include_test_compile: bool,
+) -> Result<GradleClasspath> {
     let cmd = resolve_gradle_command(gradle_root)?;
     let init = init_script_path();
     if !init.is_file() {
@@ -3386,37 +4893,30 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
     args.extend([
         "--no-daemon".into(),
         "--no-configuration-cache".into(),
+        "--parallel".into(),
         "-I".into(),
         init_str.to_string(),
     ]);
+    if include_test_compile {
+        args.push("-PreaperClasspathIncludeTestCompile=true".into());
+    }
 
     let mut gradle_log = String::new();
-
-    // Resolve/download dependency JARs before printing classpath.
-    let warm_args: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .chain(
-            ["compileJava", "compileTestJava", "-q", "--console=plain"]
-                .iter()
-                .copied(),
-        )
-        .collect();
-    if let Ok(out) = run_gradle_with_command(&cmd, &warm_args) {
-        if !out.success() {
-            gradle_log = format!(
-                "compileJava failed (exit {}): {}",
-                out.exit_code,
-                out.stderr.trim()
-            );
-        }
-    }
 
     args.extend([
         "reaperPrintClasspath".into(),
         "-q".into(),
         "--console=plain".into(),
     ]);
+    report_index_progress(
+        progress,
+        if include_test_compile {
+            "running-gradle-test-classpath"
+        } else {
+            "running-gradle-classpath"
+        },
+        0,
+    );
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let out = run_gradle_with_command(&cmd, &arg_refs)?;
@@ -3435,6 +4935,8 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
 
     let mut jars = HashSet::new();
     let mut source_jars = HashSet::new();
+    let mut classes_dirs = HashSet::new();
+    let mut project_source_dirs = HashSet::new();
     for line in out.stdout.lines().chain(out.stderr.lines()) {
         if let Some(path) = line.strip_prefix("JAR:") {
             let path = PathBuf::from(path.trim());
@@ -3446,11 +4948,23 @@ fn resolve_gradle_classpath(gradle_root: &Path) -> Result<GradleClasspath> {
             if path.is_file() {
                 source_jars.insert(path);
             }
+        } else if let Some(path) = line.strip_prefix("CLASSES:") {
+            let path = PathBuf::from(path.trim());
+            if path.is_dir() {
+                classes_dirs.insert(path);
+            }
+        } else if let Some(path) = line.strip_prefix("SRCROOT:") {
+            let path = PathBuf::from(path.trim());
+            if path.is_dir() {
+                project_source_dirs.insert(path);
+            }
         }
     }
     Ok(GradleClasspath {
         jars: jars.into_iter().collect(),
         source_jars: source_jars.into_iter().collect(),
+        classes_dirs: classes_dirs.into_iter().collect(),
+        project_source_dirs: project_source_dirs.into_iter().collect(),
         log: gradle_log,
     })
 }
@@ -3654,19 +5168,47 @@ fn index_jar_classpath_fallback(
     source_dirs: &[PathBuf],
     symbols: &mut Vec<IndexedSymbol>,
     progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
-) -> Result<()> {
+    options: JarIndexOptions,
+    on_jar_done: Option<&dyn Fn(usize, usize)>,
+) -> Result<usize> {
     let _ = (ws, gradle_root, source_dirs);
     let base_symbols = symbols.len();
     let mut known: HashSet<String> = symbols.iter().map(|s| s.qualified.clone()).collect();
     let jar_refs = prioritize_jars_for_fallback(jars);
     let jar_total = jar_refs.len().max(1);
     let mut added = 0usize;
+    let mut processed = 0usize;
+    let progress_phase = if options.throttle {
+        "jar-index-background"
+    } else {
+        "jar-index"
+    };
 
     for (jar_idx, jar) in jar_refs.iter().enumerate() {
+        if crate::process_registry::is_shutdown_requested() {
+            break;
+        }
+        if jar_idx < options.skip_jars {
+            continue;
+        }
+        if let Some(max) = options.max_jars {
+            if processed >= max {
+                break;
+            }
+        }
         if let Some(cb) = progress {
-            report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
+            if options.throttle {
+                cb(progress_phase, symbols.len());
+            } else {
+                report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
+            }
         }
         if !jar.is_file() {
+            processed += 1;
+            let jars_done = jar_idx + 1;
+            if let Some(cb) = on_jar_done {
+                cb(jars_done.min(jar_total), jar_total);
+            }
             continue;
         }
         let entries = list_jar_class_entries(jar)?;
@@ -3679,10 +5221,10 @@ fn index_jar_classpath_fallback(
                 .unwrap_or("classpath.jar")
         );
         for (entry_idx, (fqcn, kind)) in entries.into_iter().enumerate() {
-            if entry_idx >= JAR_INDEX_MAX_ENTRIES_PER_JAR {
+            if crate::process_registry::is_shutdown_requested() {
                 break;
             }
-            if known.contains(&fqcn) || !should_index_jar_class(&fqcn) {
+            if known.contains(&fqcn) || !should_index_jar_entry(&fqcn, &kind) {
                 continue;
             }
             let name = fqcn.rsplit('.').next().unwrap_or(&fqcn).to_string();
@@ -3698,24 +5240,194 @@ fn index_jar_classpath_fallback(
             added += 1;
 
             if let Some(cb) = progress {
-                if added % JAR_INDEX_PROGRESS_INTERVAL == 0 || entry_idx + 1 == entry_count {
+                if options.throttle {
+                    if added % JAR_INDEX_PROGRESS_INTERVAL == 0 {
+                        cb(progress_phase, symbols.len());
+                    }
+                } else if added % JAR_INDEX_PROGRESS_INTERVAL == 0 || entry_idx + 1 == entry_count {
                     report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
                 }
             }
         }
 
+        processed += 1;
+        let jars_done = jar_idx + 1;
+        if let Some(cb) = on_jar_done {
+            cb(jars_done.min(jar_total), jar_total);
+        }
         if let Some(cb) = progress {
-            report_jar_index_progress(cb, base_symbols, jar_idx + 1, jar_total);
+            if options.throttle {
+                cb(progress_phase, symbols.len());
+            } else {
+                report_jar_index_progress(cb, base_symbols, jar_idx + 1, jar_total);
+            }
+        }
+        if options.throttle {
+            std::thread::sleep(std::time::Duration::from_millis(BACKGROUND_JAR_SLEEP_MS));
+        } else if processed % FOREGROUND_JAR_YIELD_EVERY == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(FOREGROUND_JAR_SLEEP_MS));
         }
     }
 
     if added > 0 {
         tracing::info!("Indexed {added} additional Java symbols from classpath JAR fallback");
     }
+    Ok(options.skip_jars + processed)
+}
+
+fn index_classes_dirs_fallback(
+    ws: &Path,
+    gradle_root: &Path,
+    classes_dirs: &[PathBuf],
+    symbols: &mut Vec<IndexedSymbol>,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+) -> Result<()> {
+    let _ = ws;
+    let base_symbols = symbols.len();
+    let mut known: HashSet<String> = symbols.iter().map(|s| s.qualified.clone()).collect();
+    let mut added = 0usize;
+
+    for dir in classes_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let rel_label = dir
+            .strip_prefix(gradle_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| dir.display().to_string());
+        let path_label = if rel_label.is_empty() {
+            dir.display().to_string()
+        } else {
+            rel_label
+        };
+        for (fqcn, kind) in list_dir_class_entries(dir)? {
+            if known.contains(&fqcn) || !should_index_jar_entry(&fqcn, &kind) {
+                continue;
+            }
+            let name = fqcn.rsplit('.').next().unwrap_or(&fqcn).to_string();
+            symbols.push(IndexedSymbol {
+                name,
+                qualified: fqcn.clone(),
+                kind,
+                path: path_label.clone(),
+                line: 1,
+                column: 1,
+            });
+            known.insert(fqcn);
+            added += 1;
+            if let Some(cb) = progress {
+                if added % JAR_INDEX_PROGRESS_INTERVAL == 0 {
+                    cb("jar-index", base_symbols + added);
+                }
+            }
+        }
+    }
+
+    if added > 0 {
+        tracing::info!("Indexed {added} additional Java symbols from project output dirs");
+    }
     Ok(())
 }
 
-const JAR_INDEX_MAX_ENTRIES_PER_JAR: usize = 4000;
+fn list_dir_class_entries(dir: &Path) -> Result<Vec<(String, String)>> {
+    let mut entries = Vec::new();
+    collect_dir_class_entries(dir, dir, &mut entries, 0)?;
+    Ok(entries)
+}
+
+fn collect_dir_class_entries(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, String)>,
+    depth: usize,
+) -> Result<()> {
+    if depth > 24 {
+        return Ok(());
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dir_class_entries(root, &path, out, depth + 1)?;
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("class") {
+            continue;
+        }
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if file_name.contains('$') {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .with_extension("");
+        let fqcn = rel
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('/', ".");
+        if fqcn.is_empty() {
+            continue;
+        }
+        let kind = read_path_class_bytes(&path)
+            .map(|b| class_kind_from_bytes(&b, &fqcn))
+            .unwrap_or_else(|| "class".into());
+        out.push((fqcn, kind));
+    }
+    Ok(())
+}
+
+/// Java source roots for javac diagnostics (hand-written + Gradle-generated).
+pub fn project_java_sourcepath(
+    ws: &Path,
+    project_root: &Path,
+    overlay_root: &Path,
+) -> Vec<PathBuf> {
+    let mut prefixes = super::java_sources::discover_source_prefixes(project_root);
+    for prefix in super::java_sources::discover_source_prefixes(ws) {
+        if !prefixes.iter().any(|p| p == &prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+
+    let mut sourcepath = Vec::new();
+    for prefix in prefixes {
+        let dir = project_root.join(&prefix);
+        let ws_dir = ws.join(&prefix);
+        let same_root = dir == ws_dir;
+        if dir.is_dir() {
+            sourcepath.push(dir);
+        }
+        if ws_dir.is_dir() && !same_root {
+            sourcepath.push(ws_dir);
+        }
+        sourcepath.push(overlay_root.join(&prefix));
+        if prefix.contains("/src/test/") {
+            let main_prefix = prefix.replacen("/src/test/", "/src/main/", 1);
+            if main_prefix != prefix {
+                let main_dir = project_root.join(&main_prefix);
+                let ws_main = ws.join(&main_prefix);
+                let same_main = main_dir == ws_main;
+                if main_dir.is_dir() {
+                    sourcepath.push(main_dir);
+                }
+                if ws_main.is_dir() && !same_main {
+                    sourcepath.push(ws_main);
+                }
+                sourcepath.push(overlay_root.join(&main_prefix));
+            }
+        }
+    }
+    sourcepath.extend(cached_project_source_dirs(project_root));
+    sourcepath.sort();
+    sourcepath.dedup();
+    sourcepath
+}
+
 const JAR_INDEX_PROGRESS_INTERVAL: usize = 128;
 
 fn report_jar_index_progress(
@@ -3766,6 +5478,106 @@ fn jar_is_index_priority(name: &str) -> bool {
         || name.contains("lombok")
 }
 
+fn is_annotation_index_symbol(sym: &IndexedSymbol) -> bool {
+    if sym.kind == "annotation" {
+        return true;
+    }
+    if sym.kind != "class" && sym.kind != "interface" {
+        return false;
+    }
+    if sym.qualified.contains(".annotation.") {
+        return true;
+    }
+    well_known_import(&sym.name).is_some_and(|fqcn| fqcn.contains(".annotation."))
+}
+
+const ACC_INTERFACE: u16 = 0x0200;
+const ACC_ANNOTATION: u16 = 0x2000;
+
+fn class_access_flags(class_bytes: &[u8]) -> Option<u16> {
+    const MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
+    if class_bytes.len() < 8 || class_bytes[..4] != MAGIC {
+        return None;
+    }
+    let mut pos = 8usize; // skip magic + version
+    pos = skip_constant_pool(class_bytes, pos)?;
+    if pos + 2 > class_bytes.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([class_bytes[pos], class_bytes[pos + 1]]))
+}
+
+fn skip_constant_pool(data: &[u8], mut pos: usize) -> Option<usize> {
+    if pos + 2 > data.len() {
+        return None;
+    }
+    let count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+    for _ in 1..count {
+        if pos >= data.len() {
+            return None;
+        }
+        let tag = data[pos];
+        pos += 1;
+        pos = match tag {
+            1 => {
+                if pos + 2 > data.len() {
+                    return None;
+                }
+                let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+                pos + 2 + len
+            }
+            3 | 4 => pos + 4,
+            5 | 6 => pos + 8,
+            7 | 8 => pos + 2,
+            9 | 10 | 11 | 12 | 18 => pos + 4,
+            15 => pos + 3,
+            16 => pos + 2,
+            _ => return None,
+        };
+        if pos > data.len() {
+            return None;
+        }
+    }
+    Some(pos)
+}
+
+fn class_kind_from_bytes(class_bytes: &[u8], fqcn: &str) -> String {
+    if fqcn.contains(".annotation.") {
+        return "annotation".into();
+    }
+    let Some(flags) = class_access_flags(class_bytes) else {
+        return "class".into();
+    };
+    if flags & ACC_ANNOTATION != 0 {
+        "annotation".into()
+    } else if flags & ACC_INTERFACE != 0 {
+        "interface".into()
+    } else {
+        "class".into()
+    }
+}
+
+fn read_path_class_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok().filter(|b| b.len() >= 8)
+}
+
+fn read_jar_entry_bytes(jar: &Path, entry: &str) -> Option<Vec<u8>> {
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(jar)
+        .arg(entry)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if out.status.success() && out.stdout.len() >= 8 {
+        Some(out.stdout)
+    } else {
+        None
+    }
+}
+
 fn should_index_jar_class(fqcn: &str) -> bool {
     if fqcn.starts_with("java.") {
         return false;
@@ -3775,6 +5587,18 @@ fn should_index_jar_class(fqcn: &str) -> bool {
         || fqcn.starts_with("javax.")
         || fqcn.starts_with("kotlin.")
         || fqcn.starts_with("org.junit.")
+        || fqcn.starts_with("org.mockito.")
+        || fqcn.starts_with("org.assertj.")
+        || fqcn.starts_with("org.slf4j.")
+        || fqcn.starts_with("org.hamcrest.")
+        || fqcn.starts_with("lombok.")
+}
+
+fn should_index_jar_entry(fqcn: &str, kind: &str) -> bool {
+    if fqcn.starts_with("java.") || fqcn.starts_with("jdk.") {
+        return false;
+    }
+    kind == "annotation" || should_index_jar_class(fqcn)
 }
 
 fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
@@ -3787,23 +5611,39 @@ fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
+    let mut annotation_probe_reads = 0usize;
+    const MAX_ANNOTATION_PROBE_READS: usize = 512;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let line = line.trim();
         if !line.ends_with(".class") || line.contains('$') {
             continue;
         }
         let fqcn = line.trim_end_matches(".class").replace('/', ".");
-        let kind = if fqcn.contains(".") {
-            let simple = fqcn.rsplit('.').next().unwrap_or("");
-            if simple.ends_with("Exception") || simple.ends_with("Error") {
-                "class".to_string()
-            } else {
-                "class".to_string()
+        if !fqcn.contains('.') {
+            continue;
+        }
+        let kind = if fqcn.contains(".annotation.") {
+            "annotation".to_string()
+        } else if should_index_jar_class(&fqcn) {
+            read_jar_entry_bytes(jar, line)
+                .map(|b| class_kind_from_bytes(&b, &fqcn))
+                .unwrap_or_else(|| "class".into())
+        } else if annotation_probe_reads < MAX_ANNOTATION_PROBE_READS {
+            annotation_probe_reads += 1;
+            let Some(bytes) = read_jar_entry_bytes(jar, line) else {
+                continue;
+            };
+            let detected = class_kind_from_bytes(&bytes, &fqcn);
+            if detected != "annotation" {
+                continue;
             }
+            detected
         } else {
             continue;
         };
-        entries.push((fqcn, kind));
+        if should_index_jar_entry(&fqcn, &kind) {
+            entries.push((fqcn, kind));
+        }
     }
     Ok(entries)
 }
@@ -3996,19 +5836,10 @@ fn fast_java_lang_location(
 }
 
 fn read_type_line_in_java_source(path: &Path, simple: &str) -> (u32, u32) {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return (1, 1);
     };
-    let reader = BufReader::new(file);
-    for (idx, line) in reader.lines().map_while(Result::ok).take(160).enumerate() {
-        for keyword in ["class", "interface", "enum", "@interface"] {
-            if java_type_on_line(&line, keyword).as_deref() == Some(simple) {
-                let col = line.find(simple).map(|i| i as u32 + 1).unwrap_or(1);
-                return (idx as u32 + 1, col);
-            }
-        }
-    }
-    (1, 1)
+    java_psi::find_type_position(&content, simple)
 }
 
 fn source_matches_fqcn(content: &str, fqcn: &str, source_path: &Path) -> bool {
@@ -4133,7 +5964,13 @@ fn should_index_methods(rel_path: &str) -> bool {
     if rel.contains("src/main/java/") || rel.contains("src/test/java/") {
         return true;
     }
-    if rel.contains("/src/") && rel.ends_with(".java") && !rel.contains("/build/") {
+    if rel.contains("/build/generated/") && rel.ends_with(".java") {
+        return true;
+    }
+    if rel.contains("/generated-sources/") && rel.ends_with(".java") {
+        return true;
+    }
+    if rel.contains("/src/") && rel.ends_with(".java") && !rel.contains("/build/classes/") {
         return true;
     }
     if rel.contains("/org/springframework/") {
@@ -4151,71 +5988,16 @@ fn should_index_methods(rel_path: &str) -> bool {
 }
 
 fn index_java_content(content: &str, rel_path: &str, index_methods: bool, symbols: &mut Vec<IndexedSymbol>) {
-    let package = package_from_source_or_path(content, rel_path);
-    let pkg_prefix = package.as_deref().map(|p| format!("{p}."));
-
-    let mut current_class: Option<String> = None;
-
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = idx as u32 + 1;
-        for (kind, keyword) in [
-            ("class", "class"),
-            ("interface", "interface"),
-            ("enum", "enum"),
-            ("annotation", "@interface"),
-        ] {
-            if let Some(name) = java_type_on_line(line, keyword) {
-                current_class = Some(name.clone());
-                let qualified = match &pkg_prefix {
-                    Some(prefix) => format!("{prefix}{name}"),
-                    None => name.clone(),
-                };
-                let col = line.find(&name).map(|i| i as u32 + 1).unwrap_or(1);
-                symbols.push(IndexedSymbol {
-                    name,
-                    qualified,
-                    kind: kind.to_string(),
-                    path: rel_path.to_string(),
-                    line: line_no,
-                    column: col,
-                });
-            }
-        }
-
-        if let Some(class) = &current_class {
-            if index_methods {
-                if let Some(method) = super::symbols::java_method_name_on_line(line) {
-                    let qualified = match &pkg_prefix {
-                        Some(prefix) => format!("{prefix}{class}.{method}"),
-                        None => format!("{class}.{method}"),
-                    };
-                    let col = line.find(&method).map(|i| i as u32 + 1).unwrap_or(1);
-                    symbols.push(IndexedSymbol {
-                        name: method,
-                        qualified,
-                        kind: "method".into(),
-                        path: rel_path.to_string(),
-                        line: line_no,
-                        column: col,
-                    });
-                }
-                if let Some(field) = java_field_name_on_line(line) {
-                    let qualified = match &pkg_prefix {
-                        Some(prefix) => format!("{prefix}{class}.{field}"),
-                        None => format!("{class}.{field}"),
-                    };
-                    let col = line.find(&field).map(|i| i as u32 + 1).unwrap_or(1);
-                    symbols.push(IndexedSymbol {
-                        name: field,
-                        qualified,
-                        kind: "field".into(),
-                        path: rel_path.to_string(),
-                        line: line_no,
-                        column: col,
-                    });
-                }
-            }
-        }
+    let unit = java_psi::parse_compilation_unit(content);
+    for sym in java_psi::index_source(rel_path, index_methods, &unit) {
+        symbols.push(IndexedSymbol {
+            name: sym.name,
+            qualified: sym.qualified,
+            kind: sym.kind,
+            path: rel_path.to_string(),
+            line: sym.line,
+            column: sym.column,
+        });
     }
 }
 
@@ -4273,19 +6055,8 @@ fn java_type_on_line(line: &str, keyword: &str) -> Option<String> {
     Some(name)
 }
 
-fn find_package(source: &str) -> Option<String> {
-    for line in source.lines() {
-        let trimmed = line.split("//").next()?.trim();
-        if let Some(rest) = trimmed.strip_prefix("package ") {
-            if let Some(pkg) = rest.strip_suffix(';') {
-                let pkg = pkg.trim();
-                if !pkg.is_empty() {
-                    return Some(pkg.to_string());
-                }
-            }
-        }
-    }
-    None
+fn package_from_source_or_path(content: &str, rel_path: &str) -> Option<String> {
+    java_psi::package_name(content, rel_path)
 }
 
 fn package_from_source_or_path(content: &str, rel_path: &str) -> Option<String> {
@@ -4324,45 +6095,7 @@ fn infer_package_from_java_path(rel_path: &str) -> Option<String> {
 }
 
 fn parse_imports(content: &str) -> ImportMap {
-    let mut explicit = HashMap::new();
-    let mut wildcards = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.split("//").next().unwrap_or(line).trim();
-        if let Some(rest) = trimmed.strip_prefix("import static ") {
-            if rest.contains('*') {
-                continue;
-            }
-            if let Some(fqcn) = rest.strip_suffix(';').map(str::trim) {
-                if let Some(simple) = fqcn.rsplit('.').next() {
-                    explicit.insert(simple.to_string(), fqcn.to_string());
-                }
-            }
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("import ") {
-            if rest.contains('*') {
-                if let Some(prefix) = rest.strip_suffix(';').and_then(|s| s.strip_suffix(".*")) {
-                    let prefix = prefix.trim();
-                    if !prefix.is_empty() {
-                        wildcards.push(prefix.to_string());
-                    }
-                }
-                continue;
-            }
-            if let Some(fqcn) = rest.strip_suffix(';').map(str::trim) {
-                if let Some(simple) = fqcn.rsplit('.').next() {
-                    explicit.insert(simple.to_string(), fqcn.to_string());
-                }
-            }
-        }
-    }
-    ImportMap { explicit, wildcards }
-}
-
-#[derive(Clone)]
-struct ImportMap {
-    explicit: HashMap<String, String>,
-    wildcards: Vec<String>,
+    java_psi::parse_imports(content)
 }
 
 fn lookup_imported_symbol<'a>(
@@ -4739,6 +6472,64 @@ mod tests {
         std::fs::write(jdk.join(".extracted"), "test").unwrap();
     }
 
+    #[test]
+    fn discovers_gradle_generated_output_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-gradle-out-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("build/classes/java/main/com/example")).unwrap();
+        std::fs::write(
+            root.join("build/classes/java/main/com/example/Generated.class"),
+            b"",
+        )
+        .unwrap();
+        std::fs::create_dir_all(
+            root.join("build/generated/sources/annotationProcessor/java/main/com/example"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build/generated/sources/annotationProcessor/java/main/com/example/Generated.java"),
+            "package com.example;\npublic class Generated {}\n",
+        )
+        .unwrap();
+
+        let (classes, sources) = discover_gradle_output_dirs(&root);
+        assert!(classes.iter().any(|p| p.ends_with("build/classes/java/main")));
+        assert!(sources.iter().any(|p| p.ends_with("java/main")));
+
+        let entries = list_dir_class_entries(&classes[0]).expect("class entries");
+        assert!(entries.iter().any(|(fqcn, _)| fqcn == "com.example.Generated"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discovers_maven_generated_output_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-maven-out-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target/classes/com/example")).unwrap();
+        std::fs::create_dir_all(
+            root.join("target/generated-sources/annotations/com/example"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("target/generated-sources/annotations/com/example/Generated.java"),
+            "package com.example;\npublic class Generated {}\n",
+        )
+        .unwrap();
+
+        let (classes, sources) = discover_project_output_dirs(&root);
+        assert!(classes.iter().any(|p| p.ends_with("target/classes")));
+        assert!(sources.iter().any(|p| p.ends_with("annotations")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn plain_java_completion_workspace(name: &str) -> PathBuf {
         let ws = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&ws);
@@ -4832,10 +6623,111 @@ mod tests {
             implementation "com.google.guava:guava:31.1-jre"
             api 'org.junit.jupiter:junit-jupiter:5.9.3'
         "#;
-        let coords = parse_gradle_coordinates(text, &GradleVersionCatalog::default());
+        let coords = parse_gradle_coordinates(
+            text,
+            &GradleVersionCatalog::default(),
+            &HashMap::new(),
+            Path::new("/nonexistent"),
+        );
         assert_eq!(coords.len(), 2);
         assert_eq!(coords[0].0, "com.google.guava");
         assert_eq!(coords[1].1, "junit-jupiter");
+    }
+
+    #[test]
+    fn parses_gradle_plugin_declarations() {
+        let build = r#"
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0'
+    id("org.jetbrains.kotlin.jvm") version "1.9.22"
+}
+"#;
+        let decls = parse_gradle_plugin_declarations(build, &GradleVersionCatalog::default());
+        assert!(decls.iter().any(|p| p.id == "org.springframework.boot" && p.version == "3.2.0"));
+        assert!(decls.iter().any(|p| p.id == "org.jetbrains.kotlin.jvm" && p.version == "1.9.22"));
+        assert!(!decls.iter().any(|p| p.id == "java"));
+    }
+
+    #[test]
+    fn plugin_import_boms_maps_known_plugins() {
+        let spring = plugin_import_boms("org.springframework.boot", "3.2.0");
+        assert_eq!(spring.len(), 1);
+        assert_eq!(spring[0].0, "org.springframework.boot");
+        assert_eq!(spring[0].1, "spring-boot-dependencies");
+
+        let kotlin = plugin_import_boms("org.jetbrains.kotlin.jvm", "1.9.22");
+        assert_eq!(kotlin[0].1, "kotlin-bom");
+
+        assert!(plugin_import_boms("java", "1.0").is_empty());
+    }
+
+    #[test]
+    fn parses_dependency_management_maven_bom() {
+        let build = r#"
+plugins {
+    id 'io.spring.dependency-management' version '1.1.4'
+}
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.boot:spring-boot-dependencies:3.2.0"
+    }
+}
+"#;
+        let boms = collect_dependency_management_boms(build, &GradleVersionCatalog::default());
+        assert!(boms.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-dependencies" && v == "3.2.0"
+        }));
+    }
+
+    #[test]
+    fn parses_gradle_plugin_catalog_alias() {
+        let catalog = parse_gradle_version_catalog(
+            r#"
+[plugins]
+spring-boot = { id = "org.springframework.boot", version = "3.2.0" }
+"#,
+        );
+        let build = r#"
+plugins {
+    alias(libs.plugins.spring.boot)
+}
+"#;
+        let decls = parse_gradle_plugin_declarations(&build, &catalog);
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].id, "org.springframework.boot");
+        assert_eq!(decls[0].version, "3.2.0");
+    }
+
+    #[test]
+    fn resolves_gradle_versionless_coordinates_from_bom() {
+        let mut management = HashMap::new();
+        management.insert(
+            "org.springframework.boot:spring-boot-starter-web".into(),
+            "3.2.0".into(),
+        );
+        management.insert(
+            "org.springframework.boot:spring-boot-starter-test".into(),
+            "3.2.0".into(),
+        );
+        let build = r#"
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+"#;
+        let coords = parse_gradle_coordinates(
+            build,
+            &GradleVersionCatalog::default(),
+            &management,
+            Path::new("/nonexistent"),
+        );
+        assert!(coords.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-starter-web" && v == "3.2.0"
+        }));
+        assert!(coords.iter().any(|(g, a, v)| {
+            g == "org.springframework.boot" && a == "spring-boot-starter-test" && v == "3.2.0"
+        }));
     }
 
     #[test]
@@ -4866,10 +6758,16 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 "#;
-        let coords = parse_gradle_coordinates(&build, &catalog);
+        let coords = parse_gradle_coordinates(
+            &build,
+            &catalog,
+            &HashMap::new(),
+            Path::new("/nonexistent"),
+        );
         assert!(coords.iter().any(|(g, a, v)| g == "org.junit.jupiter" && a == "junit-jupiter" && v == "5.11.1"));
         assert!(coords.iter().any(|(g, a, _)| g == "com.google.guava" && a == "guava"));
-        assert_eq!(coords.len(), 2);
+        assert!(coords.iter().any(|(g, a, _)| g == "org.junit.platform" && a == "junit-platform-launcher"));
+        assert_eq!(coords.len(), 3);
     }
 
     #[test]
@@ -4916,6 +6814,51 @@ dependencies {
         assert_eq!(fqcn.as_deref(), Some("java.lang.String"));
         let list = resolve_type_fqcn(&lookup, "List", &imports, Path::new("."));
         assert_eq!(list.as_deref(), Some("java.util.List"));
+    }
+
+    #[test]
+    fn class_kind_detects_annotation_from_classfile() {
+        let dir = std::env::temp_dir().join(format!("reaper-ann-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Sample.java"),
+            "public @interface Sample { String value() default \"\"; }\n",
+        )
+        .unwrap();
+        let status = Command::new("javac")
+            .arg(dir.join("Sample.java"))
+            .status()
+            .unwrap();
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let bytes = std::fs::read(dir.join("Sample.class")).unwrap();
+        assert_eq!(class_kind_from_bytes(&bytes, "Sample"), "annotation");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_annotation_index_symbol_matches_library_annotations() {
+        let spring = IndexedSymbol {
+            name: "GetMapping".into(),
+            qualified: "org.springframework.web.bind.annotation.GetMapping".into(),
+            kind: "annotation".into(),
+            path: "jar".into(),
+            line: 1,
+            column: 1,
+        };
+        assert!(is_annotation_index_symbol(&spring));
+        let plain = IndexedSymbol {
+            name: "Hello".into(),
+            qualified: "com.example.Hello".into(),
+            kind: "class".into(),
+            path: "src".into(),
+            line: 1,
+            column: 1,
+        };
+        assert!(!is_annotation_index_symbol(&plain));
     }
 
     #[test]
@@ -5177,6 +7120,73 @@ dependencies {
     }
 
     #[test]
+    fn tooling_classpath_cache_preferred_over_tree_walk() {
+        let ws = std::env::temp_dir().join("reaper-tooling-classpath-pref");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper")).unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let tooling_only = ws.join("slf4j-api-tooling.jar");
+        std::fs::write(&tooling_only, b"PK").unwrap();
+        save_classpath_jars_cache(&ws, &[tooling_only.clone()]).unwrap();
+        mark_tooling_classpath_done(&ws).unwrap();
+
+        assert!(tooling_classpath_resolved(&ws));
+        let jars = resolve_classpath_jars_preferring_build_tree(&ws, true);
+        assert!(
+            jars.iter().any(|p| p == &tooling_only),
+            "expected tooling compile classpath JAR, got {:?}",
+            jars
+        );
+        assert!(needs_tooling_classpath_resolve(&ws) == false);
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\ndependencies { implementation 'org.slf4j:slf4j-api:2.0.9' }\n").unwrap();
+        assert!(
+            needs_tooling_classpath_resolve(&ws),
+            "build file change should invalidate tooling classpath"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn should_index_mockito_and_slf4j_jar_classes() {
+        assert!(should_index_jar_class("org.mockito.Mock"));
+        assert!(should_index_jar_class("org.mockito.junit.jupiter.MockitoExtension"));
+        assert!(should_index_jar_class("org.slf4j.Logger"));
+        assert!(should_index_jar_class("lombok.extern.slf4j.Slf4j"));
+    }
+
+    #[test]
+    fn build_file_tree_merged_with_tooling_cache() {
+        let ws = std::env::temp_dir().join("reaper-classpath-tree-merge");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper")).unwrap();
+        std::fs::write(
+            ws.join("build.gradle"),
+            r#"
+plugins { id 'java' }
+dependencies {
+    testImplementation 'org.mockito:mockito-core:5.14.2'
+}
+"#,
+        )
+        .unwrap();
+
+        let tooling_only = ws.join("guava-tooling.jar");
+        std::fs::write(&tooling_only, b"PK").unwrap();
+        save_classpath_jars_cache(&ws, &[tooling_only.clone()]).unwrap();
+        mark_tooling_classpath_done(&ws).unwrap();
+
+        // Mockito may not resolve offline without M2 cache; at minimum tooling JAR is kept.
+        let jars = resolve_classpath_jars_preferring_build_tree(&ws, true);
+        assert!(
+            jars.iter().any(|p| p == &tooling_only),
+            "expected tooling jar preserved, got {:?}",
+            jars
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn spring_data_deps_requires_commons_not_starter() {
         let starter = PathBuf::from("/m2/spring-boot-starter-data-jpa-3.2.0.jar");
         assert!(!classpath_includes_spring_data_deps(&[starter]));
@@ -5185,15 +7195,93 @@ dependencies {
     }
 
     #[test]
-    fn jar_index_skips_jdk_classes_and_prioritizes_spring_data() {
-        assert!(!should_index_jar_class("java.lang.String"));
-        assert!(should_index_jar_class("org.springframework.data.domain.PageRequest"));
-        assert!(jar_is_index_priority("spring-data-commons-3.2.0.jar"));
-        let mut jars: Vec<PathBuf> = (0..121)
-            .map(|i| PathBuf::from(format!("/tmp/filler-{i}.jar")))
-            .collect();
-        jars.push(PathBuf::from("/tmp/spring-data-commons-3.2.0.jar"));
-        let ordered = prioritize_jars_for_fallback(&jars);
-        assert!(ordered[0].to_string_lossy().contains("spring-data"));
+    fn jakarta_annotation_jar_does_not_satisfy_validation_package() {
+        let ann = PathBuf::from(
+            "/cache/files-2.1/jakarta.annotation/jakarta.annotation-api/2.1.1/x/jakarta.annotation-api-2.1.1.jar",
+        );
+        assert!(!classpath_includes_package(
+            &[ann],
+            "jakarta.validation.constraints",
+        ));
+        assert!(!classpath_includes_validation(&[PathBuf::from(
+            "/cache/files-2.1/jakarta.annotation/jakarta.annotation-api/2.1.1/x/jakarta.annotation-api-2.1.1.jar",
+        )]));
+    }
+
+    #[test]
+    fn validation_api_jar_satisfies_validation_constraints() {
+        let api = PathBuf::from(
+            "/cache/files-2.1/jakarta.validation/jakarta.validation-api/3.0.2/x/jakarta.validation-api-3.0.2.jar",
+        );
+        assert!(classpath_includes_package(
+            &[api.clone()],
+            "jakarta.validation.constraints",
+        ));
+        assert!(classpath_includes_validation(&[api]));
+    }
+
+    #[test]
+    fn test_classpath_satisfied_detects_junit_gap() {
+        let junit = PathBuf::from("/cache/junit-jupiter-api-5.11.jar");
+        assert!(test_classpath_satisfied(
+            "import org.junit.jupiter.api.Test;",
+            &[junit],
+        ));
+        assert!(!test_classpath_satisfied(
+            "import org.junit.jupiter.api.Test;",
+            &[PathBuf::from("/cache/guava-33.jar")],
+        ));
+    }
+
+    #[test]
+    fn test_classpath_resolve_full_defaults_lightweight() {
+        let _guard = env_var_guard::new("REAPER_CLASSPATH_FULL");
+        assert!(!classpath_resolve_full());
+        assert_eq!(maven_build_classpath_scope(), "compile");
+        std::env::set_var("REAPER_CLASSPATH_FULL", "1");
+        assert!(classpath_resolve_full());
+        assert_eq!(maven_build_classpath_scope(), "test");
+    }
+
+    #[test]
+    fn is_valid_zip_file_rejects_truncated_jar() {
+        let dir = std::env::temp_dir().join(format!("reaper-zip-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad-sources.jar");
+        std::fs::write(&bad, b"PK").unwrap();
+        assert!(!is_valid_zip_file(&bad));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_sources_jar_skips_invalid_zip() {
+        let dir = std::env::temp_dir().join(format!("reaper-src-jar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sources = dir.join("itu-1.0-sources.jar");
+        std::fs::write(&sources, b"not-a-zip").unwrap();
+        let dest = dir.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let ws = dir.join("ws");
+        let mut seen = HashSet::new();
+        let out = extract_sources_jar(&ws, &dest, &sources, &mut seen).unwrap();
+        assert!(out.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+struct env_var_guard(&'static str);
+
+impl env_var_guard {
+    fn new(key: &'static str) -> Self {
+        std::env::remove_var(key);
+        Self(key)
+    }
+}
+
+impl Drop for env_var_guard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
     }
 }
