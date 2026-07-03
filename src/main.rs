@@ -1,6 +1,7 @@
 mod config;
 mod cursor;
 mod port;
+mod process_registry;
 mod git;
 mod agent;
 mod auth;
@@ -63,7 +64,7 @@ fn init_tracing() {
     }
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "reaper=debug,tower_http=debug".into());
+        .unwrap_or_else(|_| "reaper=warn,tower_http=warn".into());
 
     match std::fs::OpenOptions::new()
         .create(true)
@@ -112,6 +113,23 @@ async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
     }
 
     Ok(AppState::new(config, settings))
+}
+
+fn prefetch_startup_index(state: &AppState) {
+    if let Ok(name) = std::env::var("REAPER_STARTUP_REPO") {
+        let name = name.trim();
+        if !name.is_empty() {
+            state
+                .project_index_jobs
+                .prefetch_startup(&state.config, name);
+            return;
+        }
+    }
+    if let Some(name) = state.settings.prefetch_repo() {
+        state
+            .project_index_jobs
+            .prefetch_startup(&state.config, &name);
+    }
 }
 
 async fn bind_listener(host: &str, preferred: u16) -> anyhow::Result<(tokio::net::TcpListener, SocketAddr)> {
@@ -174,6 +192,7 @@ async fn run_server_mode() -> anyhow::Result<()> {
     persist_server_port(&config.data_dir, addr.port());
 
     let state = prepare_state(addr.port()).await?;
+    prefetch_startup_index(&state);
     let config = state.config.clone();
 
     tracing::info!("Reaper listening on http://{addr}");
@@ -182,8 +201,14 @@ async fn run_server_mode() -> anyhow::Result<()> {
     tracing::info!("Repositories stored in {}", config.repos_dir.display());
     tracing::info!("Static assets from {}", config.static_dir.display());
 
-    axum::serve(listener, web::router(state)).await?;
+    tokio::spawn(process_registry::shutdown_watchdog());
 
+    axum::serve(listener, web::router(state))
+        .with_graceful_shutdown(process_registry::wait_for_shutdown_signal())
+        .await?;
+
+    cursor::stop_bridge().await;
+    process_registry::shutdown_all();
     Ok(())
 }
 
@@ -191,6 +216,8 @@ fn run_gui_mode() -> anyhow::Result<()> {
     init_tracing();
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let shutdown_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server_shutdown = std::sync::Arc::clone(&shutdown_notify);
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -204,6 +231,7 @@ fn run_gui_mode() -> anyhow::Result<()> {
             persist_server_port(&config.data_dir, addr.port());
 
             let state = prepare_state(addr.port()).await?;
+            prefetch_startup_index(&state);
             let config = state.config.clone();
             let url = format!("http://{addr}");
 
@@ -216,9 +244,26 @@ fn run_gui_mode() -> anyhow::Result<()> {
             tx.send(Ok(url.clone()))
                 .map_err(|_| anyhow::anyhow!("GUI exited before server started"))?;
 
-            axum::serve(listener, web::router(state)).await?;
+            tokio::spawn(process_registry::shutdown_watchdog());
+
+            let gui_shutdown = async move {
+                server_shutdown.notified().await;
+                tracing::info!("GUI closed; shutting down server");
+                process_registry::initiate_shutdown();
+            };
+
+            axum::serve(listener, web::router(state))
+                .with_graceful_shutdown(async {
+                    tokio::select! {
+                        _ = process_registry::wait_for_shutdown_signal() => {}
+                        _ = gui_shutdown => {}
+                    }
+                })
+                .await?;
+            cursor::stop_bridge().await;
             Ok::<_, anyhow::Error>(())
         });
+        process_registry::shutdown_all();
         if let Err(e) = result {
             let _ = tx.send(Err(format!("{e:#}")));
         }
@@ -236,5 +281,8 @@ fn run_gui_mode() -> anyhow::Result<()> {
         }
     };
 
-    gui::run(&url)
+    let gui_result = gui::run(&url);
+    shutdown_notify.notify_one();
+    process_registry::initiate_shutdown();
+    gui_result
 }

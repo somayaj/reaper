@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/dist/Reaper.app"
 BINARY="$ROOT/target/release/reaper"
 
+echo "Running editor regression suite…"
+"$ROOT/scripts/test-editor-regression.sh"
+
 echo "Building release binary…"
 env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
 

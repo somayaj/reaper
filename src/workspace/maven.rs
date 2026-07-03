@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+
+use crate::jdk;
 
 use super::gradle;
 use super::safe_join;
@@ -54,25 +58,77 @@ pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
 }
 
 pub fn run_maven(project_root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    if crate::process_registry::is_shutdown_requested() {
+        bail!("Reaper is shutting down");
+    }
     let cmd = resolve_maven_command(project_root);
-    Command::new(&cmd.program)
-        .current_dir(&cmd.cwd)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawn {}", cmd.program.display()))
+    let mut process = Command::new(&cmd.program);
+    process.current_dir(&cmd.cwd).args(args);
+    crate::process_registry::configure_command(&mut process);
+    jdk::apply_java_env(&mut process);
+    let label = format!("mvn {}", args.join(" "));
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("spawn {}", cmd.program.display()))?;
+    let _guard = crate::process_registry::guard_for_child(&mut child, &label);
+    child
+        .wait_with_output()
+        .with_context(|| format!("wait for {}", cmd.program.display()))
 }
+
+const MAVEN_ROOTS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static MAVEN_ROOTS_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, Vec<PathBuf>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Discover Maven module roots (skips Gradle projects and reactor parents without sources).
 pub fn find_all_maven_roots(ws: &Path) -> Result<Vec<PathBuf>> {
+    let key = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    if let Ok(guard) = MAVEN_ROOTS_CACHE.lock() {
+        if let Some((at, roots)) = guard.get(&key) {
+            if at.elapsed() < MAVEN_ROOTS_CACHE_TTL {
+                return Ok(roots.clone());
+            }
+        }
+    }
+
+    let roots = compute_all_maven_roots(ws)?;
+    if let Ok(mut guard) = MAVEN_ROOTS_CACHE.lock() {
+        guard.insert(key, (Instant::now(), roots.clone()));
+    }
+    Ok(roots)
+}
+
+pub fn invalidate_maven_roots_cache(ws: &Path) {
+    let key = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    if let Ok(mut guard) = MAVEN_ROOTS_CACHE.lock() {
+        guard.remove(&key);
+    }
+}
+
+fn compute_all_maven_roots(ws: &Path) -> Result<Vec<PathBuf>> {
+    let ws_canon = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
     let mut found = Vec::new();
-    collect_maven_roots(ws, ws, 0, 8, &mut found)?;
+    collect_maven_roots(&ws_canon, ws, 0, 8, &mut found)?;
     found.sort_by(|a, b| a.display().to_string().cmp(&b.display().to_string()));
     found.dedup();
     Ok(found)
 }
 
+fn should_skip_maven_scan_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git" | ".reaper" | "node_modules" | "build" | "target" | ".gradle" | "out"
+                | "dist" | "bin" | ".idea" | ".vscode" | "coverage" | "tmp"
+        )
+    )
+}
+
 fn collect_maven_roots(
-    ws: &Path,
+    ws_canon: &Path,
     dir: &Path,
     depth: usize,
     max_depth: usize,
@@ -84,10 +140,7 @@ fn collect_maven_roots(
     let dir_canon = dir
         .canonicalize()
         .with_context(|| format!("resolve {}", dir.display()))?;
-    let ws_canon = ws
-        .canonicalize()
-        .with_context(|| format!("resolve workspace {}", ws.display()))?;
-    if !dir_canon.starts_with(&ws_canon) {
+    if !dir_canon.starts_with(ws_canon) {
         return Ok(());
     }
 
@@ -101,7 +154,7 @@ fn collect_maven_roots(
             for module in &pom.modules {
                 let module_dir = dir.join(module);
                 if module_dir.is_dir() {
-                    collect_maven_roots(ws, &module_dir, depth + 1, max_depth, out)?;
+                    collect_maven_roots(ws_canon, &module_dir, depth + 1, max_depth, out)?;
                 }
             }
             return Ok(());
@@ -118,16 +171,10 @@ fn collect_maven_roots(
         if !path.is_dir() {
             continue;
         }
-        let name = entry.file_name();
-        if name == ".git"
-            || name == ".reaper"
-            || name == "node_modules"
-            || name == "target"
-            || name == "build"
-        {
+        if should_skip_maven_scan_dir(&entry.file_name()) {
             continue;
         }
-        collect_maven_roots(ws, &path, depth + 1, max_depth, out)?;
+        collect_maven_roots(ws_canon, &path, depth + 1, max_depth, out)?;
     }
     Ok(())
 }
@@ -326,9 +373,6 @@ pub fn collect_transitive_jar_paths(maven_root: &Path, include_test_scope: bool)
     collect_transitive_jars(&roots, include_test_scope, find_m2_jar, read_m2_pom_text)
 }
 
-/// Upper bound when walking Maven/Gradle transitive dependency trees offline.
-pub const MAX_TRANSITIVE_CLASSPATH_JARS: usize = 800;
-
 /// Walk transitive Maven POM dependencies, resolving JARs and POMs via callbacks.
 pub fn collect_transitive_jars<FJ, FP>(
     roots: &[(String, String, String)],
@@ -342,7 +386,6 @@ where
 {
     use std::collections::VecDeque;
 
-    const MAX_JARS: usize = MAX_TRANSITIVE_CLASSPATH_JARS;
     const MAX_DEPTH: usize = 10;
 
     let mut queue: VecDeque<(String, String, String, usize)> = roots
@@ -369,10 +412,6 @@ where
             continue;
         };
         enqueue_transitive_deps(&raw, &mut queue, depth + 1, include_test_scope);
-
-        if jars.len() >= MAX_JARS {
-            break;
-        }
     }
 
     jars
@@ -667,6 +706,25 @@ impl PomModel {
     }
 }
 
+/// Lightweight POM view for build-task trees (module folder names match the project explorer).
+#[derive(Debug, Clone)]
+pub struct PomTreeInfo {
+    pub modules: Vec<String>,
+    pub raw: String,
+    pub is_reactor: bool,
+    pub is_spring_boot: bool,
+}
+
+pub fn pom_tree_info(root: &Path) -> Result<PomTreeInfo> {
+    let pom = read_pom(root)?;
+    Ok(PomTreeInfo {
+        modules: pom.modules.clone(),
+        raw: pom.raw.clone(),
+        is_reactor: pom.is_reactor(),
+        is_spring_boot: pom.looks_like_spring_boot(),
+    })
+}
+
 fn read_pom(root: &Path) -> Result<PomModel> {
     let path = root.join("pom.xml");
     let raw = std::fs::read_to_string(&path)
@@ -855,6 +913,271 @@ fn resolve_version(version: Option<&str>, pom: &PomModel) -> Option<String> {
     Some(version)
 }
 
+// --- Maven reactor / multi-module workspace ---
+
+/// Reactor root, `-pl` selector, and in-repo `groupId:artifactId` → module dir.
+#[derive(Debug, Clone)]
+pub struct MavenReactorContext {
+    pub reactor_root: PathBuf,
+    pub module_pl: String,
+    pub workspace_modules: HashMap<String, PathBuf>,
+}
+
+/// Innermost reactor POM ancestor of a module (multi-module parent with `<modules>`).
+pub fn find_maven_reactor_root(module_root: &Path) -> Option<PathBuf> {
+    let mut dir = module_root.to_path_buf();
+    let mut innermost = None;
+    loop {
+        if dir.join("pom.xml").is_file() {
+            if let Ok(pom) = read_pom(&dir) {
+                if pom.is_reactor() {
+                    innermost = dir.canonicalize().ok().or_else(|| Some(dir.clone()));
+                }
+            }
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    innermost
+}
+
+pub fn maven_reactor_context(module_root: &Path) -> Option<MavenReactorContext> {
+    let reactor_root = find_maven_reactor_root(module_root)?;
+    let module_pl = module_pl_selector(module_root, &reactor_root)?;
+    let workspace_modules = build_workspace_module_map(&reactor_root);
+    Some(MavenReactorContext {
+        reactor_root,
+        module_pl,
+        workspace_modules,
+    })
+}
+
+fn module_pl_selector(module_root: &Path, reactor_root: &Path) -> Option<String> {
+    let module_canon = module_root.canonicalize().ok()?;
+    let reactor_canon = reactor_root.canonicalize().ok()?;
+    if module_canon == reactor_canon {
+        return None;
+    }
+    let rel = module_canon.strip_prefix(&reactor_canon).ok()?;
+    let pl = rel.to_string_lossy().replace('\\', "/");
+    if pl.is_empty() {
+        None
+    } else {
+        Some(pl)
+    }
+}
+
+/// Map `groupId:artifactId` → module directory for every leaf module in a reactor.
+pub fn build_workspace_module_map(reactor_root: &Path) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    collect_workspace_modules(reactor_root, &mut map);
+    map
+}
+
+fn collect_workspace_modules(dir: &Path, out: &mut HashMap<String, PathBuf>) {
+    if !dir.join("pom.xml").is_file() {
+        return;
+    }
+    let Ok(pom) = read_pom(dir) else {
+        return;
+    };
+    if pom.is_reactor() {
+        for module in &pom.modules {
+            collect_workspace_modules(&dir.join(module), out);
+        }
+        return;
+    }
+    if let (Some(group), Some(artifact)) = (&pom.group_id, &pom.artifact_id) {
+        let key = format!("{group}:{artifact}");
+        if let Ok(path) = dir.canonicalize() {
+            out.insert(key, path);
+        } else {
+            out.insert(key, dir.to_path_buf());
+        }
+    }
+}
+
+/// Run Maven with cwd at an arbitrary directory (reactor root for `-pl` / `-am`).
+pub fn run_maven_from(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
+    if crate::process_registry::is_shutdown_requested() {
+        bail!("Reaper is shutting down");
+    }
+    let cmd = resolve_maven_command(cwd);
+    let mut process = Command::new(&cmd.program);
+    process.current_dir(cwd).args(args);
+    crate::process_registry::configure_command(&mut process);
+    jdk::apply_java_env(&mut process);
+    let label = format!("mvn {}", args.join(" "));
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("spawn {} in {}", cmd.program.display(), cwd.display()))?;
+    let _guard = crate::process_registry::guard_for_child(&mut child, &label);
+    child
+        .wait_with_output()
+        .with_context(|| format!("wait for {} in {}", cmd.program.display(), cwd.display()))
+}
+
+/// Compiled outputs for workspace sibling modules declared in this module's POM.
+pub fn workspace_module_classpath_entries(
+    module_root: &Path,
+    ctx: &MavenReactorContext,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let Ok(pom) = read_pom(module_root) else {
+        return (Vec::new(), Vec::new());
+    };
+    let module_canon = module_root.canonicalize().unwrap_or_else(|_| module_root.to_path_buf());
+    let mut classes_dirs = Vec::new();
+    let mut jars = Vec::new();
+
+    for dep in &pom.dependencies {
+        if dep.optional {
+            continue;
+        }
+        let scope = dep.scope.as_deref().unwrap_or("compile");
+        if matches!(scope, "test" | "provided" | "system") {
+            continue;
+        }
+        let group = resolve_property(&dep.group_id, &pom.properties);
+        let artifact = resolve_property(&dep.artifact_id, &pom.properties);
+        let key = format!("{group}:{artifact}");
+        let Some(sibling) = ctx.workspace_modules.get(&key) else {
+            continue;
+        };
+        let sibling_canon = sibling.canonicalize().unwrap_or_else(|_| sibling.clone());
+        if sibling_canon == module_canon {
+            continue;
+        }
+        append_module_output_entries(sibling, &mut classes_dirs, &mut jars);
+    }
+
+    (classes_dirs, jars)
+}
+
+fn append_module_output_entries(
+    module_dir: &Path,
+    classes_dirs: &mut Vec<PathBuf>,
+    jars: &mut Vec<PathBuf>,
+) {
+    let classes = module_dir.join("target/classes");
+    if classes.is_dir() && !classes_dirs.contains(&classes) {
+        classes_dirs.push(classes);
+    }
+    let target = module_dir.join("target");
+    if let Ok(entries) = std::fs::read_dir(&target) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.extension().and_then(|e| e.to_str()) != Some("jar") {
+                continue;
+            }
+            if name.contains("-sources") || name.contains("-javadoc") || name.ends_with(".original") {
+                continue;
+            }
+            if !jars.contains(&path) {
+                jars.push(path);
+            }
+        }
+    }
+}
+
+/// Parent coordinates and relativePath for generating a Reaper coverage overlay POM.
+#[derive(Debug, Clone)]
+pub struct MavenModuleCoords {
+    pub artifact_id: String,
+    pub parent: Option<(String, String, String, String)>,
+}
+
+pub fn maven_module_coords(project_root: &Path) -> Result<MavenModuleCoords> {
+    let pom = read_pom(project_root)?;
+    let artifact_id = pom
+        .artifact_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing artifactId in {}", project_root.display()))?;
+    let parent = pom.parent_coords().map(|(group, artifact, version)| {
+        let relative_path = parent_relative_path(&pom.raw).unwrap_or_else(|| "../pom.xml".into());
+        (group, artifact, version, relative_path)
+    });
+    Ok(MavenModuleCoords {
+        artifact_id,
+        parent,
+    })
+}
+
+/// Surefire JVM args hardcoded in this module or a parent POM (not `${argLine}` / `@{argLine}`).
+pub fn effective_surefire_arg_line(project_root: &Path) -> Option<String> {
+    let mut current = project_root.to_path_buf();
+    for _ in 0..16 {
+        let pom_path = current.join("pom.xml");
+        if !pom_path.is_file() {
+            break;
+        }
+        let raw = std::fs::read_to_string(&pom_path).ok()?;
+        if let Some(line) = surefire_arg_line_in_pom(&raw) {
+            return Some(line);
+        }
+        let model = parse_pom(&raw);
+        let Some(next) = parent_pom_dir(&current, &model) else {
+            break;
+        };
+        current = next;
+    }
+    None
+}
+
+fn parent_relative_path(raw: &str) -> Option<String> {
+    let section = extract_tag_block(raw, "parent")?;
+    tag_value(&section, "relativePath").or_else(|| Some("../pom.xml".into()))
+}
+
+fn parent_pom_dir(current: &Path, model: &PomModel) -> Option<PathBuf> {
+    if let Some(section) = extract_tag_block(&model.raw, "parent") {
+        let rel = tag_value(&section, "relativePath").unwrap_or_else(|| "../pom.xml".into());
+        if !rel.is_empty() {
+            let candidate = current.join(&rel);
+            if candidate.join("pom.xml").is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some((group, artifact, version)) = model.parent_coords() {
+        if let Some(dir) = resolve_pom_directory(&group, &artifact, &version) {
+            return Some(dir);
+        }
+    }
+    let parent = current.parent()?;
+    if parent.join("pom.xml").is_file() {
+        Some(parent.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn surefire_arg_line_in_pom(raw: &str) -> Option<String> {
+    let properties = parse_properties(raw);
+    let mut search = raw;
+    while let Some(idx) = search.find("maven-surefire-plugin") {
+        let tail = &search[idx..];
+        let plugin_block = extract_tag_block(tail, "plugin").unwrap_or_else(|| tail.to_string());
+        if let Some(config) = extract_tag_block(&plugin_block, "configuration") {
+            if let Some(arg) = tag_value(&config, "argLine") {
+                if arg.contains("${argLine}") || arg.contains("@{argLine}") {
+                    return None;
+                }
+                let resolved = resolve_property(&arg, &properties);
+                if !resolved.trim().is_empty() {
+                    return Some(resolved);
+                }
+            }
+        }
+        search = &search[idx + "maven-surefire-plugin".len()..];
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,5 +1305,85 @@ mod tests {
         .unwrap();
         assert_eq!(parts[0], "-Dtest=com.example.AppTest#appHasAGreeting");
         assert_eq!(parts[1], "test");
+    }
+
+    #[test]
+    fn detects_hardcoded_surefire_arg_line_in_parent() {
+        let root = std::env::temp_dir().join("reaper-maven-surefire-parent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("child")).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            r#"<?xml version="1.0"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <configuration>
+            <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("child/pom.xml"),
+            r#"<?xml version="1.0"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>child</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            effective_surefire_arg_line(&root.join("child")).as_deref(),
+            Some("-Dnet.bytebuddy.experimental=true")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ignores_surefire_arg_line_property_placeholder() {
+        let root = std::env::temp_dir().join("reaper-maven-surefire-placeholder");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            r#"<?xml version="1.0"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <artifactId>demo</artifactId>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <argLine>@{argLine} -Xmx512m</argLine>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#,
+        )
+        .unwrap();
+        assert!(effective_surefire_arg_line(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

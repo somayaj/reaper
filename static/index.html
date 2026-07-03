@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="312" />
+  <meta name="reaper-ui-build" content="347" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -71,7 +71,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=312" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=347" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -215,6 +215,33 @@
     </div>
   </div>
   <script src="/launch-splash.js?v=2"></script>
+  <script>
+    (function () {
+      function prefetchStartupIndex() {
+        function openRepo(name) {
+          if (!name) return;
+          fetch('/api/repos/' + encodeURIComponent(name) + '/workspace/open', { method: 'POST' })
+            .catch(function () {});
+        }
+        var fromUrl = new URLSearchParams(window.location.search).get('repo');
+        if (fromUrl && fromUrl.trim()) {
+          openRepo(fromUrl.trim());
+          return;
+        }
+        fetch('/api/settings/general')
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (g) {
+            openRepo(g && (g.default_repo || g.last_repo));
+          })
+          .catch(function () {});
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', prefetchStartupIndex);
+      } else {
+        prefetchStartupIndex();
+      }
+    })();
+  </script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -286,6 +313,7 @@
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="search-everywhere">Search…<span class="ij-kbd">⌘P</span></button>
             <button type="button" class="ij-menu-item" data-action="goto-class">Go to Class…<span class="ij-kbd">⌘O</span></button>
+            <button type="button" class="ij-menu-item" data-action="goto-line">Go to Line…<span class="ij-kbd">⌘G</span></button>
           </div>
         </div>
         <div class="ij-menu-root" data-menu="view">
@@ -298,6 +326,11 @@
             <button type="button" class="ij-menu-item" data-action="terminal-new">New Terminal<span class="ij-kbd">⌘⇧`</span></button>
             <button type="button" class="ij-menu-item" data-action="panel-agent">Agent</button>
             <button type="button" class="ij-menu-item" data-action="panel-coverage">Coverage report</button>
+            <button type="button" class="ij-menu-item" data-action="panel-db-viewer">Database</button>
+            <button type="button" class="ij-menu-item" data-action="panel-git-viewer">Git Console</button>
+            <button type="button" class="ij-menu-item" data-action="panel-docker-logs">Docker logs</button>
+            <button type="button" class="ij-menu-item" data-action="panel-build-tasks">Build tasks</button>
+            <button type="button" class="ij-menu-item" data-action="panel-package-manifest">Package manifest</button>
             <div class="ij-menu-sep"></div>
             <div class="ij-menu-heading">Terminal position</div>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="terminal-dock-left">Dock left</button>
@@ -307,6 +340,16 @@
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-left">Dock left</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-right">Dock right</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-bottom">Dock bottom</button>
+            <div class="ij-menu-heading">Docker logs position</div>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-left">Dock left</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-right">Dock right</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-bottom">Dock bottom</button>
+            <div class="ij-menu-heading">Build tasks position</div>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="build-tasks-dock-left">Dock left</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="build-tasks-dock-right">Dock right</button>
+            <div class="ij-menu-heading">Package manifest position</div>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="package-manifest-dock-left">Dock left</button>
+            <button type="button" class="ij-menu-item ij-menu-checkable" data-action="package-manifest-dock-right">Dock right</button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="toggle-sidebar">Toggle sidebar</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="toggle-dotfiles" aria-pressed="false">Show hidden files<span class="ij-menu-hint">dotfiles, gradlew, gradle/wrapper</span></button>
@@ -412,6 +455,11 @@
       <button data-panel="history" class="activity-btn" title="Git Log">
         <span class="ij-activity-glyph" aria-hidden="true">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        </span>
+      </button>
+      <button id="btn-build-tasks" type="button" class="activity-btn" title="Build tasks (Maven/Gradle)" aria-label="Build tasks">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 10h10M4 14h7M4 18h4"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 8l3 3-3 3"/></svg>
         </span>
       </button>
       <button data-panel="agent" class="activity-btn" title="Agent">
@@ -532,6 +580,28 @@
         <div id="terminal-xterm-host" class="ij-terminal-xterm-host flex-1 min-h-0 min-w-0"></div>
       </div>
 
+      <div id="panel-docker-logs" class="panel hidden flex-1 flex flex-col min-h-0 ij-docker-logs-panel">
+        <div class="ij-docker-logs-toolbar">
+          <div class="ij-docker-logs-heading min-w-0">
+            <span id="docker-logs-title" class="ij-docker-logs-title">Docker logs</span>
+            <span id="docker-logs-subtitle" class="ij-docker-logs-subtitle"></span>
+            <span id="docker-logs-status" class="ij-docker-logs-status" aria-live="polite"></span>
+          </div>
+          <div class="ij-docker-logs-toolbar-actions">
+            <button type="button" id="btn-docker-logs-follow" class="ij-docker-logs-action-btn" title="Follow all services (docker compose logs -f)">Follow</button>
+            <button type="button" id="btn-docker-logs-stop" class="ij-docker-logs-action-btn" title="Stop log stream" disabled>Stop</button>
+            <button type="button" id="btn-docker-logs-clear" class="ij-docker-logs-action-btn" title="Clear log output">Clear</button>
+            <div class="ij-docker-logs-dock-group" role="group" aria-label="Docker logs position">
+              <button type="button" data-docker-logs-dock="left" class="docker-logs-dock-btn" title="Dock left">Left</button>
+              <button type="button" data-docker-logs-dock="right" class="docker-logs-dock-btn" title="Dock right">Right</button>
+              <button type="button" data-docker-logs-dock="bottom" class="docker-logs-dock-btn" title="Dock bottom">Bottom</button>
+            </div>
+            <button type="button" id="btn-docker-logs-close" class="ij-docker-logs-icon-btn" title="Close Docker logs panel">×</button>
+          </div>
+        </div>
+        <pre id="docker-logs-output" class="ij-docker-logs-output panel-scroll flex-1 min-h-0" aria-label="Docker log output"></pre>
+      </div>
+
       <div id="panel-agent" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden h-full">
         <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2">
           <div id="agent-status" class="text-[10px] text-gray-500 truncate min-w-0">Checking…</div>
@@ -585,19 +655,67 @@
           </div>
         </div>
       </div>
+
+      <div id="panel-build-tasks" class="hidden flex flex-col flex-1 min-h-0 ij-build-tasks-panel">
+        <div class="ij-build-tasks-header">
+          <div class="ij-build-tasks-heading">
+            <span id="build-tasks-title" class="ij-build-tasks-title">Build tasks</span>
+            <span id="build-tasks-subtitle" class="ij-build-tasks-subtitle"></span>
+          </div>
+          <div class="ij-build-tasks-header-actions">
+            <div class="ij-build-tasks-dock-group" role="group" aria-label="Build tasks position">
+              <button type="button" data-build-tasks-dock="left" class="build-tasks-dock-btn" title="Dock left">Left</button>
+              <button type="button" data-build-tasks-dock="right" class="build-tasks-dock-btn" title="Dock right">Right</button>
+            </div>
+            <button id="build-tasks-refresh" type="button" class="ij-build-tasks-icon-btn" title="Refresh tasks" aria-label="Refresh tasks">↻</button>
+            <button id="build-tasks-close" type="button" class="ij-build-tasks-icon-btn" title="Close build tasks panel">×</button>
+          </div>
+        </div>
+        <div class="ij-build-tasks-toolbar">
+          <input id="build-tasks-filter" type="search" class="ij-build-tasks-filter" placeholder="Filter modules or tasks…" autocomplete="off" spellcheck="false" aria-label="Filter build tasks" />
+        </div>
+        <div id="build-tasks-tree" class="ij-build-tasks-body panel-scroll flex-1 min-h-0"></div>
+      </div>
+
+      <div id="panel-package-manifest" class="hidden flex flex-col flex-1 min-h-0 ij-package-manifest-panel">
+        <div class="ij-package-manifest-header">
+          <div class="ij-package-manifest-heading">
+            <span id="package-manifest-ecosystem" class="ij-package-manifest-ecosystem"></span>
+            <span id="package-manifest-title" class="ij-package-manifest-title">Package</span>
+            <span id="package-manifest-subtitle" class="ij-package-manifest-subtitle"></span>
+          </div>
+          <div class="ij-package-manifest-header-actions">
+            <div class="ij-package-manifest-dock-group" role="group" aria-label="Package manifest position">
+              <button type="button" data-package-manifest-dock="left" class="package-manifest-dock-btn" title="Dock left">Left</button>
+              <button type="button" data-package-manifest-dock="right" class="package-manifest-dock-btn" title="Dock right">Right</button>
+            </div>
+            <button id="package-manifest-refresh" type="button" class="ij-package-manifest-icon-btn" title="Refresh manifest" aria-label="Refresh manifest">↻</button>
+            <button id="package-manifest-close" type="button" class="ij-package-manifest-icon-btn" title="Close package panel">×</button>
+          </div>
+        </div>
+        <div class="ij-package-manifest-toolbar">
+          <input id="package-manifest-filter" type="search" class="ij-package-manifest-filter" placeholder="Filter dependencies…" autocomplete="off" spellcheck="false" aria-label="Filter manifest" />
+        </div>
+        <div id="package-manifest-body" class="ij-package-manifest-body panel-scroll flex-1 min-h-0"></div>
+      </div>
     </aside>
 
     <div id="sidebar-resizer" class="ij-sidebar-resizer" title="Drag to resize"></div>
+
+    <aside id="build-tasks-dock-left" class="hidden flex flex-col shrink-0 min-h-0 ij-build-tasks-dock ij-build-tasks-dock--left" aria-label="Build tasks"></aside>
+    <div id="build-tasks-left-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize build tasks panel"></div>
+    <aside id="package-manifest-dock-left" class="hidden flex flex-col shrink-0 min-h-0 ij-package-manifest-dock ij-package-manifest-dock--left" aria-label="Package manifest"></aside>
+    <div id="package-manifest-left-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize package panel"></div>
 
     <!-- Editor area -->
     <main class="flex-1 flex flex-col min-w-0 bg-surface-950">
       <!-- Run toolbar -->
       <div id="editor-toolbar" class="ij-toolbar hidden items-center shrink-0">
-        <button id="tb-run" disabled title="Run (F5)" class="ij-toolbar-btn run" type="button">
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        <button id="tb-run" disabled title="Run (F5)" class="ij-toolbar-btn run" type="button" aria-label="Run">
+          <svg class="ij-toolbar-run-icon" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
         </button>
         <button id="tb-save" disabled title="Save (⌘S)" class="ij-toolbar-btn" type="button">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+          <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
         </button>
         <button id="tb-format" disabled title="Reformat (⇧⌥F)" class="ij-toolbar-btn" type="button">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M4 6h16M4 12h10M4 18h7"/></svg>
@@ -693,12 +811,24 @@
       </div>
     </main>
 
+    <!-- Docker logs dock (right) -->
+    <div id="docker-logs-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize Docker logs panel"></div>
+    <aside id="docker-logs-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
+
     <!-- Agent dock (right) -->
     <div id="agent-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize agent panel"></div>
     <aside id="agent-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
 
     <!-- Terminal dock (right) -->
     <aside id="terminal-dock-right" class="hidden flex flex-col shrink-0 min-h-0"></aside>
+
+    <!-- Build tasks (right) -->
+    <div id="build-tasks-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize build tasks panel"></div>
+    <aside id="build-tasks-dock-right" class="hidden flex flex-col shrink-0 min-h-0 ij-build-tasks-dock ij-build-tasks-dock--right" aria-label="Build tasks"></aside>
+
+    <!-- Package manifest (Cargo, Python, Ruby, Go, C/C++) -->
+    <div id="package-manifest-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize package panel"></div>
+    <aside id="package-manifest-dock-right" class="hidden flex flex-col shrink-0 min-h-0 ij-package-manifest-dock ij-package-manifest-dock--right" aria-label="Package manifest"></aside>
 
     <!-- Coverage report (right) -->
     <div id="coverage-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize coverage panel"></div>
@@ -719,6 +849,121 @@
         <button type="button" id="btn-coverage-open-html" class="ij-coverage-footer-btn hidden">Open HTML report</button>
       </div>
     </aside>
+
+    <!-- Database viewer (right) -->
+    <div id="db-viewer-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize database panel"></div>
+    <aside id="db-viewer-dock-right" class="hidden flex flex-col shrink-0 min-h-0 ij-db-viewer-dock" aria-label="Database">
+      <div class="ij-db-viewer-header">
+        <div class="min-w-0">
+          <span class="ij-db-viewer-title">Database</span>
+          <span id="db-viewer-subtitle" class="ij-db-viewer-subtitle"></span>
+        </div>
+        <div class="ij-db-viewer-header-actions">
+          <button type="button" id="btn-db-viewer-refresh" class="ij-db-viewer-icon-btn" title="Refresh schema">↻</button>
+          <button type="button" id="btn-db-viewer-close" class="ij-db-viewer-icon-btn" title="Close database panel">×</button>
+        </div>
+      </div>
+      <div class="ij-db-viewer-connection-wrap">
+        <div class="ij-db-viewer-connection">
+          <span id="db-viewer-status-dot" class="ij-db-viewer-status-dot" aria-hidden="true"></span>
+          <input id="db-viewer-url" type="text" class="ij-db-viewer-url" placeholder="postgresql://… or database.sqlite" autocomplete="off" spellcheck="false" aria-label="Database connection" />
+          <button type="button" id="btn-db-viewer-connect" class="ij-db-viewer-connect-btn">Connect</button>
+        </div>
+        <details id="db-viewer-ssl-panel" class="ij-db-ssl-panel">
+          <summary class="ij-db-ssl-summary">
+            <span>SSL / Certificates</span>
+            <span id="db-viewer-ssl-hint" class="ij-db-ssl-hint"></span>
+          </summary>
+          <div class="ij-db-ssl-fields">
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">SSL mode</span>
+              <select id="db-viewer-ssl-mode" class="ij-db-ssl-input" aria-label="SSL mode">
+                <option value="">disable</option>
+                <option value="allow">allow</option>
+                <option value="prefer">prefer</option>
+                <option value="require">require</option>
+                <option value="verify-ca">verify-ca</option>
+                <option value="verify-full">verify-full</option>
+              </select>
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Root certificate (CA)</span>
+              <input id="db-viewer-ssl-root" type="text" class="ij-db-ssl-input" placeholder="/path/to/root.crt" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Client certificate</span>
+              <input id="db-viewer-ssl-cert" type="text" class="ij-db-ssl-input" placeholder="/path/to/client.crt" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Client private key</span>
+              <input id="db-viewer-ssl-key" type="password" class="ij-db-ssl-input" placeholder="/path/to/client.key" autocomplete="off" spellcheck="false" />
+            </label>
+            <p class="ij-db-ssl-footnote">PostgreSQL only. Use absolute paths to PEM files (same as DBeaver). Not used for Docker Compose local postgres.</p>
+          </div>
+        </details>
+      </div>
+      <div class="ij-db-viewer-body">
+        <aside class="ij-db-schema-rail">
+          <div class="ij-db-schema-rail-head">
+            <span class="ij-db-schema-rail-title">Objects</span>
+            <input id="db-viewer-schema-filter" type="search" class="ij-db-schema-filter" placeholder="Filter…" autocomplete="off" spellcheck="false" aria-label="Filter objects" />
+          </div>
+          <div id="db-viewer-schema" class="ij-db-schema-tree panel-scroll"></div>
+        </aside>
+        <div id="db-viewer-schema-resizer" class="ij-db-schema-resizer" role="separator" aria-orientation="vertical" aria-label="Resize schema panel" tabindex="0"></div>
+        <div class="ij-db-workspace">
+          <div class="ij-db-query-pane">
+            <div class="ij-db-query-toolbar">
+              <button type="button" id="btn-db-viewer-run-query" class="ij-db-run-btn ij-db-run-btn--primary" title="Run query (⌘Enter)">
+                <span class="ij-db-run-icon" aria-hidden="true">▶</span> Run
+              </button>
+              <button type="button" id="btn-db-viewer-run-selection" class="ij-db-run-btn" title="Run selected SQL">Selection</button>
+              <span id="db-viewer-query-meta" class="ij-db-query-meta"></span>
+            </div>
+            <textarea id="db-viewer-sql" class="ij-db-query-editor panel-scroll" rows="6" placeholder="SELECT * FROM users LIMIT 100;" spellcheck="false" aria-label="SQL query"></textarea>
+          </div>
+          <div id="db-viewer-results-resizer" class="ij-dock-resize-handle ij-db-results-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize results panel" tabindex="0"></div>
+          <div class="ij-db-results-pane">
+            <div class="ij-db-results-head">
+              <span class="ij-db-results-title">Results</span>
+              <span id="db-viewer-results-meta" class="ij-db-results-meta"></span>
+            </div>
+            <div id="db-viewer-results" class="ij-db-results-body panel-scroll"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Git console (right) -->
+    <div id="git-viewer-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize Git console"></div>
+    <aside id="git-viewer-dock-right" class="hidden flex flex-col shrink-0 min-h-0 ij-git-viewer-dock" aria-label="Git console">
+      <div class="ij-git-viewer-header">
+        <div class="min-w-0">
+          <span class="ij-git-viewer-title">Git Console</span>
+          <span id="git-viewer-subtitle" class="ij-git-viewer-subtitle"></span>
+        </div>
+        <div class="ij-git-viewer-header-actions">
+          <button type="button" id="btn-git-viewer-refresh" class="ij-git-viewer-icon-btn" title="Refresh branch info">↻</button>
+          <button type="button" id="btn-git-viewer-close" class="ij-git-viewer-icon-btn" title="Close Git console">×</button>
+        </div>
+      </div>
+      <div id="git-viewer-quick" class="ij-git-viewer-quick panel-scroll" role="toolbar" aria-label="Git quick commands"></div>
+      <div class="ij-git-viewer-command-row">
+        <span class="ij-git-viewer-prompt" aria-hidden="true">git</span>
+        <input id="git-viewer-command" type="text" class="ij-git-viewer-command" placeholder="status --short" autocomplete="off" spellcheck="false" aria-label="Git command arguments" />
+        <button type="button" id="btn-git-viewer-run" class="ij-git-viewer-run-btn" title="Run command (⌘Enter)">Run</button>
+      </div>
+      <div class="ij-git-viewer-output-head">
+        <span class="ij-git-viewer-output-title">Output</span>
+        <span id="git-viewer-output-meta" class="ij-git-viewer-output-meta"></span>
+      </div>
+      <pre id="git-viewer-output" class="ij-git-viewer-output panel-scroll"></pre>
+    </aside>
+    </div>
+
+    <!-- Docker logs dock (bottom) -->
+    <div id="docker-logs-dock-bottom" class="hidden shrink-0 flex flex-col min-h-0">
+      <div id="docker-logs-bottom-resize" class="ij-dock-resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize Docker logs panel" tabindex="0"></div>
     </div>
 
     <!-- Agent dock (bottom) -->
@@ -813,7 +1058,7 @@
         <div id="clone-remote-panel" class="space-y-4">
           <div>
             <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
-            <input id="clone-remote-url" name="remote_url" placeholder="https://github.com/owner/repo.git" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+            <input id="clone-remote-url" name="remote_url" placeholder="https://github.com/owner/repo.git" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
           </div>
           <p id="clone-remote-hint" class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
         </div>
@@ -1066,6 +1311,15 @@
               <input id="settings-compiler-search" type="search" placeholder="Filter languages… (e.g. python, java, rust)" class="ij-compiler-search" autocomplete="off" spellcheck="false" />
             </div>
             <div id="settings-compilers-list" class="ij-compiler-table-wrap"></div>
+            <div class="border-t border-surface-700 pt-4 space-y-2">
+              <label for="settings-java-index-mode" class="block text-xs font-medium text-gray-400">Java dependency index</label>
+              <select id="settings-java-index-mode" class="ij-theme-menu-select w-full max-w-md" title="How many dependency JARs to index at startup">
+                <option value="standard">Standard — core JARs first (~2000), rest in background</option>
+                <option value="light">Light — fewer JARs (~400), lower CPU and memory</option>
+                <option value="lazy">On-demand — index each module when you open its files</option>
+              </select>
+              <p class="text-[11px] text-gray-600">Standard keeps the editor usable quickly on large Maven/Gradle projects; remaining JARs index slowly in the background. On-demand skips startup indexing and loads each module as you open Java files — best for large monorepos. Reload the project index after changing this.</p>
+            </div>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
             <div>
@@ -1126,6 +1380,17 @@
     <div class="ij-palette">
       <input id="palette-input" type="text" placeholder="Type a command or search files…" autocomplete="off" />
       <div id="palette-results" class="max-h-72 overflow-auto panel-scroll py-1"></div>
+    </div>
+  </div>
+
+  <!-- Go to Line -->
+  <div id="goto-line-overlay" class="ij-overlay" role="dialog" aria-modal="true" aria-labelledby="goto-line-title">
+    <div class="ij-palette ij-goto-line-palette">
+      <div id="goto-line-title" class="ij-goto-class-header">Go to Line</div>
+      <div id="goto-line-subtitle" class="ij-goto-line-subtitle"></div>
+      <input id="goto-line-input" type="text" placeholder="Line or line:column…" autocomplete="off" spellcheck="false" aria-label="Line number" inputmode="numeric" />
+      <pre id="goto-line-preview" class="ij-goto-line-preview" aria-live="polite"></pre>
+      <div id="goto-line-hint" class="ij-goto-class-hint">Enter jump · Esc close</div>
     </div>
   </div>
 
@@ -1213,9 +1478,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=312"></script>
-  <script src="/monaco-languages.js?v=312" onerror="window.__reaperLangBundleError=true"></script>
-  <script src="/themes.js?v=10"></script>
-  <script src="/app.js?v=312"></script>
+  <script src="/reaper-lang-core.js?v=347"></script>
+  <script src="/monaco-languages.js?v=347" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/themes.js?v=11"></script>
+  <script src="/app.js?v=347"></script>
 </body>
 </html>

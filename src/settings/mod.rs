@@ -30,6 +30,12 @@ struct SettingsFile {
     /// Repository opened automatically on startup when no URL repo is set.
     #[serde(default)]
     default_repo: Option<String>,
+    /// Most recently opened repository (resume on next launch).
+    #[serde(default)]
+    last_repo: Option<String>,
+    /// Java dependency index: "standard" (2000 JARs + background) or "light" (400 JARs).
+    #[serde(default)]
+    java_index_mode: Option<String>,
 }
 
 #[derive(Clone)]
@@ -67,6 +73,8 @@ pub struct GeminiSettingsView {
 #[derive(Debug, Serialize)]
 pub struct GeneralSettingsView {
     pub default_repo: Option<String>,
+    pub last_repo: Option<String>,
+    pub java_index_mode: String,
 }
 
 impl SettingsStore {
@@ -321,13 +329,64 @@ impl SettingsStore {
     }
 
     pub fn general_view(&self) -> GeneralSettingsView {
-        let default_repo = self
+        let (default_repo, last_repo, java_index_mode) = self
             .inner
             .read()
             .ok()
-            .and_then(|guard| guard.default_repo.clone())
-            .filter(|name| !name.is_empty());
-        GeneralSettingsView { default_repo }
+            .map(|guard| {
+                (
+                    guard
+                        .default_repo
+                        .clone()
+                        .filter(|name| !name.is_empty()),
+                    guard
+                        .last_repo
+                        .clone()
+                        .filter(|name| !name.is_empty()),
+                    guard
+                        .java_index_mode
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| "standard".into()),
+                )
+            })
+            .unwrap_or_else(|| (None, None, "standard".into()));
+        GeneralSettingsView {
+            default_repo,
+            last_repo,
+            java_index_mode,
+        }
+    }
+
+    /// Repo to prefetch on startup: explicit default, else last opened.
+    pub fn prefetch_repo(&self) -> Option<String> {
+        self.inner.read().ok().and_then(|guard| {
+            guard
+                .default_repo
+                .clone()
+                .filter(|name| !name.is_empty())
+                .or_else(|| guard.last_repo.clone().filter(|name| !name.is_empty()))
+        })
+    }
+
+    pub fn set_last_repo(&self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.last_repo = Some(name.to_string());
+        self.save(&guard)
+    }
+
+    pub fn set_java_index_mode(&self, mode: &str) -> Result<()> {
+        let mode = mode.trim();
+        if mode != "standard" && mode != "light" && mode != "lazy" {
+            anyhow::bail!("java_index_mode must be \"standard\", \"light\", or \"lazy\"");
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.java_index_mode = Some(mode.to_string());
+        self.save(&guard)
     }
 
     pub fn set_default_repo(&self, name: Option<String>) -> Result<()> {

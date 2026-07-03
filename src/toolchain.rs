@@ -135,6 +135,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_CLANG"),
     },
     ToolDef {
+        id: "clangd",
+        label: "C/C++ language server (clangd)",
+        kind: ToolKind::Binary,
+        defaults: &["clangd"],
+        env_key: Some("REAPER_CLANGD"),
+    },
+    ToolDef {
         id: "gcc",
         label: "C/C++ (gcc)",
         kind: ToolKind::Binary,
@@ -218,6 +225,27 @@ pub const TOOLS: &[ToolDef] = &[
         defaults: &["ajv"],
         env_key: Some("REAPER_AJV"),
     },
+    ToolDef {
+        id: "psql",
+        label: "PostgreSQL (psql)",
+        kind: ToolKind::Binary,
+        defaults: &["psql"],
+        env_key: Some("REAPER_PSQL"),
+    },
+    ToolDef {
+        id: "sqlite3",
+        label: "SQLite (sqlite3)",
+        kind: ToolKind::Binary,
+        defaults: &["sqlite3"],
+        env_key: Some("REAPER_SQLITE3"),
+    },
+    ToolDef {
+        id: "sqlfluff",
+        label: "SQL (sqlfluff)",
+        kind: ToolKind::Binary,
+        defaults: &["sqlfluff"],
+        env_key: Some("REAPER_SQLFLUFF"),
+    },
 ];
 
 pub fn tool_def(id: &str) -> Option<&'static ToolDef> {
@@ -227,6 +255,62 @@ pub fn tool_def(id: &str) -> Option<&'static ToolDef> {
 pub fn set_configured_tools(paths: HashMap<String, PathBuf>) {
     if let Ok(mut guard) = overrides().write() {
         *guard = paths;
+    }
+}
+
+/// Env vars from Settings → Compilers (JAVA_HOME, REAPER_*, PATH prefixes).
+pub fn compiler_env_entries() -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut path_prefixes: Vec<PathBuf> = Vec::new();
+
+    if let Ok(home) = crate::jdk::effective_java_home() {
+        entries.push(("JAVA_HOME".into(), home.to_string_lossy().into_owned()));
+        if let Some(key) = tool_def("java").and_then(|d| d.env_key) {
+            entries.push((key.to_string(), home.to_string_lossy().into_owned()));
+        }
+        let bin = home.join("bin");
+        if bin.is_dir() {
+            path_prefixes.push(bin);
+        }
+    }
+
+    for def in TOOLS {
+        if def.id == "java" {
+            continue;
+        }
+        let Some(path) = configured_path(def.id) else {
+            continue;
+        };
+        if let Some(key) = def.env_key {
+            entries.push((key.to_string(), path.to_string_lossy().into_owned()));
+        }
+        if def.kind == ToolKind::Binary {
+            if let Some(parent) = path.parent() {
+                path_prefixes.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    if !path_prefixes.is_empty() {
+        let current = std::env::var("PATH").unwrap_or_default();
+        let mut merged = path_prefixes;
+        for entry in std::env::split_paths(&current) {
+            if !merged.contains(&entry) {
+                merged.push(entry);
+            }
+        }
+        if let Ok(joined) = std::env::join_paths(merged) {
+            entries.push(("PATH".into(), joined.to_string_lossy().into_owned()));
+        }
+    }
+
+    entries
+}
+
+/// Apply Settings → Compilers to a child process.
+pub fn apply_compiler_env(cmd: &mut Command) {
+    for (key, value) in compiler_env_entries() {
+        cmd.env(key, value);
     }
 }
 

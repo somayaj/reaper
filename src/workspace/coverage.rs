@@ -800,13 +800,87 @@ fn stream_maven_coverage(
             agent.display(),
             dest.display()
         );
-        args.push(format!("-DargLine={agent_arg}"));
+        if let Some(existing) = maven::effective_surefire_arg_line(&root) {
+            let merged = format!("{agent_arg} {existing}");
+            write_maven_coverage_overlay(&root, &merged)?;
+            args.push("-f".into());
+            args.push(".reaper/coverage-pom.xml".into());
+        } else {
+            args.push(format!("-DargLine={agent_arg}"));
+        }
         args.push("test".into());
         args.push(format!(
             "org.jacoco:jacoco-maven-plugin:{JACOCO_MAVEN_VERSION}:report"
         ));
     }
     exec_stream::stream_maven_command(&cmd, &args, tx)
+}
+
+const MAVEN_COVERAGE_OVERLAY: &str = ".reaper/coverage-pom.xml";
+
+fn write_maven_coverage_overlay(project_root: &Path, merged_arg_line: &str) -> Result<()> {
+    let coords = maven::maven_module_coords(project_root)?;
+    let overlay_dir = project_root.join(".reaper");
+    std::fs::create_dir_all(&overlay_dir).with_context(|| {
+        format!("create {}", overlay_dir.display())
+    })?;
+
+    let parent_xml = coords
+        .parent
+        .map(|(group, artifact, version, relative_path)| {
+            format!(
+                r#"  <parent>
+    <groupId>{group}</groupId>
+    <artifactId>{artifact}</artifactId>
+    <version>{version}</version>
+    <relativePath>{relative_path}</relativePath>
+  </parent>
+"#
+            )
+        })
+        .unwrap_or_default();
+
+    let escaped_arg_line = xml_escape(merged_arg_line);
+    let content = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+{parent_xml}  <artifactId>{artifact_id}</artifactId>
+  <build>
+    <directory>../target</directory>
+    <sourceDirectory>../src/main/java</sourceDirectory>
+    <testSourceDirectory>../src/test/java</testSourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration combine.self="override">
+          <argLine>{escaped_arg_line}</argLine>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+        artifact_id = coords.artifact_id,
+    );
+
+    std::fs::write(project_root.join(MAVEN_COVERAGE_OVERLAY), content).with_context(|| {
+        format!(
+            "write {}",
+            project_root.join(MAVEN_COVERAGE_OVERLAY).display()
+        )
+    })
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 pub fn coverage_init_script_path() -> PathBuf {
@@ -974,6 +1048,38 @@ mod tests {
             parse_test_filter_from_task("-Dtest=com.foo.BarTest#testX test", "maven"),
             "com.foo.BarTest#testX"
         );
+    }
+
+    #[test]
+    fn write_maven_coverage_overlay_includes_merged_arg_line() {
+        let root = std::env::temp_dir().join("reaper-coverage-overlay");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            r#"<?xml version="1.0"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>child</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        write_maven_coverage_overlay(
+            &root,
+            "-javaagent:/tmp/jacoco.jar=destfile=/tmp/jacoco.exec -Dnet.bytebuddy.experimental=true",
+        )
+        .unwrap();
+        let overlay = std::fs::read_to_string(root.join(MAVEN_COVERAGE_OVERLAY)).unwrap();
+        assert!(overlay.contains("combine.self=\"override\""));
+        assert!(overlay.contains("-javaagent:/tmp/jacoco.jar=destfile=/tmp/jacoco.exec"));
+        assert!(overlay.contains("-Dnet.bytebuddy.experimental=true"));
+        assert!(overlay.contains("<directory>../target</directory>"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -34,6 +34,15 @@ pub struct ProjectIndexJobs {
     java: Arc<JavaIndexJobs>,
 }
 
+impl Clone for ProjectIndexJobs {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            java: Arc::clone(&self.java),
+        }
+    }
+}
+
 impl ProjectIndexJobs {
     pub fn new(java: Arc<JavaIndexJobs>) -> Self {
         Self {
@@ -61,6 +70,28 @@ impl ProjectIndexJobs {
             self.java.ensure_building(repo, ws);
         }
         self.start(repo, ws, profile, false);
+    }
+
+    /// Start indexing the default repo while the IDE shell is still loading.
+    pub fn prefetch_startup(&self, config: &crate::config::Config, repo: &str) {
+        let repo = repo.trim();
+        if repo.is_empty() {
+            return;
+        }
+        let config = config.clone();
+        let repo = repo.to_string();
+        let jobs = self.clone();
+        std::thread::spawn(move || {
+            if crate::process_registry::is_shutdown_requested() {
+                return;
+            }
+            let Ok(ws) = super::ensure_workspace(&config, &repo) else {
+                tracing::warn!("Startup index prefetch: workspace {repo} unavailable");
+                return;
+            };
+            tracing::info!("Prefetching project index for {repo} during IDE startup");
+            jobs.on_open(&repo, &ws);
+        });
     }
 
     /// Invalidate Maven/Gradle caches and rebuild indexes (build file save, manual reload).
@@ -151,6 +182,9 @@ impl ProjectIndexJobs {
         let java_jobs = Arc::clone(&self.java);
 
         std::thread::spawn(move || {
+            if crate::process_registry::is_shutdown_requested() {
+                return;
+            }
             let mut workspace_symbols = 0usize;
             let mut error: Option<String> = None;
 
@@ -165,16 +199,18 @@ impl ProjectIndexJobs {
 
             if profile_clone.indexers.iter().any(|i| i == "java") {
                 touch_project_phase(&inner, &repo_key, "java-index", workspace_symbols);
-                for _ in 0..600 {
-                    let status = java_jobs.status(&repo_key);
-                    if status.state.is_empty()
-                        || status.state == "ready"
-                        || status.state == "error"
-                        || status.state == "idle"
-                    {
-                        break;
+                if !classpath::java_index_is_lazy() {
+                    for _ in 0..600 {
+                        let status = java_jobs.status(&repo_key);
+                        if status.state.is_empty()
+                            || status.state == "ready"
+                            || status.state == "error"
+                            || status.state == "idle"
+                        {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
 
@@ -182,7 +218,7 @@ impl ProjectIndexJobs {
             let needs_java = profile_clone.indexers.iter().any(|i| i == "java");
             let state = if error.is_some() || java.state == "error" {
                 "error".into()
-            } else if needs_java && java.state == "running" {
+            } else if needs_java && java.state == "running" && !classpath::java_index_is_lazy() {
                 "running".into()
             } else if java.state == "ready" || workspace_symbols > 0 {
                 "ready".into()
@@ -225,9 +261,14 @@ impl ProjectIndexJobs {
         let needs_symbols = profile.indexers.iter().any(|i| i == "workspace-symbols");
 
         let java_ok = !needs_java || {
-            classpath::peek_index_status(ws)
-                .map(|p| p.indexed && p.symbol_count > 0)
-                .unwrap_or(false)
+            if classpath::java_index_is_lazy() {
+                let java = self.java.status(repo);
+                java.state == "ready" || java.phase == "on-demand"
+            } else {
+                classpath::peek_index_status(ws)
+                    .map(|p| p.indexed && p.symbol_count > 0)
+                    .unwrap_or(false)
+            }
         };
         let symbols_ok =
             !needs_symbols || super::symbols::workspace_symbol_cache_count(ws) > 0;
@@ -241,7 +282,8 @@ impl ProjectIndexJobs {
             entry.profile = profile.clone();
             let java = self.java.status(repo);
             let java_running = java.state == "running";
-            let java_ready = java.state == "ready" && java.symbol_count > 0;
+            let java_ready = java.state == "ready"
+                && (java.symbol_count > 0 || classpath::java_index_is_lazy());
             entry.status = ProjectIndexStatus {
                 state: if java_running {
                     "running".into()

@@ -90,6 +90,20 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
     })
 }
 
+pub fn is_c_like_path(path: &str) -> bool {
+    matches!(
+        language_for_path(path),
+        Some("c") | Some("cpp")
+    )
+}
+
+pub fn c_language_id(path: &str) -> &'static str {
+    match language_for_path(path) {
+        Some("cpp") => "cpp",
+        _ => "c",
+    }
+}
+
 pub fn is_source_extension(ext: &str) -> bool {
     SOURCE_EXTENSIONS.contains(&ext)
 }
@@ -208,6 +222,9 @@ pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
             ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json", ".css", ".scss", ".less",
             ".md", ".html", ".xml", ".yml", ".yaml",
         ],
+        "psql" => &[".sql"],
+        "sqlite3" => &[".sql"],
+        "sqlfluff" => &[".sql"],
         _ => &[],
     }
 }
@@ -243,13 +260,14 @@ pub fn compiler_tool_ids_for_path(path: &str) -> Vec<&'static str> {
         Some("php") => vec!["php"],
         Some("csharp") => vec!["csc"],
         Some("swift") => vec!["swiftc"],
-        Some("c") | Some("cpp") => vec!["clang", "gcc"],
+        Some("c") | Some("cpp") => vec!["clangd", "clang", "gcc"],
         Some("shell") => vec!["bash"],
         Some("lua") => vec!["luac"],
         Some("dart") => vec!["dart"],
         Some("json") | Some("jsonc") => vec!["jsonlint"],
         // YAML: yamllint (+ optional actionlint/kubeconform by content).
         Some("yaml") => vec!["yamllint"],
+        Some("sql") => vec!["psql", "sqlite3", "sqlfluff"],
         _ => Vec::new(),
     }
 }

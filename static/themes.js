@@ -88,7 +88,9 @@
         { token: 'identifier', foreground: 'A9B7C6' },
         { token: 'delimiter', foreground: 'A9B7C6' },
         { token: 'operator', foreground: 'A9B7C6' },
-        { token: 'annotation', foreground: 'BBB529' },
+        { token: 'variable', foreground: '9876AA' },
+        { token: 'variable.name', foreground: '9876AA' },
+        { token: 'metatag', foreground: '6A8759' },
       ],
       colors: {
         'editor.background': '#2B2B2B',
@@ -121,6 +123,8 @@
         { token: 'identifier', foreground: 'FFFFFF' },
         { token: 'delimiter', foreground: 'D4D4D4' },
         { token: 'operator', foreground: 'FF00FF' },
+        { token: 'variable', foreground: '9876AA' },
+        { token: 'variable.name', foreground: '9876AA' },
         { token: 'annotation', foreground: '39FF14' },
       ],
       colors: {
@@ -154,6 +158,8 @@
         { token: 'identifier', foreground: 'F8FAFC' },
         { token: 'delimiter', foreground: 'CBD5E1' },
         { token: 'operator', foreground: 'E879F9' },
+        { token: 'variable', foreground: 'A78BFA' },
+        { token: 'variable.name', foreground: 'A78BFA' },
         { token: 'annotation', foreground: '4ADE80' },
       ],
       colors: {
@@ -187,6 +193,8 @@
         { token: 'identifier', foreground: '334155' },
         { token: 'delimiter', foreground: '475569' },
         { token: 'operator', foreground: '2563EB' },
+        { token: 'variable', foreground: '7C3AED' },
+        { token: 'variable.name', foreground: '7C3AED' },
         { token: 'annotation', foreground: 'DC2626' },
       ],
       colors: {
@@ -220,6 +228,8 @@
         { token: 'identifier', foreground: '334155' },
         { token: 'delimiter', foreground: '64748B' },
         { token: 'operator', foreground: '475569' },
+        { token: 'variable', foreground: '7C3AED' },
+        { token: 'variable.name', foreground: '7C3AED' },
         { token: 'annotation', foreground: 'DC2626' },
       ],
       colors: {

@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,100 @@ use super::gradle::{find_gradle_root, resolve_gradle_command, run_gradle_with_co
 use super::java_psi::{self, ImportMap};
 use super::symbols::{ClassSearchHit, SymbolLocation, class_name_match_score};
 
+const PEEK_INDEX_CACHE_TTL: Duration = Duration::from_secs(10);
+const NEEDS_REFRESH_CACHE_TTL: Duration = Duration::from_secs(15);
+
+static PEEK_INDEX_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, WarmIndexStatus)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEEDS_REFRESH_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, bool)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn workspace_cache_key(ws: &Path) -> PathBuf {
+    ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf())
+}
+
+pub fn invalidate_workspace_index_caches(ws: &Path) {
+    let key = workspace_cache_key(ws);
+    super::gradle::invalidate_gradle_roots_cache(ws);
+    super::maven::invalidate_maven_roots_cache(ws);
+    if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
+        guard.remove(&key);
+    }
+    if let Ok(mut guard) = NEEDS_REFRESH_CACHE.lock() {
+        guard.remove(&key);
+    }
+}
 const INDEX_PATH: &str = "java-index.json";
 /// Bump when index shape/rules change so stale caches rebuild once.
-const INDEX_VERSION: u32 = 11;
+const INDEX_VERSION: u32 = 12;
+
+/// Priority JARs indexed synchronously at startup (standard profile).
+const STARTUP_JAR_LIMIT_STANDARD: usize = 2000;
+/// Fewer JARs for light profile; no background continuation.
+const STARTUP_JAR_LIMIT_LIGHT: usize = 400;
+const BACKGROUND_JAR_SLEEP_MS: u64 = 250;
+const FOREGROUND_JAR_YIELD_EVERY: usize = 8;
+const FOREGROUND_JAR_SLEEP_MS: u64 = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaIndexProfile {
+    Standard,
+    Light,
+    Lazy,
+}
+
+impl JavaIndexProfile {
+    fn current() -> Self {
+        if std::env::var("REAPER_JAVA_INDEX_LIGHT").ok().as_deref() == Some("1") {
+            return Self::Light;
+        }
+        if std::env::var("REAPER_JAVA_INDEX_LAZY").ok().as_deref() == Some("1") {
+            return Self::Lazy;
+        }
+        #[derive(Deserialize, Default)]
+        struct SettingsSnippet {
+            #[serde(default)]
+            java_index_mode: Option<String>,
+        }
+        let path = crate::config::Config::resolve_data_dir().join("settings.json");
+        let mode = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<SettingsSnippet>(&text).ok())
+            .and_then(|s| s.java_index_mode);
+        match mode.as_deref() {
+            Some("light") => Self::Light,
+            Some("lazy") => Self::Lazy,
+            _ => Self::Standard,
+        }
+    }
+
+    fn startup_jar_limit(self) -> usize {
+        match self {
+            Self::Standard => STARTUP_JAR_LIMIT_STANDARD,
+            Self::Light | Self::Lazy => STARTUP_JAR_LIMIT_LIGHT,
+        }
+    }
+
+    fn background_enabled(self) -> bool {
+        matches!(self, Self::Standard | Self::Lazy)
+    }
+
+    fn index_all_modules_on_startup(self) -> bool {
+        !matches!(self, Self::Lazy)
+    }
+}
+
+/// True when Java indexes load per module as files are opened.
+pub fn java_index_is_lazy() -> bool {
+    JavaIndexProfile::current() == JavaIndexProfile::Lazy
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct JarIndexOptions {
+    skip_jars: usize,
+    max_jars: Option<usize>,
+    throttle: bool,
+}
 
 /// JDK module directories inside extracted `src.zip` (Java 9+ layout).
 const JDK_SOURCE_MODULES: &[&str] = &[
@@ -316,6 +407,57 @@ fn cached_gradle_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
     Ok(root)
 }
 
+/// Maven/Gradle/plain-Java module root for a workspace-relative path.
+pub fn index_root_for_path(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
+    cached_gradle_root(ws, from_path)
+}
+
+fn merge_warm_status(combined: &mut WarmIndexStatus, index: &JavaIndex, meta: &IndexMeta, cached: bool) {
+    combined.indexed = true;
+    combined.project_root = Some(index.project_root.clone());
+    combined.symbol_count += index.symbols.len();
+    combined.cached = combined.cached && cached;
+    combined.dependency_jars += meta.dependency_jars;
+    combined.source_jars += meta.source_jars;
+    combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
+    combined.spring_symbols += meta.spring_symbols;
+    combined.jdk_symbols += meta.jdk_symbols;
+    combined.jars_indexed += meta.jars_indexed;
+    combined.jars_total += meta.jars_total;
+    combined.index_complete = combined.index_complete && meta.index_complete;
+}
+
+/// Index one module (Maven/Gradle root) — used for on-demand lazy loading.
+pub fn warm_single_root_index(
+    ws: &Path,
+    root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+) -> Result<WarmIndexStatus> {
+    if crate::process_registry::is_shutdown_requested() {
+        bail!("Reaper is shutting down");
+    }
+    let cached = is_index_cached(ws, root)?;
+    let index = if cached {
+        load_index(ws, root)?
+    } else {
+        build_index(ws, root, progress)?
+    };
+    let meta = index_meta(root);
+    let mut status = empty_warm_status();
+    merge_warm_status(&mut status, &index, &meta, cached);
+    Ok(status)
+}
+
+/// Continue staged JAR indexing for one module root.
+pub fn continue_background_index_root_pub(
+    ws: &Path,
+    root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    continue_background_index_root(ws, root, progress, jar_progress)
+}
+
 fn definition_cache_key(
     gradle_root: &Path,
     from_path: &str,
@@ -458,6 +600,18 @@ pub struct WarmIndexStatus {
     pub jdk_sources: bool,
     pub spring_symbols: usize,
     pub jdk_symbols: usize,
+    /// JARs indexed so far (staged indexing).
+    #[serde(default)]
+    pub jars_indexed: usize,
+    #[serde(default)]
+    pub jars_total: usize,
+    /// False while background JAR indexing is still running.
+    #[serde(default = "default_index_complete")]
+    pub index_complete: bool,
+}
+
+fn default_index_complete() -> bool {
+    true
 }
 
 pub fn is_gradle_workspace(ws: &Path) -> bool {
@@ -553,6 +707,7 @@ fn report_index_progress(progress: IndexProgress, phase: &str, count: usize) {
 
 /// Drop cached Java indexes so the next warm_index rebuilds (e.g. after branch checkout).
 pub fn invalidate_caches(ws: &Path) -> Result<()> {
+    invalidate_workspace_index_caches(ws);
     for root in find_all_index_roots(ws)? {
         invalidate_lookup_cache(&root);
         let reaper = reaper_dir(&root);
@@ -924,8 +1079,15 @@ pub fn resolve_classpaths_for_index(
     ws: &Path,
     progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
 ) -> Result<()> {
+    if !JavaIndexProfile::current().index_all_modules_on_startup() {
+        let _ = ws;
+        return Ok(());
+    }
     let roots = project_roots(ws)?;
     for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            bail!("Reaper is shutting down");
+        }
         if !is_build_tool_project_root(&root) {
             continue;
         }
@@ -1582,6 +1744,9 @@ pub fn warm_index_with_progress(
     ws: &Path,
     progress: Option<Box<dyn Fn(&str, usize) + Send>>,
 ) -> Result<WarmIndexStatus> {
+    if !JavaIndexProfile::current().index_all_modules_on_startup() {
+        return compute_peek_index_status(ws);
+    }
     let roots = find_all_index_roots(ws)?;
     if roots.is_empty() {
         return Ok(empty_warm_status());
@@ -1597,9 +1762,15 @@ pub fn warm_index_with_progress(
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     };
 
     for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            bail!("Reaper is shutting down");
+        }
         let cached = is_index_cached(ws, &root)?;
         let index = if cached {
             load_index(ws, &root)?
@@ -1616,6 +1787,9 @@ pub fn warm_index_with_progress(
         combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
         combined.spring_symbols += meta.spring_symbols;
         combined.jdk_symbols += meta.jdk_symbols;
+        combined.jars_indexed += meta.jars_indexed;
+        combined.jars_total += meta.jars_total;
+        combined.index_complete = combined.index_complete && meta.index_complete;
     }
 
     Ok(combined)
@@ -1623,6 +1797,25 @@ pub fn warm_index_with_progress(
 
 /// Read index status from disk without building (for UI polling).
 pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
+    let key = workspace_cache_key(ws);
+    if let Ok(guard) = PEEK_INDEX_CACHE.lock() {
+        if let Some((at, status)) = guard.get(&key) {
+            if at.elapsed() < PEEK_INDEX_CACHE_TTL {
+                return Ok(status.clone());
+            }
+        }
+    }
+
+    let status = compute_peek_index_status(ws)?;
+    if status.index_complete && status.symbol_count > 0 {
+        if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
+            guard.insert(key, (Instant::now(), status.clone()));
+        }
+    }
+    Ok(status)
+}
+
+fn compute_peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
     let roots = find_all_index_roots(ws)?;
     if roots.is_empty() {
         return Ok(empty_warm_status());
@@ -1638,6 +1831,9 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     };
 
     for root in roots {
@@ -1653,6 +1849,9 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
             combined.jdk_sources = combined.jdk_sources || meta.jdk_sources;
             combined.spring_symbols += meta.spring_symbols;
             combined.jdk_symbols += meta.jdk_symbols;
+            combined.jars_indexed += meta.jars_indexed;
+            combined.jars_total += meta.jars_total;
+            combined.index_complete = combined.index_complete && meta.index_complete;
         }
     }
 
@@ -1662,7 +1861,27 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
 /// True when a cached Java index should be fully rebuilt (missing types, empty deps, etc.).
 /// Pending Gradle/Maven tooling alone does not require a rebuild — see `tooling_classpath_pending`.
 pub fn java_index_needs_refresh(ws: &Path) -> bool {
+    let key = workspace_cache_key(ws);
+    if let Ok(guard) = NEEDS_REFRESH_CACHE.lock() {
+        if let Some((at, needs)) = guard.get(&key) {
+            if at.elapsed() < NEEDS_REFRESH_CACHE_TTL {
+                return *needs;
+            }
+        }
+    }
+
+    let needs = compute_java_index_needs_refresh(ws);
+    if let Ok(mut guard) = NEEDS_REFRESH_CACHE.lock() {
+        guard.insert(key, (Instant::now(), needs));
+    }
+    needs
+}
+
+fn compute_java_index_needs_refresh(ws: &Path) -> bool {
     let Ok(roots) = find_all_index_roots(ws) else {
+        return false;
+    };
+    let Ok(peek) = peek_index_status(ws) else {
         return false;
     };
     for root in roots {
@@ -1674,11 +1893,9 @@ pub fn java_index_needs_refresh(ws: &Path) -> bool {
         {
             return true;
         }
-        if let Ok(peek) = peek_index_status(ws) {
-            let markers = super::java_ecosystem::project_build_markers(&root);
-            if markers.spring && peek.indexed && peek.dependency_jars == 0 {
-                return true;
-            }
+        let markers = super::java_ecosystem::project_build_markers(&root);
+        if markers.spring && peek.indexed && peek.dependency_jars == 0 {
+            return true;
         }
     }
     false
@@ -1793,7 +2010,154 @@ fn empty_warm_status() -> WarmIndexStatus {
         jdk_sources: false,
         spring_symbols: 0,
         jdk_symbols: 0,
+        jars_indexed: 0,
+        jars_total: 0,
+        index_complete: true,
     }
+}
+
+/// Continue staged JAR indexing for roots that saved a partial index.
+pub fn continue_background_index(
+    ws: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    let roots = find_all_index_roots(ws)?;
+    for root in roots {
+        if crate::process_registry::is_shutdown_requested() {
+            break;
+        }
+        continue_background_index_root(ws, &root, progress, jar_progress)?;
+    }
+    Ok(())
+}
+
+pub fn background_index_pending(ws: &Path) -> bool {
+    find_all_index_roots(ws)
+        .ok()
+        .is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|root| index_meta(root).index_version >= INDEX_VERSION && !index_meta(root).index_complete)
+        })
+}
+
+fn continue_background_index_root(
+    ws: &Path,
+    gradle_root: &Path,
+    progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    jar_progress: Option<&Box<dyn Fn(usize, usize) + Send>>,
+) -> Result<()> {
+    let meta = index_meta(gradle_root);
+    if meta.index_complete || meta.index_version < INDEX_VERSION {
+        return Ok(());
+    }
+    if !JavaIndexProfile::current().background_enabled() {
+        return Ok(());
+    }
+
+    let Some(mut index) = try_load_index(ws, gradle_root)? else {
+        return Ok(());
+    };
+
+    let jars = cached_classpath_jars(gradle_root);
+    if jars.is_empty() {
+        return Ok(());
+    }
+
+    let jar_refs = prioritize_jars_for_fallback(&jars);
+    let jars_total = jar_refs.len();
+    if meta.jars_indexed >= jars_total {
+        write_index_meta(
+            gradle_root,
+            &IndexMeta {
+                index_complete: true,
+                ..meta
+            },
+        )?;
+        return Ok(());
+    }
+
+    if let Some(cb) = progress {
+        cb("jar-index-background", index.symbols.len());
+    }
+    if let Some(cb) = jar_progress {
+        cb(meta.jars_indexed, jars_total);
+    }
+
+    let jar_cb = |done: usize, total: usize| {
+        if let Some(cb) = jar_progress {
+            cb(done, total);
+        }
+    };
+    let jars_done = index_jar_classpath_fallback(
+        ws,
+        gradle_root,
+        &jars,
+        &[],
+        &mut index.symbols,
+        progress,
+        JarIndexOptions {
+            skip_jars: meta.jars_indexed,
+            max_jars: None,
+            throttle: true,
+        },
+        Some(&jar_cb),
+    )?;
+
+    index.symbols.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+
+    let spring_symbols = index
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("org.springframework.")
+                || s.path.contains("/org/springframework/")
+        })
+        .count();
+    let jdk_symbols = index
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.qualified.starts_with("java.") || s.path.contains(".reaper/java-sources/jdk/")
+        })
+        .count();
+
+    std::fs::write(
+        reaper_dir(gradle_root).join("java-index.json"),
+        serde_json::to_string(&index)?,
+    )?;
+
+    let jars_done = jars_done.min(jars_total);
+    write_index_meta(
+        gradle_root,
+        &IndexMeta {
+            spring_symbols,
+            jdk_symbols,
+            jars_indexed: jars_done,
+            jars_total,
+            index_complete: jars_done >= jars_total,
+            ..meta
+        },
+    )?;
+
+    invalidate_lookup_cache(gradle_root);
+
+    if let Some(cb) = progress {
+        cb(
+            if jars_done >= jars_total {
+                "ready"
+            } else {
+                "jar-index-background"
+            },
+            index.symbols.len(),
+        );
+    }
+    if let Some(cb) = jar_progress {
+        cb(jars_done, jars_total);
+    }
+
+    Ok(())
 }
 
 pub fn find_external_definition(
@@ -2750,6 +3114,12 @@ struct IndexMeta {
     jdk_symbols: usize,
     #[serde(default)]
     index_version: u32,
+    #[serde(default)]
+    jars_indexed: usize,
+    #[serde(default)]
+    jars_total: usize,
+    #[serde(default = "default_index_complete")]
+    index_complete: bool,
 }
 
 const META_PATH: &str = "java-index-meta.json";
@@ -2840,16 +3210,45 @@ fn build_index(
                 || s.path.contains("/org/springframework/")
         })
         .count();
+    let mut jars_indexed = 0usize;
+    let mut jars_total = 0usize;
+    let mut index_complete = true;
     if !classpath.jars.is_empty() {
         report(progress, "jar-index", symbols.len());
-        index_jar_classpath_fallback(
+        let profile = JavaIndexProfile::current();
+        let jar_refs = prioritize_jars_for_fallback(&classpath.jars);
+        jars_total = jar_refs.len();
+        let startup_limit = profile.startup_jar_limit();
+        let staged = profile.background_enabled() && jars_total > startup_limit;
+        let jar_options = if jars_total > startup_limit {
+            JarIndexOptions {
+                skip_jars: 0,
+                max_jars: Some(startup_limit),
+                throttle: jars_total > 600,
+            }
+        } else {
+            JarIndexOptions {
+                throttle: jars_total > 600,
+                ..Default::default()
+            }
+        };
+        jars_indexed = index_jar_classpath_fallback(
             ws,
             gradle_root,
             &classpath.jars,
             &source_dirs,
             &mut symbols,
             progress,
+            jar_options,
+            None,
         )?;
+        index_complete = !staged || jars_indexed >= jars_total;
+        if staged {
+            tracing::info!(
+                "Staged Java index for {}: {jars_indexed}/{jars_total} priority JARs — remainder in background",
+                gradle_root.display()
+            );
+        }
     } else {
         tracing::info!(
             "Skipping JAR classpath fallback for {} ({} symbols, {} Spring from sources, no JARs)",
@@ -2921,6 +3320,9 @@ fn build_index(
             spring_symbols,
             jdk_symbols,
             index_version: INDEX_VERSION,
+            jars_indexed,
+            jars_total,
+            index_complete,
         },
     )?;
 
@@ -3221,8 +3623,6 @@ fn try_resolve_classpath_via_tooling_inner(
     }
 }
 
-const MAX_OFFLINE_CLASSPATH_JARS: usize = 800;
-
 const SPRING_CACHE_GROUPS: &[&str] = &[
     "org.springframework",
     "org.springframework.boot",
@@ -3413,10 +3813,8 @@ fn resolve_classpath_from_m2(maven_root: &Path) -> GradleClasspath {
 }
 
 fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool) -> GradleClasspath {
-    let jar_list: Vec<PathBuf> = super::maven::collect_transitive_jar_paths(maven_root, include_test_scope)
-        .into_iter()
-        .take(MAX_OFFLINE_CLASSPATH_JARS)
-        .collect();
+    let jar_list: Vec<PathBuf> =
+        super::maven::collect_transitive_jar_paths(maven_root, include_test_scope);
 
     if !jar_list.is_empty() {
         return GradleClasspath {
@@ -3435,28 +3833,18 @@ fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool)
         if let Some(jar) = super::maven::find_m2_jar(&group, &artifact, &version) {
             jars.insert(jar);
         }
-        if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-            break;
-        }
     }
 
     if super::maven::is_spring_boot_project(maven_root) {
         let files_root = super::maven::m2_home();
         for group in SPRING_CACHE_GROUPS {
-            let remaining = MAX_OFFLINE_CLASSPATH_JARS.saturating_sub(jars.len());
-            if remaining == 0 {
-                break;
-            }
-            for jar in list_jars_in_m2_group(&files_root, group, remaining) {
+            for jar in list_jars_in_m2_group(&files_root, group) {
                 jars.insert(jar);
-                if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                    break;
-                }
             }
         }
     }
 
-    let jar_list: Vec<PathBuf> = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
+    let jar_list: Vec<PathBuf> = jars.into_iter().collect();
     GradleClasspath {
         jars: jar_list.clone(),
         source_jars: discover_source_jars_for_jars(&jar_list),
@@ -3465,18 +3853,18 @@ fn resolve_classpath_from_m2_scoped(maven_root: &Path, include_test_scope: bool)
     }
 }
 
-fn list_jars_in_m2_group(m2_root: &Path, group: &str, limit: usize) -> Vec<PathBuf> {
+fn list_jars_in_m2_group(m2_root: &Path, group: &str) -> Vec<PathBuf> {
     let group_dir = m2_root.join(group.replace('.', "/"));
     if !group_dir.is_dir() {
         return Vec::new();
     }
     let mut jars = Vec::new();
-    collect_m2_jars_under(&group_dir, limit, &mut jars);
+    collect_m2_jars_under(&group_dir, &mut jars);
     jars
 }
 
-fn collect_m2_jars_under(dir: &Path, limit: usize, out: &mut Vec<PathBuf>) {
-    if out.len() >= limit || !dir.is_dir() {
+fn collect_m2_jars_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -3490,16 +3878,10 @@ fn collect_m2_jars_under(dir: &Path, limit: usize, out: &mut Vec<PathBuf>) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !name.contains("-sources") && !name.contains("-javadoc") {
                     out.push(path);
-                    if out.len() >= limit {
-                        return;
-                    }
                 }
             }
         } else if path.is_dir() {
-            collect_m2_jars_under(&path, limit, out);
-            if out.len() >= limit {
-                return;
-            }
+            collect_m2_jars_under(&path, out);
         }
     }
 }
@@ -3571,13 +3953,8 @@ fn resolve_classpath_from_gradle_cache_scoped(
             {
                 jars.insert(jar);
             }
-            if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                break;
-            }
         }
-        jar_list = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
-    } else {
-        jar_list.truncate(MAX_OFFLINE_CLASSPATH_JARS);
+        jar_list = jars.into_iter().collect();
     }
 
     if jar_list.is_empty()
@@ -3586,18 +3963,11 @@ fn resolve_classpath_from_gradle_cache_scoped(
     {
         let mut jars = HashSet::new();
         for group in SPRING_CACHE_GROUPS {
-            let remaining = MAX_OFFLINE_CLASSPATH_JARS.saturating_sub(jars.len());
-            if remaining == 0 {
-                break;
-            }
-            for jar in list_jars_in_cache_group(&files_root, group, remaining) {
+            for jar in list_jars_in_cache_group(&files_root, group) {
                 jars.insert(jar);
-                if jars.len() >= MAX_OFFLINE_CLASSPATH_JARS {
-                    break;
-                }
             }
         }
-        jar_list = jars.into_iter().take(MAX_OFFLINE_CLASSPATH_JARS).collect();
+        jar_list = jars.into_iter().collect();
     }
 
     if jar_list.is_empty() {
@@ -3649,20 +4019,17 @@ fn discover_source_jars_for_jars(jars: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-fn list_jars_in_cache_group(files_root: &Path, group: &str, max: usize) -> Vec<PathBuf> {
+fn list_jars_in_cache_group(files_root: &Path, group: &str) -> Vec<PathBuf> {
     let group_dir = files_root.join(group);
-    if !group_dir.is_dir() || max == 0 {
+    if !group_dir.is_dir() {
         return Vec::new();
     }
     let mut jars = Vec::new();
-    collect_jars_under(&group_dir, &mut jars, max);
+    collect_jars_under(&group_dir, &mut jars);
     jars
 }
 
-fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>, max: usize) {
-    if out.len() >= max {
-        return;
-    }
+fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -3674,16 +4041,10 @@ fn collect_jars_under(dir: &Path, out: &mut Vec<PathBuf>, max: usize) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !name.ends_with("-sources.jar") {
                     out.push(path);
-                    if out.len() >= max {
-                        return;
-                    }
                 }
             }
         } else if path.is_dir() {
-            collect_jars_under(&path, out, max);
-            if out.len() >= max {
-                return;
-            }
+            collect_jars_under(&path, out);
         }
     }
 }
@@ -4807,19 +5168,47 @@ fn index_jar_classpath_fallback(
     source_dirs: &[PathBuf],
     symbols: &mut Vec<IndexedSymbol>,
     progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
-) -> Result<()> {
+    options: JarIndexOptions,
+    on_jar_done: Option<&dyn Fn(usize, usize)>,
+) -> Result<usize> {
     let _ = (ws, gradle_root, source_dirs);
     let base_symbols = symbols.len();
     let mut known: HashSet<String> = symbols.iter().map(|s| s.qualified.clone()).collect();
     let jar_refs = prioritize_jars_for_fallback(jars);
     let jar_total = jar_refs.len().max(1);
     let mut added = 0usize;
+    let mut processed = 0usize;
+    let progress_phase = if options.throttle {
+        "jar-index-background"
+    } else {
+        "jar-index"
+    };
 
     for (jar_idx, jar) in jar_refs.iter().enumerate() {
+        if crate::process_registry::is_shutdown_requested() {
+            break;
+        }
+        if jar_idx < options.skip_jars {
+            continue;
+        }
+        if let Some(max) = options.max_jars {
+            if processed >= max {
+                break;
+            }
+        }
         if let Some(cb) = progress {
-            report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
+            if options.throttle {
+                cb(progress_phase, symbols.len());
+            } else {
+                report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
+            }
         }
         if !jar.is_file() {
+            processed += 1;
+            let jars_done = jar_idx + 1;
+            if let Some(cb) = on_jar_done {
+                cb(jars_done.min(jar_total), jar_total);
+            }
             continue;
         }
         let entries = list_jar_class_entries(jar)?;
@@ -4832,7 +5221,7 @@ fn index_jar_classpath_fallback(
                 .unwrap_or("classpath.jar")
         );
         for (entry_idx, (fqcn, kind)) in entries.into_iter().enumerate() {
-            if entry_idx >= JAR_INDEX_MAX_ENTRIES_PER_JAR {
+            if crate::process_registry::is_shutdown_requested() {
                 break;
             }
             if known.contains(&fqcn) || !should_index_jar_entry(&fqcn, &kind) {
@@ -4851,21 +5240,39 @@ fn index_jar_classpath_fallback(
             added += 1;
 
             if let Some(cb) = progress {
-                if added % JAR_INDEX_PROGRESS_INTERVAL == 0 || entry_idx + 1 == entry_count {
+                if options.throttle {
+                    if added % JAR_INDEX_PROGRESS_INTERVAL == 0 {
+                        cb(progress_phase, symbols.len());
+                    }
+                } else if added % JAR_INDEX_PROGRESS_INTERVAL == 0 || entry_idx + 1 == entry_count {
                     report_jar_index_progress(cb, base_symbols, jar_idx, jar_total);
                 }
             }
         }
 
+        processed += 1;
+        let jars_done = jar_idx + 1;
+        if let Some(cb) = on_jar_done {
+            cb(jars_done.min(jar_total), jar_total);
+        }
         if let Some(cb) = progress {
-            report_jar_index_progress(cb, base_symbols, jar_idx + 1, jar_total);
+            if options.throttle {
+                cb(progress_phase, symbols.len());
+            } else {
+                report_jar_index_progress(cb, base_symbols, jar_idx + 1, jar_total);
+            }
+        }
+        if options.throttle {
+            std::thread::sleep(std::time::Duration::from_millis(BACKGROUND_JAR_SLEEP_MS));
+        } else if processed % FOREGROUND_JAR_YIELD_EVERY == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(FOREGROUND_JAR_SLEEP_MS));
         }
     }
 
     if added > 0 {
         tracing::info!("Indexed {added} additional Java symbols from classpath JAR fallback");
     }
-    Ok(())
+    Ok(options.skip_jars + processed)
 }
 
 fn index_classes_dirs_fallback(
@@ -4934,7 +5341,7 @@ fn collect_dir_class_entries(
     out: &mut Vec<(String, String)>,
     depth: usize,
 ) -> Result<()> {
-    if depth > 24 || out.len() >= JAR_INDEX_MAX_ENTRIES_PER_JAR {
+    if depth > 24 {
         return Ok(());
     }
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -5021,7 +5428,6 @@ pub fn project_java_sourcepath(
     sourcepath
 }
 
-const JAR_INDEX_MAX_ENTRIES_PER_JAR: usize = 4000;
 const JAR_INDEX_PROGRESS_INTERVAL: usize = 128;
 
 fn report_jar_index_progress(

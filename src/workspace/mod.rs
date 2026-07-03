@@ -5,7 +5,11 @@ pub mod exec_stream;
 mod ruby_nav;
 mod shell;
 mod solargraph;
+mod clangd;
 pub mod terminal;
+mod build_tasks;
+mod native_build_tasks;
+mod package_manifest;
 mod classpath;
 pub use classpath::CompletionItem;
 mod gradle;
@@ -25,6 +29,7 @@ mod project_jobs;
 mod project_profile;
 mod quick_fix;
 mod coverage;
+mod db_viewer;
 mod run_project;
 mod spring_props;
 mod symbols;
@@ -762,13 +767,27 @@ pub fn run_project_info(ws: &Path, rel_path: &str) -> Result<run_project::RunPro
     run_project::run_project_info(ws, rel_path)
 }
 
+pub fn build_tasks_tree(
+    ws: &Path,
+    rel_path: &str,
+    compose_content: Option<&str>,
+) -> Result<build_tasks::BuildTasksTree> {
+    build_tasks::build_tasks_tree(ws, rel_path, compose_content)
+}
+
+pub fn package_manifest_view(ws: &Path, rel_path: &str) -> Result<package_manifest::PackageManifestView> {
+    package_manifest::package_manifest_view(ws, rel_path)
+}
+
 pub fn run_context(
     ws: &Path,
     rel_path: &str,
     content: Option<&str>,
     line: u32,
+    database_url: Option<&str>,
+    db_ssl: Option<&metadata::DbSslSettings>,
 ) -> Result<run_project::RunContext> {
-    run_project::run_context(ws, rel_path, content, line)
+    run_project::run_context(ws, rel_path, content, line, database_url, db_ssl)
 }
 
 pub use run_project::{AiRunTargetHint, JavaRunTarget, RunContext, RunProjectInfo};
@@ -808,6 +827,39 @@ pub fn coverage_report_summary(
 ) -> Result<coverage::CoverageReportSummary> {
     coverage::coverage_report_summary(ws, rel_path)
 }
+
+pub fn db_connection_view(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+) -> db_viewer::DbConnectionView {
+    db_viewer::connection_view(ws, database_url, ssl)
+}
+
+pub fn effective_database_url(ws: &Path, stored: Option<&str>) -> Option<String> {
+    db_viewer::effective_database_url(ws, stored)
+}
+
+pub fn db_schema(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+) -> db_viewer::DbSchemaResponse {
+    db_viewer::fetch_schema(ws, database_url, ssl)
+}
+
+pub fn db_query(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&metadata::DbSslSettings>,
+    sql: &str,
+    limit: u32,
+) -> db_viewer::DbQueryResult {
+    db_viewer::run_query(ws, database_url, ssl, sql, limit)
+}
+
+pub use db_viewer::{DbConnectionRequest, DbQueryRequest, DbQueryResult, DbSchemaResponse};
+pub use metadata::DbSslSettings;
 
 pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     let path = safe_join(ws, rel_path)?;
@@ -878,6 +930,19 @@ pub fn stream_workspace_java_main(
 ) -> Result<i32> {
     let rel_path = normalize_workspace_source_path(rel_path);
     exec_stream::stream_java_main(ws, &rel_path, tx)
+}
+
+pub fn stream_workspace_sql_file(
+    ws: &Path,
+    rel_path: &str,
+    content: Option<&str>,
+    database_url: Option<&str>,
+    db_ssl: Option<&metadata::DbSslSettings>,
+    tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
+) -> Result<i32> {
+    let rel_path = normalize_workspace_source_path(rel_path);
+    let command = db_viewer::prepare_sql_run_command(ws, &rel_path, content, database_url, db_ssl)?;
+    exec_stream::stream_shell(ws, None, &command, tx)
 }
 
 pub fn java_file_context(
@@ -1065,6 +1130,12 @@ pub fn find_symbol_hover_with_content(
         None => read_file(ws, from_path)?,
     };
 
+    if languages::is_c_like_path(from_path) {
+        if let Some(info) = clangd::find_hover(ws, from_path, line, column, &content)? {
+            return Ok(Some(info));
+        }
+    }
+
     if classpath::is_java_like(from_path) {
         let items = java_completions(ws, from_path, line, column, "", Some(&content), &[])?;
         if let Some(item) = items.into_iter().find(|i| i.label == symbol) {
@@ -1165,6 +1236,13 @@ pub fn find_hover_with_content(
         Some(c) => c.to_string(),
         None => read_file(ws, from_path)?,
     };
+
+    if languages::is_c_like_path(from_path) {
+        if let Some(info) = clangd::find_hover(ws, from_path, line, column, &content)? {
+            return Ok(Some(info));
+        }
+    }
+
     let hit = find_definition_with_content(ws, from_path, line, column, Some(&content))?;
     let Some(hit) = hit else {
         return Ok(None);
@@ -1198,6 +1276,11 @@ pub fn find_definition_with_content(
             return Ok(Some(hit));
         }
         if let Some(hit) = ruby_nav::find_definition(ws, line, column, &content)? {
+            return Ok(Some(hit));
+        }
+    }
+    if languages::is_c_like_path(from_path) {
+        if let Some(hit) = clangd::find_definition(ws, from_path, line, column, &content)? {
             return Ok(Some(hit));
         }
     }
@@ -1320,4 +1403,27 @@ pub fn should_prefer_ai_statement_inline(
     line: u32,
 ) -> bool {
     inline_context::should_prefer_ai_statement_inline(path, line_prefix, content, line)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_file_accepts_absolute_paths_outside_workspace() {
+        let ws = std::env::temp_dir().join(format!("reaper-abs-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let external = std::env::temp_dir().join(format!("reaper-ext-header-{}.h", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&external).unwrap();
+            writeln!(f, "int printf(const char*, ...);").unwrap();
+        }
+        let abs = external.to_string_lossy().into_owned();
+        let content = read_file(&ws, &abs).expect("read absolute path");
+        assert!(content.contains("printf"));
+        let _ = std::fs::remove_file(&external);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
