@@ -13,9 +13,12 @@ use futures_util::{
     sink::SinkExt,
     stream::StreamExt,
 };
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Deserialize;
 use tokio::sync::mpsc as async_mpsc;
+
+use crate::process_registry;
+use crate::toolchain;
 
 use super::shell;
 
@@ -43,6 +46,7 @@ impl PtyControl {
 
 struct PtySession {
     control: PtyControl,
+    _process_guard: process_registry::ProcessGuard,
     _writer_thread: thread::JoinHandle<()>,
     _reader_thread: thread::JoinHandle<()>,
     _child_thread: thread::JoinHandle<()>,
@@ -76,8 +80,14 @@ pub fn spawn_pty_session(
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    for (key, value) in toolchain::compiler_env_entries() {
+        cmd.env(key, value);
+    }
 
     let mut child = pair.slave.spawn_command(cmd).context("spawn shell")?;
+    let shell_pid = child.process_id();
+    let shell_killer = child.clone_killer();
+    let process_guard = process_registry::guard_for_pty(shell_killer, shell_pid, "terminal");
 
     let reader = pair.master.try_clone_reader().context("pty reader")?;
     let writer = pair.master.take_writer().context("pty writer")?;
@@ -143,9 +153,10 @@ pub fn spawn_pty_session(
     Ok((
         PtySession {
             control: control.clone(),
+            _process_guard: process_guard,
             _writer_thread: writer_thread,
-            _reader_thread: reader_thread,
             _child_thread: child_thread,
+            _reader_thread: reader_thread,
         },
         control,
         out_rx,
@@ -169,29 +180,50 @@ pub async fn run_terminal_websocket(socket: WebSocket, ws: &Path, cwd_rel: Optio
     let control_recv = control.clone();
 
     let send_task = tokio::spawn(async move {
-        while let Some(chunk) = async_out_rx.recv().await {
-            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+        loop {
+            if process_registry::is_shutdown_requested() {
                 break;
+            }
+            tokio::select! {
+                chunk = async_out_rx.recv() => {
+                    match chunk {
+                        Some(chunk) => {
+                            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
     });
 
     let recv_task = tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(ctrl) = serde_json::from_str::<TerminalResize>(&text) {
-                        if ctrl.kind == "resize" {
-                            control_recv.resize(ctrl.cols, ctrl.rows);
-                            continue;
+        loop {
+            if process_registry::is_shutdown_requested() {
+                break;
+            }
+            tokio::select! {
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(ctrl) = serde_json::from_str::<TerminalResize>(&text) {
+                                if ctrl.kind == "resize" {
+                                    control_recv.resize(ctrl.cols, ctrl.rows);
+                                    continue;
+                                }
+                            }
+                            control_recv.write(text.as_bytes());
                         }
+                        Some(Ok(Message::Binary(data))) => control_recv.write(&data),
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                        Some(Err(_)) => break,
                     }
-                    control_recv.write(text.as_bytes());
                 }
-                Ok(Message::Binary(data)) => control_recv.write(&data),
-                Ok(Message::Close(_)) => break,
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                Err(_) => break,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
     });

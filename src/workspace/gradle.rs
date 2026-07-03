@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -212,6 +215,10 @@ pub fn run_gradle_compile_test_java(project_root: &Path) -> Result<GitOutput> {
 pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<GitOutput> {
     use std::process::{Command, Stdio};
 
+    if crate::process_registry::is_shutdown_requested() {
+        bail!("Reaper is shutting down");
+    }
+
     let mut process = Command::new(
         cmd.program
             .to_str()
@@ -222,12 +229,18 @@ pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<Git
         .current_dir(&cmd.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::process_registry::configure_command(&mut process);
     if let Ok(home) = gradle_java_home_for_project(&cmd.cwd) {
         crate::jdk::apply_java_home(&mut process, &home);
     }
 
-    let output = process
-        .output()
+    let label = format!("gradle {}", args.join(" "));
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("failed to run {}", cmd.program.display()))?;
+    let _guard = crate::process_registry::guard_for_child(&mut child, &label);
+    let output = child
+        .wait_with_output()
         .with_context(|| format!("failed to run {}", cmd.program.display()))?;
 
     Ok(GitOutput {
@@ -498,17 +511,59 @@ pub fn is_gradle_project_dir(dir: &Path) -> bool {
         || dir.join("build.gradle.kts").is_file()
 }
 
+const GRADLE_ROOTS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static GRADLE_ROOTS_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, Vec<PathBuf>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Discover Gradle project roots under a workspace (supports nested layouts like `repo-1/`).
 pub fn find_all_gradle_roots(ws: &Path) -> Result<Vec<PathBuf>> {
+    let key = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    if let Ok(guard) = GRADLE_ROOTS_CACHE.lock() {
+        if let Some((at, roots)) = guard.get(&key) {
+            if at.elapsed() < GRADLE_ROOTS_CACHE_TTL {
+                return Ok(roots.clone());
+            }
+        }
+    }
+
+    let roots = compute_all_gradle_roots(ws)?;
+    if let Ok(mut guard) = GRADLE_ROOTS_CACHE.lock() {
+        guard.insert(key, (Instant::now(), roots.clone()));
+    }
+    Ok(roots)
+}
+
+pub fn invalidate_gradle_roots_cache(ws: &Path) {
+    let key = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    if let Ok(mut guard) = GRADLE_ROOTS_CACHE.lock() {
+        guard.remove(&key);
+    }
+}
+
+fn compute_all_gradle_roots(ws: &Path) -> Result<Vec<PathBuf>> {
+    let ws_canon = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
     let mut found = Vec::new();
-    collect_gradle_roots(ws, ws, 0, 8, &mut found)?;
+    collect_gradle_roots(&ws_canon, ws, 0, 8, &mut found)?;
     found.sort_by(|a, b| a.display().to_string().cmp(&b.display().to_string()));
     found.dedup();
     Ok(found)
 }
 
+fn should_skip_gradle_scan_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git" | ".reaper" | "node_modules" | "build" | "target" | ".gradle" | "out"
+                | "dist" | "bin" | ".idea" | ".vscode" | "coverage" | "tmp"
+        )
+    )
+}
+
 fn collect_gradle_roots(
-    ws: &Path,
+    ws_canon: &Path,
     dir: &Path,
     depth: usize,
     max_depth: usize,
@@ -520,10 +575,7 @@ fn collect_gradle_roots(
     let dir_canon = dir
         .canonicalize()
         .with_context(|| format!("resolve {}", dir.display()))?;
-    let ws_canon = ws
-        .canonicalize()
-        .with_context(|| format!("resolve workspace {}", ws.display()))?;
-    if !dir_canon.starts_with(&ws_canon) {
+    if !dir_canon.starts_with(ws_canon) {
         return Ok(());
     }
 
@@ -540,11 +592,10 @@ fn collect_gradle_roots(
         if !path.is_dir() {
             continue;
         }
-        let name = entry.file_name();
-        if name == ".git" || name == ".reaper" || name == "node_modules" || name == "build" {
+        if should_skip_gradle_scan_dir(&entry.file_name()) {
             continue;
         }
-        collect_gradle_roots(ws, &path, depth + 1, max_depth, out)?;
+        collect_gradle_roots(ws_canon, &path, depth + 1, max_depth, out)?;
     }
     Ok(())
 }
@@ -668,7 +719,7 @@ pub fn read_build_file_content(root: &Path) -> Option<String> {
     read_build_file(root)
 }
 
-fn read_build_file(root: &Path) -> Option<String> {
+pub(crate) fn read_build_file(root: &Path) -> Option<String> {
     for name in ["build.gradle", "build.gradle.kts"] {
         let path = root.join(name);
         if path.is_file() {
@@ -678,7 +729,7 @@ fn read_build_file(root: &Path) -> Option<String> {
     None
 }
 
-fn has_application_plugin(content: &str) -> bool {
+pub(crate) fn has_application_plugin(content: &str) -> bool {
     let normalized: String = content
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -912,6 +963,8 @@ mod tests {
             rel,
             Some("@SpringBootApplication\npackage com.example;\npublic class GatewayApplication { public static void main(String[] args) {} }\n"),
             1,
+            None,
+            None,
         )
         .expect("run context");
         assert!(ctx.project.has_project);

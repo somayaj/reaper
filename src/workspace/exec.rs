@@ -8,11 +8,23 @@ use crate::jdk;
 use crate::toolchain;
 
 pub fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
+    run_command_with_env(cwd, program, args, &[] as &[(&str, &str)])
+}
+
+pub fn run_command_with_env(
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<GitOutput> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let output = cmd
         .output()
@@ -54,7 +66,22 @@ pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitO
 /// Run a command through bash login shell (PATH, nvm, brew, etc. in GUI apps).
 pub fn run_shell_command(cwd: &Path, command: &str) -> Result<GitOutput> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    run_command(cwd, &shell, &["-lc", command])
+    let mut cmd = Command::new(&shell);
+    cmd.args(["-lc", command])
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    toolchain::apply_compiler_env(&mut cmd);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run shell command: {command}"))?;
+
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
 }
 
 fn shell_quote(arg: &str) -> String {

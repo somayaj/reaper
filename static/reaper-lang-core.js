@@ -10,6 +10,7 @@
     if (!base) return 'plaintext';
     if (base === 'dockerfile' || base.startsWith('dockerfile.')) return 'dockerfile';
     if (base === 'makefile' || base === 'gnumakefile') return 'makefile';
+    if (base.startsWith('makefile.') || base.endsWith('.mk')) return 'makefile';
     if (base === 'cmakelists.txt') return 'cmake';
     if (base.endsWith('.gradle.kts')) return 'kotlin';
     if (base.endsWith('.gradle')) return 'groovy';
@@ -20,6 +21,14 @@
       js: 'javascript', mjs: 'javascript', cjs: 'javascript',
       ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
       py: 'python', go: 'go', rs: 'rust', rb: 'ruby', php: 'php',
+      c: 'cpp', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+      md: 'markdown', mdx: 'markdown',
+      json: 'json', jsonc: 'json',
+      yml: 'yaml', yaml: 'yaml',
+      html: 'html', htm: 'html',
+      css: 'css', scss: 'scss', less: 'less',
+      sql: 'sql', xml: 'xml', toml: 'toml',
+      sh: 'shell', bash: 'shell', zsh: 'shell',
     };
     return map[ext] || 'plaintext';
   }
@@ -33,9 +42,21 @@
       typescript: 'TypeScript',
       plaintext: 'Plain Text',
       ini: 'Properties',
+      cpp: 'C/C++',
     };
     return labels[lang] || (lang ? lang.charAt(0).toUpperCase() + lang.slice(1) : 'Plain Text');
   }
+
+  function langLabelForPath(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    if (base.endsWith('.c')) return 'C';
+    if (base.endsWith('.h')) return 'C header';
+    if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(base)) return 'C++';
+    if (base === 'makefile' || base === 'gnumakefile') return 'Makefile';
+    return langLabel(langForPath(path));
+  }
+
+  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile']);
 
   function compilerToolIdsForPath(path) {
     const lang = langForPath(path);
@@ -49,6 +70,7 @@
       go: ['go'],
       javascript: ['node'],
       typescript: ['tsc', 'node'],
+      cpp: ['clangd', 'clang', 'gcc'],
     };
     return map[lang] || [];
   }
@@ -58,6 +80,7 @@
     const labels = {
       java: 'Java', kotlin: 'Kotlin', groovy: 'Groovy', python: 'Python',
       ruby: 'Ruby', cargo: 'cargo', go: 'Go', node: 'Node', tsc: 'tsc',
+      clangd: 'clangd', clang: 'clang', gcc: 'gcc',
     };
     return ids.map((id) => labels[id] || id).join(', ');
   }
@@ -71,15 +94,43 @@
     return langForPath(path) !== 'plaintext';
   }
 
-  function ensureMonacoBasicLanguage(lang) {
-    if (typeof require === 'undefined' || !lang || lang === 'plaintext') return;
-    const safe = String(lang).replace(/[^a-z0-9_-]/gi, '');
-    if (!safe) return;
-    try {
-      require([`vs/basic-languages/${safe}/${safe}`], () => {});
-    } catch {
-      /* optional tokenizer module */
+  function ensureMonacoBasicLanguage(lang, onReady) {
+    const done = typeof onReady === 'function' ? onReady : () => {};
+    if (typeof require === 'undefined' || !lang || lang === 'plaintext') {
+      done();
+      return;
     }
+    const loadLang = lang === 'c' ? 'cpp' : lang;
+    const safe = String(loadLang).replace(/[^a-z0-9_-]/gi, '');
+    if (!safe || REAPER_CUSTOM_LANGS.has(safe)) {
+      done();
+      return;
+    }
+    try {
+      require([`vs/basic-languages/${safe}/${safe}`], () => done(), () => done());
+    } catch {
+      done();
+    }
+  }
+
+  function applyEditorLanguage(path, model, onReady) {
+    const expected = langForPath(path || '');
+    const done = typeof onReady === 'function' ? onReady : () => {};
+    if (!model || !expected || expected === 'plaintext') {
+      done(expected);
+      return;
+    }
+    window.ReaperLang?.ensureReaperCustomLanguage?.(expected);
+    ensureMonacoBasicLanguage(expected, () => {
+      const prev = model.getLanguageId?.();
+      if (prev !== expected) {
+        monaco.editor.setModelLanguage(model, expected);
+      } else if (REAPER_CUSTOM_LANGS.has(expected)) {
+        monaco.editor.setModelLanguage(model, 'plaintext');
+        monaco.editor.setModelLanguage(model, expected);
+      }
+      done(expected);
+    });
   }
 
   function isValidJsReceiverExpr(expr) {
@@ -346,10 +397,12 @@
     coreOnly: true,
     langForPath,
     langLabel,
+    langLabelForPath,
     compilerToolIdsForPath,
     compilerLabelsForPath,
     isDiagnosablePath,
     ensureMonacoBasicLanguage,
+    applyEditorLanguage,
     dotQualifierFromLinePrefix,
     memberDotContext,
     editorLinePrefix,

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::git;
 use crate::repos::{
     self, CreateRepoRequest, ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest,
-    PublishToGitHubRequest, import_local_repo, import_repo, link_remote, publish_to_github,
+    PublishToGitHubRequest, import_local_repo, import_repo, link_remote, metadata, publish_to_github,
     push_preview, push_to_remote, sync_from_remote,
 };
 use crate::agent as git_agent;
@@ -67,15 +67,25 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/git", post(run_workspace_git))
         .route("/api/repos/{name}/workspace/shell", post(run_workspace_shell))
         .route("/api/repos/{name}/workspace/shell/cd", post(workspace_shell_cd))
+        .route("/api/repos/{name}/workspace/exec/cancel", post(cancel_workspace_exec_handler))
         .route("/api/repos/{name}/workspace/terminal", get(workspace_terminal_ws))
         .route("/api/repos/{name}/workspace/java/info", get(java_main_info))
         .route("/api/repos/{name}/workspace/java/run", post(run_java_main_handler))
+        .route("/api/repos/{name}/workspace/sql/run", post(run_sql_file_handler))
         .route("/api/repos/{name}/workspace/java/test-methods", get(java_test_methods_handler).post(java_test_methods_post))
         .route("/api/repos/{name}/workspace/gradle/info", get(gradle_project_info_handler))
         .route("/api/repos/{name}/workspace/gradle/run", post(run_gradle_handler))
         .route("/api/repos/{name}/workspace/run/info", get(run_project_info_handler))
         .route("/api/repos/{name}/workspace/run/target", get(run_target_handler).post(run_target_post))
         .route("/api/repos/{name}/workspace/run/task", post(run_project_task_handler))
+        .route(
+            "/api/repos/{name}/workspace/build/tasks-tree",
+            get(build_tasks_tree_handler).post(build_tasks_tree_post),
+        )
+        .route(
+            "/api/repos/{name}/workspace/package/manifest",
+            get(package_manifest_handler),
+        )
         .route("/api/repos/{name}/workspace/coverage", get(workspace_coverage_handler))
         .route(
             "/api/repos/{name}/workspace/coverage/report",
@@ -84,6 +94,18 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/repos/{name}/workspace/open-external",
             post(workspace_open_external),
+        )
+        .route(
+            "/api/repos/{name}/workspace/db/connection",
+            get(workspace_db_connection_get).put(workspace_db_connection_put),
+        )
+        .route(
+            "/api/repos/{name}/workspace/db/schema",
+            get(workspace_db_schema_handler),
+        )
+        .route(
+            "/api/repos/{name}/workspace/db/query",
+            post(workspace_db_query_handler),
         )
         .route("/api/repos/{name}/workspace/maven/run", post(run_maven_handler))
         .route("/api/repos/{name}/workspace/definition", get(workspace_definition).post(workspace_definition_post))
@@ -94,6 +116,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/ai-completions", post(workspace_ai_completions))
         .route("/api/repos/{name}/workspace/inline-complete", post(workspace_inline_complete))
         .route("/api/repos/{name}/workspace/java/index-status", get(java_index_status))
+        .route("/api/repos/{name}/workspace/java/ensure-module", post(java_ensure_module))
         .route("/api/repos/{name}/workspace/project/index-status", get(project_index_status))
         .route("/api/repos/{name}/workspace/project/reload", post(reload_project_index))
         .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
@@ -314,6 +337,9 @@ async fn open_workspace(
 ) -> impl IntoResponse {
     match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => {
+            if let Err(e) = state.settings.set_last_repo(&name) {
+                tracing::warn!("Could not persist last opened repo {name}: {e:#}");
+            }
             let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
             state.project_index_jobs.on_open(&name, &ws);
             let index_status = state.project_index_jobs.status(&name);
@@ -743,6 +769,11 @@ async fn workspace_shell_cd(
     }
 }
 
+async fn cancel_workspace_exec_handler() -> impl IntoResponse {
+    let cancelled = crate::process_registry::cancel_active_exec();
+    Json(serde_json::json!({ "cancelled": cancelled })).into_response()
+}
+
 #[derive(Deserialize)]
 struct TerminalWsQuery {
     cwd: Option<String>,
@@ -800,6 +831,52 @@ async fn run_java_main_handler(
     let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
     tokio::task::spawn_blocking(move || {
         if let Err(e) = workspace::stream_workspace_java_main(&ws, &path, tx.clone()) {
+            let _ = tx.blocking_send(workspace::ExecStreamEvent {
+                t: "error".into(),
+                text: Some(format!("{e:#}\n")),
+                code: Some(-1),
+                step: None,
+            });
+        }
+    });
+
+    exec_stream_response(rx)
+}
+
+#[derive(Deserialize)]
+struct RunSqlRequest {
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn run_sql_file_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RunSqlRequest>,
+) -> Response {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+
+    let path = body.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    let content = body.content;
+    let database_url = resolve_repo_database_url(&state.config, &name, &ws);
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workspace::stream_workspace_sql_file(
+            &ws,
+            &path,
+            content.as_deref(),
+            database_url.as_deref(),
+            db_ssl.as_ref(),
+            tx.clone(),
+        ) {
             let _ = tx.blocking_send(workspace::ExecStreamEvent {
                 t: "error".into(),
                 text: Some(format!("{e:#}\n")),
@@ -978,9 +1055,21 @@ async fn run_target_handler(
         return api_error(StatusCode::BAD_REQUEST, "path required");
     }
     let line = q.line.max(1);
+    let database_url = resolve_repo_database_url(&state.config, &name, &ws);
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
     let ws_clone = ws.clone();
     let path_clone = path.clone();
-    match tokio::task::spawn_blocking(move || workspace::run_context(&ws_clone, &path_clone, None, line)).await
+    match tokio::task::spawn_blocking(move || {
+        workspace::run_context(
+            &ws_clone,
+            &path_clone,
+            None,
+            line,
+            database_url.as_deref(),
+            db_ssl.as_ref(),
+        )
+    })
+    .await
     {
         Ok(Ok(mut ctx)) => {
             maybe_enhance_run_target_with_ai(
@@ -1018,11 +1107,20 @@ async fn run_target_post(
     }
     let line = body.line.max(1);
     let content = body.content.clone();
+    let database_url = resolve_repo_database_url(&state.config, &name, &ws);
     let ws_clone = ws.clone();
     let path_clone = path.clone();
     let content_for_task = content.clone();
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
     match tokio::task::spawn_blocking(move || {
-        workspace::run_context(&ws_clone, &path_clone, content_for_task.as_deref(), line)
+        workspace::run_context(
+            &ws_clone,
+            &path_clone,
+            content_for_task.as_deref(),
+            line,
+            database_url.as_deref(),
+            db_ssl.as_ref(),
+        )
     })
     .await
     {
@@ -1081,6 +1179,62 @@ async fn maybe_enhance_run_target_with_ai(
     .await
     {
         workspace::apply_ai_run_target(target, &hint);
+    }
+}
+
+async fn build_tasks_tree_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::build_tasks_tree(&ws, &q.path, None) {
+        Ok(tree) => Json(tree).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BuildTasksTreeRequest {
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+async fn build_tasks_tree_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<BuildTasksTreeRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    match workspace::build_tasks_tree(&ws, &path, body.content.as_deref()) {
+        Ok(tree) => Json(tree).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn package_manifest_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::package_manifest_view(&ws, &q.path) {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
 
@@ -1164,6 +1318,109 @@ async fn workspace_open_external(
     }
 }
 
+fn repo_database_url(config: &crate::config::Config, name: &str) -> Option<String> {
+    metadata::load(config, name)
+        .ok()
+        .and_then(|meta| meta.database_url)
+        .filter(|url| !url.trim().is_empty())
+}
+
+fn resolve_repo_database_url(
+    config: &crate::config::Config,
+    name: &str,
+    ws: &std::path::Path,
+) -> Option<String> {
+    let stored = repo_database_url(config, name);
+    workspace::effective_database_url(ws, stored.as_deref())
+}
+
+async fn workspace_db_connection_get(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let database_url = repo_database_url(&state.config, &name);
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    Json(workspace::db_connection_view(
+        &ws,
+        database_url.as_deref(),
+        db_ssl.as_ref(),
+    ))
+    .into_response()
+}
+
+async fn workspace_db_connection_put(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<workspace::DbConnectionRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match metadata::set_db_connection(
+        &state.config,
+        &name,
+        body.database_url.clone(),
+        body.ssl.clone(),
+    ) {
+        Ok(_) => {
+            let database_url = repo_database_url(&state.config, &name);
+            let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+            Json(workspace::db_connection_view(
+                &ws,
+                database_url.as_deref(),
+                db_ssl.as_ref(),
+            ))
+            .into_response()
+        }
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_db_schema_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let database_url = repo_database_url(&state.config, &name);
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    Json(workspace::db_schema(
+        &ws,
+        database_url.as_deref(),
+        db_ssl.as_ref(),
+    ))
+    .into_response()
+}
+
+async fn workspace_db_query_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<workspace::DbQueryRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let database_url = repo_database_url(&state.config, &name);
+    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let limit = body.limit.clamp(1, 5_000);
+    Json(workspace::db_query(
+        &ws,
+        database_url.as_deref(),
+        db_ssl.as_ref(),
+        &body.sql,
+        limit,
+    ))
+    .into_response()
+}
+
 async fn run_maven_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1224,7 +1481,7 @@ async fn workspace_definition(
     };
     let from_path = q.path.trim();
     if workspace::definition_uses_java_index(from_path) {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     match workspace::find_definition_with_content(&ws, from_path, q.line, q.column, None) {
         Ok(hit) => Json(hit).into_response(),
@@ -1256,7 +1513,7 @@ async fn workspace_definition_post(
     };
     let from_path = body.path.trim();
     if workspace::definition_uses_java_index(from_path) {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     match workspace::find_definition_with_content(
         &ws,
@@ -1281,7 +1538,7 @@ async fn workspace_hover(
     };
     let from_path = q.path.trim();
     if workspace::definition_uses_java_index(from_path) {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     let result = if let Some(member) = q.member.as_deref().filter(|m| !m.is_empty()) {
         workspace::find_member_hover_with_content(&ws, from_path, q.line, q.column, member, None)
@@ -1307,7 +1564,7 @@ async fn workspace_hover_post(
     };
     let from_path = body.path.trim();
     if workspace::definition_uses_java_index(from_path) {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     let result = if let Some(member) = body.member.as_deref().filter(|m| !m.is_empty()) {
         workspace::find_member_hover_with_content(
@@ -1410,7 +1667,7 @@ async fn workspace_completions(
     if workspace::definition_uses_java_index(from_path)
         || workspace::uses_spring_property_completions(from_path)
     {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None, &[]) {
         Ok(items) => {
@@ -1471,7 +1728,7 @@ async fn workspace_completions_post(
     if workspace::definition_uses_java_index(from_path)
         || workspace::uses_spring_property_completions(from_path)
     {
-        state.java_index_jobs.ensure_building(&name, &ws);
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     let overlays: Vec<(String, String)> = body
         .overlays
@@ -1607,6 +1864,24 @@ async fn java_index_status(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    Json(state.java_index_jobs.status(&name)).into_response()
+}
+
+#[derive(Deserialize)]
+struct EnsureModuleQuery {
+    path: String,
+}
+
+async fn java_ensure_module(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<EnsureModuleQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    ensure_java_index_for_file(&state, &name, &ws, q.path.trim());
     Json(state.java_index_jobs.status(&name)).into_response()
 }
 
@@ -1798,6 +2073,17 @@ async fn app_version() -> Json<AppVersionResponse> {
         version: env!("CARGO_PKG_VERSION"),
         build: env!("REAPER_UI_BUILD"),
     })
+}
+
+fn ensure_java_index_for_file(
+    state: &AppState,
+    repo: &str,
+    ws: &std::path::Path,
+    rel_path: &str,
+) {
+    state
+        .java_index_jobs
+        .ensure_module_for_path(repo, ws, rel_path);
 }
 
 fn api_error(status: StatusCode, err: impl std::fmt::Display) -> axum::response::Response {
