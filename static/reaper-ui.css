@@ -2075,9 +2075,9 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 
 .ij-welcome-layout {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(240px, 380px);
+  grid-template-columns: minmax(300px, 1fr) minmax(320px, 520px);
   gap: 2rem 2.5rem;
-  width: min(100%, 1080px);
+  width: min(100%, 1180px);
   margin: 0 auto;
   align-items: start;
 }
@@ -2090,36 +2090,39 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 }
 
 .ij-welcome-showcase {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
   position: sticky;
   top: 0.5rem;
+  max-height: calc(100vh - 4rem);
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .ij-welcome-frame {
   margin: 0;
-  padding: 12px;
+  padding: 8px;
   background: #0a0a0a;
   border: 1px solid #141414;
-  border-radius: 10px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
 .ij-welcome-frame img {
   display: block;
   width: 100%;
-  min-height: 120px;
+  min-height: 72px;
   height: auto;
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--ij-bg);
   object-fit: cover;
-  object-position: top;
+  object-position: top left;
 }
 
 .ij-welcome-frame figcaption {
-  margin: 8px 0 0;
-  font-size: 10px;
+  margin: 6px 0 0;
+  font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2143,6 +2146,14 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   .ij-welcome-showcase {
     position: static;
     order: 2;
+    max-height: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .ij-welcome-showcase {
+    grid-template-columns: 1fr;
   }
 }
 
