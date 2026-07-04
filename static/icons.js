@@ -75,6 +75,12 @@
         '<path d="M9 9h6M9 13h6"/>',
     ),
 
+    /** Search — magnifying glass */
+    search: icon(
+      '<circle cx="11" cy="11" r="6.5"/>' +
+        '<path d="M16 16l4.5 4.5"/>',
+    ),
+
     toastError: icon(
       '<circle cx="12" cy="12" r="9"/>' +
         '<path d="M15 9l-6 6M9 9l6 6"/>',

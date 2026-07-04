@@ -2904,6 +2904,15 @@ function testLongRunningTaskBusyUi() {
   ok(appSrc.includes('function setPushModalBusy') && appSrc.includes('pushBusy'), 'push modal busy state');
   ok(appSrc.includes('function busyStatusHtml'), 'shared busy status markup helper');
   ok(appSrc.includes("setGlobalLoading(true, `Opening ${name}…`)"), 'opening repo shows global spinner');
+  ok(appSrc.includes('function hydrateRepoWorkspace') && appSrc.includes('repoSelectToken'), 'repo switch serialized and hydrates in background');
+  ok(appSrc.includes('function dismissLaunchSplashNow') && appSrc.includes('dismissLaunchSplashNow();'), 'repo open dismisses launch splash');
+  ok(appSrc.includes('const showLoader = switching || !previousRepo'), 'first repo open in window shows loader');
+  ok(appSrc.includes('leaveSaveGate();') && appSrc.includes('async function selectRepoOnce'), 'repo switch clears save gate before open');
+  ok(appSrc.includes('window-title-project') && appSrc.includes('function updateWindowTitle'), 'window title bar project label wired');
+  ok(indexHtml.includes('ij-window-titlebar') && indexHtml.includes('window-title-project'), 'window title bar markup');
+  ok(appSrc.includes('header-search-input') && indexHtml.includes('ij-header-search-icon'), 'header search on right with icon');
+  ok(!indexHtml.includes('file-breadcrumb'), 'menubar file breadcrumb removed (editor breadcrumbs remain)');
+  ok(!indexHtml.includes('header-context-chip') && !indexHtml.includes('header-git-chip'), 'crowded header chips removed');
   ok(appSrc.includes("setGlobalLoading(true, `Deleting ${repoName}…`)"), 'delete repo shows global spinner');
   ok(appSrc.includes("setGlobalLoading(true, 'Committing & pushing…')"), 'commit & push shows global spinner');
   ok(appSrc.includes('busyStatusHtml(\'Loading push preview…\')'), 'push preview loads with spinner');
