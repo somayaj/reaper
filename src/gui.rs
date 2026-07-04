@@ -110,6 +110,7 @@ fn create_window(
     event_loop: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
+    use tao::platform::macos::WindowBuilderExtMacOS;
     use tao::window::WindowBuilder;
     use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
@@ -119,6 +120,9 @@ fn create_window(
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
         .with_visible(false)
         .with_background_color((10, 10, 10, 255))
+        .with_titlebar_transparent(true)
+        .with_title_hidden(true)
+        .with_fullsize_content_view(true)
         .build(event_loop)?;
 
     let window_id = window.id();
@@ -126,7 +130,8 @@ fn create_window(
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
     let init_script = format!(
-        "document.documentElement.style.backgroundColor='#0a0a0a';\n{}",
+        "document.documentElement.classList.add('ij-native-titlebar');\n\
+         document.documentElement.style.backgroundColor='#0a0a0a';\n{}",
         launch.init_script
     );
     let webview = WebViewBuilder::new()

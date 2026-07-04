@@ -256,13 +256,29 @@
     </div>
   </div>
 
+  <!-- Window title bar (macOS traffic-light strip) -->
+  <header id="window-titlebar" class="ij-window-titlebar" aria-label="Window title">
+    <span class="ij-window-titlebar-brand">Reaper</span>
+    <span id="window-title-project" class="ij-window-titlebar-project"></span>
+  </header>
+
   <!-- Main menu bar -->
-  <header class="ij-menubar flex items-center justify-between px-2 shrink-0">
-    <div class="flex items-center gap-1 min-w-0 flex-1">
-      <a href="/" class="flex items-center gap-2 shrink-0 group px-1">
-        <span data-reaper-logo="sm" class="logo-mark"></span>
-        <span class="hidden lg:block text-sm font-semibold text-white tracking-tight">Reaper</span>
-      </a>
+  <header class="ij-menubar flex items-center justify-between px-3 shrink-0">
+    <div class="ij-menubar-main flex items-center gap-2 min-w-0 flex-1">
+      <div id="header-brand" class="ij-header-brand shrink-0 flex items-center gap-2 min-w-0 max-w-[min(100%,26rem)]">
+        <div class="ij-menu-root ij-header-logo-root" data-menu="logo">
+          <button type="button" id="header-logo-btn" class="ij-header-logo-btn" title="Reaper menu" aria-label="Reaper menu" aria-haspopup="menu">
+            <span data-reaper-logo="sm" class="logo-mark"></span>
+          </button>
+          <div class="ij-menu-dropdown ij-header-logo-dropdown">
+            <button type="button" class="ij-menu-item" data-action="header-open-repo">Open repository…</button>
+            <button type="button" class="ij-menu-item" data-action="header-search" disabled>Search project…<span class="ij-kbd">⌘P</span></button>
+            <button type="button" class="ij-menu-item" data-action="header-palette">Command palette<span class="ij-kbd">⌘K</span></button>
+            <div class="ij-menu-sep"></div>
+            <button type="button" class="ij-menu-item" data-action="settings">Preferences…<span class="ij-kbd">⌘,</span></button>
+          </div>
+        </div>
+      </div>
 
       <nav class="ij-menu-nav ij-menu-nav--main" aria-label="Main menu">
         <div class="ij-menu-root" data-menu="file">
@@ -385,22 +401,22 @@
         </div>
       </nav>
 
-      <div class="w-px h-5 bg-surface-700 hidden md:block mx-1"></div>
+      <div class="ij-header-divider hidden md:block" aria-hidden="true"></div>
 
-      <div class="flex items-center gap-2 min-w-0">
-        <div class="ij-repo-picker-group flex items-center gap-1 min-w-0">
+      <div id="header-workspace" class="ij-header-workspace min-w-0">
+        <div id="repo-picker-group" class="ij-repo-picker-group flex items-center min-w-0">
           <button type="button" id="repo-picker-btn" title="Select repository" class="ij-header-picker ij-repo-picker-btn">
             <span id="repo-picker-label">Select repo…</span>
             <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
           </button>
         </div>
-        <div class="relative">
+        <div class="relative shrink-0">
           <button type="button" id="branch-picker-btn" disabled title="Switch branch (⌘⇧B)" class="ij-header-picker">
             <span id="branch-picker-label">branch</span>
             <svg class="ij-header-picker-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
           </button>
         </div>
-        <span id="repo-default-branch" class="hidden text-[11px] text-gray-500 font-mono shrink-0" title=""></span>
+        <span id="repo-default-branch" class="hidden" title=""></span>
         <div id="git-nav-toolbar" class="ij-git-nav hidden md:flex items-center shrink-0" role="toolbar" aria-label="Git actions">
           <button id="btn-sync" type="button" disabled title="Pull latest" class="ij-header-btn icon" aria-label="Pull">
             <span class="ij-header-icon" data-icon="gitPull"></span>
@@ -413,21 +429,23 @@
           </button>
         </div>
       </div>
-
-      <div id="file-breadcrumb" class="hidden md:flex items-center gap-1.5 text-xs text-gray-600 truncate min-w-0">
-        <span class="text-gray-700">/</span>
-        <span id="breadcrumb-path" class="font-mono text-gray-500 truncate"></span>
-      </div>
     </div>
 
-    <div class="flex items-center gap-1 shrink-0">
-      <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon" aria-label="Repository details">
-        <span class="ij-header-icon" data-icon="gitRepo"></span>
-      </button>
-      <button id="btn-open-agent" title="AI Agent" class="ij-header-btn ghost text-accent border-accent/30">
-        <span class="ij-header-icon" data-icon="agent"></span>
-        <span>Agent</span>
-      </button>
+    <div class="ij-header-actions shrink-0">
+      <label class="ij-header-search hidden md:flex">
+        <span class="ij-header-search-icon" data-icon="search" aria-hidden="true"></span>
+        <span class="sr-only">Search project</span>
+        <input id="header-search-input" type="search" placeholder="Search…" autocomplete="off" spellcheck="false" aria-label="Search project" />
+      </label>
+      <div class="ij-header-icon-toolbar" role="toolbar" aria-label="Header actions">
+        <button id="btn-repo-info" disabled title="Repository details" class="ij-header-btn icon" aria-label="Repository details">
+          <span class="ij-header-icon" data-icon="gitRepo"></span>
+        </button>
+        <button id="btn-open-agent" title="AI Agent" class="ij-header-btn ghost text-accent border-accent/30">
+          <span class="ij-header-icon" data-icon="agent"></span>
+          <span>Agent</span>
+        </button>
+      </div>
     </div>
   </header>
 

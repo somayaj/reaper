@@ -459,6 +459,60 @@ html, body {
   overflow: hidden;
 }
 
+:root {
+  --ij-titlebar-h: 28px;
+  --ij-titlebar-inset-left: 12px;
+}
+
+html.ij-native-titlebar {
+  --ij-titlebar-inset-left: 78px;
+}
+
+.ij-window-titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: var(--ij-titlebar-h);
+  min-height: var(--ij-titlebar-h);
+  padding: 0 16px;
+  padding-left: var(--ij-titlebar-inset-left);
+  background: var(--ij-panel-header);
+  border-bottom: 1px solid var(--ij-border);
+  color: var(--ij-text-muted);
+  font-family: var(--ij-ui-font-family);
+  font-size: var(--ij-ui-font-size);
+  line-height: var(--ij-ui-line-height);
+  -webkit-app-region: drag;
+  user-select: none;
+  z-index: 60;
+}
+
+.ij-window-titlebar-brand {
+  flex-shrink: 0;
+  color: var(--ij-text-dim);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.ij-window-titlebar-project {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(52vw, 28rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ij-text-bright);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  pointer-events: none;
+}
+
+.ij-window-titlebar-project:empty {
+  display: none;
+}
+
 .ij-workspace {
   flex: 1;
   min-height: 0;
@@ -476,7 +530,7 @@ html, body {
 
 .ij-menubar {
   position: relative;
-  background: var(--ij-panel);
+  background: var(--ij-panel-header);
   border-bottom: 1px solid var(--ij-border);
   height: var(--ij-header-h);
   min-height: var(--ij-header-h);
@@ -484,8 +538,102 @@ html, body {
   overflow: visible;
 }
 
-.ij-menubar > .flex {
+.ij-menubar > .flex,
+.ij-menubar-main {
   overflow: visible;
+  gap: 0.625rem;
+}
+
+.ij-menubar-main {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+}
+
+.ij-header-divider {
+  width: 1px;
+  height: 1.25rem;
+  margin: 0 0.625rem;
+  background: var(--ij-border);
+  flex-shrink: 0;
+}
+
+.ij-header-workspace {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.ij-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: 0.75rem;
+  padding-left: 0.75rem;
+  border-left: 1px solid color-mix(in srgb, var(--ij-border) 80%, transparent);
+  flex-shrink: 0;
+}
+
+.ij-header-icon-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ij-header-search {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  width: 10.5rem;
+  max-width: 14rem;
+  padding: 0 8px;
+  border-radius: var(--ij-radius);
+  border: 1px solid var(--ij-border);
+  background: var(--ij-bg);
+  color: var(--ij-text-muted);
+}
+
+.ij-header-search:focus-within {
+  border-color: var(--ij-accent);
+  color: var(--ij-text-bright);
+  box-shadow: 0 0 0 1px var(--ij-accent-muted);
+}
+
+.ij-header-search-icon {
+  display: flex;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  opacity: 0.72;
+}
+
+.ij-header-search-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ij-header-search input {
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--ij-text);
+  font-size: 12px;
+}
+
+.ij-header-search input::placeholder {
+  color: color-mix(in srgb, var(--ij-text-muted) 70%, transparent);
+}
+
+.ij-header-search input:focus {
+  outline: none;
+  color: var(--ij-text-bright);
 }
 
 .ij-menu-nav {
@@ -502,6 +650,50 @@ html, body {
   border-left: 1px solid color-mix(in srgb, var(--ij-border) 45%, transparent);
   padding-left: 8px;
   margin-left: 8px;
+}
+
+.ij-header-brand {
+  padding: 0 2px;
+}
+
+.ij-header-logo-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  border: none;
+  border-radius: var(--ij-radius);
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+
+.ij-header-logo-btn:hover {
+  background: color-mix(in srgb, var(--ij-accent) 12%, transparent);
+}
+
+.ij-header-logo-root .ij-menu-dropdown {
+  min-width: 13rem;
+}
+
+.ij-header-brand-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ij-text-bright);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .ij-menubar select {
@@ -851,7 +1043,9 @@ html, body {
 }
 
 .ij-header-btn.icon {
-  width: 28px;
+  width: 32px;
+  min-width: 32px;
+  height: 30px;
   padding: 0;
   color: var(--ij-text-dim);
 }
@@ -1994,16 +2188,20 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 }
 
 .ij-git-nav {
-  gap: 1px;
-  padding: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 0.125rem;
+  padding: 4px 6px;
   border: 1px solid var(--ij-border);
   border-radius: var(--ij-radius);
   background: color-mix(in srgb, var(--ij-bg) 40%, transparent);
 }
 
 .ij-git-nav .ij-header-btn.icon {
-  width: 28px;
-  min-width: 28px;
+  width: 32px;
+  min-width: 32px;
+  height: 28px;
   padding: 0;
   border-radius: calc(var(--ij-radius) - 2px);
 }
@@ -3609,10 +3807,10 @@ main { background: var(--ij-bg); }
 .ij-header-picker {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 100px;
   max-width: 200px;
-  padding: 6px 28px 6px 12px;
+  padding: 6px 30px 6px 12px;
   border-radius: 8px;
   border: 1px solid var(--ij-border);
   background: color-mix(in srgb, var(--ij-panel-header) 85%, transparent);

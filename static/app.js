@@ -743,6 +743,33 @@ function setGlobalLoading(on, text = 'Loading…') {
   overlay?.classList.toggle('flex', on);
 }
 
+/** Remove launch splash immediately so repo-open spinner is visible and dismisses cleanly. */
+function dismissLaunchSplashNow() {
+  const splash = $('#launch-splash');
+  if (!splash) return;
+  splash.dataset.dismissing = '1';
+  document.body?.classList.add('reaper-ui-ready');
+  splash.remove();
+}
+
+function hideLaunchSplash(options = {}) {
+  const { immediate = false } = options;
+  if (immediate) {
+    dismissLaunchSplashNow();
+    return;
+  }
+  const splash = $('#launch-splash');
+  if (!splash || splash.dataset.dismissing) return;
+  splash.dataset.dismissing = '1';
+  const started = window.__reaperSplashAt || Date.now();
+  const minVisible = 4500;
+  const wait = Math.max(0, minVisible - (Date.now() - started));
+  setTimeout(() => {
+    document.body?.classList.add('reaper-ui-ready');
+    splash.remove();
+  }, wait);
+}
+
 function busyIndicatorHtml({ large = false } = {}) {
   const sizeClass = large ? ' ij-busy-indicator--lg' : '';
   return `<span class="ij-busy-indicator${sizeClass}" aria-hidden="true"><span class="ij-busy-indicator-ring"></span><span class="ij-busy-indicator-glow"></span></span>`;
@@ -754,19 +781,6 @@ function navigationBusyHtml(message) {
 
 function busyStatusHtml(message) {
   return `<span class="ij-busy-status">${busyIndicatorHtml()}<span>${escapeHtml(message)}</span></span>`;
-}
-
-function hideLaunchSplash() {
-  const splash = $('#launch-splash');
-  if (!splash || splash.dataset.dismissing) return;
-  splash.dataset.dismissing = '1';
-  const started = window.__reaperSplashAt || Date.now();
-  const minVisible = 4500;
-  const wait = Math.max(0, minVisible - (Date.now() - started));
-  setTimeout(() => {
-    document.body?.classList.add('reaper-ui-ready');
-    splash.remove();
-  }, wait);
 }
 
 function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
@@ -1227,7 +1241,10 @@ function requestRepoSelection(repoName, { revertSelect = true } = {}) {
 }
 
 function updateWindowTitle() {
-  document.title = state.repo ? `Reaper — ${state.repo}` : 'Reaper';
+  const project = state.repo || '';
+  document.title = project ? `Reaper — ${project}` : 'Reaper';
+  const el = $('#window-title-project');
+  if (el) el.textContent = project;
 }
 
 function getInitialRepoFromUrl() {
@@ -2950,7 +2967,9 @@ function applyIndexingProgressUi({ title, phase, stats, percent, show, label }) 
       ? `${phase || ''}${phase && stats ? ' — ' : ''}${stats}`
       : (phase || 'Preparing workspace…');
   }
-  // Banner only — never cover the editor; the veil blocks Monaco suggest widgets.
+  const banner = $('#java-index-banner');
+  if (banner) banner.classList.toggle('hidden', !show);
+  // Banner only — never cover the editor.
   overlay?.classList.add('hidden');
   overlay?.setAttribute('aria-hidden', 'true');
 }
@@ -2972,6 +2991,74 @@ function indexingLabelFromProfile(profile) {
   if (frameworks.length) return frameworks.join(', ');
   if (langs) return langs;
   return 'project';
+}
+
+function headerStackLabel(profile) {
+  if (!profile) return '';
+  const fw = profile.frameworks || [];
+  if (fw.includes('spring-boot')) return 'Spring Boot';
+  if (fw.includes('maven') && fw.includes('gradle')) return 'Maven/Gradle';
+  if (fw.includes('maven')) return 'Maven';
+  if (fw.includes('gradle')) return 'Gradle';
+  if (fw.includes('rails')) return 'Rails';
+  if (fw.includes('django')) return 'Django';
+  if (fw.includes('nextjs')) return 'Next.js';
+  if (fw.includes('flutter')) return 'Flutter';
+  const langs = profile.languages || [];
+  if (langs.includes('java')) return 'Java';
+  if (langs.includes('kotlin')) return 'Kotlin';
+  if (langs.includes('python')) return 'Python';
+  if (langs.includes('go')) return 'Go';
+  if (langs.includes('ruby')) return 'Ruby';
+  if (langs.includes('rust')) return 'Rust';
+  if (langs.includes('cpp')) return 'C++';
+  if (langs.includes('javascript')) return langs.includes('typescript') ? 'TypeScript' : 'JavaScript';
+  return indexingLabelFromProfile(profile);
+}
+
+function syncHeaderMenuState() {
+  const searchItem = document.querySelector('[data-action="header-search"]');
+  if (searchItem) searchItem.disabled = !state.repo;
+  const headerSearch = $('#header-search-input');
+  if (headerSearch) {
+    headerSearch.disabled = !state.repo;
+    headerSearch.placeholder = state.repo ? 'Search…' : 'Open a repo…';
+  }
+}
+
+function updateHeaderBrand() {
+  syncHeaderMenuState();
+}
+
+function bindHeaderBrand() {
+  $('#header-logo-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const root = e.currentTarget.closest('.ij-menu-root');
+    const wasOpen = root?.classList.contains('open');
+    closeAllMenus();
+    if (!wasOpen) root?.classList.add('open');
+  });
+  $$('.ij-header-logo-dropdown .ij-menu-item[data-action]').forEach((item) => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (item.disabled) return;
+      closeAllMenus();
+      runMenuAction(item.dataset.action);
+    });
+  });
+  const headerSearch = $('#header-search-input');
+  headerSearch?.addEventListener('focus', () => {
+    if (!state.repo) return;
+    showSearchEverywhere(headerSearch.value.trim());
+  });
+  headerSearch?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (state.repo) showSearchEverywhere(headerSearch.value.trim());
+      else showRepoPicker();
+    }
+    if (e.key === 'Escape') headerSearch.blur();
+  });
 }
 
 function startProjectIndexPolling() {
@@ -3031,7 +3118,6 @@ function updateProjectIndexUi(status) {
   if (projectIndexNeedsFreeze(status)) {
     const progress = formatIndexingProgress(status);
     setStatusMessage(`${progress.title} — ${progress.detail}`);
-    banner?.classList.remove('hidden');
     applyIndexingProgressUi({
       title: progress.title,
       label: status?.label || indexingLabelFromProfile(status?.profile),
@@ -3040,6 +3126,7 @@ function updateProjectIndexUi(status) {
       percent: progress.percent ?? 5,
       show: true,
     });
+    updateHeaderBrand();
     return;
   }
 
@@ -3053,7 +3140,6 @@ function updateProjectIndexUi(status) {
       ? `Core ready · background ${jarsIndexed.toLocaleString()}/${jarsTotal.toLocaleString()} JARs`
       : phaseLabel;
     setStatusMessage(jarLine);
-    banner?.classList.remove('hidden');
     applyIndexingProgressUi({
       title: jarLine,
       label: status?.label || indexingLabelFromProfile(status?.profile),
@@ -3062,13 +3148,13 @@ function updateProjectIndexUi(status) {
       percent: indexingProgressPercent(status),
       show: true,
     });
+    updateHeaderBrand();
     return;
   }
 
   if (isBackgroundToolingPhase(bgPhase)) {
     const phaseLabel = indexingPhaseLabel(bgPhase);
     setStatusMessage(phaseLabel);
-    banner?.classList.remove('hidden');
     applyIndexingProgressUi({
       title: `Updating ${status?.label || indexingLabelFromProfile(status?.profile) || 'project'} classpath…`,
       label: status?.label || indexingLabelFromProfile(status?.profile),
@@ -3077,6 +3163,7 @@ function updateProjectIndexUi(status) {
       percent: indexingProgressPercent(status),
       show: true,
     });
+    updateHeaderBrand();
     return;
   }
 
@@ -4411,6 +4498,9 @@ function runMenuAction(action) {
     'goto-class': showGoToClass,
     'goto-line': showGoToLine,
     'switch-branch': showBranchPicker,
+    'header-open-repo': () => showRepoPicker(),
+    'header-search': () => showSearchEverywhere(),
+    'header-palette': () => showPalette(),
     settings: () => showSettingsModal('git'),
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
@@ -4818,6 +4908,7 @@ function setBranchLabel(branch) {
   const el = $('#branch-picker-label');
   if (el) el.textContent = normalized || 'branch';
   updateDefaultBranchUi();
+  updateHeaderBrand();
 }
 
 function updateDefaultBranchUi() {
@@ -5178,6 +5269,8 @@ function showSearchEverywhere(initialQuery = '') {
   searchHits = [];
   $('#search-overlay')?.classList.add('open');
   const input = $('#search-input');
+  const headerSearch = $('#header-search-input');
+  if (headerSearch && initialQuery) headerSearch.value = initialQuery;
   if (input) {
     input.value = initialQuery;
     const results = $('#search-results');
@@ -5196,6 +5289,8 @@ function showSearchEverywhere(initialQuery = '') {
 
 function hideSearchEverywhere() {
   $('#search-overlay')?.classList.remove('open');
+  const headerSearch = $('#header-search-input');
+  if (headerSearch && document.activeElement === headerSearch) headerSearch.blur();
   if (searchTimer) {
     clearTimeout(searchTimer);
     searchTimer = null;
@@ -8792,6 +8887,7 @@ async function loadRepos() {
   state.repos = repos;
   state.hiddenRepos = hiddenRepos;
   setRepoPickerLabel(state.repo);
+  updateHeaderBrand();
   if ($('#repo-picker-overlay')?.classList.contains('open')) {
     renderRepoPickerResults();
   }
@@ -8802,7 +8898,56 @@ async function loadRepos() {
   }
 }
 
-async function selectRepo(name) {
+let repoSelectChain = Promise.resolve();
+let repoSelectToken = 0;
+
+/** Repo metadata, tree, git, history, and README after workspace/open (spinner already dismissed). */
+async function hydrateRepoWorkspace(name, opened, token) {
+  try {
+    const detail = await api(repoApi(name));
+    if (token !== repoSelectToken) return;
+    state.branches = normalizeBranchList(detail.branches);
+    state.defaultBranch = resolveDefaultBranch(
+      detail.default_branch || detail.summary?.default_branch || '',
+      state.branches,
+    );
+    updateBranchSelect();
+    updateDefaultBranchUi();
+    updateRepoInfo(detail);
+    updateAgentUi();
+    updateHeaderBrand();
+    await refreshTree({ resetExpanded: true });
+    if (token !== repoSelectToken) return;
+    await refreshGitStatus();
+    if (token !== repoSelectToken) return;
+    await refreshHistory();
+    if (token !== repoSelectToken) return;
+    if (opened?.jdtls?.warming) {
+      terminalLog('Starting Java language server…');
+    } else if (opened?.jdtls?.ready) {
+      terminalLog('Java language server ready');
+    }
+    await openFile('README.md', { silent: true });
+    if (token !== repoSelectToken) return;
+    terminalLog(`Opened workspace: ${name}`);
+    if (state.activeTab) {
+      $('#empty-state')?.classList.add('hidden');
+    } else {
+      $('#empty-state')?.classList.remove('hidden');
+    }
+    syncWelcomeLayout();
+    updateMenuState();
+  } catch (err) {
+    if (token !== repoSelectToken) return;
+    console.warn('[Reaper] repo hydrate failed', err);
+    toast(err.message || 'Failed to load project files', 'warning');
+  } finally {
+    setGlobalLoading(false);
+    dismissLaunchSplashNow();
+  }
+}
+
+async function selectRepoOnce(name, token) {
   if (!name) {
     state.repo = null;
     state.projectFolder = null;
@@ -8812,8 +8957,11 @@ async function selectRepo(name) {
     return;
   }
 
-  const switching = state.repo !== name;
+  const previousRepo = state.repo;
+  const switching = previousRepo !== name;
+  const showLoader = switching || !previousRepo;
   if (switching) {
+    leaveSaveGate();
     closeWorkspaceTabs();
     hideBuildTasksPanel();
     hidePackageManifestPanel();
@@ -8825,60 +8973,57 @@ async function selectRepo(name) {
     state.gitViewerLastResult = null;
   }
 
-  state.repo = name;
-  resetTerminalCwds();
-  let showedLoading = false;
+  let loaderOn = false;
   try {
-    if (switching) {
+    if (showLoader) {
+      dismissLaunchSplashNow();
       setGlobalLoading(true, `Opening ${name}…`);
-      showedLoading = true;
+      loaderOn = true;
     }
     const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
+    if (token !== repoSelectToken) return;
+
+    state.repo = name;
+    resetTerminalCwds();
     state.projectProfile = opened?.profile || null;
     state.projectFolder = opened?.path || null;
     startProjectIndexPolling();
     updateProjectReloadButton();
-    const detail = await api(repoApi(name));
-    state.branches = normalizeBranchList(detail.branches);
-    state.defaultBranch = resolveDefaultBranch(
-      detail.default_branch || detail.summary?.default_branch || '',
-      state.branches,
-    );
-    updateBranchSelect();
-    updateDefaultBranchUi();
-    updateRepoInfo(detail);
     enableControls();
-    updateAgentUi();
-    await refreshTree({ resetExpanded: true });
-    await refreshGitStatus();
-    await refreshHistory();
-    if (opened?.jdtls?.warming) {
-      terminalLog('Starting Java language server…');
-    } else if (opened?.jdtls?.ready) {
-      terminalLog('Java language server ready');
-    }
-    await openFile('README.md', { silent: true });
-    terminalLog(`Opened workspace: ${name}`);
-    if (state.activeTab) {
-      $('#empty-state')?.classList.add('hidden');
-    } else {
-      $('#empty-state')?.classList.remove('hidden');
-    }
-    syncWelcomeLayout();
-    updateMenuState();
     updateWindowTitle();
     setRepoPickerLabel(name);
+    updateHeaderBrand();
+
+    if (loaderOn) {
+      setGlobalLoading(false);
+      loaderOn = false;
+    }
+
+    void hydrateRepoWorkspace(name, opened, token);
   } catch (err) {
+    if (token !== repoSelectToken) return;
     toast(err.message, 'error');
     if (switching) {
-      state.repo = null;
-      resetUI();
-      updateWindowTitle();
-      setRepoPickerLabel('');
+      state.repo = previousRepo || null;
+      if (state.repo) {
+        setRepoPickerLabel(state.repo);
+      } else {
+        resetUI();
+        updateWindowTitle();
+        setRepoPickerLabel('');
+      }
     }
   } finally {
-    if (showedLoading) setGlobalLoading(false);
+    if (loaderOn) setGlobalLoading(false);
+    dismissLaunchSplashNow();
   }
+}
+
+function selectRepo(name) {
+  const token = ++repoSelectToken;
+  const job = repoSelectChain.then(() => selectRepoOnce(name, token));
+  repoSelectChain = job.catch(() => {});
+  return job;
 }
 
 function showNoRepoFileTree() {
@@ -8932,6 +9077,8 @@ function resetUI() {
   updateStatusBar();
   updateMenuState();
   setRepoPickerLabel('');
+  state.projectProfile = null;
+  updateHeaderBrand();
 }
 
 function enableControls() {
@@ -15877,6 +16024,7 @@ async function init() {
   bindSearchEverywhere();
   bindBranchPicker();
   bindRepoPicker();
+  bindHeaderBrand();
   mountReaperIcons();
   void initStatusFooter();
   initSidebarResize();
@@ -15919,6 +16067,7 @@ async function init() {
   } else if (!state.repo) {
     showNoRepoFileTree();
   }
+  hideLaunchSplash({ immediate: true });
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {
       await loadCursorStatus();
