@@ -1252,6 +1252,57 @@ function getInitialRepoFromUrl() {
   return repo || null;
 }
 
+function shouldSkipAutoRepoOpen() {
+  return new URLSearchParams(window.location.search).has('norepo');
+}
+
+function shouldShowWelcomeShowcase() {
+  return new URLSearchParams(window.location.search).get('showcase') !== '0';
+}
+
+async function applyCaptureDemoFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('capture')) return;
+  dismissLaunchSplashNow();
+  await new Promise((r) => setTimeout(r, 1500));
+  const mode = params.get('capture');
+  if (mode === 'file') {
+    const path = params.get('path')?.trim();
+    if (path && state.repo) await openFile(path, { silent: true });
+    await new Promise((r) => setTimeout(r, 3500));
+    return;
+  }
+  if (mode === 'panel') {
+    const panel = params.get('panel');
+    if (panel === 'agent') {
+      if (state.agentDock !== 'left') toggleAgent();
+      else switchPanel('agent');
+    } else if (panel === 'terminal') {
+      showTerminal();
+    } else if (panel) {
+      switchPanel(panel);
+    }
+    await new Promise((r) => setTimeout(r, panel === 'history' ? 3000 : 2000));
+    return;
+  }
+  if (mode === 'feature') {
+    const feature = params.get('feature');
+    if (feature === 'build-tasks') {
+      showBuildTasksPanel();
+      await new Promise((r) => setTimeout(r, 5000));
+    } else if (feature === 'search') {
+      showSearchEverywhere(params.get('q') || 'Order');
+      await new Promise((r) => setTimeout(r, 2500));
+    } else if (feature === 'palette') {
+      showPalette();
+      await new Promise((r) => setTimeout(r, 1500));
+    } else if (feature === 'go-to-class') {
+      showGoToClass(params.get('q') || 'Order');
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+  }
+}
+
 function syncDockMenuControls() {
   ['left', 'right', 'bottom'].forEach((dock) => {
     $$(`.ij-menu-item[data-action="terminal-dock-${dock}"]`).forEach((el) => {
@@ -4309,10 +4360,17 @@ async function pollProjectIndexStatus() {
 }
 
 function welcomeShowcaseHtml() {
+  if (!shouldShowWelcomeShowcase()) return '';
   const shots = [
     { file: 'welcome-home', label: 'Home', alt: 'Reaper welcome screen with quick actions' },
-    { file: 'editor-java', label: 'Editor', alt: 'Monaco editor with project tree and syntax highlighting' },
-    { file: 'git-commit', label: 'Git', alt: 'Git commit panel with staged changes' },
+    { file: 'editor-java', label: 'Editor', alt: 'Monaco editor with Java syntax highlighting' },
+    { file: 'git-commit', label: 'Commit', alt: 'Git commit panel with staged changes' },
+    { file: 'git-history', label: 'Git log', alt: 'Git history and commit log' },
+    { file: 'terminal', label: 'Terminal', alt: 'Integrated terminal for Gradle and shell output' },
+    { file: 'agent', label: 'Agent', alt: 'Cursor agent chat for AI-assisted editing' },
+    { file: 'build-tasks', label: 'Build', alt: 'Gradle and Maven build tasks tree' },
+    { file: 'search', label: 'Search', alt: 'Search classes, files, and text across the project' },
+    { file: 'go-to-class', label: 'Navigate', alt: 'Go to Class for Java symbol navigation' },
   ];
   return `<aside class="ij-welcome-showcase" aria-label="Reaper in action">
     ${shots.map(({ file, label, alt }) => `
@@ -16072,8 +16130,8 @@ async function init() {
     toast(`Could not reach Reaper backend: ${err.message}. Quit other Reaper copies and relaunch.`, 'error', { duration: 15000 });
   }
   hideLaunchSplash();
-  let repoToOpen = getInitialRepoFromUrl();
-  if (!repoToOpen) {
+  let repoToOpen = shouldSkipAutoRepoOpen() ? null : getInitialRepoFromUrl();
+  if (!repoToOpen && !shouldSkipAutoRepoOpen()) {
     try {
       const general = await api('/api/settings/general');
       repoToOpen = general?.default_repo || general?.last_repo || null;
@@ -16086,6 +16144,7 @@ async function init() {
   } else if (!state.repo) {
     showNoRepoFileTree();
   }
+  await applyCaptureDemoFromUrl();
   hideLaunchSplash({ immediate: true });
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {
