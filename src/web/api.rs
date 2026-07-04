@@ -92,6 +92,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/git", post(run_bare_git_command))
         .route("/api/repos/{name}/workspace/open", post(open_workspace))
         .route("/api/repos/{name}/workspace/sync", post(sync_workspace))
+        .route("/api/repos/{name}/workspace/fetch", post(fetch_workspace))
         .route("/api/repos/{name}/workspace/tree", get(workspace_tree))
         .route(
             "/api/repos/{name}/workspace/file",
@@ -446,6 +447,20 @@ async fn sync_workspace(
     match workspace::sync_workspace(&ws) {
         Ok(out) => git_response(out),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn fetch_workspace(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::fetch_workspace_remotes(&ws) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
 
