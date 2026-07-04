@@ -36,6 +36,9 @@ struct SettingsFile {
     /// Java dependency index: "standard" (2000 JARs + background) or "light" (400 JARs).
     #[serde(default)]
     java_index_mode: Option<String>,
+    /// Periodically fetch remotes while a repo is open (ahead/behind in header). Off by default.
+    #[serde(default)]
+    git_background_fetch: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -75,6 +78,7 @@ pub struct GeneralSettingsView {
     pub default_repo: Option<String>,
     pub last_repo: Option<String>,
     pub java_index_mode: String,
+    pub git_background_fetch: bool,
 }
 
 impl SettingsStore {
@@ -339,7 +343,7 @@ impl SettingsStore {
     }
 
     pub fn general_view(&self) -> GeneralSettingsView {
-        let (default_repo, last_repo, java_index_mode) = self
+        let (default_repo, last_repo, java_index_mode, git_background_fetch) = self
             .inner
             .read()
             .ok()
@@ -358,13 +362,15 @@ impl SettingsStore {
                         .clone()
                         .filter(|m| !m.is_empty())
                         .unwrap_or_else(|| "lazy".into()),
+                    guard.git_background_fetch.unwrap_or(false),
                 )
             })
-            .unwrap_or_else(|| (None, None, "lazy".into()));
+            .unwrap_or_else(|| (None, None, "lazy".into(), false));
         GeneralSettingsView {
             default_repo,
             last_repo,
             java_index_mode,
+            git_background_fetch,
         }
     }
 
@@ -396,6 +402,12 @@ impl SettingsStore {
         }
         let mut guard = self.inner.write().expect("settings lock poisoned");
         guard.java_index_mode = Some(mode.to_string());
+        self.save(&guard)
+    }
+
+    pub fn set_git_background_fetch(&self, enabled: bool) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.git_background_fetch = Some(enabled);
         self.save(&guard)
     }
 

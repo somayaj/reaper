@@ -205,13 +205,35 @@ pub fn list_branches(repo: &Path) -> Result<Vec<String>> {
     if !out.success() {
         bail!("{}", out.stderr.trim());
     }
-    Ok(out
+    let mut branches: Vec<String> = out
         .stdout
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !is_legacy_branch(l))
         .map(str::to_string)
-        .collect())
+        .collect();
+
+    // Include remote-only branches (e.g. origin/feature not checked out locally).
+    if let Ok(remote_out) = run_git(
+        Some(repo),
+        &["branch", "-r", "--format=%(refname:short)"],
+    ) {
+        if remote_out.success() {
+            for line in remote_out.stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.ends_with("/HEAD") || is_legacy_branch(line) {
+                    continue;
+                }
+                let name = line.strip_prefix("origin/").unwrap_or(line).to_string();
+                if !branches.iter().any(|b| b == &name) {
+                    branches.push(name);
+                }
+            }
+        }
+    }
+
+    branches.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Ok(branches)
 }
 
 fn remote_default_branch(repo: &Path) -> Option<String> {

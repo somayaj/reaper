@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="372" />
+  <meta name="reaper-ui-build" content="377" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -71,7 +71,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=372" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=377" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -263,7 +263,7 @@
   </header>
 
   <!-- Main menu bar -->
-  <header class="ij-menubar flex items-center justify-between px-3 shrink-0">
+  <header class="ij-menubar shrink-0">
     <div class="ij-menubar-main flex items-center gap-2 min-w-0 flex-1">
       <div id="header-brand" class="ij-header-brand shrink-0 flex items-center gap-2 min-w-0 max-w-[min(100%,26rem)]">
         <div class="ij-menu-root ij-header-logo-root" data-menu="logo">
@@ -1331,6 +1331,13 @@
             </div>
             <div>
               <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                <input id="settings-git-background-fetch" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
+                Background fetch for ahead/behind
+              </label>
+              <p class="text-[11px] text-gray-600 mt-2">While a repo is open, fetch remotes every 60 seconds so the header and status bar show current ahead/behind counts. Off by default — use Pull to refresh manually.</p>
+            </div>
+            <div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
                 <input id="settings-new-window-on-repo" type="checkbox" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
                 Open a new window when switching repos
               </label>
@@ -1522,9 +1529,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=372"></script>
-  <script src="/monaco-languages.js?v=372" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=377"></script>
+  <script src="/monaco-languages.js?v=377" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=372"></script>
+  <script src="/app.js?v=377"></script>
 </body>
 </html>

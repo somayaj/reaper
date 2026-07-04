@@ -163,6 +163,15 @@ pub fn sync_workspace(ws: &Path) -> Result<GitOutput> {
     git::run_git(Some(ws), &["pull", "--ff-only"])
 }
 
+/// Fetch all remotes in the workspace clone so ahead/behind reflect upstream.
+pub fn fetch_workspace_remotes(ws: &Path) -> Result<GitOutput> {
+    let remotes = git::run_git(Some(ws), &["remote"])?;
+    if !remotes.success() || remotes.stdout.trim().is_empty() {
+        bail!("no remotes configured");
+    }
+    git::run_git(Some(ws), &["fetch", "--all", "--quiet", "--prune"])
+}
+
 #[derive(Debug, Serialize)]
 pub struct FileNode {
     pub name: String,
@@ -478,6 +487,9 @@ pub struct WorkspaceStatus {
     pub merge: conflict::MergeState,
     pub conflict_count: usize,
     pub ahead: usize,
+    pub behind: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<String>,
 }
 
 pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
@@ -536,6 +548,8 @@ pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
         }
     }
 
+    let (ahead, behind, tracking) = tracking_counts(ws, &branch, &out.stdout);
+
     Ok(WorkspaceStatus {
         clean: files.is_empty(),
         branch,
@@ -543,12 +557,94 @@ pub fn workspace_status(ws: &Path) -> Result<WorkspaceStatus> {
         stdout: out.stdout,
         merge,
         conflict_count,
-        ahead: unpushed_commit_count(ws),
+        ahead,
+        behind,
+        tracking,
     })
 }
 
-fn unpushed_commit_count(ws: &Path) -> usize {
-    if let Ok(out) = git::run_git(Some(ws), &["rev-list", "--count", "@{u}..HEAD"]) {
+fn tracking_counts(ws: &Path, branch: &str, status_stdout: &str) -> (usize, usize, Option<String>) {
+    let (mut ahead, mut behind, tracking) = parse_status_branch_line(status_stdout)
+        .unwrap_or((0, 0, None));
+    let tracking = tracking.or_else(|| resolve_tracking_ref(ws, branch));
+    let Some(upstream) = tracking.clone() else {
+        return (0, 0, None);
+    };
+    if ahead == 0 && behind == 0 {
+        ahead = count_rev_range(ws, &upstream, true);
+        behind = count_rev_range(ws, &upstream, false);
+    } else {
+        if ahead == 0 {
+            ahead = count_rev_range(ws, &upstream, true);
+        }
+        if behind == 0 {
+            behind = count_rev_range(ws, &upstream, false);
+        }
+    }
+    (ahead, behind, Some(upstream))
+}
+
+/// Parse `## branch...upstream [ahead N, behind M]` from porcelain status.
+fn parse_status_branch_line(status_stdout: &str) -> Option<(usize, usize, Option<String>)> {
+    let line = status_stdout.lines().find(|l| l.starts_with("## "))?;
+    let rest = line.strip_prefix("## ")?.trim();
+    if rest.starts_with("HEAD ") {
+        return None;
+    }
+    let (branch_part, upstream_part) = rest.split_once("...")?;
+    if branch_part.is_empty() {
+        return None;
+    }
+    let mut upstream = upstream_part.to_string();
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
+    if let Some(bracket_start) = upstream.find(" [") {
+        let bracket = upstream[bracket_start + 2..].strip_suffix(']')?.to_string();
+        upstream.truncate(bracket_start);
+        for part in bracket.split(',') {
+            let part = part.trim();
+            if let Some(n) = part.strip_prefix("ahead ") {
+                ahead = n.trim().parse().unwrap_or(0);
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                behind = n.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    upstream = upstream.split_whitespace().next()?.to_string();
+    if upstream.is_empty() {
+        return None;
+    }
+    Some((ahead, behind, Some(upstream)))
+}
+
+fn resolve_tracking_ref(ws: &Path, branch: &str) -> Option<String> {
+    if let Ok(out) = git::run_git(
+        Some(ws),
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    ) {
+        if out.success() {
+            let label = out.stdout.trim();
+            if !label.is_empty() {
+                return Some(label.to_string());
+            }
+        }
+    }
+    let origin_branch = format!("origin/{branch}");
+    if let Ok(verify) = git::run_git(Some(ws), &["rev-parse", "--verify", &origin_branch]) {
+        if verify.success() {
+            return Some(origin_branch);
+        }
+    }
+    None
+}
+
+fn count_rev_range(ws: &Path, upstream: &str, ahead: bool) -> usize {
+    let range = if ahead {
+        format!("{upstream}..HEAD")
+    } else {
+        format!("HEAD..{upstream}")
+    };
+    if let Ok(out) = git::run_git(Some(ws), &["rev-list", "--count", &range]) {
         if out.success() {
             return out.stdout.trim().parse().unwrap_or(0);
         }
@@ -773,6 +869,15 @@ pub fn commit_and_push(ws: &Path, message: &str, paths: Option<&[String]>) -> Re
 }
 
 pub fn checkout_branch(ws: &Path, branch: &str) -> Result<GitOutput> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        anyhow::bail!("branch name required");
+    }
+    // `switch` creates a local branch from origin/<name> when needed.
+    let out = git::run_git(Some(ws), &["switch", branch])?;
+    if out.success() {
+        return Ok(out);
+    }
     git::run_git(Some(ws), &["checkout", branch])
 }
 
@@ -1955,5 +2060,23 @@ mod path_tests {
         assert!(content.contains("printf"));
         let _ = std::fs::remove_file(&external);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn parse_status_branch_line_reads_ahead_and_behind() {
+        let stdout = "## main...origin/main [ahead 2, behind 3]\n M file.txt\n";
+        let (ahead, behind, tracking) = parse_status_branch_line(stdout).unwrap();
+        assert_eq!(ahead, 2);
+        assert_eq!(behind, 3);
+        assert_eq!(tracking.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn parse_status_branch_line_reads_upstream_only() {
+        let stdout = "## feature...upstream/main\n";
+        let (ahead, behind, tracking) = parse_status_branch_line(stdout).unwrap();
+        assert_eq!(ahead, 0);
+        assert_eq!(behind, 0);
+        assert_eq!(tracking.as_deref(), Some("upstream/main"));
     }
 }

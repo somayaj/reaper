@@ -320,6 +320,7 @@ async fn get_general(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 struct SetGeneralRequest {
     default_repo: Option<String>,
     java_index_mode: Option<String>,
+    git_background_fetch: Option<bool>,
 }
 
 async fn set_general(
@@ -329,6 +330,11 @@ async fn set_general(
     if let Some(mode) = body.java_index_mode.as_deref() {
         if let Err(e) = state.settings.set_java_index_mode(mode) {
             return api_error(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(enabled) = body.git_background_fetch {
+        if let Err(e) = state.settings.set_git_background_fetch(enabled) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
     }
     if body.default_repo.is_some() {
