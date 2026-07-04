@@ -10,6 +10,7 @@ pub struct Config {
     pub workspaces_dir: PathBuf,
     pub metadata_dir: PathBuf,
     pub settings_path: PathBuf,
+    pub ui_preferences_path: PathBuf,
 }
 
 impl Config {
@@ -27,6 +28,7 @@ impl Config {
             workspaces_dir: data_dir.join("workspaces"),
             metadata_dir: data_dir.join("metadata"),
             settings_path: data_dir.join("settings.json"),
+            ui_preferences_path: data_dir.join("ui-preferences.json"),
             data_dir,
             static_dir,
         }
@@ -131,11 +133,65 @@ pub fn running_in_app_bundle() -> bool {
 pub fn bundled_node() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(mac_os) = exe.parent() {
-            let bundled = mac_os.join("../Resources/node/bin/node");
+            let resources = mac_os.join("../Resources");
+            let arch = crate::platform::macos_host_arch();
+            for candidate in [
+                resources.join(format!("node-{arch}/bin/node")),
+                resources.join("node/bin/node"),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate.canonicalize().unwrap_or(candidate));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Temurin JDK 21 shipped inside Reaper.app (runs jdtls only — not the project JDK).
+pub fn bundled_jdtls_java_home() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let resources = mac_os.join("../Resources");
+            let arch = crate::platform::macos_host_arch();
+            for candidate in [
+                resources.join(format!("jdk-21-{arch}/Contents/Home")),
+                resources.join("jdk-21/Contents/Home"),
+            ] {
+                if candidate.join("bin/java").is_file() {
+                    return Some(candidate.canonicalize().unwrap_or(candidate));
+                }
+            }
+        }
+    }
+    dev_bundled_jdtls_java_home()
+}
+
+fn dev_bundled_jdtls_java_home() -> Option<PathBuf> {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let arch = crate::platform::macos_host_arch();
+    let home = base.join(format!("jdk-macos-{arch}/Contents/Home"));
+    if home.join("bin/java").is_file() {
+        Some(home)
+    } else {
+        None
+    }
+}
+
+/// Eclipse JDT Language Server shipped inside Reaper.app (Java navigation).
+pub fn bundled_jdtls() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let bundled = mac_os.join("../Resources/jdtls/bin/jdtls");
             if bundled.is_file() {
                 return Some(bundled.canonicalize().unwrap_or(bundled));
             }
         }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources/jdtls/bin/jdtls");
+    if dev.is_file() {
+        return Some(dev);
     }
     None
 }

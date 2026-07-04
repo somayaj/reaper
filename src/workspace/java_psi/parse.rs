@@ -302,15 +302,13 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_single_type(&mut self) -> bool {
-        let mut saw = false;
-        match self.peek().kind.clone() {
+        let saw = match self.peek().kind.clone() {
             TokenKind::Keyword(Keyword::Void) => {
                 self.bump();
-                saw = true;
+                true
             }
             TokenKind::Identifier(_) => {
                 self.bump();
-                saw = true;
                 while matches!(self.peek().kind, TokenKind::Dot) {
                     if !self
                         .tokens
@@ -322,9 +320,10 @@ impl<'a> Parser<'a> {
                     self.bump();
                     self.bump();
                 }
+                true
             }
             _ => return false,
-        }
+        };
         while matches!(self.peek().kind, TokenKind::Lt) {
             self.bump();
             self.skip_balanced(TokenKind::Lt, TokenKind::Gt);

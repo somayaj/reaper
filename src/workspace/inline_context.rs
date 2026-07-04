@@ -54,6 +54,34 @@ pub fn build_inline_completion_context(
 fn append_language_hints(out: &mut String, path: &str, line_prefix: &str) {
     let lang = languages::language_for_path(path).unwrap_or("plaintext");
     writeln!(out, "\n--- {lang} completion hints ---").ok();
+    match lang {
+        "markdown" => {
+            writeln!(
+                out,
+                "Markdown: headings (#), lists (- / 1.), links, code fences, blockquotes (>)."
+            )
+            .ok();
+        }
+        "yaml" | "toml" | "ini" => {
+            writeln!(out, "Config: keys, nesting, indentation, valid {lang} syntax.").ok();
+        }
+        "json" => {
+            writeln!(out, "JSON: keys, strings, arrays, objects — strict syntax.").ok();
+        }
+        "html" | "xml" => {
+            writeln!(out, "Markup: tags, attributes, closing elements, valid nesting.").ok();
+        }
+        "css" | "scss" | "less" => {
+            writeln!(out, "Styles: selectors, properties, values, blocks.").ok();
+        }
+        "sql" => {
+            writeln!(out, "SQL: clauses (SELECT, FROM, WHERE, JOIN), identifiers, literals.").ok();
+        }
+        "dockerfile" | "makefile" | "cmake" => {
+            writeln!(out, "Build file: valid {lang} instructions and targets.").ok();
+        }
+        _ => {}
+    }
     writeln!(
         out,
         "Suggest valid {lang} syntax: keywords, identifiers, operators, delimiters (; ) ] }} ), strings, calls, imports, attributes, blocks — not only loops."
@@ -691,13 +719,33 @@ fn line_ends_with_control_keyword(trimmed: &str) -> bool {
         || trimmed.ends_with("switch(")
 }
 
+fn markup_or_config_language(path: &str) -> bool {
+    matches!(
+        languages::language_for_path(path),
+        Some(
+            "markdown" | "plaintext" | "yaml" | "json" | "html" | "xml" | "toml" | "ini" | "css"
+                | "scss" | "less" | "sql" | "dockerfile" | "makefile" | "cmake" | "graphql"
+                | "protobuf"
+        )
+    )
+}
+
 /// Prefer AI over local symbol/keyword fallback for statements and block bodies (all languages).
 pub fn should_prefer_ai_statement_inline(
-    _path: &str,
+    path: &str,
     line_prefix: &str,
     content: &str,
     line: u32,
 ) -> bool {
+    if is_import_typing_line(path, content, line, line_prefix) {
+        return false;
+    }
+    if markup_or_config_language(path) {
+        return true;
+    }
+    if is_whitespace_only_line(line_prefix) {
+        return true;
+    }
     let trimmed = line_prefix.trim_end();
     if line_ends_with_control_keyword(trimmed) {
         return true;
@@ -705,14 +753,29 @@ pub fn should_prefer_ai_statement_inline(
     if is_inside_control_paren(line_prefix) {
         return true;
     }
-    if is_whitespace_only_line(line_prefix) && find_enclosing_block(content, line).is_some() {
-        return true;
-    }
     let partial = extract_partial_token(line_prefix);
     if !partial.is_empty() && is_control_keyword_prefix(&partial) {
         return true;
     }
     false
+}
+
+/// Import/using lines — classpath index ghost only (respects project compiler version), not AI.
+pub fn is_import_typing_line(path: &str, content: &str, line: u32, line_prefix: &str) -> bool {
+    if super::symbols::is_java_import_line(content, line) {
+        return true;
+    }
+    let trimmed = line_prefix.trim_start();
+    match languages::language_for_path(path).unwrap_or("plaintext") {
+        "csharp" => trimmed.starts_with("using "),
+        "python" => trimmed.starts_with("import ") || trimmed.starts_with("from "),
+        "rust" => trimmed.starts_with("use "),
+        "javascript" | "typescript" => {
+            trimmed.starts_with("import ") || trimmed.contains(" from ")
+        }
+        "go" | "swift" | "dart" | "kotlin" | "groovy" | "java" => trimmed.starts_with("import "),
+        _ => trimmed.starts_with("import "),
+    }
 }
 
 fn control_structure_inline_suffix(
@@ -830,6 +893,23 @@ pub fn inline_completion_fallback(
     content: &str,
     line_prefix: &str,
 ) -> Option<String> {
+    if super::symbols::is_java_import_line(content, line) {
+        if let Ok(items) =
+            super::java_completions(ws, path, line, column, "", Some(content), &[])
+        {
+            if let Some(insert) = items.first().map(|i| {
+                i.insert
+                    .as_deref()
+                    .unwrap_or(&i.label)
+                    .to_string()
+            }) {
+                if !insert.is_empty() {
+                    return Some(insert);
+                }
+            }
+        }
+    }
+
     let word = symbols::word_at(content, line, column).unwrap_or_default();
     let prefix = if word.is_empty() {
         symbols::java_dot_qualifier(content, line, column)
@@ -874,4 +954,53 @@ pub fn inline_completion_fallback(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_prefer_ai_statement_inline;
+    use super::is_import_typing_line;
+
+    #[test]
+    fn import_lines_skip_ai() {
+        let java = "package com.example;\nimport org.spring\n";
+        assert!(is_import_typing_line("src/App.java", java, 2, "import org.spring"));
+        assert!(!should_prefer_ai_statement_inline(
+            "src/App.java",
+            "import org.spring",
+            java,
+            2,
+        ));
+    }
+
+    #[test]
+    fn prefer_ai_for_all_markup_and_config_languages() {
+        let langs = [
+            ("README.md", "    ", 2),
+            ("notes.txt", "    ", 2),
+            ("config.yaml", "title: ", 1),
+            ("data.json", "  \"a\": ", 2),
+            ("index.html", "  <p>", 2),
+            ("pom.xml", "  <root>", 2),
+            ("Cargo.toml", "name = ", 2),
+            ("app.ini", "key=", 2),
+            ("style.css", "  color: ", 2),
+            ("query.sql", "SELECT ", 1),
+            ("Dockerfile", "RUN ", 2),
+            ("Makefile", "\t", 2),
+        ];
+        for (path, prefix, line) in langs {
+            assert!(
+                should_prefer_ai_statement_inline(path, prefix, "ctx\n", line),
+                "expected AI for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefer_ai_for_empty_lines_in_code_languages() {
+        let body = "class A {\n  void m() {\n    \n  }\n}\n";
+        assert!(should_prefer_ai_statement_inline("src/App.java", "    ", body, 3));
+        assert!(should_prefer_ai_statement_inline("app.py", "    ", "def m():\n    \n", 2));
+    }
 }

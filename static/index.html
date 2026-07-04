@@ -75,7 +75,7 @@
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
-  <script src="/agent-markdown.js?v=5"></script>
+  <script src="/agent-markdown.js?v=6"></script>
   <style>
     html, body { height: 100%; margin: 0; }
     #editor { min-height: 0; }
@@ -247,6 +247,7 @@
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
     <div class="flex flex-col items-center gap-4 max-w-sm w-full px-6">
       <span data-reaper-logo="xl" data-reaper-logo-pulse="true" class="logo-mark loading-dot"></span>
+      <span id="loading-spinner" class="ij-busy-indicator ij-busy-indicator--lg hidden" aria-hidden="true"><span class="ij-busy-indicator-ring"></span><span class="ij-busy-indicator-glow"></span></span>
       <p id="loading-text" class="text-sm text-gray-500 text-center">Loading…</p>
       <div id="loading-index-progress" class="ij-index-progress hidden w-full">
         <div class="ij-index-progress-track"><div id="loading-index-progress-fill" class="ij-index-progress-fill"></div></div>
@@ -723,6 +724,9 @@
         <button id="tb-rollback" disabled title="Rollback last change (⌘Z)" class="ij-toolbar-btn" type="button" aria-label="Rollback last change">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14L4 9m0 0l5-5M4 9h10.5a5.5 5.5 0 010 11H11"/></svg>
         </button>
+        <button id="tb-coverage-inline" type="button" class="ij-toolbar-btn ij-toolbar-cov-toggle hidden" aria-pressed="true" aria-label="Coverage highlighting in editor" title="Hide covered / uncovered line highlighting in editor">
+          <span class="ij-toolbar-cov-icon" aria-hidden="true">◔</span>
+        </button>
         <button id="tb-reload-project" disabled title="Reload Maven project" class="ij-toolbar-btn hidden" type="button" aria-label="Reload Maven project">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0115.5-2.5M20 15a9 9 0 01-15.5 2.5"/></svg>
         </button>
@@ -757,7 +761,7 @@
           <div id="banner-index-progress-fill" class="ij-index-strip-fill"></div>
         </div>
       </div>
-      <div id="tab-bar" class="flex items-stretch shrink-0 min-h-[28px]">
+      <div id="tab-bar" class="flex items-stretch shrink-0">
         <div id="tab-list" class="flex items-stretch flex-1 min-w-0 overflow-x-auto"></div>
       </div>
       <div id="editor-breadcrumbs" class="ij-breadcrumbs hidden"></div>
@@ -839,6 +843,7 @@
           <span id="coverage-panel-subtitle" class="ij-coverage-subtitle"></span>
         </div>
         <div class="ij-coverage-header-actions">
+          <button type="button" id="btn-coverage-toggle-inline" class="ij-coverage-icon-btn ij-coverage-inline-toggle hidden" aria-pressed="true" title="Hide covered / uncovered line highlighting in editor">◔</button>
           <button type="button" id="btn-coverage-refresh" class="ij-coverage-icon-btn" title="Refresh report">↻</button>
           <button type="button" id="btn-coverage-close" class="ij-coverage-icon-btn" title="Close coverage panel">×</button>
         </div>
@@ -979,7 +984,8 @@
 
   <!-- Status bar -->
   <footer class="ij-statusbar flex items-stretch shrink-0">
-    <div id="status-left" class="ij-status-segment flex items-center gap-2 truncate min-w-0">
+    <div id="status-left" class="ij-status-segment flex items-center gap-2 min-w-0">
+      <span id="status-nav-indicator" class="ij-status-nav-slot hidden" aria-live="polite" aria-atomic="true"></span>
       <span id="status-message">Ready</span>
       <span id="status-diag-hint" class="ij-status-diag-hint hidden" title=""></span>
       <span id="status-complete-debug" class="ij-status-complete-debug shrink-0 hidden" title="Completion debug"></span>
@@ -1112,10 +1118,17 @@
           <input type="checkbox" name="private" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
           Private repository
         </label>
+        <div id="publish-feedback" class="ij-modal-feedback">
+          <div id="publish-status" class="ij-clone-status hidden" aria-live="polite">
+            <span class="ij-clone-spinner" aria-hidden="true"></span>
+            <span id="publish-status-text">Publishing…</span>
+          </div>
+          <div id="publish-error" class="ij-clone-error hidden" role="alert"></div>
+        </div>
       </form>
       <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
         <button type="button" id="publish-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" form="publish-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Publish</button>
+        <button type="submit" id="btn-publish-submit" form="publish-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Publish</button>
       </div>
     </div>
   </div>
@@ -1135,7 +1148,11 @@
       <div id="push-modal-body" class="ij-push-modal-body flex-1 overflow-auto panel-scroll px-6 py-4 min-h-0">
         <p class="text-sm text-gray-500">Loading…</p>
       </div>
-      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50 shrink-0">
+      <div class="px-6 py-4 border-t border-surface-700/80 flex items-center justify-end gap-2 bg-surface-900/50 shrink-0">
+        <div id="push-modal-busy" class="ij-push-modal-busy hidden" aria-live="polite">
+          <span class="ij-clone-spinner" aria-hidden="true"></span>
+          <span id="push-modal-busy-text">Pushing…</span>
+        </div>
         <button type="button" id="push-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
         <button type="button" id="push-modal-confirm" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors" disabled>Push</button>
       </div>
@@ -1316,9 +1333,9 @@
               <select id="settings-java-index-mode" class="ij-theme-menu-select w-full max-w-md" title="How many dependency JARs to index at startup">
                 <option value="standard">Standard — core JARs first (~2000), rest in background</option>
                 <option value="light">Light — fewer JARs (~400), lower CPU and memory</option>
-                <option value="lazy">On-demand — index each module when you open its files</option>
+                <option value="lazy">On-demand — index for completions, Go to Class, and Spring props</option>
               </select>
-              <p class="text-[11px] text-gray-600">Standard keeps the editor usable quickly on large Maven/Gradle projects; remaining JARs index slowly in the background. On-demand skips startup indexing and loads each module as you open Java files — best for large monorepos. Reload the project index after changing this.</p>
+              <p class="text-[11px] text-gray-600">On-demand skips startup indexing; the custom index builds when you use code completion (⌃Space), Go to Class (⌘O), or Spring property keys. Java navigation (F12, hover, rename) uses the bundled language server. Standard/Light index more JARs at startup for faster first completion.</p>
             </div>
           </section>
           <section id="settings-panel-cursor" class="ij-settings-panel hidden space-y-4">
@@ -1401,6 +1418,15 @@
       <input id="goto-class-input" type="text" placeholder="Search classes (e.g. User, ACB, com.example.Foo)…" autocomplete="off" spellcheck="false" />
       <div id="goto-class-results" class="max-h-80 overflow-auto panel-scroll py-1"></div>
       <div id="goto-class-hint" class="ij-goto-class-hint">↑↓ navigate · Enter open · Esc close</div>
+    </div>
+  </div>
+
+  <!-- Find Usages (jdtls) -->
+  <div id="java-references-overlay" class="ij-overlay">
+    <div class="ij-palette ij-goto-class">
+      <div id="java-references-title" class="ij-goto-class-header">Find Usages</div>
+      <div id="java-references-results" class="max-h-80 overflow-auto panel-scroll py-1"></div>
+      <div class="ij-goto-class-hint">↑↓ navigate · Enter open · Esc close</div>
     </div>
   </div>
 

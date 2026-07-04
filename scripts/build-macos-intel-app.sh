@@ -30,6 +30,8 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 "$ROOT/scripts/sync-launch-splash.sh"
 "$ROOT/scripts/vendor-monaco.sh"
 REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
+REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
+"$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
 
 GJF_BIN="$APP/Contents/Resources/google-java-format/google-java-format"
 GJF_JAR="$APP/Contents/Resources/google-java-format/google-java-format-all-deps.jar"

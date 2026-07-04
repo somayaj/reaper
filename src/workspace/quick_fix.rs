@@ -69,8 +69,165 @@ pub fn suggest_local_quick_fixes(
                 fixes.push(fix);
             }
         }
+        if let Some(fix) = file_exists_receiver_fix_for_diagnostic(content, diag) {
+            let key = fix
+                .edits
+                .iter()
+                .map(|e| format!("{}:{}:{}", e.start_line, e.start_column, e.text))
+                .collect::<String>();
+            if seen.insert(key) {
+                fixes.push(fix);
+            }
+        }
     }
     Ok(fixes)
+}
+
+fn quick_fix_dedupe_key(fix: &QuickFix) -> String {
+    format!(
+        "{}:{}",
+        fix.title,
+        fix.edits
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    e.start_line, e.start_column, e.end_line, e.end_column, e.text
+                )
+            })
+            .collect::<String>()
+    )
+}
+
+/// Append `from` onto `into`, skipping fixes with identical title + edits.
+pub fn merge_quick_fixes(into: &mut Vec<QuickFix>, from: Vec<QuickFix>) {
+    let mut seen: std::collections::HashSet<String> =
+        into.iter().map(quick_fix_dedupe_key).collect();
+    for fix in from {
+        if seen.insert(quick_fix_dedupe_key(&fix)) {
+            into.push(fix);
+        }
+    }
+}
+
+fn file_exists_receiver_fix_for_diagnostic(
+    content: &str,
+    diag: &QuickFixDiagnostic,
+) -> Option<QuickFix> {
+    if !diag.message.contains("cannot find symbol") {
+        return None;
+    }
+    let about_exists = diag.message.contains("method exists()")
+        || diag.message.contains("symbol:   method exists")
+        || diag.message.contains("variable exist")
+        || diag.message.contains("variable exists");
+    if !about_exists {
+        return None;
+    }
+    let file_var = infer_java_file_receiver_var(content)?;
+    let line = content.lines().nth(diag.line.saturating_sub(1) as usize)?;
+
+    if let Some((start, end)) = find_bare_method_call_span(line, "exists") {
+        return Some(QuickFix {
+            title: format!("Change exists() to {file_var}.exists()"),
+            edits: vec![QuickFixEdit {
+                start_line: diag.line,
+                start_column: start,
+                end_line: diag.line,
+                end_column: end,
+                text: format!("{file_var}.exists()"),
+            }],
+            provider: Some("local".into()),
+        });
+    }
+
+    for typo in ["exist", "exists"] {
+        let pattern = format!("{file_var}.{typo}");
+        if let Some(idx) = line.find(&pattern) {
+            let start_col = idx as u32 + 1;
+            let end_col = start_col + pattern.len() as u32;
+            return Some(QuickFix {
+                title: format!("Change {pattern} to {file_var}.exists()"),
+                edits: vec![QuickFixEdit {
+                    start_line: diag.line,
+                    start_column: start_col,
+                    end_line: diag.line,
+                    end_column: end_col,
+                    text: format!("{file_var}.exists()"),
+                }],
+                provider: Some("local".into()),
+            });
+        }
+    }
+    None
+}
+
+fn infer_java_file_receiver_var(content: &str) -> Option<String> {
+    let mut vars = std::collections::HashSet::new();
+    for line in content.lines() {
+        let mut search = line;
+        while let Some(idx) = search.find("File") {
+            let before_ok = idx == 0
+                || !search.as_bytes()[idx - 1].is_ascii_alphanumeric()
+                    && search.as_bytes()[idx - 1] != b'.';
+            let after = search[idx + 4..].trim_start();
+            if before_ok {
+                if let Some(name) = read_java_ident(after) {
+                    if name != "createTempFile" {
+                        vars.insert(name);
+                    }
+                }
+            }
+            search = &search[idx + 4..];
+        }
+    }
+    if vars.contains("file") {
+        return Some("file".into());
+    }
+    vars.into_iter().next()
+}
+
+fn read_java_ident(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return None;
+    }
+    let mut name = String::new();
+    name.push(first);
+    for ch in chars {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            name.push(ch);
+        } else {
+            break;
+        }
+    }
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn find_bare_method_call_span(line: &str, method: &str) -> Option<(u32, u32)> {
+    let open_needle = format!("{method}(");
+    let mut search_from = 0usize;
+    while let Some(rel) = line[search_from..].find(&open_needle) {
+        let start = search_from + rel;
+        let before_ok = start == 0
+            || {
+                let b = line.as_bytes()[start - 1];
+                !b.is_ascii_alphanumeric() && b != b'.'
+            };
+        if before_ok {
+            let open_paren = start + method.len();
+            if line.as_bytes().get(open_paren) == Some(&b'(') {
+                if let Some(close_rel) = line[open_paren + 1..].find(')') {
+                    let end = open_paren + 1 + close_rel + 1;
+                    return Some((start as u32 + 1, end as u32 + 1));
+                }
+            }
+        }
+        search_from = start + 1;
+    }
+    None
 }
 
 fn import_fix_for_diagnostic(
@@ -165,5 +322,48 @@ mod tests {
         let edit = import_insert_edit(content, "org.springframework.web.bind.annotation.RestController");
         assert_eq!(edit.start_line, 2);
         assert!(edit.text.contains("RestController"));
+    }
+
+    #[test]
+    fn file_exists_receiver_fix_replaces_bare_exists_call() {
+        let content = r#"import java.io.File;
+public class App {
+    void m() {
+        File file = new File("x");
+        System.out.println(exists());
+    }
+}
+"#;
+        let diag = QuickFixDiagnostic {
+            line: 5,
+            column: 28,
+            message: "cannot find symbol\n  symbol:   method exists()\n  location: class App"
+                .into(),
+            severity: "error".into(),
+        };
+        let fix = file_exists_receiver_fix_for_diagnostic(content, &diag).expect("fix");
+        assert_eq!(fix.edits.len(), 1);
+        assert_eq!(fix.edits[0].text, "file.exists()");
+    }
+
+    #[test]
+    fn file_exists_receiver_fix_replaces_member_without_parens() {
+        let content = r#"import java.io.File;
+public class App {
+    void m() {
+        File file = new File("x");
+        if (file.exist) { }
+    }
+}
+"#;
+        let diag = QuickFixDiagnostic {
+            line: 5,
+            column: 13,
+            message: "cannot find symbol\n  symbol:   variable exist\n  location: variable file of type File"
+                .into(),
+            severity: "error".into(),
+        };
+        let fix = file_exists_receiver_fix_for_diagnostic(content, &diag).expect("fix");
+        assert_eq!(fix.edits[0].text, "file.exists()");
     }
 }

@@ -345,28 +345,49 @@
     syncMonacoOverflowWidgetTheme(theme.dark);
 
     if (typeof monaco !== 'undefined' && window.__reaperMonacoThemesDefined) {
-      monaco.editor.setTheme(theme.monaco);
+      syncMonacoEditorTheme(theme);
     }
     if (typeof window.syncTerminalTheme === 'function') {
       window.syncTerminalTheme();
     }
   }
 
-  /** Hover/suggest widgets render in #editor-overflow-root, outside .monaco-editor. */
+  function themeSurfaceColorsFromCss(dark = true) {
+    const root = document.documentElement;
+    const styles = getComputedStyle(root);
+    const pick = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+    return {
+      panel: pick('--ij-panel', dark ? '#3C3F41' : '#FFFFFF'),
+      text: pick('--ij-text', dark ? '#BBBBBB' : '#1E1E1E'),
+      textBright: pick('--ij-text-bright', '#FFFFFF'),
+      border: pick('--ij-border', dark ? '#515658' : '#C8C8C8'),
+      selected: pick('--ij-selection', dark ? '#214283' : '#0060C0'),
+    };
+  }
+
+  function themeMenuColorsFromCss(dark = true) {
+    const { panel, text, textBright, border, selected } = themeSurfaceColorsFromCss(dark);
+    return {
+      'menu.background': panel,
+      'menu.foreground': text,
+      'menu.selectionBackground': selected,
+      'menu.selectionForeground': textBright,
+      'menu.border': border,
+      'menu.separatorBackground': border,
+    };
+  }
+
+  /** Hover/suggest/menu widgets render outside .monaco-editor (overflow root + body context view). */
   function syncMonacoOverflowWidgetTheme(dark = true) {
     const el = document.getElementById('editor-overflow-root');
-    if (!el) return;
-    const panel = dark ? '#3C3F41' : '#FFFFFF';
-    const text = dark ? '#BBBBBB' : '#1E1E1E';
-    const border = dark ? '#515658' : '#C8C8C8';
-    const selected = dark ? '#214283' : '#0060C0';
+    const { panel, text, textBright, border, selected } = themeSurfaceColorsFromCss(dark);
     const vars = {
       '--vscode-editorSuggestWidget-background': panel,
       '--vscode-editorSuggestWidget-foreground': text,
       '--vscode-editorSuggestWidget-border': border,
       '--vscode-editorSuggestWidget-selectedBackground': selected,
-      '--vscode-editorSuggestWidget-selectedForeground': '#FFFFFF',
-      '--vscode-editorSuggestWidget-highlightForeground': '#FFFFFF',
+      '--vscode-editorSuggestWidget-selectedForeground': textBright,
+      '--vscode-editorSuggestWidget-highlightForeground': textBright,
       '--vscode-editorHoverWidget-background': panel,
       '--vscode-editorHoverWidget-foreground': text,
       '--vscode-editorHoverWidget-border': border,
@@ -374,37 +395,31 @@
       '--vscode-menu-background': panel,
       '--vscode-menu-foreground': text,
       '--vscode-menu-selectionBackground': selected,
-      '--vscode-menu-selectionForeground': '#FFFFFF',
+      '--vscode-menu-selectionForeground': textBright,
       '--vscode-menu-border': border,
       '--vscode-menu-separatorBackground': border,
+      '--vscode-foreground': text,
     };
     Object.entries(vars).forEach(([key, value]) => {
-      el.style.setProperty(key, value);
       document.documentElement.style.setProperty(key, value);
+      el?.style.setProperty(key, value);
     });
   }
 
-  /** Hover/suggest widgets render in #editor-overflow-root, outside .monaco-editor. */
-  function syncMonacoOverflowWidgetTheme(dark = true) {
-    const el = document.getElementById('editor-overflow-root');
-    if (!el) return;
-    const panel = dark ? '#3C3F41' : '#FFFFFF';
-    const text = dark ? '#BBBBBB' : '#1E1E1E';
-    const border = dark ? '#515658' : '#C8C8C8';
-    const selected = dark ? '#214283' : '#0060C0';
-    const vars = {
-      '--vscode-editorSuggestWidget-background': panel,
-      '--vscode-editorSuggestWidget-foreground': text,
-      '--vscode-editorSuggestWidget-border': border,
-      '--vscode-editorSuggestWidget-selectedBackground': selected,
-      '--vscode-editorSuggestWidget-selectedForeground': '#FFFFFF',
-      '--vscode-editorSuggestWidget-highlightForeground': '#FFFFFF',
-      '--vscode-editorHoverWidget-background': panel,
-      '--vscode-editorHoverWidget-foreground': text,
-      '--vscode-editorHoverWidget-border': border,
-      '--vscode-widget-shadow': 'rgba(0, 0, 0, 0.36)',
-    };
-    Object.entries(vars).forEach(([key, value]) => el.style.setProperty(key, value));
+  function syncMonacoEditorTheme(theme) {
+    if (typeof monaco === 'undefined' || !window.__reaperMonacoThemesDefined) return;
+    const spec = MONACO_THEMES[theme.monaco];
+    if (!spec) return;
+    monaco.editor.defineTheme(theme.monaco, {
+      ...spec,
+      colors: {
+        ...spec.colors,
+        ...DIAG_EDITOR_COLORS,
+        ...monacoWidgetColors(spec.base),
+        ...themeMenuColorsFromCss(theme.dark),
+      },
+    });
+    monaco.editor.setTheme(theme.monaco);
   }
 
   function defineMonacoThemes() {
@@ -454,6 +469,7 @@
     getTheme,
     applyTheme,
     defineMonacoThemes,
+    syncMonacoEditorTheme,
     getMonacoThemeId,
     syncMonacoOverflowWidgetTheme,
     initThemes,

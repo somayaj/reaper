@@ -54,13 +54,14 @@ pub fn build_tasks_tree(ws: &Path, rel_path: &str, compose_content: Option<&str>
             return Ok(tree);
         }
     }
-    if let Some(tree) = native_build_tasks::try_docker_compose_tree(ws, &rel_path, compose_content)? {
-        return Ok(tree);
-    }
+    // Prefer Maven/Gradle for this file before ambient docker-compose in the repo root.
     if let Some(tree) = try_maven_tree(ws, &rel_path)? {
         return Ok(tree);
     }
     if let Some(tree) = try_gradle_tree(ws, &rel_path)? {
+        return Ok(tree);
+    }
+    if let Some(tree) = native_build_tasks::try_docker_compose_tree(ws, &rel_path, compose_content)? {
         return Ok(tree);
     }
     if let Some(tree) = native_build_tasks::try_native_tree(ws, &rel_path, compose_content)? {
@@ -753,6 +754,36 @@ include 'services:inventory-service'
             .tasks
             .iter()
             .any(|t| t.command == "spring-boot:run"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn maven_tree_wins_over_ambient_docker_compose() {
+        let tmp = std::env::temp_dir().join(format!("reaper-build-tasks-docker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let root = &tmp;
+        fs::write(
+            root.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <artifactId>demo</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("docker-compose.yml"),
+            "services:\n  db:\n    image: postgres:16\n",
+        )
+        .unwrap();
+
+        let tree = build_tasks_tree(root, "pom.xml", None).expect("tree");
+        assert_eq!(tree.build_tool, "maven");
+        assert!(tree.tree.tasks.iter().any(|t| t.command == "compile"));
+
+        let compose = build_tasks_tree(root, "docker-compose.yml", None).expect("compose tree");
+        assert_eq!(compose.build_tool, "docker");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

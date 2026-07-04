@@ -9,7 +9,5 @@ mod lexer;
 mod parse;
 
 pub use index::complete_classpath;
-pub use lexer::{MavenCoord, coord_from_jar_path, coords_from_jar_paths};
-pub use cache::{
-    find_cached_jar, find_jar, gradle_files_root, gradle_user_home, read_gradle_cached_pom, read_pom,
-};
+pub use lexer::coord_from_jar_path;
+pub use cache::{find_cached_jar, gradle_user_home, read_gradle_cached_pom};

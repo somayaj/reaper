@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::types::ValueRef;
 use serde::{Deserialize, Serialize};
 
-use super::exec::{run_command, run_command_with_env, run_shell_command, run_tool_command};
+use super::exec::{run_command_with_env, run_shell_command};
 use crate::git::GitOutput;
 use crate::repos::metadata::DbSslSettings;
 use super::safe_join;
@@ -1425,7 +1425,11 @@ mod tests {
         assert!(url.contains("sqlproj"));
         assert!(url.contains(":5431/"));
         let cmd = sql_run_command(&tmp, "sql/queries/examples.sql", None, None).expect("command");
-        assert!(cmd.contains("docker compose exec -T postgres psql"));
+        assert!(
+            cmd.contains("compose exec") && cmd.contains("exec -T") && cmd.contains("psql"),
+            "unexpected sql run command: {cmd}"
+        );
+        assert!(cmd.contains("'postgres'"));
         assert!(cmd.contains("< 'sql/queries/examples.sql'"));
         assert!(cmd.contains("ON_ERROR_STOP=1"));
         let _ = std::fs::remove_dir_all(&tmp);

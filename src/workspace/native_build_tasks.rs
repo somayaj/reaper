@@ -1090,7 +1090,6 @@ fn default_rake_tasks(is_rails: bool) -> Vec<BuildTask> {
 
 fn parse_rake_tasks(text: &str) -> Vec<BuildTask> {
     let mut out = Vec::new();
-    let mut pending_desc: Option<String> = None;
     let mut namespace: Option<String> = None;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -1098,7 +1097,6 @@ fn parse_rake_tasks(text: &str) -> Vec<BuildTask> {
             continue;
         }
         if trimmed.starts_with("desc ") {
-            pending_desc = extract_quoted(trimmed.strip_prefix("desc ").unwrap_or(trimmed));
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("namespace ") {
@@ -1121,8 +1119,6 @@ fn parse_rake_tasks(text: &str) -> Vec<BuildTask> {
                     &cmd,
                     "tasks",
                 ));
-            } else {
-                pending_desc = None;
             }
         }
     }

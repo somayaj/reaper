@@ -21,6 +21,33 @@ pub struct Diagnostic {
     pub severity: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FileDiagnosticsResult {
+    pub diagnostics: Vec<Diagnostic>,
+    #[serde(default, skip_serializing_if = "FileDiagnosticsResult::omit_cancelled")]
+    pub cancelled: bool,
+}
+
+impl FileDiagnosticsResult {
+    fn omit_cancelled(cancelled: &bool) -> bool {
+        !*cancelled
+    }
+
+    pub fn ready(diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            diagnostics,
+            cancelled: false,
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            diagnostics: Vec::new(),
+            cancelled: true,
+        }
+    }
+}
+
 pub fn check_file(
     ws: &Path,
     rel_path: &str,
@@ -36,7 +63,12 @@ pub fn check_file(
     let ext = file_extension(&lower);
 
     if lower.ends_with(".java") {
-        return Ok(java_diagnostics::check_java(ws, rel_path, content, overlays)?);
+        let (diagnostics, cancelled) =
+            java_diagnostics::check_java(ws, rel_path, content, overlays)?;
+        if cancelled {
+            return Ok(Vec::new());
+        }
+        return Ok(diagnostics);
     }
     if ext == "rs" {
         return check_rust(ws, rel_path, content);
@@ -133,6 +165,31 @@ pub fn check_file(
     }
 
     Ok(Vec::new())
+}
+
+pub fn diagnose_file(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    overlays: &[(String, String)],
+) -> Result<FileDiagnosticsResult> {
+    if rel_path.starts_with(".reaper/") {
+        return Ok(FileDiagnosticsResult::ready(Vec::new()));
+    }
+    let lower = rel_path.to_lowercase();
+    if lower.ends_with(".java") {
+        let _ = safe_join(ws, rel_path)?;
+        let (diagnostics, cancelled) =
+            java_diagnostics::check_java(ws, rel_path, content, overlays)?;
+        return Ok(if cancelled {
+            FileDiagnosticsResult::cancelled()
+        } else {
+            FileDiagnosticsResult::ready(diagnostics)
+        });
+    }
+    Ok(FileDiagnosticsResult::ready(check_file(
+        ws, rel_path, content, overlays,
+    )?))
 }
 
 fn base_name_is(lower_path: &str, name: &str) -> bool {

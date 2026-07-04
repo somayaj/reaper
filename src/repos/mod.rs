@@ -2,12 +2,12 @@ pub mod metadata;
 mod remote;
 
 pub use remote::{
-    ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishResult,
-    PublishToGitHubRequest, PushPreview, import_local_repo, import_repo, link_remote,
-    publish_to_github, push_preview, push_to_remote, sync_from_remote,
+    ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishToGitHubRequest,
+    import_local_repo, import_repo, link_remote, publish_to_github, push_preview, push_to_remote,
+    sync_from_remote,
 };
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -46,6 +46,16 @@ pub fn list_repos(config: &Config, settings: &SettingsStore) -> Result<Vec<RepoS
     discovered
         .into_iter()
         .filter(|(name, _)| !settings.is_repo_hidden(name))
+        .map(|(name, path)| summarize_repo(config, settings, &name, &path))
+        .collect()
+}
+
+pub fn list_hidden_repos(config: &Config, settings: &SettingsStore) -> Result<Vec<RepoSummary>> {
+    config.ensure_dirs()?;
+    let discovered = config::discover_repos(&config.repos_dir)?;
+    discovered
+        .into_iter()
+        .filter(|(name, _)| settings.is_repo_hidden(name))
         .map(|(name, path)| summarize_repo(config, settings, &name, &path))
         .collect()
 }
@@ -110,6 +120,9 @@ pub fn create_repo(
     }
     let path = config.repo_path(&req.name);
     if path.exists() {
+        if settings.is_repo_hidden(&req.name) {
+            return restore_repo(config, settings, &req.name);
+        }
         bail!("repository already exists");
     }
 
@@ -150,26 +163,20 @@ pub fn delete_repo(config: &Config, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove a repo from the IDE without deleting its bare repository on disk.
+/// Hide a repo from the IDE. Bare repo, workspace clone, and metadata stay on disk.
 pub fn unregister_repo(config: &Config, settings: &SettingsStore, name: &str) -> Result<()> {
     if !config.repo_exists(name) {
         bail!("repository not found");
     }
-    settings.hide_repo(name)?;
-    let meta = metadata::load(config, name).unwrap_or_default();
-    let ws = config.workspace_path(name);
-    if ws.exists() && !same_path(meta.local_path.as_deref(), &ws) {
-        std::fs::remove_dir_all(ws)?;
-    }
-    Ok(())
+    settings.hide_repo(name)
 }
 
-fn same_path(a: Option<&str>, b: &Path) -> bool {
-    let Some(a) = a else {
-        return false;
-    };
-    match (PathBuf::from(a).canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => PathBuf::from(a) == b,
+/// Show a previously hidden repo in the IDE again.
+pub fn restore_repo(config: &Config, settings: &SettingsStore, name: &str) -> Result<RepoSummary> {
+    if !config.repo_exists(name) {
+        bail!("repository not found");
     }
+    settings.show_repo(name)?;
+    let path = config.repo_path(name);
+    summarize_repo(config, settings, name, &path)
 }

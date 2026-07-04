@@ -10,10 +10,58 @@
     'strictfp', 'transient', 'volatile', 'with',
   ];
 
+  /** Local inline is vars/objects/keywords only — loops, blocks, empty lines use AI. */
+  function skipLocalStatementTemplates() {
+    return true;
+  }
+
+  /** Completion syntax level from language-context (max of configured JDK and project release). */
   function inlineJavaLevel(helpers) {
     const ctx = helpers.getLanguageContext?.();
-    if (ctx?.java_level) return ctx.java_level;
-    return helpers.getJavaLanguageLevel?.() ?? 17;
+    if (ctx?.java_level != null) return ctx.java_level;
+    const configured = helpers.getJavaLanguageLevel?.();
+    if (configured != null) return configured;
+    return ctx?.jdk_level ?? 17;
+  }
+
+  /** Parse `for (…; i < coll.length|size(); i++)` — distinguishes arrays, lists, and strings. */
+  function parseJavaIndexedForLoop(forInit, indexVar = 'i') {
+    const init = String(forInit || '');
+    const iv = indexVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let m = init.match(new RegExp(`${iv}\\s*<\\s*(\\w+)\\.length\\b`));
+    if (m) return { name: m[1], kind: 'array', indexVar };
+    m = init.match(new RegExp(`${iv}\\s*<\\s*(\\w+)\\.size\\s*\\(\\s*\\)`));
+    if (m) return { name: m[1], kind: 'list', indexVar };
+    m = init.match(new RegExp(`${iv}\\s*<\\s*(\\w+)\\.length\\s*\\(\\s*\\)`));
+    if (m) return { name: m[1], kind: 'string', indexVar };
+    return null;
+  }
+
+  function javaIndexedAccessExpr(parsed, indexVar = 'i') {
+    if (!parsed) return '';
+    const iv = indexVar || parsed.indexVar || 'i';
+    if (parsed.kind === 'array') return `${parsed.name}[${iv}]`;
+    if (parsed.kind === 'list') return `${parsed.name}.get(${iv})`;
+    if (parsed.kind === 'string') return `${parsed.name}.charAt(${iv})`;
+    return '';
+  }
+
+  function javaIndexedLoopBodyLine(parsed, indent, javaLevel, lang = 'java') {
+    if (!parsed) return '';
+    const iv = parsed.indexVar || 'i';
+    let access;
+    if (lang === 'kotlin') {
+      access = parsed.kind === 'list'
+        ? `${parsed.name}.get(${iv})`
+        : `${parsed.name}[${iv}]`;
+    } else {
+      access = javaIndexedAccessExpr(parsed, iv);
+    }
+    if (!access) return '';
+    if (javaLevel >= 10 && lang !== 'kotlin') {
+      return `${indent}var item = ${access};`;
+    }
+    return `${indent}${access};`;
   }
 
   function langForPath(path) {
@@ -78,6 +126,44 @@
     return base.endsWith('.yml') || base.endsWith('.yaml');
   }
 
+  function isGradlePropertiesFile(path) {
+    const base = (path.split('/').pop() || '').toLowerCase();
+    return base.endsWith('gradle.properties') || base.endsWith('.gradle.properties');
+  }
+
+  function isGradleBuildFile(path) {
+    if (!path) return false;
+    const base = (path.split('/').pop() || '').toLowerCase();
+    return base.endsWith('.gradle') || base.endsWith('.gradle.kts');
+  }
+
+  /** Languages where workspace symbol/classpath index inline ghosts make sense (not README/prose). */
+  const INDEX_INLINE_LANGS = new Set([
+    'java', 'kotlin', 'groovy', 'rust', 'javascript', 'typescript', 'python', 'go',
+    'csharp', 'ruby', 'php', 'swift', 'c', 'cpp', 'shell', 'lua', 'dart', 'r', 'sql',
+  ]);
+
+  function isProseLanguage(path) {
+    const lang = langForPath(path);
+    return lang === 'markdown' || lang === 'plaintext';
+  }
+
+  /** Markup/config paths (md, yaml, pom.xml, etc.) — AI empty lines, skip heavy index work. */
+  function isMarkupOrConfigPath(path) {
+    if (!path) return false;
+    const lang = langForPath(path);
+    return [
+      'markdown', 'plaintext', 'yaml', 'json', 'html', 'xml', 'toml', 'ini',
+      'css', 'scss', 'less', 'sql', 'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql',
+    ].includes(lang);
+  }
+
+  function supportsWorkspaceIndexInline(path) {
+    if (!path) return false;
+    if (isSpringConfigFile(path)) return true;
+    return INDEX_INLINE_LANGS.has(langForPath(path));
+  }
+
   function springConfigKeyPrefix(path, linePrefix, content, lineNumber, column) {
     const line = String(linePrefix || '');
     const trimmed = line.split('#')[0].trimEnd();
@@ -101,7 +187,8 @@
       segments.push(beforeColon);
     }
     let needIndent = currentIndent;
-    for (let i = idx - 1; i >= 0; i -= 1) {
+    const minRow = Math.max(0, idx - INLINE_NEARBY_LINES);
+    for (let i = idx - 1; i >= minRow; i -= 1) {
       const row = lines[i];
       if (!row.trim() || row.trim().startsWith('#')) continue;
       const indent = row.match(/^[\t ]*/)?.[0]?.length || 0;
@@ -115,14 +202,107 @@
     return segments.join('.');
   }
 
+  function gradlePropertiesKeyPrefix(linePrefix) {
+    const trimmed = String(linePrefix || '').split('#')[0].trimEnd();
+    if (trimmed.includes('=')) return '';
+    return trimmed.trim();
+  }
+
+  function collectNearbyGradlePropertyKeys(content, lineNumber) {
+    const lines = String(content || '').split(/\r?\n/);
+    const keys = [];
+    const seen = new Set();
+    const minRow = Math.max(0, lineNumber - 1 - INLINE_NEARBY_LINES);
+    const maxRow = Math.min(lines.length - 1, lineNumber - 1 + INLINE_NEARBY_LINES);
+    for (let i = minRow; i <= maxRow; i += 1) {
+      if (i === lineNumber - 1) continue;
+      const row = lines[i];
+      if (!row.trim() || row.trim().startsWith('#')) continue;
+      const key = row.split('=')[0].split('#')[0].trim();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        keys.push({ key, line: i + 1 });
+      }
+    }
+    return keys;
+  }
+
+  function gradlePropertiesLocalInline(path, linePrefix, content, lineNumber) {
+    if (!isGradlePropertiesFile(path)) return '';
+    const keyPrefix = gradlePropertiesKeyPrefix(linePrefix);
+    if (!keyPrefix) return '';
+    const lower = keyPrefix.toLowerCase();
+    const candidates = collectNearbyGradlePropertyKeys(content, lineNumber)
+      .filter((entry) =>
+        entry.key.toLowerCase().startsWith(lower) && entry.key.length > keyPrefix.length,
+      );
+    if (!candidates.length) return '';
+    const rankLine = (line) => {
+      if (line < lineNumber) return lineNumber - line;
+      if (line > lineNumber) {
+        const below = line - lineNumber;
+        return below <= 3 ? below : 1000 + below;
+      }
+      return 500;
+    };
+    candidates.sort((a, b) => {
+      const rankA = rankLine(a.line);
+      const rankB = rankLine(b.line);
+      if (rankA !== rankB) return rankA - rankB;
+      const suffixA = a.key.slice(keyPrefix.length);
+      const suffixB = b.key.slice(keyPrefix.length);
+      return suffixA.length - suffixB.length || a.key.localeCompare(b.key);
+    });
+    return candidates[0].key.slice(keyPrefix.length);
+  }
+
   function completionSuffixFromLabel(label, prefix) {
     const p = prefix || '';
-    if (!label || !p) return '';
+    if (!label) return '';
+    if (!p) return label;
     if (label.startsWith(p)) return label.slice(p.length);
     if (label.toLowerCase().startsWith(p.toLowerCase())) {
       return label.slice(p.length);
     }
     return '';
+  }
+
+  const LSP_INLINE_FETCH_MS = 220;
+  const LSP_INLINE_MEMBER_FETCH_MS = 140;
+
+  /** Member access and indexed code paths — prefer jdtls/index top completion for inline ghost. */
+  function shouldPreferLspInlineGhost(path, linePrefix, content = '', lineNumber = 0) {
+    if (!path || !supportsWorkspaceIndexInline(path)) return false;
+    if (isWhitespaceOnlyLine(linePrefix)) {
+      return shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber);
+    }
+    if (dotQualifierFromLinePrefix(linePrefix)) return true;
+    const token = extractInlinePartialToken(linePrefix);
+    if (token && shouldPreferControlKeywordInline(path, linePrefix, token)) return false;
+    return shouldFetchIndexCompletions(linePrefix, token || '', path, { content, lineNumber });
+  }
+
+  function inlineGhostTextFromCompletionItem(item) {
+    const label = String(item?.label || '');
+    let insert = stripSnippetMarkers(String(item?.insert || label));
+    if (insert.includes('(') && !label.includes('(')) {
+      insert = insert.split('(')[0];
+    }
+    if (insert.includes('.')) insert = insert.split('.').pop() || insert;
+    return insert || label;
+  }
+
+  function inlineSuffixFromLspItem(item, linePrefix, prefix) {
+    const member = dotQualifierFromLinePrefix(linePrefix);
+    const tokenPrefix = member
+      ? (member.memberPrefix || '')
+      : (prefix || extractInlinePartialToken(linePrefix) || '');
+    const candidate = inlineGhostTextFromCompletionItem(item);
+    if (!candidate) return '';
+    const suffix = completionSuffixFromLabel(candidate, tokenPrefix);
+    if (!suffix) return '';
+    if (suffix === '()' || suffix.startsWith('(')) return '';
+    return suffix;
   }
 
   function springConfigLocalInline(path, linePrefix, content, lineNumber, column) {
@@ -416,8 +596,83 @@
 
   /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
   const REAPER_DOC_SELECTOR = ALL_EDITOR_LANGS;
-  const REAPER_COMPLETION_REV = '253';
+  const REAPER_COMPLETION_REV = '354';
   let reaperDotCompletionHandler = null;
+
+  /** Keywords that belong only in SQL buffers — never suggest in Java/other langs. */
+  const SQL_ONLY_KEYWORDS = new Set([
+    'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER',
+    'JOIN', 'INNER', 'OUTER', 'LEFT', 'RIGHT', 'FULL', 'CROSS', 'ON', 'USING',
+    'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'INTERSECT', 'EXCEPT',
+    'INTO', 'VALUES', 'SET', 'TABLE', 'INDEX', 'VIEW', 'DATABASE', 'SCHEMA',
+    'GRANT', 'REVOKE', 'COMMIT', 'ROLLBACK', 'BEGIN', 'TRANSACTION', 'TRUNCATE',
+    'DISTINCT', 'AS', 'AND', 'OR', 'NOT', 'NULL', 'IS', 'IN', 'LIKE', 'ILIKE',
+    'BETWEEN', 'EXISTS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'CAST', 'COALESCE',
+  ]);
+
+  function editorLanguagesCompatible(expected, actual) {
+    if (!expected || !actual) return true;
+    if (expected === actual) return true;
+    if (expected === 'cpp' && (actual === 'cpp' || actual === 'c')) return true;
+    if (expected === 'javascript' && actual === 'typescript') return true;
+    if (expected === 'typescript' && actual === 'javascript') return true;
+    return false;
+  }
+
+  /** Keep completions/inline/hover scoped to the active tab's file language. */
+  function editorScopeMatches(path, model, { sync = true } = {}) {
+    const rel = String(path || '').trim();
+    if (!rel) return false;
+    const expected = langForPath(rel);
+    if (!expected || expected === 'plaintext') return false;
+    if (!model) return true;
+    if (sync) ensureModelLanguageForPath(rel, model);
+    const actual = model.getLanguageId?.() || '';
+    return editorLanguagesCompatible(expected, actual);
+  }
+
+  function suggestionMatchesEditorLanguage(path, label) {
+    const lang = langForPath(path || '');
+    const text = String(label || '').trim();
+    if (!text) return false;
+    if (lang === 'sql') return true;
+    const upper = text.toUpperCase();
+    if (SQL_ONLY_KEYWORDS.has(upper)) return false;
+    if (lang === 'java' || lang === 'kotlin' || lang === 'groovy') {
+      if (lang !== 'groovy' && upper === 'DEF') return false;
+      if (lang !== 'python' && (upper === 'ELIF' || upper === 'PASS')) return false;
+      if (lang !== 'ruby' && upper === 'END') return false;
+      if (lang !== 'php' && upper === 'ECHO') return false;
+    }
+    return true;
+  }
+
+  /** Google Java Format: single spaces around `=` in assignments (not `==`, `+=`, …). */
+  function maybeInsertJavaAssignSpace(ed) {
+    if (ed._reaperAssignSpaceEdit || ed._reaperExpandingBrace) return;
+    const path = ed._reaperHelpers?.getActivePath?.() || '';
+    if (langForPath(path) !== 'java') return;
+    const model = ed.getModel();
+    const pos = ed.getPosition();
+    if (!model || !pos || pos.column < 2) return;
+    const line = model.getLineContent(pos.lineNumber);
+    const col = pos.column;
+    if (line[col - 2] !== '=') return;
+    const prev = col >= 3 ? line[col - 3] : '';
+    if ('!<>=+-*/%&|^'.includes(prev)) return;
+    if (line[col - 1] === '=') return;
+    const after = line[col - 1];
+    if (after === ' ' || after === '\t') return;
+    ed._reaperAssignSpaceEdit = true;
+    try {
+      ed.executeEdits('reaper-java-assign-space', [{
+        range: new monaco.Range(pos.lineNumber, col, pos.lineNumber, col),
+        text: ' ',
+      }]);
+    } finally {
+      ed._reaperAssignSpaceEdit = false;
+    }
+  }
 
   /** WKWebView Monaco builds may omit CodeActionKind — use string fallbacks. */
   function reaperCodeActionKind(name) {
@@ -438,7 +693,10 @@
   }
 
   function editorContent(ed, model) {
-    return ed?._reaperContent ?? model.getValue();
+    if (typeof ed?._reaperContent === 'string') return ed._reaperContent;
+    const tab = ed?._reaperHelpers?.getActiveTabContent?.();
+    if (typeof tab === 'string') return tab;
+    return model.getValue();
   }
 
   function completionDebugEnabled() {
@@ -535,7 +793,14 @@
   }
 
   const MIN_AUTOCOMPLETE_CHARS = 1;
+  const MIN_INDEX_INLINE_CHARS = 2;
+  /** Inline identifier / empty-line templates use only this many lines above and below the cursor. */
+  const INLINE_NEARBY_LINES = 5;
   const MAX_INLINE_LINES = 15;
+
+  function isNearbyLine(line, cursorLine, radius = INLINE_NEARBY_LINES) {
+    return line >= cursorLine - radius && line <= cursorLine + radius;
+  }
   const AUTOCOMPLETE_TRIGGER_RE = /[.@:<#"=/\\\-]$/;
 
   function capInlineText(text) {
@@ -563,24 +828,155 @@
       || trimmed.endsWith('switch (') || trimmed.endsWith('switch(');
   }
 
-  /** Statement/construct templates disabled — AI inline handles if/for/while/etc. */
-  function controlStructureInlineSuffix(_path, _linePrefix, _content, _lineNumber, _javaLevel) {
+  /** Statement/construct templates — local ghosts for if/for/while (AI optional). */
+  function controlStructureInlineSuffix(path, linePrefix, content, lineNumber, javaLevel = 17) {
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (!trimmed || !isCodeStatementLanguage(path)) return '';
+    const lang = langForPath(path);
+    const ctx = editorContextAroundLine(content, lineNumber);
+
+    if (lang === 'java' || lang === 'kotlin' || lang === 'groovy') {
+      if (lineEndsWithKeyword(trimmed, 'for')) {
+        const target = bestJavaIndexedForTarget(ctx);
+        if (target?.init) return ` (${target.init}) {`;
+        return ' (int i = 0; i < length; i++) {';
+      }
+      if (lineEndsWithKeyword(trimmed, 'while')) {
+        const cond = inferInlineCondition(path, content, lineNumber, 'while', javaLevel);
+        return ` (${cond}) {`;
+      }
+      if (lineEndsWithKeyword(trimmed, 'if')) {
+        const cond = inferInlineCondition(path, content, lineNumber, 'if', javaLevel);
+        return ` (${cond}) {`;
+      }
+      if (lineEndsWithKeyword(trimmed, 'do')) return ' {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' (value) {';
+      if (lineEndsWithKeyword(trimmed, 'try')) return ' {';
+      if (lang === 'kotlin' && lineEndsWithKeyword(trimmed, 'when')) return ' (x) {';
+      if (trimmed.endsWith('for (') || trimmed.endsWith('for(')) {
+        const target = bestJavaIndexedForTarget(ctx);
+        if (target?.init) return target.init;
+        return 'int i = 0; i < length; i++';
+      }
+      if (trimmed.endsWith('if (') || trimmed.endsWith('if(')) {
+        return inferInlineCondition(path, content, lineNumber, 'if', javaLevel);
+      }
+      if (trimmed.endsWith('while (') || trimmed.endsWith('while(')) {
+        return inferInlineCondition(path, content, lineNumber, 'while', javaLevel);
+      }
+    }
+
+    if (lang === 'python') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' item in items:';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition:';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' condition:';
+      if (lineEndsWithKeyword(trimmed, 'elif')) return ' condition:';
+      if (lineEndsWithKeyword(trimmed, 'def')) return ' name():';
+      if (lineEndsWithKeyword(trimmed, 'with')) return ' resource:';
+    }
+
+    if (lang === 'javascript' || lang === 'typescript') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' (let i = 0; i < length; i++) {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' (value) {';
+      if (lineEndsWithKeyword(trimmed, 'try')) return ' {';
+      if (trimmed.endsWith('if (') || trimmed.endsWith('if(')) return 'condition';
+      if (trimmed.endsWith('for (') || trimmed.endsWith('for(')) return 'let i = 0; i < length; i++';
+    }
+
+    if (lang === 'rust') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' item in items {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' condition {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition {';
+      if (lineEndsWithKeyword(trimmed, 'match')) return ' value {';
+      if (lineEndsWithKeyword(trimmed, 'loop')) return ' {';
+    }
+
+    if (lang === 'go') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' _, _ := range items {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' x {';
+    }
+
+    if (lang === 'csharp') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' (int i = 0; i < length; i++) {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' (value) {';
+      if (lineEndsWithKeyword(trimmed, 'foreach')) return ' (var item in items) {';
+    }
+
+    if (lang === 'c' || lang === 'cpp') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' (int i = 0; i < length; i++) {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' (value) {';
+    }
+
+    if (lang === 'ruby') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' item in items';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' condition';
+      if (lineEndsWithKeyword(trimmed, 'def')) return ' name';
+      if (lineEndsWithKeyword(trimmed, 'class')) return ' Name';
+    }
+
+    if (lang === 'php') {
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' ($i = 0; $i < count($items); $i++) {';
+      if (lineEndsWithKeyword(trimmed, 'foreach')) return ' ($items as $item) {';
+    }
+
+    if (lang === 'swift') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' item in items {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' condition {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition {';
+      if (lineEndsWithKeyword(trimmed, 'guard')) return ' condition else {';
+      if (lineEndsWithKeyword(trimmed, 'switch')) return ' value {';
+    }
+
+    if (lang === 'shell') {
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' [ condition ]; then';
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' item in items; do';
+      if (lineEndsWithKeyword(trimmed, 'function')) return ' name() {';
+    }
+
+    if (lang === 'lua') {
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' condition then';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' condition do';
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' i, item in ipairs(items) do';
+      if (lineEndsWithKeyword(trimmed, 'function')) return ' name()';
+    }
+
+    if (lang === 'dart') {
+      if (lineEndsWithKeyword(trimmed, 'for')) return ' (var item in items) {';
+      if (lineEndsWithKeyword(trimmed, 'while')) return ' (condition) {';
+      if (lineEndsWithKeyword(trimmed, 'if')) return ' (condition) {';
+    }
+
     return '';
   }
 
-  function controlStructureInlineGhost(_path, _linePrefix, _content, _lineNumber, _javaLevel) {
-    return '';
+  function controlStructureInlineGhost(path, linePrefix, content, lineNumber, javaLevel = 17) {
+    return controlStructureInlineSuffix(path, linePrefix, content, lineNumber, javaLevel);
   }
 
-  function inlineGhostSuffix(path, linePrefix, content, lineNumber, javaLevel, column = 0) {
-    const inline = localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel, column);
+  function inlineGhostSuffix(
+    path, linePrefix, content, lineNumber, javaLevel, column = 0, indexCtx = null,
+    { fast = false } = {},
+  ) {
+    const inline = localInlineSuggestion(
+      path, linePrefix, content, lineNumber, javaLevel, column, indexCtx, { fast },
+    );
     if (!inline) return '';
     if (inline.includes('\n')) return inline.split('\n')[0];
     return inline;
   }
 
   function lineIndent(linePrefix) {
-    const m = linePrefix.match(/^[\t ]*/);
+    const m = String(linePrefix ?? '').match(/^[\t ]*/);
     return m ? m[0] : '';
   }
 
@@ -591,6 +987,268 @@
     return m ? m[1] : '';
   }
 
+  /** Line ends with a binary/logical operator — cursor may follow immediately or after spaces (`foo +|` / `foo + |`). */
+  function operatorTailMatch(linePrefix) {
+    const s = String(linePrefix || '');
+    const trimmed = s.trimEnd();
+    if (!trimmed) return null;
+
+    const tryEnd = (text) => {
+      const multi = ['===', '!==', '==', '!=', '<=', '>=', '&&', '||', '<<', '>>', '>>>', '++', '--'];
+      for (const op of multi) {
+        if (text.endsWith(op)) {
+          return { op, lhs: text.slice(0, -op.length).trimEnd() };
+        }
+      }
+      const last = text[text.length - 1];
+      if ('+-*/%&|^<>?:'.includes(last)) {
+        if (last === '-' && text.length === 1) return null;
+        return { op: last, lhs: text.slice(0, -1).trimEnd() };
+      }
+      if (
+        text.endsWith('=')
+        && !text.endsWith('==')
+        && !text.endsWith('!=')
+        && !text.endsWith('<=')
+        && !text.endsWith('>=')
+      ) {
+        return { op: '=', lhs: text.slice(0, -1).trimEnd() };
+      }
+      return null;
+    };
+
+    const trailingSpace = s.length > trimmed.length;
+    if (trailingSpace) {
+      return tryEnd(trimmed);
+    }
+    return tryEnd(trimmed);
+  }
+
+  function isOperandContext(linePrefix) {
+    const tail = operatorTailMatch(linePrefix);
+    return tail != null && !!tail.lhs;
+  }
+
+  function isAfterOperatorWithSpace(linePrefix) {
+    return isOperandContext(linePrefix) && /\s$/.test(String(linePrefix || ''));
+  }
+
+  function rankScopeCandidates(candidates, lineNumber, {
+    token = '',
+    preferValues = false,
+    excludeNames = null,
+    path = '',
+  } = {}) {
+    const lower = token.toLowerCase();
+    const exclude = excludeNames || new Set();
+    const filtered = candidates.filter((c) => {
+      if (!c?.name || exclude.has(c.name)) return false;
+      if (token && !c.name.toLowerCase().startsWith(lower)) return false;
+      return c.name.length > token.length;
+    });
+    if (!filtered.length) return [];
+    const tokenIsUpper = token ? /^[A-Z]/.test(token) : false;
+    const stmtKeywords = new Set(statementKeywordsForPath(path).map((kw) => kw.toLowerCase()));
+    filtered.sort((a, b) => {
+      if (preferValues && a.isType !== b.isType) return a.isType ? 1 : -1;
+      if (tokenIsUpper && token.length >= 3 && a.isType !== b.isType) return a.isType ? -1 : 1;
+      const rankLine = (c) => {
+        if (c.maxLine < lineNumber) return lineNumber - c.maxLine;
+        if (c.minLine > lineNumber) {
+          const below = c.minLine - lineNumber;
+          if (below <= 3) return below;
+          return 1000 + below;
+        }
+        return 500;
+      };
+      const kwA = stmtKeywords.has(a.name.toLowerCase()) ? 1 : 0;
+      const kwB = stmtKeywords.has(b.name.toLowerCase()) ? 1 : 0;
+      if (kwA !== kwB) return kwA - kwB;
+      const lineRankA = rankLine(a);
+      const lineRankB = rankLine(b);
+      if (lineRankA !== lineRankB) return lineRankA - lineRankB;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.length - b.name.length || a.name.localeCompare(b.name);
+    });
+    return filtered;
+  }
+
+  function operandInlineSuffix(content, path, lineNumber, linePrefix) {
+    const tail = operatorTailMatch(linePrefix);
+    if (!tail || !tail.lhs || !content || !isCodeStatementLanguage(path)) return '';
+    const exclude = new Set();
+    const lhsIdent = tail.lhs.match(/([A-Za-z_$][\w$]*)$/);
+    if (lhsIdent) exclude.add(lhsIdent[1]);
+    const preferValues = '+-*/%&|^'.includes(tail.op) || tail.op === '==';
+    if (isJavaLikePath(path)) {
+      const vars = scopeVarsForInline(content, lineNumber, path, {
+        preferValues: true,
+        excludeNames: exclude,
+      });
+      if (vars.length) return pickScopeVarSuffix(vars);
+    }
+    const candidates = collectContentIdentifierCandidates(content, path, lineNumber);
+    const ranked = rankScopeCandidates(candidates, lineNumber, {
+      token: '',
+      preferValues,
+      excludeNames: exclude,
+      path,
+    });
+    return ranked[0]?.name || '';
+  }
+
+  /** Fast scope: small line window (keystroke path — avoids full nearby scan). */
+  function fastLineWindowScopeSuffix(content, path, lineNumber, token) {
+    if (!token || !content) return '';
+    if (token.length === 1 && !/^[A-Z]/.test(token)) return '';
+    const keywords = new Set(clientKeywordsForPath(path).map((kw) => kw.toLowerCase()));
+    const lines = String(content).split(/\r?\n/);
+    const cur = lineNumber - 1;
+    if (!Number.isFinite(cur) || cur < 0) return '';
+    const lower = token.toLowerCase();
+    const radius = 2;
+    const counts = new Map();
+    const meta = new Map();
+    const identRe = /\b([A-Za-z_][\w$]*)\b/g;
+    for (let i = Math.max(0, cur - radius); i <= Math.min(lines.length - 1, cur + radius); i += 1) {
+      const line = lines[i];
+      identRe.lastIndex = 0;
+      let m;
+      for (;;) {
+        m = identRe.exec(line);
+        if (!m) break;
+        const name = m[1];
+        if (keywords.has(name.toLowerCase())) continue;
+        if (!name.toLowerCase().startsWith(lower) || name.length <= token.length) continue;
+        counts.set(name, (counts.get(name) || 0) + 1);
+        const prev = meta.get(name);
+        if (!prev) {
+          meta.set(name, {
+            name,
+            isType: /^[A-Z]/.test(name),
+            minLine: i + 1,
+            maxLine: i + 1,
+            count: 1,
+          });
+        } else {
+          prev.minLine = Math.min(prev.minLine, i + 1);
+          prev.maxLine = Math.max(prev.maxLine, i + 1);
+          prev.count = counts.get(name);
+        }
+      }
+    }
+    const candidates = [...meta.values()];
+    if (!candidates.length) return '';
+    if (token.length === 1 && /^[A-Z]/.test(token) && candidates.length === 1) {
+      return candidates[0].name.slice(1);
+    }
+    if (token.length < MIN_INDEX_INLINE_CHARS) return '';
+    const ranked = rankScopeCandidates(candidates, lineNumber, { token, path });
+    return ranked[0]?.name.slice(token.length) || '';
+  }
+
+  function isReturnContext(linePrefix) {
+    const s = String(linePrefix || '');
+    if (/\breturn\s+$/.test(s)) return true;
+    const trimmed = s.trimEnd();
+    return /\breturn(?:\s+[A-Za-z_$][\w$]*)?$/.test(trimmed);
+  }
+
+  /** Method/ctor call argument list — not control-flow parens (`if (`). */
+  function isCallArgContext(linePrefix, path) {
+    if (!isJavaLikePath(path)) return false;
+    if (isInsideControlParen(linePrefix)) return false;
+    const trimmed = String(linePrefix || '').trimEnd();
+    const idx = trimmed.lastIndexOf('(');
+    if (idx < 0) return false;
+    const before = trimmed.slice(0, idx).trimEnd();
+    if (!before || !/[\w)\]]$/.test(before)) return false;
+    const inside = trimmed.slice(idx + 1);
+    if (inside.includes('(') || inside.includes('{')) return false;
+    return true;
+  }
+
+  function scopeVarsForInline(content, lineNumber, path, {
+    token = '',
+    preferValues = true,
+    excludeNames = null,
+  } = {}) {
+    if (!content || !isJavaLikePath(path)) return [];
+    const exclude = excludeNames || new Set();
+    const vars = collectJavaScopeVariables(content, lineNumber)
+      .filter((v) => v.name && !exclude.has(v.name));
+    if (!token) return vars;
+    const lower = token.toLowerCase();
+    return vars.filter((v) => v.name.toLowerCase().startsWith(lower) && v.name.length > token.length);
+  }
+
+  function pickScopeVarSuffix(vars, token = '') {
+    if (!vars.length) return '';
+    const pick = vars[vars.length - 1];
+    return token ? pick.name.slice(token.length) : pick.name;
+  }
+
+  function returnInlineSuffix(content, path, lineNumber, linePrefix) {
+    if (!isReturnContext(linePrefix) || !content || !isCodeStatementLanguage(path)) return '';
+    const token = extractInlinePartialToken(linePrefix);
+    if (isJavaLikePath(path)) {
+      const vars = scopeVarsForInline(content, lineNumber, path, { token, preferValues: true });
+      if (vars.length) return pickScopeVarSuffix(vars, token);
+    }
+    if (token) {
+      const scope = scopeIdentifierInlineSuffix(content, path, lineNumber, token);
+      if (scope) return scope;
+      const fast = fastLineWindowScopeSuffix(content, path, lineNumber, token);
+      if (fast) return fast;
+    }
+    const candidates = collectContentIdentifierCandidates(content, path, lineNumber);
+    const ranked = rankScopeCandidates(candidates, lineNumber, { token, preferValues: true, path });
+    const name = ranked[0]?.name;
+    if (!name) return '';
+    return token ? name.slice(token.length) : name;
+  }
+
+  function callArgInlineSuffix(content, path, lineNumber, linePrefix) {
+    if (!isCallArgContext(linePrefix, path) || !content) return '';
+    const trimmed = linePrefix.trimEnd();
+    const idx = trimmed.lastIndexOf('(');
+    const inside = trimmed.slice(idx + 1);
+    const token = extractInlinePartialToken(linePrefix);
+    const used = new Set();
+    inside.split(',').forEach((seg) => {
+      const id = seg.trim().match(/^(\w+)/);
+      if (id?.[1]) used.add(id[1]);
+    });
+    const vars = scopeVarsForInline(content, lineNumber, path, {
+      token,
+      preferValues: true,
+      excludeNames: used,
+    });
+    if (vars.length) return pickScopeVarSuffix(vars, token);
+    if (token) {
+      const candidates = collectContentIdentifierCandidates(content, path, lineNumber)
+        .filter((c) => !used.has(c.name));
+      const ranked = rankScopeCandidates(candidates, lineNumber, {
+        token,
+        preferValues: true,
+        excludeNames: used,
+        path,
+      });
+      const name = ranked[0]?.name;
+      if (name) return name.slice(token.length);
+    }
+    return '';
+  }
+
+  function inlineFilterUsesFullPrefix(linePrefix, path) {
+    if (isWhitespaceOnlyLine(linePrefix)) return true;
+    if (dotQualifierFromLinePrefix(linePrefix)) return true;
+    if (isOperandContext(linePrefix)) return true;
+    if (isReturnContext(linePrefix)) return true;
+    if (isCallArgContext(linePrefix, path)) return true;
+    return false;
+  }
+
   function lineEndsWithKeyword(trimmed, kw) {
     const re = new RegExp(`(?:^|[\\s({])${kw}$`);
     return re.test(trimmed);
@@ -598,11 +1256,45 @@
 
   const CONTROL_KEYWORD_PREFIXES = [
     'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'try', 'catch', 'finally',
-    'elif', 'def', 'class', 'function', 'fun', 'when', 'break', 'continue', 'return',
+    'elif', 'def', 'class', 'function', 'fun', 'func', 'when', 'match', 'guard', 'foreach',
+    'break', 'continue', 'return', 'loop', 'then',
   ];
+
+  /** Shared statement keywords merged with per-language CLIENT_KEYWORDS for inline ghosts. */
+  const SHARED_STMT_KEYWORDS = [
+    'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'try', 'catch', 'finally',
+    'elif', 'def', 'class', 'function', 'fun', 'func', 'when', 'match', 'guard', 'foreach',
+    'return', 'break', 'continue', 'throw', 'with', 'loop', 'then', 'namespace', 'package',
+    'import', 'export', 'struct', 'interface', 'enum', 'trait', 'impl', 'async', 'await',
+  ];
+
+  function isCodeStatementLanguage(path) {
+    if (isProseLanguage(path)) return false;
+    const lang = langForPath(path);
+    return !['json', 'yaml', 'html', 'css', 'scss', 'less', 'xml', 'sql', 'ini', 'toml',
+      'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'plaintext'].includes(lang);
+  }
+
+  function statementKeywordsForPath(path) {
+    if (!isCodeStatementLanguage(path)) return clientKeywordsForPath(path);
+    const lang = langForPath(path);
+    let shared = SHARED_STMT_KEYWORDS;
+    if (lang === 'java' || lang === 'kotlin' || lang === 'groovy') {
+      const exclude = new Set([
+        'def', 'fun', 'func', 'fn', 'elif', 'pass', 'end', 'echo', 'unless', 'until',
+        'yield', 'raise', 'except', 'nonlocal', 'lambda', 'trait', 'impl', 'mut', 'pub',
+        'defer', 'go', 'chan', 'package', 'foreach', 'namespace', 'using', 'declare',
+        'match', 'guard', 'then', 'loop', 'self', 'with',
+      ]);
+      shared = SHARED_STMT_KEYWORDS.filter((kw) => !exclude.has(kw.toLowerCase()));
+    }
+    return [...new Set([...clientKeywordsForPath(path), ...shared])];
+  }
 
   function isControlKeywordPrefix(token) {
     if (!token) return false;
+    // Uppercase tokens are Java/Kotlin types (File, String), not keyword prefixes.
+    if (/[A-Z]/.test(token)) return false;
     const lower = token.toLowerCase();
     return CONTROL_KEYWORD_PREFIXES.some((kw) => kw.startsWith(lower));
   }
@@ -632,7 +1324,7 @@
     return 'block';
   }
 
-  function editorContextAroundLine(content, lineNumber, maxAbove = 25, maxBelow = 15) {
+  function editorContextAroundLine(content, lineNumber, maxAbove = INLINE_NEARBY_LINES, maxBelow = INLINE_NEARBY_LINES) {
     const lines = String(content || '').split(/\r?\n/);
     const cur = Math.min(Math.max(0, lineNumber - 1), lines.length);
     const start = Math.max(0, cur - maxAbove);
@@ -653,19 +1345,183 @@
     return { content: lines.slice(start, end).join('\n'), line: cur - start + 1 };
   }
 
-  function shouldFetchIndexCompletions(linePrefix, prefix, path) {
+  /** Import/using lines — index ghost from project classpath (compiler version), never AI. */
+  function isImportTypingLine(path, linePrefix) {
+    const trimmed = String(linePrefix || '').trimStart();
+    if (!trimmed) return false;
+    const lang = langForPath(path || '');
+    switch (lang) {
+      case 'csharp':
+        return /^using\s/.test(trimmed);
+      case 'python':
+        return /^import\s/.test(trimmed) || /^from\s+\S+\s+import\b/.test(trimmed);
+      case 'rust':
+        return /^use\s/.test(trimmed);
+      case 'javascript':
+      case 'typescript':
+      case 'tsx':
+      case 'jsx':
+        return /^import\s/.test(trimmed) || /^export\s+.*\sfrom\s/.test(trimmed);
+      default:
+        return /^import(?:\s+static)?\s/.test(trimmed);
+    }
+  }
+
+  function shouldFetchIndexCompletions(linePrefix, prefix, path, { afterPause = false, content = '', lineNumber = 0 } = {}) {
+    if (path && !supportsWorkspaceIndexInline(path)) return false;
+    if (path && isImportTypingLine(path, linePrefix)) return true;
     if (path && isSpringConfigFile(path)) {
       const p = prefix || extractInlinePartialToken(linePrefix) || '';
       return p.length >= 1 || AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '');
     }
+    if (path && isWhitespaceOnlyLine(linePrefix) && supportsWorkspaceIndexInline(path)) {
+      if (!content || !lineNumber) return afterPause;
+      return shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber);
+    }
     const p = prefix || '';
-    if (p.length >= MIN_AUTOCOMPLETE_CHARS) return true;
+    if (p.length >= MIN_INDEX_INLINE_CHARS) return true;
+    if (afterPause && p.length >= 1) return true;
     if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix || '')) return true;
     if (dotQualifierFromLinePrefix(linePrefix)) return true;
+    if (isAfterOperatorWithSpace(linePrefix)) return true;
+    if (isOperandContext(linePrefix)) return true;
+    if (isReturnContext(linePrefix)) return true;
+    if (isCallArgContext(linePrefix, path)) return true;
     if (isInsideControlParen(linePrefix)) return true;
-    const trimmed = (linePrefix || '').trimStart();
-    if (/^import\s/.test(trimmed)) return true;
     return false;
+  }
+
+  /** Statement finished on this line (`foo();`) — no inline ghost after the semicolon. */
+  function isLineInlineComplete(linePrefix) {
+    return /;\s*$/.test(String(linePrefix || '').trimEnd());
+  }
+
+  function isWhitespaceOnlyLine(linePrefix) {
+    return !String(linePrefix || '').trim();
+  }
+
+  /** Per-language characters / patterns that mark a finished line segment (no inline ghost). */
+  function pauseInlineRulesForPath(path) {
+    const lang = langForPath(path || '');
+    switch (lang) {
+      case 'python':
+        return { semicolon: false, braces: false, bracket: true, paren: true, colonBlock: true };
+      case 'ruby':
+        return { semicolon: true, braces: false, bracket: true, paren: true, endKeyword: true };
+      case 'shell':
+      case 'dockerfile':
+      case 'makefile':
+      case 'cmake':
+        return { semicolon: false, braces: true, bracket: false, paren: true, lineContinuation: true };
+      case 'markdown':
+      case 'plaintext':
+        return { semicolon: false, braces: false, bracket: false, paren: false, proseLine: true };
+      case 'yaml':
+      case 'toml':
+      case 'ini':
+        return { semicolon: false, braces: false, bracket: false, paren: false, configLine: true };
+      case 'xml':
+      case 'html':
+        return { semicolon: false, braces: false, bracket: false, paren: false, xmlTag: true };
+      case 'json':
+        return { semicolon: false, braces: true, bracket: true, paren: false, comma: true };
+      case 'css':
+      case 'scss':
+      case 'less':
+        return { semicolon: true, braces: true, bracket: false, paren: false, cssColon: true };
+      case 'sql':
+        return { semicolon: true, braces: false, bracket: false, paren: true };
+      default:
+        return { semicolon: true, braces: true, bracket: true, paren: true };
+    }
+  }
+
+  /**
+   * Cursor after a natural line boundary for the active language.
+   * Whitespace-only lines are not paused (empty-line templates / AI still apply).
+   */
+  function shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber, column) {
+    if (isWhitespaceOnlyLine(linePrefix)) return false;
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (!trimmed) return false;
+    const rules = pauseInlineRulesForPath(path);
+    const lang = langForPath(path || '');
+    const last = trimmed[trimmed.length - 1];
+
+    if (rules.semicolon && /;\s*$/.test(trimmed)) return true;
+
+    if (rules.braces && (last === '{' || last === '}')) return true;
+    if (rules.bracket && last === ']') return true;
+
+    if (rules.paren && last === ')') {
+      if (!extractInlinePartialToken(linePrefix)) return true;
+    }
+
+    if (rules.colonBlock && lang === 'python' && /:\s*$/.test(trimmed)) {
+      if (/\b(def|class|if|elif|else|for|while|try|except|finally|with|match|case)\b/.test(trimmed)) {
+        return true;
+      }
+    }
+
+    if (rules.endKeyword && lang === 'ruby' && /\b(end|do)\s*$/.test(trimmed)) return true;
+
+    if (rules.lineContinuation && last === '\\') return true;
+
+    if (rules.xmlTag && last === '>' && /<[^>]+>\s*$/.test(trimmed)) return true;
+
+    if (rules.comma && last === ',' && (lang === 'json')) return true;
+
+    if (rules.cssColon && last === ';') return true;
+
+    if (rules.configLine) {
+      if (lang === 'yaml' && /:\s*(\S.*)?$/.test(trimmed) && !trimmed.endsWith(':')) return true;
+      if ((lang === 'toml' || lang === 'ini') && /=/.test(trimmed) && /\S=\S/.test(trimmed.replace(/\s/g, ''))) {
+        return true;
+      }
+    }
+
+    if (rules.proseLine && lang === 'markdown') {
+      const body = trimmed.trimStart();
+      if (/^[-*+]\s+\S/.test(body)) return true;
+      if (/^\d+\.\s+\S/.test(body)) return true;
+    }
+
+    if (content && lineNumber && column) {
+      const after = lineAfterCursor(content, lineNumber, column);
+      if (!after.trim() && rules.paren && /\)\s*$/.test(trimmed) && !extractInlinePartialToken(linePrefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** After a typing pause, try workspace index inline when there is something to complete. */
+  function shouldPrefetchInlineOnPause(path, linePrefix, content, lineNumber) {
+    if (!path || isDeclarationTyping(path, linePrefix)) return false;
+    if (isImportTypingLine(path, linePrefix)) return supportsWorkspaceIndexInline(path);
+    if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
+    const trimmedAll = String(linePrefix || '').trim();
+    if (!trimmedAll) {
+      if (!content || !lineNumber) {
+        return supportsWorkspaceIndexInline(path) || isSpringConfigFile(path);
+      }
+      return supportsWorkspaceIndexInline(path)
+        || isSpringConfigFile(path)
+        || shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber);
+    }
+    const trimmedEnd = String(linePrefix || '').trimEnd();
+    const token = extractInlinePartialToken(linePrefix);
+    if (dotQualifierFromLinePrefix(linePrefix)) {
+      return supportsWorkspaceIndexInline(path);
+    }
+    if (!token) return false;
+    return supportsWorkspaceIndexInline(path);
+  }
+
+  function inlineIndexPrefix(linePrefix) {
+    const memberCtx = dotQualifierFromLinePrefix(linePrefix);
+    if (memberCtx) return memberCtx.memberPrefix || '';
+    return extractInlinePartialToken(linePrefix) || '';
   }
 
   function editorLinePrefix(model, position) {
@@ -690,9 +1546,11 @@
     return { word, linePrefix, prefix, range, memberCtx };
   }
 
-  function mapIndexItemToSuggestion(item, range, seen, memberContext) {
+  function mapIndexItemToSuggestion(item, range, seen, memberContext, path = '') {
     const label = item.label;
     if (!label || seen.has(label)) return null;
+  
+    if (path && !suggestionMatchesEditorLanguage(path, label)) return null;
     if (!isCodeLikeCompletion(label, item.kind)) return null;
     seen.add(label);
     const kind = String(item.kind || '').toLowerCase();
@@ -700,7 +1558,9 @@
     if (!insertText) {
       insertText = kind === 'method' ? `${label}()` : label;
     }
-    const sortRank = memberContext ? '0' : '1';
+    const sortRank = memberContext
+      ? '0'
+      : (kind === 'class' || kind === 'interface' || kind === 'type' || kind === 'enum' ? '0' : '1');
     const detail = item.detail
       ? (memberContext && kind === 'method' && !item.detail.includes('(')
         ? `${item.detail} · method`
@@ -720,7 +1580,7 @@
     if (item.documentation) {
       const doc = String(item.documentation);
       suggestion.documentation = doc;
-      suggestion.documentationHtml = `<div class="reaper-java-hover-doc">${javadocHtmlFromText(doc)}</div>`;
+      suggestion.documentationHtml = `<div class="reaper-java-hover-doc">${documentationHtmlFromText(doc)}</div>`;
     }
     return suggestion;
   }
@@ -793,6 +1653,61 @@
       .replace(/"/g, '&quot;');
   }
 
+  function hoverDisplayName(info) {
+    if (info?.name) return info.name;
+    const sig = info?.signature || '';
+    if (isJdtlsSourceLine(sig)) return '';
+    const typeMatch = sig.match(/\b(?:class|interface|enum|record|@interface)\s+(\w+)/);
+    if (typeMatch) return typeMatch[1];
+    const methodMatch = sig.match(/(\w+)\s*\(/);
+    return methodMatch ? methodMatch[1] : '';
+  }
+
+  function hoverInfoHasContent(info) {
+    return !!(info && (info.name || info.signature || info.documentation));
+  }
+
+  function isJdtlsSourceLine(text) {
+    if (window.ReaperAgentMarkdown?.isJdtlsSourceLine) {
+      return window.ReaperAgentMarkdown.isJdtlsSourceLine(text);
+    }
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/^source:/i.test(t) && (/jdt\.ls/i.test(t) || /file:\/\//i.test(t) || /jdt:\/\//i.test(t))) {
+      return true;
+    }
+    return /jdt\.ls-java-project/i.test(t);
+  }
+
+  function documentationHtmlFromText(text) {
+    const raw = window.ReaperAgentMarkdown?.stripJdtlsSourceAttribution?.(text) ?? String(text || '');
+    const doc = raw.trim();
+    if (!doc) return '';
+    const md = window.ReaperAgentMarkdown;
+    if (md?.looksLikeJavadocHtml?.(doc)) {
+      return md.renderJavadocHtml(doc);
+    }
+    if (md?.looksLikeLspMarkdown?.(doc)) {
+      return md.renderLspDocumentation(doc);
+    }
+    if (doc.includes('Parameters:')) {
+      return doc.split('\n').map((line) => `<div class="reaper-javadoc-line">${escapeHtml(line)}</div>`).join('');
+    }
+    return javadocHtmlFromText(doc);
+  }
+
+  function lspMarkupContent(text) {
+    const value = String(text || '').trim();
+    if (!value) return undefined;
+    const out = { value };
+    if (window.ReaperAgentMarkdown?.looksLikeLspMarkdown?.(value)) {
+      out.kind = (typeof monaco !== 'undefined' && monaco.MarkupKind)
+        ? monaco.MarkupKind.Markdown
+        : 'markdown';
+    }
+    return out;
+  }
+
   function javadocHtmlFromText(text) {
     const doc = String(text || '').trim();
     if (!doc) return '';
@@ -810,25 +1725,30 @@
   }
 
   function hoverHtmlFromInfo(info) {
-    if (!info?.name) return '';
-    const kind = escapeHtml(info.kind || 'symbol');
+    if (!hoverInfoHasContent(info)) return '';
+    const displayName = hoverDisplayName(info);
+    const kindRaw = info.kind && info.kind !== 'symbol' ? info.kind : '';
+    const kind = kindRaw ? escapeHtml(kindRaw) : '';
     let html = '<div class="reaper-java-hover">';
-    if (info.signature) {
+    const signature = info.signature && !isJdtlsSourceLine(info.signature) ? info.signature : '';
+    if (signature) {
       html += '<div class="reaper-java-hover-head">';
-      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
-      html += `<div class="reaper-java-hover-sig">${escapeHtml(info.signature)}</div>`;
+      if (kind) {
+        html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      }
+      html += `<div class="reaper-java-hover-sig">${escapeHtml(signature)}</div>`;
       html += '</div>';
-    } else {
+    } else if (displayName) {
       html += '<div class="reaper-java-hover-title">';
-      html += `<span class="reaper-java-hover-name">${escapeHtml(info.name)}</span>`;
-      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      html += `<span class="reaper-java-hover-name">${escapeHtml(displayName)}</span>`;
+      if (kind) {
+        html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      }
       html += '</div>';
     }
     if (info.documentation) {
-      const docHtml = info.documentation.includes('Parameters:')
-        ? info.documentation.split('\n').map((line) => `<div class="reaper-javadoc-line">${escapeHtml(line)}</div>`).join('')
-        : javadocHtmlFromText(info.documentation);
-      html += `<div class="reaper-java-hover-doc panel-scroll">${docHtml}</div>`;
+      const docHtml = documentationHtmlFromText(info.documentation);
+      html += `<div class="reaper-java-hover-doc">${docHtml}</div>`;
     } else if (['method', 'field', 'function', 'macro', 'typedef', 'struct', 'class', 'enum', 'namespace'].includes(info.kind)) {
       html += '<div class="reaper-java-hover-empty">No documentation available.</div>';
     }
@@ -838,7 +1758,7 @@
 
   function buildEditorHoverHtml(symInfo, markers) {
     const parts = [];
-    if (symInfo?.name) {
+    if (hoverInfoHasContent(symInfo)) {
       parts.push(hoverHtmlFromInfo(symInfo));
     }
     if (markers?.length) {
@@ -877,9 +1797,9 @@
       parts.push(diagHtml);
     }
     if (!parts.length) return '';
-    const rootCls = markers?.length && !symInfo?.name
-      ? 'reaper-editor-hover reaper-editor-hover--problems-only panel-scroll'
-      : 'reaper-editor-hover panel-scroll';
+    const rootCls = markers?.length && !hoverInfoHasContent(symInfo)
+      ? 'reaper-editor-hover reaper-editor-hover--problems-only'
+      : 'reaper-editor-hover';
     return `<div class="${rootCls}">${parts.join('')}</div>`;
   }
 
@@ -890,7 +1810,11 @@
     if (!item?.documentation) return { text: '', html: '' };
     const doc = item.documentation;
     if (typeof doc === 'string') {
-      return { text: doc.trim(), html: '' };
+      const trimmed = doc.trim();
+      if (window.ReaperAgentMarkdown?.looksLikeLspMarkdown?.(trimmed)) {
+        return { text: '', html: window.ReaperAgentMarkdown.renderLspDocumentation(trimmed) };
+      }
+      return { text: trimmed, html: '' };
     }
     if (typeof doc === 'object') {
       const value = typeof doc.value === 'string' ? doc.value.trim() : '';
@@ -972,15 +1896,18 @@
   }
 
   function hoverMarkdownFromInfo(info) {
-    if (!info?.name) return '';
+    if (!hoverInfoHasContent(info)) return '';
+    const displayName = hoverDisplayName(info);
     const parts = [];
     if (info.signature) {
       parts.push(`\`\`\`java\n${info.signature}\n\`\`\``);
-    } else {
-      parts.push(`**${info.name}** · ${info.kind || 'symbol'}`);
+    } else if (displayName) {
+      parts.push(`**${displayName}**${info.kind && info.kind !== 'symbol' ? ` · ${info.kind}` : ''}`);
     }
     if (info.documentation) {
-      parts.push(formatJavadocMarkdown(info.documentation));
+      const doc = window.ReaperAgentMarkdown?.stripJdtlsSourceAttribution?.(info.documentation)
+        ?? info.documentation;
+      if (doc) parts.push(formatJavadocMarkdown(doc));
     } else if (info.kind === 'method' || info.kind === 'field') {
       parts.push('*No documentation.*');
     }
@@ -988,9 +1915,17 @@
   }
 
   function renderJavadocBody(el, text) {
-    el.innerHTML = '';
     const doc = String(text || '').trim();
-    if (!doc) return;
+    if (!doc) {
+      el.innerHTML = '';
+      return;
+    }
+    const md = window.ReaperAgentMarkdown;
+    if (md?.looksLikeLspMarkdown?.(doc)) {
+      el.innerHTML = md.renderLspDocumentation(doc);
+      return;
+    }
+    el.innerHTML = '';
     for (const line of doc.split('\n')) {
       const row = document.createElement('div');
       const trimmed = line.trim();
@@ -1847,7 +2782,7 @@
     if (item.documentation) {
       const doc = String(item.documentation);
       suggestion.documentation = doc;
-      suggestion.documentationHtml = `<div class="reaper-java-hover-doc">${javadocHtmlFromText(doc)}</div>`;
+      suggestion.documentationHtml = `<div class="reaper-java-hover-doc">${documentationHtmlFromText(doc)}</div>`;
     }
     return suggestion;
   }
@@ -1920,6 +2855,61 @@
       .replace(/"/g, '&quot;');
   }
 
+  function hoverDisplayName(info) {
+    if (info?.name) return info.name;
+    const sig = info?.signature || '';
+    if (isJdtlsSourceLine(sig)) return '';
+    const typeMatch = sig.match(/\b(?:class|interface|enum|record|@interface)\s+(\w+)/);
+    if (typeMatch) return typeMatch[1];
+    const methodMatch = sig.match(/(\w+)\s*\(/);
+    return methodMatch ? methodMatch[1] : '';
+  }
+
+  function hoverInfoHasContent(info) {
+    return !!(info && (info.name || info.signature || info.documentation));
+  }
+
+  function isJdtlsSourceLine(text) {
+    if (window.ReaperAgentMarkdown?.isJdtlsSourceLine) {
+      return window.ReaperAgentMarkdown.isJdtlsSourceLine(text);
+    }
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/^source:/i.test(t) && (/jdt\.ls/i.test(t) || /file:\/\//i.test(t) || /jdt:\/\//i.test(t))) {
+      return true;
+    }
+    return /jdt\.ls-java-project/i.test(t);
+  }
+
+  function documentationHtmlFromText(text) {
+    const raw = window.ReaperAgentMarkdown?.stripJdtlsSourceAttribution?.(text) ?? String(text || '');
+    const doc = raw.trim();
+    if (!doc) return '';
+    const md = window.ReaperAgentMarkdown;
+    if (md?.looksLikeJavadocHtml?.(doc)) {
+      return md.renderJavadocHtml(doc);
+    }
+    if (md?.looksLikeLspMarkdown?.(doc)) {
+      return md.renderLspDocumentation(doc);
+    }
+    if (doc.includes('Parameters:')) {
+      return doc.split('\n').map((line) => `<div class="reaper-javadoc-line">${escapeHtml(line)}</div>`).join('');
+    }
+    return javadocHtmlFromText(doc);
+  }
+
+  function lspMarkupContent(text) {
+    const value = String(text || '').trim();
+    if (!value) return undefined;
+    const out = { value };
+    if (window.ReaperAgentMarkdown?.looksLikeLspMarkdown?.(value)) {
+      out.kind = (typeof monaco !== 'undefined' && monaco.MarkupKind)
+        ? monaco.MarkupKind.Markdown
+        : 'markdown';
+    }
+    return out;
+  }
+
   function javadocHtmlFromText(text) {
     const doc = String(text || '').trim();
     if (!doc) return '';
@@ -1937,22 +2927,29 @@
   }
 
   function hoverHtmlFromInfo(info) {
-    if (!info?.name) return '';
-    const kind = escapeHtml(info.kind || 'symbol');
+    if (!hoverInfoHasContent(info)) return '';
+    const displayName = hoverDisplayName(info);
+    const kindRaw = info.kind && info.kind !== 'symbol' ? info.kind : '';
+    const kind = kindRaw ? escapeHtml(kindRaw) : '';
     let html = '<div class="reaper-java-hover">';
-    if (info.signature) {
+    const signature = info.signature && !isJdtlsSourceLine(info.signature) ? info.signature : '';
+    if (signature) {
       html += '<div class="reaper-java-hover-head">';
-      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
-      html += `<div class="reaper-java-hover-sig">${escapeHtml(info.signature)}</div>`;
+      if (kind) {
+        html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      }
+      html += `<div class="reaper-java-hover-sig">${escapeHtml(signature)}</div>`;
       html += '</div>';
-    } else {
+    } else if (displayName) {
       html += '<div class="reaper-java-hover-title">';
-      html += `<span class="reaper-java-hover-name">${escapeHtml(info.name)}</span>`;
-      html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      html += `<span class="reaper-java-hover-name">${escapeHtml(displayName)}</span>`;
+      if (kind) {
+        html += `<span class="reaper-java-hover-kind-pill">${kind}</span>`;
+      }
       html += '</div>';
     }
     if (info.documentation) {
-      html += `<div class="reaper-java-hover-doc panel-scroll">${javadocHtmlFromText(info.documentation)}</div>`;
+      html += `<div class="reaper-java-hover-doc">${documentationHtmlFromText(info.documentation)}</div>`;
     } else if (info.kind === 'method' || info.kind === 'field') {
       html += '<div class="reaper-java-hover-empty">No documentation available.</div>';
     }
@@ -1962,7 +2959,7 @@
 
   function buildEditorHoverHtml(symInfo, markers) {
     const parts = [];
-    if (symInfo?.name) {
+    if (hoverInfoHasContent(symInfo)) {
       parts.push(hoverHtmlFromInfo(symInfo));
     }
     if (markers?.length) {
@@ -2001,9 +2998,9 @@
       parts.push(diagHtml);
     }
     if (!parts.length) return '';
-    const rootCls = markers?.length && !symInfo?.name
-      ? 'reaper-editor-hover reaper-editor-hover--problems-only panel-scroll'
-      : 'reaper-editor-hover panel-scroll';
+    const rootCls = markers?.length && !hoverInfoHasContent(symInfo)
+      ? 'reaper-editor-hover reaper-editor-hover--problems-only'
+      : 'reaper-editor-hover';
     return `<div class="${rootCls}">${parts.join('')}</div>`;
   }
 
@@ -2014,7 +3011,11 @@
     if (!item?.documentation) return { text: '', html: '' };
     const doc = item.documentation;
     if (typeof doc === 'string') {
-      return { text: doc.trim(), html: '' };
+      const trimmed = doc.trim();
+      if (window.ReaperAgentMarkdown?.looksLikeLspMarkdown?.(trimmed)) {
+        return { text: '', html: window.ReaperAgentMarkdown.renderLspDocumentation(trimmed) };
+      }
+      return { text: trimmed, html: '' };
     }
     if (typeof doc === 'object') {
       const value = typeof doc.value === 'string' ? doc.value.trim() : '';
@@ -2096,15 +3097,18 @@
   }
 
   function hoverMarkdownFromInfo(info) {
-    if (!info?.name) return '';
+    if (!hoverInfoHasContent(info)) return '';
+    const displayName = hoverDisplayName(info);
     const parts = [];
     if (info.signature) {
       parts.push(`\`\`\`java\n${info.signature}\n\`\`\``);
-    } else {
-      parts.push(`**${info.name}** · ${info.kind || 'symbol'}`);
+    } else if (displayName) {
+      parts.push(`**${displayName}**${info.kind && info.kind !== 'symbol' ? ` · ${info.kind}` : ''}`);
     }
     if (info.documentation) {
-      parts.push(formatJavadocMarkdown(info.documentation));
+      const doc = window.ReaperAgentMarkdown?.stripJdtlsSourceAttribution?.(info.documentation)
+        ?? info.documentation;
+      if (doc) parts.push(formatJavadocMarkdown(doc));
     } else if (info.kind === 'method' || info.kind === 'field') {
       parts.push('*No documentation.*');
     }
@@ -2112,9 +3116,17 @@
   }
 
   function renderJavadocBody(el, text) {
-    el.innerHTML = '';
     const doc = String(text || '').trim();
-    if (!doc) return;
+    if (!doc) {
+      el.innerHTML = '';
+      return;
+    }
+    const md = window.ReaperAgentMarkdown;
+    if (md?.looksLikeLspMarkdown?.(doc)) {
+      el.innerHTML = md.renderLspDocumentation(doc);
+      return;
+    }
+    el.innerHTML = '';
     for (const line of doc.split('\n')) {
       const row = document.createElement('div');
       const trimmed = line.trim();
@@ -2281,6 +3293,115 @@
   };
 
   const COMMON_JAVA_IMPORTS = {
+    // java.util / java.util.concurrent
+    List: 'java.util.List',
+    ArrayList: 'java.util.ArrayList',
+    LinkedList: 'java.util.LinkedList',
+    Map: 'java.util.Map',
+    HashMap: 'java.util.HashMap',
+    LinkedHashMap: 'java.util.LinkedHashMap',
+    TreeMap: 'java.util.TreeMap',
+    Set: 'java.util.Set',
+    HashSet: 'java.util.HashSet',
+    LinkedHashSet: 'java.util.LinkedHashSet',
+    TreeSet: 'java.util.TreeSet',
+    Deque: 'java.util.Deque',
+    ArrayDeque: 'java.util.ArrayDeque',
+    Queue: 'java.util.Queue',
+    Optional: 'java.util.Optional',
+    Arrays: 'java.util.Arrays',
+    Collections: 'java.util.Collections',
+    Objects: 'java.util.Objects',
+    UUID: 'java.util.UUID',
+    Properties: 'java.util.Properties',
+    Comparator: 'java.util.Comparator',
+    Iterator: 'java.util.Iterator',
+    Enumeration: 'java.util.Enumeration',
+    Locale: 'java.util.Locale',
+    Random: 'java.util.Random',
+    Date: 'java.util.Date',
+    Calendar: 'java.util.Calendar',
+    TimeZone: 'java.util.TimeZone',
+    Scanner: 'java.util.Scanner',
+    Pattern: 'java.util.regex.Pattern',
+    Matcher: 'java.util.regex.Matcher',
+    Stream: 'java.util.stream.Stream',
+    IntStream: 'java.util.stream.IntStream',
+    LongStream: 'java.util.stream.LongStream',
+    DoubleStream: 'java.util.stream.DoubleStream',
+    Collectors: 'java.util.stream.Collectors',
+    CompletableFuture: 'java.util.concurrent.CompletableFuture',
+    Future: 'java.util.concurrent.Future',
+    ExecutorService: 'java.util.concurrent.ExecutorService',
+    Executors: 'java.util.concurrent.Executors',
+    ConcurrentHashMap: 'java.util.concurrent.ConcurrentHashMap',
+    CountDownLatch: 'java.util.concurrent.CountDownLatch',
+    Semaphore: 'java.util.concurrent.Semaphore',
+    AtomicInteger: 'java.util.concurrent.atomic.AtomicInteger',
+    AtomicLong: 'java.util.concurrent.atomic.AtomicLong',
+    AtomicBoolean: 'java.util.concurrent.atomic.AtomicBoolean',
+    // java.io / java.nio
+    File: 'java.io.File',
+    FileReader: 'java.io.FileReader',
+    FileWriter: 'java.io.FileWriter',
+    FileInputStream: 'java.io.FileInputStream',
+    FileOutputStream: 'java.io.FileOutputStream',
+    InputStream: 'java.io.InputStream',
+    OutputStream: 'java.io.OutputStream',
+    Reader: 'java.io.Reader',
+    Writer: 'java.io.Writer',
+    BufferedReader: 'java.io.BufferedReader',
+    BufferedWriter: 'java.io.BufferedWriter',
+    PrintWriter: 'java.io.PrintWriter',
+    PrintStream: 'java.io.PrintStream',
+    IOException: 'java.io.IOException',
+    Serializable: 'java.io.Serializable',
+    Path: 'java.nio.file.Path',
+    Paths: 'java.nio.file.Paths',
+    Files: 'java.nio.file.Files',
+    StandardCharsets: 'java.nio.charset.StandardCharsets',
+    Charset: 'java.nio.charset.Charset',
+    ByteBuffer: 'java.nio.ByteBuffer',
+    // java.time
+    LocalDate: 'java.time.LocalDate',
+    LocalTime: 'java.time.LocalTime',
+    LocalDateTime: 'java.time.LocalDateTime',
+    Instant: 'java.time.Instant',
+    Duration: 'java.time.Duration',
+    Period: 'java.time.Period',
+    ZonedDateTime: 'java.time.ZonedDateTime',
+    ZoneId: 'java.time.ZoneId',
+    DateTimeFormatter: 'java.time.format.DateTimeFormatter',
+    // java.math / java.net
+    BigDecimal: 'java.math.BigDecimal',
+    BigInteger: 'java.math.BigInteger',
+    URI: 'java.net.URI',
+    URL: 'java.net.URL',
+    HttpURLConnection: 'java.net.HttpURLConnection',
+    // java.lang.reflect / functional
+    Function: 'java.util.function.Function',
+    Consumer: 'java.util.function.Consumer',
+    Supplier: 'java.util.function.Supplier',
+    Predicate: 'java.util.function.Predicate',
+    BiFunction: 'java.util.function.BiFunction',
+    UnaryOperator: 'java.util.function.UnaryOperator',
+    BinaryOperator: 'java.util.function.BinaryOperator',
+    // logging
+    Logger: 'org.slf4j.Logger',
+    LoggerFactory: 'org.slf4j.LoggerFactory',
+    // lombok (common quick-fix targets)
+    Slf4j: 'lombok.extern.slf4j.Slf4j',
+    Data: 'lombok.Data',
+    Getter: 'lombok.Getter',
+    Setter: 'lombok.Setter',
+    Builder: 'lombok.Builder',
+    AllArgsConstructor: 'lombok.AllArgsConstructor',
+    NoArgsConstructor: 'lombok.NoArgsConstructor',
+    RequiredArgsConstructor: 'lombok.RequiredArgsConstructor',
+    EqualsAndHashCode: 'lombok.EqualsAndHashCode',
+    ToString: 'lombok.ToString',
+    NonNull: 'lombok.NonNull',
+    // Spring
     RestController: 'org.springframework.web.bind.annotation.RestController',
     Controller: 'org.springframework.stereotype.Controller',
     Service: 'org.springframework.stereotype.Service',
@@ -2300,7 +3421,30 @@
     SpringBootApplication: 'org.springframework.boot.autoconfigure.SpringBootApplication',
     ResponseEntity: 'org.springframework.http.ResponseEntity',
     HttpStatus: 'org.springframework.http.HttpStatus',
+    Page: 'org.springframework.data.domain.Page',
+    Pageable: 'org.springframework.data.domain.Pageable',
+    PageRequest: 'org.springframework.data.domain.PageRequest',
+    Sort: 'org.springframework.data.domain.Sort',
+    Bean: 'org.springframework.context.annotation.Bean',
+    Configuration: 'org.springframework.context.annotation.Configuration',
+    SpringApplication: 'org.springframework.boot.SpringApplication',
+    HttpServletRequest: 'jakarta.servlet.http.HttpServletRequest',
+    HttpServletResponse: 'jakarta.servlet.http.HttpServletResponse',
   };
+
+  const JAVA_LANG_NO_IMPORT = new Set([
+    'String', 'Object', 'Integer', 'Long', 'Boolean', 'Double', 'Float', 'Byte', 'Short',
+    'Character', 'Void', 'Class', 'System', 'Math', 'Enum', 'RuntimeException', 'Exception',
+    'Error', 'Throwable', 'Override', 'Deprecated', 'SuppressWarnings', 'FunctionalInterface',
+    'AutoCloseable', 'Cloneable', 'Iterable', 'Comparable', 'Runnable', 'Thread',
+    'StringBuilder', 'StringBuffer', 'Process', 'ProcessBuilder', 'Record',
+  ]);
+
+  function localJavaImportFqcn(symbol) {
+    const name = String(symbol || '').trim();
+    if (!name || JAVA_LANG_NO_IMPORT.has(name)) return null;
+    return COMMON_JAVA_IMPORTS[name] || null;
+  }
 
   function extractJavacClassSymbol(message) {
     const msg = String(message || '');
@@ -2309,7 +3453,9 @@
     const rest = msg.slice(idx + 'symbol:'.length).trim();
     const parts = rest.split(/\s+/);
     if (!parts.length) return '';
-    if (parts[0] === 'class' || parts[0] === 'interface') return parts[1] || '';
+    if (parts[0] === 'class' || parts[0] === 'interface' || parts[0] === 'variable' || parts[0] === 'method') {
+      return parts[1] || '';
+    }
     return parts[0];
   }
 
@@ -2470,26 +3616,50 @@
     Long: ['longValue', 'intValue', 'toString', 'parseLong', 'valueOf', 'compare', 'equals'],
     Boolean: ['booleanValue', 'toString', 'valueOf', 'equals'],
     Object: ['toString', 'equals', 'hashCode', 'getClass', 'clone', 'notify', 'notifyAll', 'wait'],
-    List: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains', 'addAll', 'removeAll'],
-    ArrayList: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains'],
+    List: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains', 'addAll', 'removeAll', 'stream', 'parallelStream', 'spliterator'],
+    ArrayList: ['add', 'get', 'size', 'isEmpty', 'clear', 'remove', 'iterator', 'contains', 'stream', 'parallelStream'],
     Map: ['get', 'put', 'size', 'isEmpty', 'clear', 'remove', 'containsKey', 'containsValue', 'keySet', 'values', 'entrySet'],
     HashMap: ['get', 'put', 'size', 'isEmpty', 'clear', 'remove', 'containsKey'],
     Set: ['add', 'size', 'isEmpty', 'clear', 'remove', 'contains', 'iterator'],
     PrintStream: ['print', 'println', 'printf', 'format', 'write', 'flush', 'close'],
     Scanner: ['next', 'nextLine', 'nextInt', 'hasNext', 'close'],
+    Stream: ['map', 'filter', 'flatMap', 'collect', 'forEach', 'reduce', 'findFirst', 'findAny', 'count', 'distinct', 'sorted', 'limit', 'skip', 'toList'],
   };
 
-  function jdkBuiltinMembersForType(typeName, memberPrefix) {
+  function jdkExtraMembersForType(simple, javaLevel) {
+    const extras = [];
+    const collections = new Set([
+      'List', 'ArrayList', 'LinkedList', 'Set', 'HashSet', 'LinkedHashSet',
+      'Collection', 'Deque', 'ArrayDeque', 'Iterable',
+    ]);
+    if (collections.has(simple) && javaLevel >= 8) {
+      for (const m of ['stream', 'parallelStream', 'spliterator']) {
+        if (!extras.includes(m)) extras.push(m);
+      }
+    }
+    if (javaLevel >= 21 && ['List', 'ArrayList', 'LinkedList', 'Deque'].includes(simple)) {
+      for (const m of ['reversed', 'getFirst', 'getLast', 'addFirst', 'addLast', 'removeFirst', 'removeLast']) {
+        if (!extras.includes(m)) extras.push(m);
+      }
+    }
+    return extras;
+  }
+
+  function jdkBuiltinMembersForType(typeName, memberPrefix, javaLevel = 21) {
     const simple = simplifyJavaTypeName(typeName);
-    const members = JDK_TYPE_MEMBERS[simple];
-    if (!members) return [];
+    const baseMembers = JDK_TYPE_MEMBERS[simple] || [];
+    const members = [...baseMembers];
+    for (const m of jdkExtraMembersForType(simple, javaLevel)) {
+      if (!members.includes(m)) members.push(m);
+    }
+    if (!members.length) return [];
     const prefixLower = (memberPrefix || '').toLowerCase();
     return members
       .filter((m) => !memberPrefix || m.toLowerCase().startsWith(prefixLower))
       .map((m) => ({ label: m, kind: 'method', detail: `${simple}.${m}` }));
   }
 
-  function localMemberCompletions(content, qualifier, memberPrefix, path, model) {
+  function localMemberCompletions(content, qualifier, memberPrefix, path, model, javaLevel = 21) {
     const items = [];
     const seen = new Set();
     const prefixLower = (memberPrefix || '').toLowerCase();
@@ -2553,7 +3723,7 @@
     if (lang === 'java' || lang === 'kotlin') {
       const type = resolveJavaQualifierType(content, qualifier);
       if (type) {
-        for (const m of jdkBuiltinMembersForType(type, memberPrefix)) {
+        for (const m of jdkBuiltinMembersForType(type, memberPrefix, javaLevel)) {
           if (seen.add(m.label)) {
             items.push(m);
           }
@@ -2574,13 +3744,79 @@
     return items.slice(0, 40);
   }
 
-  function syntaxInlineSuffix(path, linePrefix) {
+  function lineAfterCursor(content, lineNumber, column) {
+    const lines = String(content || '').split(/\r?\n/);
+    const line = lines[lineNumber - 1] || '';
+    return line.slice(Math.max(0, (column || 1) - 1));
+  }
+
+  function hasCloseBraceAfterCursor(content, lineNumber, column) {
+    return /^\s*\}/.test(lineAfterCursor(content, lineNumber, column));
+  }
+
+  function isRedundantCloseBraceGhost(linePrefix, ghostText, content, lineNumber, column) {
+    const ghost = String(ghostText ?? '').trim();
+    if (ghost !== '}') return false;
+    if (!String(linePrefix || '').trimEnd().endsWith('{')) return false;
+    if (content && lineNumber && column) {
+      return hasCloseBraceAfterCursor(content, lineNumber, column);
+    }
+    return true;
+  }
+
+  function childIndent(indent) {
+    const base = String(indent || '');
+    if (base.includes('\t')) return `${base}\t`;
+    return `${base}    `;
+  }
+
+  function matchExpandableEmptyBraceLine(lineText) {
+    const m = String(lineText || '').match(/^(\s*)(.+?\S)\s*\{\s*\}(\s*)$/);
+    if (!m) return null;
+    const head = m[2].trimEnd();
+    if (/^\s*(if|else\b|for|while|switch|catch|try|do|synchronized)\b/.test(head)) return null;
+    if (/\b(class|interface|enum|record|struct|trait|namespace)\s+\w+/.test(head)) return m;
+    if (/\b(function|func|def|fn)\s+\w+/.test(head)) return m;
+    if (/\)\s*$/.test(head)) return m;
+    return null;
+  }
+
+  function maybeExpandEmptyBraceBlock(ed) {
+    if (ed._reaperExpandingBrace) return;
+    const model = ed.getModel();
+    const pos = ed.getPosition();
+    if (!model || !pos) return;
+    const lineText = model.getLineContent(pos.lineNumber);
+    const m = matchExpandableEmptyBraceLine(lineText);
+    if (!m) return;
+    const baseIndent = m[1];
+    const head = m[2].trimEnd();
+    const inner = childIndent(baseIndent);
+    const newText = `${baseIndent}${head} {\n${inner}\n${baseIndent}}`;
+    ed._reaperExpandingBrace = true;
+    try {
+      ed.executeEdits('reaper-expand-brace', [{
+        range: new monaco.Range(pos.lineNumber, 1, pos.lineNumber, lineText.length + 1),
+        text: newText,
+      }]);
+      ed.setPosition({ lineNumber: pos.lineNumber + 1, column: inner.length + 1 });
+    } finally {
+      ed._reaperExpandingBrace = false;
+    }
+  }
+
+  function syntaxInlineSuffix(path, linePrefix, content, lineNumber, column) {
     const trimmed = String(linePrefix || '').trimEnd();
     if (!trimmed) return '';
     const lang = langForPath(path);
 
     if (/\w\s*\($/.test(trimmed) && !trimmed.endsWith('()')) return ')';
-    if (trimmed.endsWith('{') && !trimmed.endsWith('${')) return '}';
+    if (trimmed.endsWith('{') && !trimmed.endsWith('${')) {
+      if (content && lineNumber && column && hasCloseBraceAfterCursor(content, lineNumber, column)) {
+        return '';
+      }
+      return '}';
+    }
     if (trimmed.endsWith('[')) return ']';
     const dq = (trimmed.match(/"/g) || []).length;
     if (dq % 2 === 1 && !trimmed.endsWith('\\"')) return '"';
@@ -2605,7 +3841,11 @@
   function isInsideControlParen(linePrefix) {
     const trimmed = String(linePrefix || '').trimEnd();
     if (dotQualifierFromLinePrefix(trimmed)) return false;
-    return /\b(for|if|while|switch)\s*\([^)]*$/i.test(trimmed);
+    if (/\b(for|if|while|switch|catch|foreach|elif|unless|until)\s*\([^)]*$/i.test(trimmed)) {
+      return true;
+    }
+    if (/\b(for|if|while|switch)\s+\w/i.test(trimmed)) return true;
+    return false;
   }
 
   function collectJavaScopeVariables(content, throughLine) {
@@ -2656,38 +3896,240 @@
 
   function shouldPreferAiStatementInline(path, linePrefix, content, lineNumber) {
     if (dotQualifierFromLinePrefix(linePrefix)) return false;
+    if (isReturnContext(linePrefix)) return false;
+    if (isOperandContext(linePrefix)) return false;
+    if (isCallArgContext(linePrefix, path)) return false;
     const trimmed = linePrefix.trimEnd();
     if (hasCompleteControlKeyword(trimmed)) return true;
     if (isInsideControlParen(linePrefix)) return true;
-    if (isWhitespaceOnlyLine(linePrefix) && findEnclosingBlock(content, lineNumber)) return true;
+    if (isWhitespaceOnlyLine(linePrefix)) return true;
     const token = extractInlinePartialToken(linePrefix);
-    if (token && isControlKeywordPrefix(token)) return true;
+    if (token.length >= 2 && isControlKeywordPrefix(token)) return true;
     return false;
+  }
+
+  /** AI inline when local vars/types/keywords are not handling the cursor (all languages). */
+  function shouldRouteInlineToAi(path, linePrefix, content, lineNumber, localGhost = '', aiEnabled = true) {
+    if (!aiEnabled) return false;
+    if (dotQualifierFromLinePrefix(linePrefix)) return false;
+    if (isImportTypingLine(path, linePrefix)) return false;
+    if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
+    if (isDeclarationTyping(path, linePrefix)) return false;
+    if (localGhost) return false;
+    if (shouldPreferAiStatementInline(path, linePrefix, content, lineNumber)) return true;
+
+    if (isOperandContext(linePrefix)) {
+      if (operandInlineSuffix(content, path, lineNumber, linePrefix)) return false;
+      if (supportsWorkspaceIndexInline(path)) return false;
+    }
+    if (isReturnContext(linePrefix)) {
+      if (returnInlineSuffix(content, path, lineNumber, linePrefix)) return false;
+      if (supportsWorkspaceIndexInline(path)) return false;
+    }
+    if (isCallArgContext(linePrefix, path)) {
+      if (callArgInlineSuffix(content, path, lineNumber, linePrefix)) return false;
+      if (supportsWorkspaceIndexInline(path)) return false;
+    }
+
+    const token = extractInlinePartialToken(linePrefix);
+    if (token) {
+      if (supportsWorkspaceIndexInline(path) && shouldFetchIndexCompletions(linePrefix, token, path)) {
+        return false;
+      }
+      if (shouldPreferJavaTypeInline(path, linePrefix, token)) return false;
+      const trimmed = linePrefix.trimEnd();
+      if (
+        (token.length === 1 && isKeywordPrefixTyping(path, token))
+        || (
+          shouldPreferControlKeywordInline(path, linePrefix, token)
+          && !hasCompleteControlKeyword(trimmed)
+        )
+      ) {
+        return false;
+      }
+      if (scopeIdentifierInlineSuffix(content, path, lineNumber, token)) return false;
+    }
+    return true;
   }
 
   const JAVA_PRIMITIVE_TYPES = new Set([
     'int', 'long', 'boolean', 'char', 'byte', 'short', 'float', 'double', 'void', 'var',
   ]);
 
-  /** Typing `String greeting` — suppress AI ghost that would glue `greeting` onto the type. */
-  function isJavaDeclarationTyping(path, linePrefix) {
+  /** Common JDK / framework types for instant inline + suggest (before async index returns). */
+  const JAVA_SYNC_TYPE_NAMES = [
+    'String', 'System', 'File', 'Files', 'Path', 'Paths', 'List', 'Map', 'Set', 'Optional',
+    'Integer', 'Long', 'Boolean', 'Double', 'Float', 'Byte', 'Short', 'Character', 'Object',
+    'Class', 'Thread', 'Exception', 'RuntimeException', 'IOException', 'InputStream',
+    'OutputStream', 'BufferedReader', 'PrintWriter', 'Scanner', 'Arrays', 'Collections',
+    'Objects', 'Math', 'UUID', 'BigDecimal', 'BigInteger', 'ArrayList', 'HashMap', 'HashSet',
+    'LinkedList', 'StringBuilder', 'StringBuffer', 'Pattern', 'Matcher', 'Stream',
+    'Collectors', 'LocalDate', 'LocalDateTime', 'Instant', 'Duration', 'URI', 'URL',
+    'FileInputStream', 'FileOutputStream', 'SpringApplication', 'Autowired', 'Component',
+    'Service', 'Repository', 'Controller', 'RestController', 'RequestMapping', 'Bean',
+    'Configuration', 'Value', 'Logger', 'LoggerFactory', 'HttpServletRequest', 'ResponseEntity',
+    'HttpStatus', 'CompletableFuture', 'Future', 'Function', 'Consumer', 'Supplier',
+    'Predicate', 'Runnable', 'Comparable', 'Iterator', 'Iterable', 'Enum', 'Record',
+  ];
+
+  function isJavaLikePath(path) {
     const lang = langForPath(path);
-    if (lang !== 'java' && lang !== 'kotlin' && lang !== 'kts') return false;
-    const trimmed = linePrefix.trimStart();
-    if (!trimmed || trimmed.includes('=') || trimmed.includes(';')) return false;
-    if (/\.\w/.test(trimmed)) return false;
-    const declRe = /^(?:(?:public|private|protected|static|final|volatile|transient)\s+)*([\w][\w.<>\[\]]*)\s*([\w$]*)$/;
-    const m = trimmed.match(declRe);
-    if (!m) return false;
-    const typePart = m[1];
-    if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
+    return lang === 'java' || lang === 'kotlin' || lang === 'kts' || lang === 'groovy';
+  }
+
+  function javaSyncTypeInlineSuffix(token) {
+    if (!token) return '';
+    const lower = token.toLowerCase();
+    for (const name of JAVA_SYNC_TYPE_NAMES) {
+      if (name.toLowerCase().startsWith(lower) && name.length > token.length) {
+        return name.slice(token.length);
+      }
+    }
+    return '';
+  }
+
+  /** PascalCase or explicit type position (`new Foo`, `String name`) — not statement keywords. */
+  function shouldPreferJavaTypeInline(path, linePrefix, token) {
+    if (!token || !isJavaLikePath(path)) return false;
+    if (/^[A-Z]/.test(token)) return true;
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (trimmed.endsWith('new ')
+      || trimmed.endsWith('extends ')
+      || trimmed.endsWith('implements ')
+      || trimmed.endsWith('throws ')
+      || trimmed.endsWith('catch (')
+      || trimmed.endsWith('<')) {
+      return true;
+    }
+    if (isDeclarationTyping(path, linePrefix)) return true;
+    return false;
+  }
+
+  /** Lowercase f/i/w at statement start → for/if/while, not File/Integer/WeakReference. */
+  function shouldPreferControlKeywordInline(path, linePrefix, token) {
+    if (!token || !isCodeStatementLanguage(path)) return false;
+    if (shouldPreferJavaTypeInline(path, linePrefix, token)) return false;
+    return isControlKeywordPrefix(token);
+  }
+
+  function rankIndexItemsForInline(items) {
+    const rank = (item) => {
+      const k = String(item?.kind || '').toLowerCase();
+      if (k === 'class' || k === 'interface' || k === 'type' || k === 'enum') return 0;
+      if (k === 'variable' || k === 'field' || k === 'property') return 1;
+      if (k === 'method' || k === 'function') return 2;
+      if (k === 'keyword') return 4;
+      return 3;
+    };
+    return [...items].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      const la = String(a?.label || a?.insert || '');
+      const lb = String(b?.label || b?.insert || '');
+      return la.length - lb.length || la.localeCompare(lb);
+    });
+  }
+
+  /** True when the user finished a type and is typing the variable name (`String greeting`). */
+  function hasDeclarationNameSlot(trimmed, typePart, namePart) {
+    if (namePart) return true;
+    const idx = trimmed.indexOf(typePart);
+    if (idx < 0) return false;
+    return trimmed.slice(idx + typePart.length).startsWith(' ');
+  }
+
+  function isJavaLikeTypeToken(typePart) {
     return JAVA_PRIMITIVE_TYPES.has(typePart)
       || /^[A-Z]/.test(typePart)
       || typePart.includes('<')
       || typePart.includes('[');
   }
 
-  /** Ghost must not start with an identifier char when the line already ends on one. */
+  /** Suppress inline ghost only while typing `Type varName`, not partial statement identifiers (`S`). */
+  function isDeclarationTyping(path, linePrefix) {
+    const lang = langForPath(path);
+    const trimmed = linePrefix.trimStart();
+    if (!trimmed || trimmed.includes('=') || trimmed.includes(';')) return false;
+    if (/\.\w/.test(trimmed)) return false;
+
+    if (lang === 'java' || lang === 'kotlin' || lang === 'kts' || lang === 'groovy') {
+      const declRe = /^(?:(?:public|private|protected|static|final|volatile|transient)\s+)*([\w][\w.<>\[\]]*)\s*([\w$]*)$/;
+      const m = trimmed.match(declRe);
+      if (!m) return false;
+      const typePart = m[1];
+      const namePart = m[2] || '';
+      if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
+      if (!isJavaLikeTypeToken(typePart)) return false;
+      return hasDeclarationNameSlot(trimmed, typePart, namePart);
+    }
+
+    if (lang === 'typescript' || lang === 'javascript') {
+      const typedVar = trimmed.match(
+        /^(?:export\s+)?(?:const|let|var)\s+\w+\s*:\s*([\w$][\w$.<>\[\]|&]*)\s*([\w$]*)$/,
+      );
+      if (typedVar) {
+        return hasDeclarationNameSlot(trimmed, typedVar[1], typedVar[2] || '');
+      }
+      const typeDecl = trimmed.match(/^(?:export\s+)?(?:type|interface)\s+([\w$]+)\s+([\w$]*)$/);
+      if (typeDecl) {
+        return hasDeclarationNameSlot(trimmed, typeDecl[1], typeDecl[2] || '');
+      }
+      return false;
+    }
+
+    if (lang === 'rust') {
+      const typed = trimmed.match(/^(?:pub\s+)?(?:let\s+mut\s+|let\s+|const\s+)\w+\s*:\s*([\w:]+)\s*([\w$]*)$/);
+      if (typed) {
+        return hasDeclarationNameSlot(trimmed, typed[1], typed[2] || '');
+      }
+      return false;
+    }
+
+    if (lang === 'csharp') {
+      const declRe = /^(?:(?:public|private|protected|internal|static|readonly|volatile|const)\s+)*([\w][\w.<>\[\]]*)\s+([\w$]*)$/;
+      const m = trimmed.match(declRe);
+      if (!m) return false;
+      const typePart = m[1];
+      const namePart = m[2] || '';
+      if (!isJavaLikeTypeToken(typePart)) return false;
+      return hasDeclarationNameSlot(trimmed, typePart, namePart);
+    }
+
+    if (lang === 'cpp' || lang === 'c') {
+      const declRe = /^(?:(?:static|const|volatile|unsigned|signed|long|short)\s+)*([\w][\w:<>\[\]*&]*)\s+([\w$]*)$/;
+      const m = trimmed.match(declRe);
+      if (!m) return false;
+      const typePart = m[1];
+      const namePart = m[2] || '';
+      if (/^(if|for|while|return|switch|case|struct|enum|union|typedef)\b/.test(typePart)) return false;
+      return hasDeclarationNameSlot(trimmed, typePart, namePart);
+    }
+
+    if (lang === 'swift') {
+      const declRe = /^(?:(?:public|private|internal|fileprivate|open|static|final|lazy|weak|unowned)\s+)*([\w][\w.<>\[\]]*)\s+([\w$]*)$/;
+      const m = trimmed.match(declRe);
+      if (!m) return false;
+      return hasDeclarationNameSlot(trimmed, m[1], m[2] || '');
+    }
+
+    if (lang === 'go') {
+      const typed = trimmed.match(/^var\s+\w+\s+([\w[\].*]+)\s*([\w$]*)$/);
+      if (typed) {
+        return hasDeclarationNameSlot(trimmed, typed[1], typed[2] || '');
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  /** @deprecated use isDeclarationTyping */
+  function isJavaDeclarationTyping(path, linePrefix) {
+    return isDeclarationTyping(path, linePrefix);
+  }
+
+  /** Ghost must not start with an identifier char when the line already ends on one — unless completing that token. */
   function inlineGhostSafeAfter(linePrefix, ghostText) {
     const ghost = String(ghostText ?? '');
     if (!ghost) return false;
@@ -2695,25 +4137,52 @@
     if (!trimmed) return true;
     const last = trimmed[trimmed.length - 1];
     if (!/[A-Za-z0-9_$]/.test(last)) return true;
+    const token = extractInlinePartialToken(linePrefix);
+    if (token && /[A-Za-z0-9_$]/.test(ghost[0])) return true;
     return !/[A-Za-z0-9_$]/.test(ghost[0]);
   }
 
-  function shouldSuppressInlineGhost(path, linePrefix, ghostText) {
-    if (isJavaDeclarationTyping(path, linePrefix)) return true;
+  function shouldSuppressInlineGhost(path, linePrefix, ghostText, content, lineNumber, column) {
+    if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber, column)) return true;
+    if (isDeclarationTyping(path, linePrefix)) return true;
     if (!inlineGhostSafeAfter(linePrefix, ghostText)) return true;
+    if (isRedundantCloseBraceGhost(linePrefix, ghostText, content, lineNumber, column)) return true;
+    if (content && lineNumber && column && ghostText) {
+      const after = lineAfterCursor(content, lineNumber, column);
+      const ghost = String(ghostText).split('\n')[0];
+      if (ghost && after.startsWith(ghost)) return true;
+    }
+    if (content && lineNumber && isWhitespaceOnlyLine(linePrefix) && ghostText) {
+      const neighbor = emptyLineNeighborBelow(content, lineNumber, linePrefix);
+      if (neighbor) {
+        const proposed = `${lineIndent(linePrefix)}${String(ghostText).split('\n')[0]}`.trim();
+        if (proposed === neighbor.text.trim()) return true;
+      }
+    }
     return false;
   }
 
   function buildInlineCacheKey(repo, path, lineNumber, column, linePrefix) {
+    if (isWhitespaceOnlyLine(linePrefix)) {
+      return `${repo}:${path}:${lineNumber}:${linePrefix}`;
+    }
     return `${repo}:${path}:${lineNumber}:${column}:${linePrefix}`;
   }
 
   /** Keep ghost text while typed chars match the pending suggestion. */
-  function inlineGhostFromCache(cache, repo, path, lineNumber, column, linePrefix) {
+  function inlineGhostFromCache(cache, repo, path, lineNumber, column, linePrefix, content) {
     if (!cache?.text) return '';
     const key = buildInlineCacheKey(repo, path, lineNumber, column, linePrefix);
     let ghost = '';
     if (cache.key === key) {
+      ghost = cache.text;
+    } else if (
+      isWhitespaceOnlyLine(linePrefix)
+      && cache.repo === repo
+      && cache.path === path
+      && cache.lineNumber === lineNumber
+      && (cache.linePrefix ?? '') === linePrefix
+    ) {
       ghost = cache.text;
     } else if (
       cache.repo === repo
@@ -2728,22 +4197,168 @@
       }
     }
     if (!ghost) return '';
-    if (shouldSuppressInlineGhost(path, linePrefix, ghost)) return '';
+    if (shouldSuppressInlineGhost(path, linePrefix, ghost, content, lineNumber, column)) return '';
     return ghost;
   }
 
-  function memberInlineSuffix(content, linePrefix, path) {
-    const dot = dotQualifierFromLinePrefix(linePrefix);
-    if (!dot || !dot.memberPrefix) return '';
-    const members = localMemberCompletions(content, dot.qualifier, dot.memberPrefix, path);
-    const best = members.find((m) =>
-      m.label.toLowerCase().startsWith(dot.memberPrefix.toLowerCase())
-      && m.label.length > dot.memberPrefix.length,
+  function shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber) {
+    if (!isWhitespaceOnlyLine(linePrefix)) return false;
+    if (!content || !Number.isFinite(Number(lineNumber))) {
+      return supportsWorkspaceIndexInline(path) || isSpringConfigFile(path);
+    }
+    if (findEnclosingBlock(content, lineNumber)) return true;
+    if (emptyLineNeighborBelow(content, lineNumber, linePrefix)) return true;
+    if (emptyLineNeighborAbove(content, lineNumber, linePrefix)) return true;
+    if (isSpringConfigFile(path)) return true;
+    return !!String(content || '').trim();
+  }
+
+  function emptyLineNeighborBelow(content, lineNumber, linePrefix, radius = INLINE_NEARBY_LINES) {
+    const lines = String(content || '').split(/\r?\n/);
+    const cur = Number(lineNumber) - 1;
+    if (!Number.isFinite(cur) || cur < 0 || cur >= lines.length) return null;
+    const indent = lineIndent(linePrefix);
+    const maxRow = Math.min(lines.length - 1, cur + radius);
+    for (let i = cur + 1; i <= maxRow; i += 1) {
+      const raw = lines[i];
+      if (!raw.trim()) continue;
+      const ind = lineIndent(raw);
+      if (ind.length < indent.length) break;
+      return { text: raw.trim(), indent: ind, lineNumber: i + 1 };
+    }
+    return null;
+  }
+
+  function emptyLineNeighborAbove(content, lineNumber, linePrefix, radius = INLINE_NEARBY_LINES) {
+    const lines = String(content || '').split(/\r?\n/);
+    const cur = Number(lineNumber) - 1;
+    if (!Number.isFinite(cur) || cur < 0 || cur >= lines.length) return null;
+    const indent = lineIndent(linePrefix);
+    const minRow = Math.max(0, cur - radius);
+    for (let i = cur - 1; i >= minRow; i -= 1) {
+      const raw = lines[i];
+      if (!raw.trim()) continue;
+      const ind = lineIndent(raw);
+      if (ind.length < indent.length) break;
+      return { text: raw.trim(), indent: ind, lineNumber: i + 1 };
+    }
+    return null;
+  }
+
+  function usesNeighborLineInline(path) {
+    const lang = langForPath(path);
+    return lang === 'markdown' || lang === 'yaml' || lang === 'xml' || lang === 'html'
+      || lang === 'json' || lang === 'ini' || lang === 'toml' || isSpringConfigFile(path)
+      || lang === 'dockerfile' || lang === 'makefile' || lang === 'cmake' || lang === 'shell'
+      || lang === 'sql' || lang === 'css' || lang === 'scss' || lang === 'less'
+      || lang === 'graphql' || lang === 'protobuf';
+  }
+
+  /** First statement starter for an empty block body — never duplicate the line below. */
+  function emptyBlockBodyStarter(path, indent) {
+    if (isGradleBuildFile(path)) return '';
+    const lang = langForPath(path);
+    if (lang === 'java' || lang === 'groovy') return `${indent}System.out.println();`;
+    if (lang === 'kotlin') return `${indent}println()`;
+    if (lang === 'python') return `${indent}pass`;
+    if (lang === 'javascript' || lang === 'typescript') return `${indent}// TODO`;
+    if (lang === 'rust' || lang === 'go' || lang === 'csharp' || lang === 'swift'
+      || lang === 'cpp' || lang === 'dart') {
+      return `${indent}// TODO`;
+    }
+    if (lang === 'ruby') return `${indent}# TODO`;
+    if (lang === 'php') return `${indent}// TODO`;
+    if (lang === 'shell' || lang === 'lua') return `${indent}# TODO`;
+    if (lang === 'r') return `${indent}# TODO`;
+    return '';
+  }
+
+  function inferEmptyLineFromBelowPath(path, indent, belowText) {
+    const text = String(belowText || '').trim();
+    if (!text) return '';
+    const lang = langForPath(path);
+
+    if (lang === 'markdown') {
+      const list = text.match(/^([-+*]|\d+\.)\s+/);
+      if (list) return `${indent}${list[0]}`;
+      if (text.startsWith('>')) return `${indent}> `;
+      if (text.startsWith('#')) return `${indent}- `;
+      return '';
+    }
+    if (lang === 'xml' || lang === 'html') {
+      const tag = text.match(/^<\/?([A-Za-z][\w:-]*)/);
+      if (tag) return `${indent}<${tag[1]}>`;
+    }
+    if (lang === 'yaml' || isSpringConfigFile(path)) {
+      if (text.startsWith('- ')) return `${indent}- `;
+      const keyOnly = text.match(/^([A-Za-z0-9_.-]+):\s*$/);
+      if (keyOnly) return `${indent}${keyOnly[1]}: `;
+      const keyVal = text.match(/^([A-Za-z0-9_.-]+):\s*/);
+      if (keyVal) return `${indent}${keyVal[1]}: `;
+    }
+    if (lang === 'groovy' || isGradleBuildFile(path)) {
+      const dep = text.match(/^(implementation|api|compileOnly|testImplementation|runtimeOnly|classpath)\b/);
+      if (dep) return `${indent}${dep[1]} `;
+    }
+    if (lang === 'json') {
+      if (text.startsWith('"')) return `${indent}"`;
+    }
+    if (lang === 'ini' || lang === 'toml') {
+      if (text.includes('=')) {
+        const key = text.split('=')[0].trim();
+        if (key) return `${indent}${key}=`;
+      }
+    }
+    if (lang === 'css' || lang === 'scss' || lang === 'less') {
+      const prop = text.match(/^([a-zA-Z-]+)\s*:/);
+      if (prop) return `${indent}${prop[1]}: `;
+    }
+    if (lang === 'graphql') {
+      const field = text.match(/^([A-Za-z_]\w*)\s*:/);
+      if (field) return `${indent}${field[1]}: `;
+    }
+    if (lang === 'protobuf') {
+      if (text.startsWith('message ')) return `${indent}message `;
+    }
+    if (lang === 'sql') {
+      const kw = text.match(/^([A-Za-z]+)/);
+      if (kw) return `${indent}${kw[1]} `;
+    }
+    if (lang === 'dockerfile' || lang === 'makefile' || lang === 'cmake' || lang === 'shell') {
+      const kw = text.match(/^([A-Za-z_./@$%-]+)/);
+      if (kw && !kw[1].startsWith('}')) return `${indent}${kw[1]} `;
+    }
+    if ((lang === 'java' || lang === 'kotlin' || lang === 'groovy') && text.startsWith('return ')) {
+      return `${indent}// ...`;
+    }
+    return '';
+  }
+
+  function preferredMemberInlineGhost(members, memberPrefix) {
+    if (!members.length) return '';
+    let best;
+    if (!memberPrefix) {
+      best = members.find((m) => m.label === 'println')
+        || members.find((m) => m.label === 'out')
+        || members[0];
+      if (!best) return '';
+      return best.kind === 'method' ? `${best.label}()` : best.label;
+    }
+    best = members.find((m) =>
+      m.label.toLowerCase().startsWith(memberPrefix.toLowerCase())
+      && m.label.length > memberPrefix.length,
     );
     if (!best) return '';
-    let rest = best.label.slice(dot.memberPrefix.length);
+    let rest = best.label.slice(memberPrefix.length);
     if (best.kind === 'method' && !rest.endsWith('(')) rest += '()';
     return rest;
+  }
+
+  function memberInlineSuffix(content, linePrefix, path, javaLevel = 21) {
+    const dot = dotQualifierFromLinePrefix(linePrefix);
+    if (!dot) return '';
+    const members = localMemberCompletions(content, dot.qualifier, dot.memberPrefix, path, null, javaLevel);
+    return preferredMemberInlineGhost(members, dot.memberPrefix);
   }
 
   function buildLocalCompletionSuggestions(model, position, path, helpers, content) {
@@ -2756,6 +4371,7 @@
 
     function push(label, kind, detail, insertText, sortKey = '2', filterText) {
       if (!label || seen.has(label)) return;
+      if (!suggestionMatchesEditorLanguage(path, label)) return;
       if (!isCodeLikeCompletion(label, kind)) return;
       seen.add(label);
       const text = insertText ?? label;
@@ -2787,7 +4403,7 @@
         const filterText = `${dot.memberPrefix || ''}${m.label}`;
         push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0', filterText);
       }
-      for (const m of localMemberCompletions(text, dot.qualifier, dot.memberPrefix, path, model)) {
+      for (const m of localMemberCompletions(text, dot.qualifier, dot.memberPrefix, path, model, javaLevel)) {
         const insert = m.kind === 'method' ? `${m.label}()` : m.label;
         const filterText = `${dot.memberPrefix || ''}${m.label}`;
         push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0', filterText);
@@ -2811,18 +4427,46 @@
     }
 
     for (const sym of extractSymbols(text, path)) {
-      if (!prefix || sym.name.toLowerCase().startsWith(prefix.toLowerCase())) {
+      if (!prefix) continue;
+      if (sym.name.toLowerCase().startsWith(prefix.toLowerCase())) {
         push(sym.name, sym.kind, sym.kind, sym.name, '1');
       }
     }
 
-    for (const kw of clientKeywordsForPath(path)) {
+    const completionPrefix = prefix || '';
+    if (helpers?.repoApi && helpers.getRepo?.()) {
+      const cached = readCachedIndexCompletions(helpers, model, position, completionPrefix);
+      if (cached?.length) {
+        mergeIndexItemsIntoSuggestions(cached, range, seen, null, suggestions, 40, path);
+      }
+    }
+
+    if (completionPrefix && shouldPreferControlKeywordInline(path, linePrefix, completionPrefix)) {
+      const lower = completionPrefix.toLowerCase();
+      for (const kw of statementKeywordsForPath(path)) {
+        if (kw.toLowerCase().startsWith(lower)) {
+          push(kw, 'keyword', 'keyword', kw, '0');
+        }
+      }
+    } else if (isJavaLikePath(path) && completionPrefix
+      && shouldPreferJavaTypeInline(path, linePrefix, completionPrefix)) {
+      const lower = completionPrefix.toLowerCase();
+      for (const name of JAVA_SYNC_TYPE_NAMES) {
+        if (name.toLowerCase().startsWith(lower)) {
+          push(name, 'class', 'type', name, '0');
+        }
+      }
+    }
+
+    for (const kw of statementKeywordsForPath(path)) {
       if (
         !shouldPreferAiStatementInline(path, linePrefix, text, position.lineNumber)
         && prefix.length >= minKwChars
         && kw.toLowerCase().startsWith(prefix.toLowerCase())
+        && !shouldPreferControlKeywordInline(path, linePrefix, prefix)
+        && !(shouldPreferJavaTypeInline(path, linePrefix, prefix) && javaSyncTypeInlineSuffix(prefix))
       ) {
-        push(kw, 'keyword', 'keyword', kw, '2');
+        push(kw, 'keyword', 'keyword', kw, '3');
       }
     }
 
@@ -3009,10 +4653,19 @@
   function keywordInlineSuffix(path, token) {
     if (!token) return '';
     const lower = token.toLowerCase();
+    const lang = langForPath(path);
+    const singleCharLoop = { f: 'for', i: 'if', w: 'while' };
+    if (token.length === 1 && singleCharLoop[lower] && lang !== 'rust') {
+      const preferred = singleCharLoop[lower];
+      if (statementKeywordsForPath(path).some((kw) => kw.toLowerCase() === preferred)) {
+        return preferred.slice(1);
+      }
+    }
     let best = null;
-    for (const kw of clientKeywordsForPath(path)) {
+    for (const kw of statementKeywordsForPath(path)) {
       const kl = kw.toLowerCase();
       if (kl.startsWith(lower) && kw.length > token.length) {
+        if (token.length === 1 && kl === 'fi') continue;
         const suffix = kw.slice(token.length);
         if (!best || suffix.length < best.length) best = suffix;
       }
@@ -3020,63 +4673,176 @@
     return best || '';
   }
 
-  function isWhitespaceOnlyLine(linePrefix) {
-    return !extractInlinePartialToken(linePrefix);
+  function collectContentIdentifierCandidates(content, path, lineNumber = null) {
+    const keywords = new Set(clientKeywordsForPath(path).map((kw) => kw.toLowerCase()));
+    const seen = new Map();
+    const identRe = /\b([A-Za-z_][\w$]*)\b/g;
+    const lines = String(content || '').split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      const lineNo = i + 1;
+      if (lineNumber != null && !isNearbyLine(lineNo, lineNumber)) continue;
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+      identRe.lastIndex = 0;
+      let m;
+      for (;;) {
+        m = identRe.exec(line);
+        if (!m) break;
+        const name = m[1];
+        if (keywords.has(name.toLowerCase())) continue;
+        const prev = seen.get(name);
+        if (prev) {
+          prev.count += 1;
+          prev.minLine = Math.min(prev.minLine, lineNo);
+          prev.maxLine = Math.max(prev.maxLine, lineNo);
+        } else {
+          seen.set(name, {
+            name,
+            count: 1,
+            minLine: lineNo,
+            maxLine: lineNo,
+            isType: /^[A-Z]/.test(name),
+          });
+        }
+      }
+    }
+    for (const sym of extractSymbols(content, path)) {
+      if (lineNumber != null && !isNearbyLine(sym.line, lineNumber)) continue;
+      const prev = seen.get(sym.name);
+      if (prev) {
+        prev.count += 1;
+        prev.minLine = Math.min(prev.minLine, sym.line);
+        prev.maxLine = Math.max(prev.maxLine, sym.line);
+      } else {
+        seen.set(sym.name, {
+          name: sym.name,
+          count: 1,
+          minLine: sym.line,
+          maxLine: sym.line,
+          isType: /^[A-Z]/.test(sym.name),
+        });
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /** Sync inline suffix from identifiers already present in the buffer (and open-tab context via content). */
+  function scopeIdentifierInlineSuffix(content, path, lineNumber, token) {
+    if (!token || token.length < MIN_INDEX_INLINE_CHARS) return '';
+    const lower = token.toLowerCase();
+    const candidates = collectContentIdentifierCandidates(content, path, lineNumber)
+      .filter((c) => c.name.toLowerCase().startsWith(lower) && c.name.length > token.length);
+    if (!candidates.length) return '';
+    const ranked = rankScopeCandidates(candidates, lineNumber, { token, path });
+    return ranked[0]?.name.slice(token.length) || '';
+  }
+
+  function extractControlParenContent(line, keyword) {
+    const re = new RegExp(`\\b${keyword}\\s*\\(`);
+    const m = String(line || '').match(re);
+    if (!m) return null;
+    const start = m.index + m[0].length;
+    let depth = 1;
+    for (let i = start; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '(') depth += 1;
+      else if (ch === ')') {
+        depth -= 1;
+        if (depth === 0) return line.slice(start, i).trim();
+      }
+    }
+    return null;
   }
 
   function findEnclosingBlock(content, lineNumber) {
     const lines = String(content || '').split(/\r?\n/);
-    const cur = lineNumber - 1;
-    if (cur < 0 || cur >= lines.length) return null;
+    const cur = Number(lineNumber) - 1;
+    if (!Number.isFinite(cur) || cur < 0 || cur >= lines.length) return null;
     const curIndent = lineIndent(lines[cur]);
 
     for (let i = cur - 1; i >= 0; i--) {
       const line = lines[i];
       const ind = lineIndent(line);
       const trimmed = line.trimEnd();
-      if (ind.length < curIndent.length && trimmed.endsWith('{')) {
-        let m;
-        if ((m = trimmed.match(/\bwhile\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
-          return { type: 'while', cond: m[1].trim(), indent: curIndent };
+      if (ind.length < curIndent.length) {
+        if (/^\s*def\s+\w/.test(trimmed)) {
+          return { type: 'block', indent: curIndent };
         }
-        if ((m = trimmed.match(/\bfor\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
-          const inside = m[1].trim();
-          const type = inside.includes(':') && !inside.includes(';') ? 'for-each' : 'for';
-          return { type, init: inside, indent: curIndent };
+        if (/^\s*(local\s+)?function\b/.test(trimmed)) {
+          return { type: 'block', indent: curIndent };
         }
-        if ((m = trimmed.match(/\bif\s*\(\s*([^)]*)\)\s*\{?\s*$/))) {
-          return { type: 'if', cond: m[1].trim(), indent: curIndent };
+        if (!(trimmed.endsWith('{') || trimmed.endsWith(':'))) {
+          continue;
+        }
+        if (trimmed.endsWith(':')) {
+          if (/^\s*if\b/.test(trimmed)) {
+            return { type: 'if', cond: trimmed, indent: curIndent };
+          }
+          if (/^\s*(elif|else)\b/.test(trimmed)) {
+            return { type: 'else', indent: curIndent };
+          }
+          if (/^\s*for\b/.test(trimmed)) {
+            return { type: 'for', init: trimmed, indent: curIndent };
+          }
+          if (/^\s*while\b/.test(trimmed)) {
+            return { type: 'while', cond: trimmed, indent: curIndent };
+          }
+          return { type: 'block', indent: curIndent };
+        }
+        const whileInside = extractControlParenContent(trimmed, 'while');
+        if (whileInside != null) {
+          return { type: 'while', cond: whileInside, indent: curIndent };
+        }
+        const forInside = extractControlParenContent(trimmed, 'for');
+        if (forInside != null) {
+          const type = forInside.includes(':') && !forInside.includes(';') ? 'for-each' : 'for';
+          return { type, init: forInside, indent: curIndent };
+        }
+        const ifInside = extractControlParenContent(trimmed, 'if');
+        if (ifInside != null) {
+          return { type: 'if', cond: ifInside, indent: curIndent };
         }
         if (/\belse\s*\{?\s*$/.test(trimmed)) {
           return { type: 'else', indent: curIndent };
         }
+        if (/\b(class|interface|enum|record|struct|trait|namespace)\s+\w+/.test(trimmed)) {
+          return { type: 'type-body', indent: curIndent };
+        }
+        return { type: 'block', indent: curIndent };
       }
       if (trimmed === '{' && i > 0) {
         const prev = lines[i - 1].trimEnd();
-        let m;
-        if ((m = prev.match(/\bwhile\s*\(\s*([^)]*)\)\s*$/))) {
-          return { type: 'while', cond: m[1].trim(), indent: curIndent };
+        if (/\b(class|interface|enum|record|struct|trait|namespace)\s+\w+/.test(prev)) {
+          return { type: 'type-body', indent: curIndent };
         }
-        if ((m = prev.match(/\bfor\s*\(\s*([^)]*)\)\s*$/))) {
-          const inside = m[1].trim();
-          const type = inside.includes(':') && !inside.includes(';') ? 'for-each' : 'for';
-          return { type, init: inside, indent: curIndent };
+        const whileInside = extractControlParenContent(prev, 'while');
+        if (whileInside != null) {
+          return { type: 'while', cond: whileInside, indent: curIndent };
         }
-        if ((m = prev.match(/\bif\s*\(\s*([^)]*)\)\s*$/))) {
-          return { type: 'if', cond: m[1].trim(), indent: curIndent };
+        const forInside = extractControlParenContent(prev, 'for');
+        if (forInside != null) {
+          const type = forInside.includes(':') && !forInside.includes(';') ? 'for-each' : 'for';
+          return { type, init: forInside, indent: curIndent };
         }
+        const ifInside = extractControlParenContent(prev, 'if');
+        if (ifInside != null) {
+          return { type: 'if', cond: ifInside, indent: curIndent };
+        }
+        return { type: 'block', indent: curIndent };
       }
     }
     return null;
   }
 
-  function sameIndentLinesInBlock(content, lineNumber, indent) {
+  function sameIndentLinesInBlock(content, lineNumber, indent, radius = INLINE_NEARBY_LINES) {
     const lines = String(content || '').split(/\r?\n/);
     const cur = lineNumber - 1;
     const above = [];
     const below = [];
     for (let i = 0; i < lines.length; i++) {
       if (i === cur || !lines[i].trim()) continue;
+      if (!isNearbyLine(i + 1, lineNumber, radius)) continue;
       if (lineIndent(lines[i]) !== indent) continue;
       const entry = { i, text: lines[i].trim() };
       if (i < cur) above.push(entry);
@@ -3086,11 +4852,25 @@
   }
 
   function inferEmptyLineContinuationFullLine(path, content, lineNumber, linePrefix, javaLevel = 17) {
+    const indent = lineIndent(linePrefix);
     const block = findEnclosingBlock(content, lineNumber);
-    if (!block) return '';
-    const indent = lineIndent(linePrefix) || block.indent;
+    if (!block) {
+      if (usesNeighborLineInline(path)) {
+        const neighbor = emptyLineNeighborBelow(content, lineNumber, linePrefix);
+        if (neighbor) {
+          return inferEmptyLineFromBelowPath(path, indent || neighbor.indent, neighbor.text);
+        }
+        const aboveNeighbor = emptyLineNeighborAbove(content, lineNumber, linePrefix);
+        if (aboveNeighbor) {
+          return inferEmptyLineFromBelowPath(path, indent || aboveNeighbor.indent, aboveNeighbor.text);
+        }
+      }
+      return '';
+    }
+    const blockIndent = indent || block.indent;
     const lang = langForPath(path);
-    const { above, below } = sameIndentLinesInBlock(content, lineNumber, indent);
+    const { above, below } = sameIndentLinesInBlock(content, lineNumber, blockIndent);
+    const effectiveIndent = blockIndent;
 
     if (lang === 'java' || lang === 'kotlin' || lang === 'groovy') {
       if (block.type === 'while') {
@@ -3101,19 +4881,19 @@
           const hasGet = above.some((x) => x.text.includes('.get(i)'));
           if (!hasGet) {
             return javaLevel >= 10
-              ? `${indent}var item = ${list}.get(i);`
-              : `${indent}${list}.get(i);`;
+              ? `${blockIndent}var item = ${list}.get(i);`
+              : `${blockIndent}${list}.get(i);`;
           }
           if (!above.some((x) => x.text === 'i++;' || /\bi\s*\+\+\s*;/.test(x.text))) {
-            return `${indent}i++;`;
+            return `${blockIndent}i++;`;
           }
         }
         if ((m = cond.match(/(\w+)\.hasNext\s*\(\s*\)/))) {
           const iter = m[1];
           if (!above.some((x) => x.text.includes('.next()'))) {
             return javaLevel >= 10
-              ? `${indent}var item = ${iter}.next();`
-              : `${indent}Object item = ${iter}.next();`;
+              ? `${effectiveIndent}var item = ${iter}.next();`
+              : `${effectiveIndent}Object item = ${iter}.next();`;
           }
         }
       }
@@ -3121,9 +4901,9 @@
         const varName = forEachVarName(block.init);
         if (varName && !above.some((x) => x.text.includes(varName))) {
           if (block.init.includes('.entrySet()')) {
-            return `${indent}var key = ${varName}.getKey();`;
+            return `${effectiveIndent}var key = ${varName}.getKey();`;
           }
-          return `${indent}System.out.println(${varName});`;
+          return `${effectiveIndent}System.out.println(${varName});`;
         }
       }
       if (block.type === 'for') {
@@ -3131,32 +4911,53 @@
         let m;
         if ((m = init.match(/(?:var\s+)?(\w+)\s*:\s*(\w+)\s*$/))) {
           const varName = m[1];
-          if (!above.length) return `${indent}System.out.println(${varName});`;
+          if (!above.length) return `${effectiveIndent}System.out.println(${varName});`;
         }
-        if (init.includes('i = 0') && init.includes('i++')) {
-          const m2 = init.match(/i\s*<\s*(\w+)/);
-          if (m2 && !above.some((x) => x.text.includes('.get(i)'))) {
-            return `${indent}${m2[1]}.get(i);`;
+        const indexed = parseJavaIndexedForLoop(init);
+        if (indexed) {
+          const access = javaIndexedAccessExpr(indexed);
+          const hasBodyLine = access && above.some((x) => x.text.includes(access));
+          if (!hasBodyLine) {
+            return javaIndexedLoopBodyLine(indexed, effectiveIndent, javaLevel, lang);
           }
-          if (m2 && above.some((x) => x.text.includes('.get(i)') && !above.some((x) => /\bi\s*\+\+\s*;/.test(x.text)))) {
-            return `${indent}i++;`;
+          if (!above.some((x) => x.text === 'i++;' || /\bi\s*\+\+\s*;/.test(x.text))) {
+            return `${effectiveIndent}i++;`;
           }
         }
       }
       if ((block.type === 'if' || block.type === 'else') && !above.length) {
-        return `${indent}// TODO`;
+        return `${effectiveIndent}// TODO`;
       }
     }
 
     if (lang === 'python') {
-      if ((block.type === 'while' || block.type === 'for' || block.type === 'if') && !above.length) {
-        return `${indent}pass`;
+      if ((block.type === 'while' || block.type === 'for' || block.type === 'if' || block.type === 'else')
+        && !above.length) {
+        return `${effectiveIndent}pass`;
       }
     }
 
+    if ((block.type === 'block' || block.type === 'type-body') && !above.length) {
+      const starter = emptyBlockBodyStarter(path, effectiveIndent);
+      if (starter) return starter;
+    }
+
     if (!above.length && below.length) {
-      const belowText = below[0].text;
-      if (belowText.startsWith('return ')) return `${indent}// ...`;
+      const hint = inferEmptyLineFromBelowPath(path, effectiveIndent, below[0].text);
+      if (hint) return hint;
+    }
+
+    if (usesNeighborLineInline(path)) {
+      const neighbor = emptyLineNeighborBelow(content, lineNumber, linePrefix);
+      if (neighbor) {
+        const hint = inferEmptyLineFromBelowPath(path, effectiveIndent || neighbor.indent, neighbor.text);
+        if (hint) return hint;
+      }
+      const aboveNeighbor = emptyLineNeighborAbove(content, lineNumber, linePrefix);
+      if (aboveNeighbor) {
+        const hint = inferEmptyLineFromBelowPath(path, effectiveIndent || aboveNeighbor.indent, aboveNeighbor.text);
+        if (hint) return hint;
+      }
     }
 
     return '';
@@ -3174,16 +4975,63 @@
     return full.trimStart();
   }
 
-  /** Synchronous local ghost text — single-line suffixes only (blocks go in the suggest menu). */
-  function localInlineSuggestion(path, linePrefix, content, lineNumber, javaLevel = 17, column = 0) {
-    const springInline = springConfigLocalInline(path, linePrefix, content, lineNumber, column);
-    if (springInline) return springInline;
-    const member = memberInlineSuffix(content, linePrefix, path);
+  /** Synchronous local ghost — identifiers, types, members, keywords only (no loops/blocks). */
+  function localInlineSuggestion(
+    path, linePrefix, content, lineNumber, javaLevel = 17, column = 0, indexCtx = null,
+    { fast = false } = {},
+  ) {
+    if (!fast) {
+      const springInline = springConfigLocalInline(path, linePrefix, content, lineNumber, column);
+      if (springInline) return springInline;
+      const gradlePropsInline = gradlePropertiesLocalInline(path, linePrefix, content, lineNumber);
+      if (gradlePropsInline) return gradlePropsInline;
+    }
+    const member = memberInlineSuffix(content, linePrefix, path, javaLevel);
     if (member) return member;
-    const syntax = syntaxInlineSuffix(path, linePrefix);
+    if (content && isOperandContext(linePrefix)) {
+      const operand = operandInlineSuffix(content, path, lineNumber, linePrefix);
+      if (operand) return operand;
+    }
+    if (content && isReturnContext(linePrefix)) {
+      const ret = returnInlineSuffix(content, path, lineNumber, linePrefix);
+      if (ret) return ret;
+    }
+    if (content && isCallArgContext(linePrefix, path)) {
+      const arg = callArgInlineSuffix(content, path, lineNumber, linePrefix);
+      if (arg) return arg;
+    }
+    const syntax = syntaxInlineSuffix(path, linePrefix, content, lineNumber, column);
     if (syntax) return syntax;
     const trimmed = linePrefix.trimEnd();
     const token = extractInlinePartialToken(linePrefix);
+    if (token) {
+      if (fast && token.length >= 1) {
+        const fastScope = fastLineWindowScopeSuffix(content, path, lineNumber, token);
+        if (fastScope) return fastScope;
+      }
+      if (!fast && token.length >= MIN_INDEX_INLINE_CHARS) {
+        const scopeSuffix = scopeIdentifierInlineSuffix(content, path, lineNumber, token);
+        if (scopeSuffix) return scopeSuffix;
+      }
+      if (
+        (!fast || token.length <= 2)
+        && shouldPreferControlKeywordInline(path, linePrefix, token)
+        && !hasCompleteControlKeyword(trimmed)
+      ) {
+        const kwSuffix = keywordInlineSuffix(path, token);
+        if (kwSuffix) return kwSuffix;
+      }
+      if (indexCtx?.helpers && indexCtx?.model && indexCtx?.position) {
+        const indexSuffix = inlineSuffixFromCachedIndex(
+          indexCtx.helpers, indexCtx.model, indexCtx.position, linePrefix, token,
+        );
+        if (indexSuffix) return indexSuffix;
+      }
+      if (shouldPreferJavaTypeInline(path, linePrefix, token)) {
+        const typeSuffix = javaSyncTypeInlineSuffix(token);
+        if (typeSuffix) return typeSuffix;
+      }
+    }
     if (token && !hasCompleteControlKeyword(trimmed) && !isControlKeywordPrefix(token)) {
       const kwSuffix = keywordInlineSuffix(path, token);
       if (kwSuffix) return kwSuffix;
@@ -3212,14 +5060,18 @@
     return clientKeywordsForPath(path).some((kw) => kw.toLowerCase().startsWith(lower));
   }
 
-  function buildInlineItems(model, position, linePrefix, text) {
+  function buildInlineItems(model, position, linePrefix, text, path = '') {
     const suffix = capInlineText(sanitizeInlineGhostText(text));
     if (!suffix) return { items: [] };
     const token = extractInlinePartialToken(linePrefix);
-    const filterText = token && !suffix.startsWith(token) ? token + suffix : suffix;
+    const ghostLine = suffix.includes('\n') ? suffix.split('\n')[0] : suffix;
+    let filterText = token && !ghostLine.startsWith(token) ? token + ghostLine : ghostLine;
+    if (inlineFilterUsesFullPrefix(linePrefix, path)) {
+      filterText = `${linePrefix}${ghostLine}`;
+    }
     return {
       items: [{
-        insertText: suffix,
+        insertText: ghostLine,
         filterText,
         range: new monaco.Range(
           position.lineNumber,
@@ -3258,6 +5110,11 @@
     return `${repo}:${path}:${line}:${column}:${prefix}:${contentLen}`;
   }
 
+  function indexCompleteLookupKey(helpers, repo, path, line, column, prefix, contentLen) {
+    const overlayHash = overlayFingerprint(helpers, path);
+    return `${indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen)}:${overlayHash}`;
+  }
+
   function pruneIndexCompleteCache() {
     if (indexCompleteCache.size <= INDEX_COMPLETE_CACHE_MAX) return;
     const first = indexCompleteCache.keys().next().value;
@@ -3269,8 +5126,8 @@
     const path = helpers.getActivePath?.() || '';
     if (!repo || !path) return null;
     const contentLen = model.getValue()?.length ?? 0;
-    const cacheKey = indexCompleteCacheKey(
-      repo, path, position.lineNumber, position.column, prefix || '', contentLen,
+    const cacheKey = indexCompleteLookupKey(
+      helpers, repo, path, position.lineNumber, position.column, prefix || '', contentLen,
     );
     const cached = indexCompleteCache.get(cacheKey);
     if (cached && Date.now() - cached.time < INDEX_COMPLETE_CACHE_MS) {
@@ -3279,10 +5136,51 @@
     return null;
   }
 
-  function mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions, limit = 80) {
+  function inlineSuffixFromIndexItems(items, linePrefix, prefix, path = '') {
+    if (!Array.isArray(items) || !items.length) return '';
+    const member = dotQualifierFromLinePrefix(linePrefix);
+    const tokenPrefix = member
+      ? (member.memberPrefix || '')
+      : (prefix || extractInlinePartialToken(linePrefix) || '');
+
+    const useServerOrder = member || supportsWorkspaceIndexInline(path);
+    const ordered = useServerOrder ? items : rankIndexItemsForInline(items);
+
+    // Empty line: top jdtls/index completion is the ghost (VS Code / LSP behavior).
+    if (!member && !tokenPrefix && isWhitespaceOnlyLine(linePrefix)) {
+      for (const item of ordered) {
+        if (!isCodeLikeCompletion(item.label, item.kind)) continue;
+        let insert = stripSnippetMarkers(String(item.insert || item.label || ''));
+        if (!insert || insert.includes('\n')) continue;
+        const indent = lineIndent(linePrefix);
+        if (indent && insert.startsWith(indent)) {
+          insert = insert.slice(indent.length);
+        }
+        const trimmed = insert.trimStart();
+        if (trimmed) return trimmed;
+      }
+      return '';
+    }
+
+    if (!member && !tokenPrefix) return '';
+    for (const item of ordered) {
+      const suffix = inlineSuffixFromLspItem(item, linePrefix, prefix);
+      if (suffix) return suffix;
+    }
+    return '';
+  }
+
+  function inlineSuffixFromCachedIndex(helpers, model, position, linePrefix, prefix) {
+    const items = readCachedIndexCompletions(helpers, model, position, prefix);
+    if (!items?.length) return '';
+    const path = helpers.getActivePath?.() || '';
+    return inlineSuffixFromIndexItems(items, linePrefix, prefix, path);
+  }
+
+  function mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions, limit = 80, path = '') {
     if (!Array.isArray(items)) return;
     for (const item of items) {
-      const mapped = mapIndexItemToSuggestion(item, range, seen, memberContext);
+      const mapped = mapIndexItemToSuggestion(item, range, seen, memberContext, path);
       if (mapped) suggestions.push(mapped);
       if (suggestions.length >= limit) break;
     }
@@ -3348,8 +5246,7 @@
     const content = model.getValue();
     const needsLiveContent = dirty || /\.(java|kt|kts|groovy)$/i.test(path) || isSpringConfigFile(path);
     const contentLen = content?.length ?? 0;
-    const overlayHash = overlayFingerprint(helpers, path);
-    const cacheKey = `${indexCompleteCacheKey(repo, path, line, column, prefix || '', contentLen)}:${overlayHash}`;
+    const cacheKey = indexCompleteLookupKey(helpers, repo, path, line, column, prefix || '', contentLen);
     const cached = indexCompleteCache.get(cacheKey);
     if (cached && Date.now() - cached.time < INDEX_COMPLETE_CACHE_MS) {
       return cached.items;
@@ -3392,6 +5289,22 @@
     return list;
   }
 
+  async function fetchIndexInlineSuffix(helpers, model, position, linePrefix, prefix) {
+    const path = helpers.getActivePath?.() || '';
+    const cachedSuffix = inlineSuffixFromCachedIndex(helpers, model, position, linePrefix, prefix);
+    if (cachedSuffix) return cachedSuffix;
+    const member = dotQualifierFromLinePrefix(linePrefix);
+    const emptyLine = isWhitespaceOnlyLine(linePrefix) && !member;
+    const timeoutMs = member
+      ? LSP_INLINE_MEMBER_FETCH_MS
+      : (emptyLine ? 450 : LSP_INLINE_FETCH_MS);
+    const items = await fetchCompletionsWithTimeout(
+      helpers, model, position, prefix || '', timeoutMs,
+    );
+    if (!items?.length) return '';
+    return inlineSuffixFromIndexItems(items, linePrefix, prefix, path);
+  }
+
   const COMPLETION_FETCH_TIMEOUT_MS = 8000;
   const INDEX_COMPLETION_BUDGET_MS = 600;
 
@@ -3411,8 +5324,21 @@
   }
 
   const definitionCache = new Map();
+  const definitionInflight = new Map();
   const hoverCache = new Map();
   const DEF_CACHE_MAX = 512;
+  const DEF_NAV_GUARD_MS = 400;
+  let lastDefinitionNavMs = 0;
+
+  function markDefinitionNavigation() {
+    lastDefinitionNavMs = Date.now();
+  }
+
+  /** Avoid "no definition" when a parallel lookup already navigated (F12 + provideDefinition). */
+  function reportNoDefinition(helpers) {
+    if (Date.now() - lastDefinitionNavMs < DEF_NAV_GUARD_MS) return;
+    helpers.showNavigationResult?.('No definition found', 'info');
+  }
 
   function definitionCacheKey(repo, path, line, column, content) {
     let hash = 2166136261;
@@ -3443,6 +5369,13 @@
     }
   }
 
+  function withNavigationBusy(helpers, label, fn) {
+    if (typeof helpers?.runWithNavigationBusy === 'function') {
+      return helpers.runWithNavigationBusy(label, fn);
+    }
+    return fn();
+  }
+
   function definitionLocationFromHit(hit) {
     if (!hit?.path) return null;
     const nameLen = (hit.name || 'symbol').length;
@@ -3471,26 +5404,36 @@
       return definitionLocationFromHit(cached);
     }
 
-    try {
-      const url = helpers.repoApi(repo, '/workspace/definition');
-      const hit = dirty
-        ? await helpers.api(url, {
-            method: 'POST',
-            body: JSON.stringify({ path, line, column, content }),
-          })
-        : await helpers.api(`${url}?${new URLSearchParams({
-            path,
-            line: String(line),
-            column: String(column),
-          })}`);
-      if (!hit?.path) return null;
-      if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
-      definitionCache.set(cacheKey, hit);
-      return definitionLocationFromHit(hit);
-    } catch (err) {
-      console.warn('[ReaperLang] lookupDefinition failed:', err);
-      return null;
-    }
+    const inflight = definitionInflight.get(cacheKey);
+    if (inflight) return inflight;
+
+    const promise = withNavigationBusy(helpers, 'Go to definition…', async () => {
+      try {
+        const url = helpers.repoApi(repo, '/workspace/definition');
+        const hit = dirty
+          ? await helpers.api(url, {
+              method: 'POST',
+              body: JSON.stringify({ path, line, column, content }),
+            })
+          : await helpers.api(`${url}?${new URLSearchParams({
+              path,
+              line: String(line),
+              column: String(column),
+            })}`);
+        if (!hit?.path) return null;
+        if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
+        definitionCache.set(cacheKey, hit);
+        return definitionLocationFromHit(hit);
+      } catch (err) {
+        console.warn('[ReaperLang] lookupDefinition failed:', err);
+        return null;
+      }
+    }).finally(() => {
+      definitionInflight.delete(cacheKey);
+    });
+
+    definitionInflight.set(cacheKey, promise);
+    return promise;
   }
 
   async function lookupHoverInfo(helpers, model, position, { member, symbol } = {}) {
@@ -3529,7 +5472,7 @@
             ...(member ? { member } : {}),
             ...(symbol ? { symbol } : {}),
           })}`);
-      const info = hit?.name ? hit : null;
+      const info = hit && (hit.name || hit.signature || hit.documentation) ? hit : null;
       if (info) {
         if (hoverCache.size >= DEF_CACHE_MAX) hoverCache.clear();
         hoverCache.set(cacheKey, info);
@@ -3542,7 +5485,185 @@
 
   async function lookupSymbolHover(helpers, model, position) {
     const info = await lookupHoverInfo(helpers, model, position);
-    return info?.name ? info : null;
+    return hoverInfoHasContent(info) ? info : null;
+  }
+
+  async function postWorkspaceLsp(helpers, model, position, endpoint, extra = {}) {
+    if (!helpers.repoApi || !helpers.getRepo) return null;
+    const repo = helpers.getRepo();
+    if (!repo) return null;
+    const path = resolveEditorPath(helpers, model);
+    if (!path) return null;
+    const line = position.lineNumber;
+    const column = position.column;
+    const content = model.getValue();
+    return helpers.api(helpers.repoApi(repo, endpoint), {
+      method: 'POST',
+      body: JSON.stringify({ path, line, column, content, ...extra }),
+    });
+  }
+
+  async function lookupReferences(helpers, model, position) {
+    return withNavigationBusy(helpers, 'Finding usages…', async () => {
+      try {
+        return await postWorkspaceLsp(helpers, model, position, '/workspace/references') || [];
+      } catch (err) {
+        console.warn('[ReaperLang] references failed:', err);
+        return [];
+      }
+    });
+  }
+
+  async function runJavaOrganizeImports(editor, helpers) {
+    const model = editor.getModel();
+    const pos = editor.getPosition();
+    if (!model || !pos) return;
+    try {
+      const actions = await postWorkspaceLsp(helpers, model, pos, '/workspace/java/code-actions', {
+        only: ['source.organizeImports'],
+      });
+      const action = (actions || []).find((a) => a?.edits?.length);
+      if (!action) {
+        helpers.toast?.('No import changes', 'info');
+        return;
+      }
+      const changed = await helpers.applyJavaWorkspaceEdits?.(action.edits);
+      if (changed) helpers.toast?.('Organized imports', 'success');
+      else helpers.toast?.('Imports already organized', 'info');
+    } catch (err) {
+      helpers.toast?.(err?.message || 'Organize imports failed', 'error');
+    }
+  }
+
+  async function runRename(editor, helpers) {
+    const model = editor.getModel();
+    const pos = editor.getPosition();
+    if (!model || !pos) return;
+    const path = resolveEditorPath(helpers, model);
+    if (!path) return;
+    return withNavigationBusy(helpers, 'Preparing rename…', async () => {
+      try {
+        const range = await postWorkspaceLsp(helpers, model, pos, '/workspace/prepare-rename');
+        if (!range) {
+          helpers.toast?.('Rename not available here', 'info');
+          return;
+        }
+        const word = model.getWordAtPosition(pos)?.word || '';
+        const newName = window.prompt('Rename to:', word);
+        if (!newName || newName === word) return;
+        const edits = await postWorkspaceLsp(helpers, model, pos, '/workspace/rename', {
+          new_name: newName,
+        });
+        if (!edits?.length) {
+          helpers.toast?.('Rename produced no edits', 'info');
+          return;
+        }
+        const changed = await helpers.applyJavaWorkspaceEdits?.(edits);
+        helpers.toast?.(
+          changed ? `Renamed to ${newName} (${changed} file${changed === 1 ? '' : 's'})` : 'Rename failed',
+          changed ? 'success' : 'error',
+        );
+      } catch (err) {
+        helpers.toast?.(err?.message || 'Rename failed', 'error');
+      }
+    });
+  }
+
+  async function runFindUsages(editor, helpers) {
+    const model = editor.getModel();
+    const pos = editor.getPosition();
+    if (!model || !pos) return;
+    const word = model.getWordAtPosition(pos)?.word || 'symbol';
+    const refs = await lookupReferences(helpers, model, pos);
+    if (!refs.length) {
+      helpers.showNavigationResult?.('No usages found', 'info');
+      helpers.toast?.('No usages found', 'info');
+      return;
+    }
+    helpers.showJavaReferences?.(refs, `Usages of ${word} (${refs.length})`);
+  }
+
+  async function runPeekDefinition(editor) {
+    await editor.getAction('editor.action.peekDefinition')?.run();
+  }
+
+  function installHoverViewportFix(ed) {
+    const root = document.getElementById('editor-overflow-root');
+    const editorBox = document.getElementById('editor-container');
+    if (!root || !editorBox || !ed) return;
+
+    let raf = 0;
+    let lastMaxHeight = '';
+    let lastTop = '';
+
+    const clampHover = () => {
+      raf = 0;
+      const hover = root.querySelector('.monaco-hover');
+      if (!hover) {
+        lastMaxHeight = '';
+        lastTop = '';
+        return;
+      }
+
+      const statusBar = document.querySelector('.ij-statusbar');
+      const ceiling = Math.min(
+        editorBox.getBoundingClientRect().bottom,
+        statusBar?.getBoundingClientRect().top ?? window.innerHeight,
+      ) - 8;
+      const rootRect = root.getBoundingClientRect();
+      const hoverRect = hover.getBoundingClientRect();
+      const statusH = parseFloat(getComputedStyle(document.documentElement)
+        .getPropertyValue('--ij-status-h')) || 22;
+      const maxByViewport = Math.min(520, window.innerHeight - statusH - 56);
+      const maxBySpace = Math.max(160, ceiling - hoverRect.top);
+      const newMaxHeight = `${Math.min(maxByViewport, maxBySpace)}px`;
+
+      let newTop = hover.style.top;
+      if (hoverRect.bottom > ceiling) {
+        const currentTop = parseFloat(hover.style.top);
+        const baseTop = Number.isFinite(currentTop)
+          ? currentTop
+          : hoverRect.top - rootRect.top;
+        newTop = `${Math.max(4, baseTop - (hoverRect.bottom - ceiling))}px`;
+      }
+
+      if (newMaxHeight !== lastMaxHeight) {
+        hover.style.maxHeight = newMaxHeight;
+        lastMaxHeight = newMaxHeight;
+      }
+      if (hoverRect.bottom > ceiling && newTop !== lastTop) {
+        hover.style.top = newTop;
+        lastTop = newTop;
+      } else if (hoverRect.bottom <= ceiling) {
+        lastTop = hover.style.top;
+      }
+    };
+
+    const schedule = () => {
+      if (!root.querySelector('.monaco-hover')) return;
+      if (raf) return;
+      raf = requestAnimationFrame(clampHover);
+    };
+
+    // Only when hover mounts/unmounts — not Monaco's per-frame style mutations (CPU hog).
+    new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type !== 'childList') continue;
+        for (const node of m.addedNodes) {
+          if (node.nodeType === 1 && node.classList?.contains('monaco-hover')) {
+            schedule();
+            return;
+          }
+        }
+        if (!root.querySelector('.monaco-hover')) {
+          lastMaxHeight = '';
+          lastTop = '';
+        }
+      }
+    }).observe(root, { childList: true, subtree: true });
+
+    ed.onDidScrollChange(schedule);
+    window.addEventListener('resize', schedule, { passive: true });
   }
 
   function setupEditorFeatures(editor, helpers) {
@@ -3556,8 +5677,11 @@
         return model ? resolveEditorPath({ getActivePath: origGetActivePath }, model) : '';
       },
     };
+    editor._reaperHelpers = helpers;
 
     completionDebug(helpers, ['debug active', `build=${document.querySelector('meta[name="reaper-ui-build"]')?.content?.trim() || '?'}`, 'rev=342']);
+
+    installHoverViewportFix(editor);
 
     try { registerGroovy(); } catch (e) { console.warn('[ReaperLang] registerGroovy failed', e); }
     try { registerMakefile(); } catch (e) { console.warn('[ReaperLang] registerMakefile failed', e); }
@@ -3662,6 +5786,40 @@
       return item.detail ? String(item.detail) : '';
     }
 
+    function memberFallbackTypeLabel(item) {
+      const detail = memberItemDetail(item).trim();
+      if (!detail) return '';
+      const paren = detail.indexOf('(');
+      if (paren > 0) {
+        const head = detail.slice(0, paren).trim();
+        const lastSpace = head.lastIndexOf(' ');
+        const typePart = lastSpace >= 0 ? head.slice(0, lastSpace) : head;
+        const dot = typePart.lastIndexOf('.');
+        return dot >= 0 ? typePart.slice(dot + 1) : typePart;
+      }
+      const dot = detail.lastIndexOf('.');
+      const short = dot >= 0 ? detail.slice(dot + 1) : detail;
+      return short.length > 28 ? `${short.slice(0, 26)}…` : short;
+    }
+
+    function memberKindLabel(kindKey) {
+      if (kindKey === 'method') return 'Method';
+      if (kindKey === 'field') return 'Field';
+      return 'Member';
+    }
+
+    function updateMemberFallbackDocTitle(item, kindKey) {
+      if (!memberFallbackEl || !item) return;
+      const titleEl = memberFallbackEl.querySelector('.reaper-member-suggest-doc-title');
+      const pillEl = memberFallbackEl.querySelector('.reaper-member-suggest-doc-kind');
+      const label = memberFallbackLabel(item);
+      if (titleEl) titleEl.textContent = label;
+      if (pillEl) {
+        pillEl.textContent = memberKindLabel(kindKey);
+        pillEl.className = `reaper-member-suggest-doc-kind reaper-java-hover-kind-pill ${kindKey}`;
+      }
+    }
+
     async function updateMemberFallbackDoc() {
       if (!memberFallbackEl) return;
       const sigEl = memberFallbackEl.querySelector('.reaper-member-suggest-doc-sig');
@@ -3670,6 +5828,7 @@
       if (!item || !bodyEl) return;
       const kindKey = memberKindKey(item);
       const label = memberFallbackLabel(item);
+      updateMemberFallbackDocTitle(item, kindKey);
       const fetchGen = ++memberDocFetchGen;
 
       const ed = activeEditor();
@@ -3831,6 +5990,12 @@
       memberFallbackEl.style.left = `${pt.left}px`;
       memberFallbackEl.style.top = `${pt.top}px`;
 
+      const header = document.createElement('div');
+      header.className = 'reaper-member-suggest-header';
+      header.innerHTML = `<span class="reaper-member-suggest-header-title">Suggestions</span>`
+        + `<span class="reaper-member-suggest-header-count">${visibleItems.length}</span>`
+        + `<span class="reaper-member-suggest-header-hint">↑↓ navigate · ↵ accept · Esc dismiss</span>`;
+
       const panel = document.createElement('div');
       panel.className = 'reaper-member-suggest-panel';
 
@@ -3848,8 +6013,19 @@
         const name = document.createElement('span');
         name.className = 'reaper-member-suggest-name';
         name.textContent = memberFallbackLabel(item);
-        row.appendChild(icon);
-        row.appendChild(name);
+        const typeLabel = memberFallbackTypeLabel(item);
+        if (typeLabel) {
+          const typeEl = document.createElement('span');
+          typeEl.className = 'reaper-member-suggest-type';
+          typeEl.textContent = typeLabel;
+          typeEl.title = memberItemDetail(item);
+          row.appendChild(icon);
+          row.appendChild(name);
+          row.appendChild(typeEl);
+        } else {
+          row.appendChild(icon);
+          row.appendChild(name);
+        }
         row.addEventListener('mouseenter', () => {
           memberFallbackIndex = i;
           focusMemberFallbackRow();
@@ -3866,7 +6042,14 @@
       docPanel.className = 'reaper-member-suggest-doc panel-scroll';
       const docHead = document.createElement('div');
       docHead.className = 'reaper-member-suggest-doc-head';
-      docHead.textContent = 'Documentation';
+      const docTitle = document.createElement('span');
+      docTitle.className = 'reaper-member-suggest-doc-title';
+      docTitle.textContent = memberFallbackLabel(visibleItems[0]);
+      const docKind = document.createElement('span');
+      docKind.className = `reaper-member-suggest-doc-kind reaper-java-hover-kind-pill ${memberKindKey(visibleItems[0])}`;
+      docKind.textContent = memberKindLabel(memberKindKey(visibleItems[0]));
+      docHead.appendChild(docTitle);
+      docHead.appendChild(docKind);
       const sigEl = document.createElement('div');
       sigEl.className = 'reaper-member-suggest-doc-sig reaper-java-hover-sig';
       const bodyEl = document.createElement('div');
@@ -3877,6 +6060,7 @@
 
       panel.appendChild(listEl);
       panel.appendChild(docPanel);
+      memberFallbackEl.appendChild(header);
       memberFallbackEl.appendChild(panel);
 
       root.appendChild(memberFallbackEl);
@@ -3891,6 +6075,11 @@
     function suggestPopupShouldStayOpen(model, position) {
       const path = helpers.getActivePath?.() || '';
       const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
+      const content = editorContent(activeEditor(), model);
+      if (isDeclarationTyping(path, linePrefix)) return false;
+      if (shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
+        return false;
+      }
       if (position.lineNumber !== range.startLineNumber) return false;
       if (position.column < range.startColumn) return false;
       if (!shouldFetchIndexCompletions(linePrefix, prefix, path)) return false;
@@ -3970,6 +6159,25 @@
     function onMemberFallbackKeydown(e) {
       if (!memberFallbackEl) return;
       const ed = activeEditor();
+      const model = ed?.getModel();
+      const position = ed?.getPosition();
+      const path = helpers.getActivePath?.() || '';
+      const linePrefix = model && position ? editorLinePrefix(model, position) : '';
+      const content = model ? editorContent(ed, model) : '';
+      if (
+        e.key.length === 1
+        && !e.ctrlKey
+        && !e.metaKey
+        && !e.altKey
+        && (
+          isDeclarationTyping(path, linePrefix)
+          || shouldPauseInlineAtCursor(path, linePrefix, content, position?.lineNumber, position?.column)
+        )
+      ) {
+        hideMemberSuggestFallback();
+        dismissMonacoSuggestWidget(ed);
+        return;
+      }
       if (e.key === ' ' || (e.key.length === 1 && /[^a-zA-Z0-9_$]/.test(e.key))) {
         return;
       }
@@ -4033,6 +6241,18 @@
       showMemberSuggestFallback(ed, memberFallbackAllItems);
     }
 
+    function cursorMoveFromMouse(e) {
+      return e?.source === 'mouse';
+    }
+
+    function dismissCompletionOnCursorClick(ed) {
+      cancelAiInlineFetch();
+      clearTimeout(ed._reaperInlinePauseTimer);
+      ed._reaperInlinePauseTimer = null;
+      dismissInlineGhost(ed);
+      dismissSuggestUi(ed);
+    }
+
     document.addEventListener('keydown', onCompletionTypeThroughKeydown, true);
     document.addEventListener('keydown', onMemberFallbackKeydown, true);
     document.addEventListener('mousedown', (e) => {
@@ -4044,11 +6264,19 @@
       if (!memberFallbackEl) return;
       refreshSuggestFallbackFilter();
     });
-    editor.onDidChangeCursorPosition(() => {
+    editor.onDidChangeCursorPosition((e) => {
       if (!memberFallbackEl) return;
+      if (cursorMoveFromMouse(e)) {
+        hideMemberSuggestFallback();
+        return;
+      }
       refreshSuggestFallbackFilter();
     });
-    editor.onDidBlurEditorWidget(() => hideMemberSuggestFallback());
+    editor.onDidBlurEditorWidget(() => {
+      hideMemberSuggestFallback();
+      cancelAiInlineFetch();
+      dismissInlineGhost(editor);
+    });
 
     let lastMemberSuggestKey = '';
     let lastMemberSuggestAt = 0;
@@ -4069,6 +6297,16 @@
       const completionPrefix = memberContext
         ? (memberContext.memberPrefix || prefix || '')
         : (prefix || '');
+      const content = editorContent(ed, model);
+      if (
+        !force
+        && (
+          isDeclarationTyping(path, linePrefix)
+          || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
+        )
+      ) {
+        return;
+      }
       if (
         !force
         && !memberContext
@@ -4090,7 +6328,6 @@
         ensureModelLanguageForPath(path, model);
       }
 
-      const content = editorContent(ed, model);
       const effLang = effectiveEditorLang(path, model);
       let localN = 0;
       let localLabels = '';
@@ -4146,7 +6383,7 @@
           const { range } = completionContext(model, position);
           const seen = new Set(localSuggestions.map((s) => s.label));
           const fromIndex = [];
-          mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, fromIndex);
+          mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, fromIndex, 80, path);
           if (memberContext) {
             showMemberMerged(fromIndex);
             return;
@@ -4298,7 +6535,14 @@
 
     monaco.languages.registerDefinitionProvider(Array.from(langs), {
       provideDefinition(model, position) {
-        return lookupDefinition(helpers, model, position);
+        return lookupDefinition(helpers, model, position).then((loc) => {
+          if (loc) {
+            markDefinitionNavigation();
+          } else {
+            reportNoDefinition(helpers);
+          }
+          return loc;
+        });
       },
     });
 
@@ -4401,7 +6645,7 @@
         if (lang === 'cpp' || lang === 'c') return null;
         const markers = markersAtEditorPosition(model, position);
 
-        if (model.getLanguageId() === 'sql') {
+        if (langForPath(path) === 'sql' && model.getLanguageId() === 'sql') {
           if (markers.length) {
             return hoverResultForMarkers(model, position, markers, range);
           }
@@ -4422,7 +6666,7 @@
         // Merge symbol docs with diagnostics when both apply (Java, etc.).
         if (markers.length) {
           return lookupSymbolHover(helpers, model, position).then((symInfo) => {
-            if (symInfo?.name) {
+            if (hoverInfoHasContent(symInfo)) {
               const html = buildEditorHoverHtml(symInfo, markers);
               if (html) {
                 return {
@@ -4440,7 +6684,7 @@
         }
 
         return lookupSymbolHover(helpers, model, position).then((symInfo) => {
-          if (!symInfo?.name) return null;
+          if (!hoverInfoHasContent(symInfo)) return null;
           const html = buildEditorHoverHtml(symInfo, []);
           if (!html) {
             const md = hoverMarkdownFromInfo(symInfo);
@@ -4511,7 +6755,7 @@
     function quickFixActionTitle(fix) {
       const title = String(fix?.title || 'Fix');
       if (/^(AI|Cursor):/i.test(title)) return title;
-      if (fix?.provider === 'local') return title;
+      if (fix?.provider === 'local' || fix?.provider === 'jdtls') return title;
       const src = fix?.provider === 'cursor' ? 'Cursor' : 'AI';
       return `${src}: ${title}`;
     }
@@ -4838,7 +7082,7 @@
 
         if (msgLower.includes('cannot find symbol')) {
           const symbol = extractJavacClassSymbol(msg);
-          const fqcn = symbol && COMMON_JAVA_IMPORTS[symbol];
+          const fqcn = localJavaImportFqcn(symbol);
           if (fqcn && !model.getValue().includes(`import ${fqcn};`)) {
             const key = `import:${fqcn}`;
             if (!seen.has(key)) {
@@ -4991,7 +7235,9 @@
       const needsAiFetch = fetchAi && !hasAiQuickFixes(fixes);
 
       if (fixes.length) {
-        presentQuickFixes(ed, fixes, { alwaysMenu, anchorEl, markers });
+        presentQuickFixes(ed, needsAiFetch ? [...fixes, QUICK_FIX_LOADING] : fixes, {
+          alwaysMenu, anchorEl, markers,
+        });
       } else if (needsAiFetch) {
         presentQuickFixes(ed, [QUICK_FIX_LOADING], { alwaysMenu, anchorEl, markers });
       } else {
@@ -5340,26 +7586,55 @@
       key: '', text: '', controlSnippet: '',
       repo: '', path: '', lineNumber: 0, column: 0, linePrefix: '',
     };
-    const AI_INLINE_DEBOUNCE_MS = 200;
-    const AI_INLINE_STATEMENT_DEBOUNCE_MS = 70;
+    const AI_INLINE_DEBOUNCE_MS = 300;
+    const AI_INLINE_STATEMENT_DEBOUNCE_MS = 150;
+    const INLINE_PAUSE_MS = 200;
+    const EMPTY_LINE_PAUSE_MS = 100;
+    const EMPTY_LINE_AI_DEBOUNCE_MS = 0;
+    const INLINE_LOCAL_FETCH_MS = 180;
+    const INLINE_AI_FETCH_MS = 12000;
     let aiInlineSeq = 0;
+    let aiInlinePendingKey = '';
     const aiCompleteCache = { key: '', items: [], time: 0 };
     let inlineShowTimer = null;
 
-    function queueInlineSuggestion(ed) {
+    function editorAcceptsInlineAi(ed) {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
+      return editorIsTypingTarget(ed);
+    }
+
+    function cancelAiInlineFetch() {
+      clearTimeout(aiInlineTimer);
+      aiInlineTimer = null;
+      aiInlinePendingKey = '';
+      aiInlineSeq += 1;
+    }
+
+    function queueInlineSuggestion(ed, { emptyLine = false } = {}) {
       clearTimeout(inlineShowTimer);
       inlineShowTimer = setTimeout(() => {
-        requestAnimationFrame(() => {
+        const paint = () => {
           ed.trigger('reaper', 'editor.action.inlineSuggest.trigger', {});
-          setTimeout(() => {
-            ed.trigger('reaper', 'editor.action.inlineSuggest.trigger', {});
-          }, 48);
-        });
-      }, 16);
+        };
+        if (emptyLine) {
+          ed.trigger('reaper', 'editor.action.inlineSuggest.hide', {});
+          requestAnimationFrame(paint);
+          if (aiInlineCache.text) {
+            clearTimeout(ed._reaperEmptyInlinePaintTimer);
+            ed._reaperEmptyInlinePaintTimer = setTimeout(() => {
+              const visible = ed._contextKeyService?.getContextKeyValue('inlineSuggestionVisible');
+              if (!visible) paint();
+            }, 48);
+          }
+        } else {
+          requestAnimationFrame(paint);
+        }
+      }, 12);
     }
 
     function aiInlineFetchEnabled() {
-      return helpers.getAiInlineComplete?.() && helpers.getGeminiConfigured?.();
+      // Server reads the Gemini key from settings; client checkbox is the only gate here.
+      return !!helpers.getAiInlineComplete?.();
     }
 
     function aiInlineEnabled() {
@@ -5396,15 +7671,18 @@
       if (ed) ed._reaperPendingControlSnippet = null;
     }
 
-    function setInlineCache(ed, cacheKey, text, controlSnippet, meta) {
+    function setInlineCache(ed, cacheKey, text, controlSnippet, meta, options = {}) {
       const path = meta?.path ?? (helpers.getActivePath?.() || '');
       const linePrefix = meta?.linePrefix ?? '';
       const clean = capInlineText(sanitizeInlineGhostText(text));
       const snippet = controlSnippet || '';
-      if (!clean || shouldSuppressInlineGhost(path, linePrefix, clean)) {
-        if (aiInlineCache.text) {
-          clearInlineCache(ed);
-        }
+      const content = meta?.content ?? ed?._reaperContent ?? ed?.getModel?.()?.getValue?.() ?? '';
+      const lineNumber = meta?.lineNumber ?? 0;
+      const column = meta?.column ?? 0;
+      if (
+        !clean
+        || shouldSuppressInlineGhost(path, linePrefix, clean, content, lineNumber, column)
+      ) {
         return;
       }
       if (
@@ -5412,6 +7690,9 @@
         && aiInlineCache.text === clean
         && aiInlineCache.controlSnippet === snippet
       ) {
+        if (options.repaint) {
+          queueInlineSuggestion(ed, { emptyLine: isWhitespaceOnlyLine(linePrefix) });
+        }
         return;
       }
       aiInlineCache = {
@@ -5429,16 +7710,19 @@
       } else {
         ed._reaperPendingControlSnippet = null;
       }
-      queueInlineSuggestion(ed);
+      if (options.refresh !== false) {
+        queueInlineSuggestion(ed, { emptyLine: isWhitespaceOnlyLine(linePrefix) });
+      }
     }
 
-    function acceptInlineOrControlSnippet(ed) {
+    function acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace = false } = {}) {
       const model = ed.getModel();
       const position = ed.getPosition();
       if (!model || !position) return;
 
       const linePrefix = editorLinePrefix(model, position);
       const cacheKey = inlineCacheKey(model, position, linePrefix);
+      const content = editorContent(ed, model);
       const pending = ed._reaperPendingControlSnippet;
       const insertRange = new monaco.Range(
         position.lineNumber, position.column, position.lineNumber, position.column,
@@ -5447,6 +7731,20 @@
       const clearInline = () => {
         clearInlineCache(ed);
       };
+
+      const ghost = aiInlineCache.key === cacheKey ? aiInlineCache.text : '';
+      if (
+        isRedundantCloseBraceGhost(linePrefix, ghost || '}', content, position.lineNumber, position.column)
+        && (!ghost || ghost.trim() === '}')
+      ) {
+        dismissInlineGhost(ed);
+        if (newlineOnRedundantBrace) {
+          ed.trigger('keyboard', 'type', { text: '\n' });
+        } else {
+          ed.trigger('reaper', 'tab', null);
+        }
+        return;
+      }
 
       if (pending?.snippet && pending.key === cacheKey) {
         ed.trigger('reaper', 'editor.action.insertSnippet', { snippet: pending.snippet });
@@ -5501,7 +7799,7 @@
         return;
       }
       if (hasActiveInlineSuggestion(ed)) {
-        acceptInlineOrControlSnippet(ed);
+        acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace: false });
         return;
       }
       ed.trigger('reaper', 'tab', null);
@@ -5531,8 +7829,8 @@
       triggerCharacters: ['.', '@', ':', '-', '<', '"', "'", '/', '#', '*', '=', '(', '[', '{'],
       provideCompletionItems(model, position, context) {
         const path = helpers.getActivePath?.() || '';
-        if (!path) {
-          completionDebug(helpers, ['provider', completionTriggerLabel(context), 'skip: no active path']);
+        if (!path || !editorScopeMatches(path, model)) {
+          completionDebug(helpers, ['provider', completionTriggerLabel(context), 'skip: language scope']);
           return { suggestions: [], incomplete: false };
         }
 
@@ -5554,6 +7852,16 @@
           ? (memberContext.memberPrefix || prefix || '')
           : (prefix || '');
         const springConfig = isSpringConfigFile(path);
+        const content = editorContent(activeEditor(), model);
+        if (
+          !manual
+          && (
+            isDeclarationTyping(path, linePrefix)
+            || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
+          )
+        ) {
+          return { suggestions: [], incomplete: false };
+        }
         if (!memberContext && !shouldFetchIndexCompletions(linePrefix, completionPrefix, path) && !manual) {
           completionDebug(helpers, [
             'provider', completionTriggerLabel(context), 'skip: fetch gate',
@@ -5563,7 +7871,6 @@
         }
 
         const ed = activeEditor();
-        const content = editorContent(ed, model);
         const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
         const suggestions = [...local.suggestions];
         const seen = new Set(suggestions.map((s) => s.label));
@@ -5590,7 +7897,7 @@
 
         const cached = readCachedIndexCompletions(helpers, model, position, completionPrefix);
         if (cached) {
-          mergeIndexItemsIntoSuggestions(cached, range, seen, memberContext, suggestions);
+          mergeIndexItemsIntoSuggestions(cached, range, seen, memberContext, suggestions, 80, path);
         }
 
         if (memberContext) {
@@ -5607,7 +7914,7 @@
                 if (n > 0 && ed) {
                   const fromIndex = [];
                   const idxSeen = new Set(suggestions.map((s) => s.label));
-                  mergeIndexItemsIntoSuggestions(items, range, idxSeen, memberContext, fromIndex);
+                  mergeIndexItemsIntoSuggestions(items, range, idxSeen, memberContext, fromIndex, 80, path);
                   if (fromIndex.length > 0) {
                     const merged = suggestions.length > 0
                       ? [...suggestions, ...fromIndex.filter((i) => !suggestions.some((s) => s.label === i.label))]
@@ -5656,7 +7963,7 @@
               new Promise((resolve) => setTimeout(() => resolve(null), budget)),
             ]);
             if (items) {
-              mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions);
+              mergeIndexItemsIntoSuggestions(items, range, seen, memberContext, suggestions, 80, path);
             }
             if (suggestions.length > 0 && ed) {
               presentCompletionSuggestions(ed, suggestions, { content, path });
@@ -5725,25 +8032,343 @@
     });
     completionDebug(helpers, ['setup', 'completion providers OK', `rev=${REAPER_COMPLETION_REV}`]);
 
-    function scheduleEmptyLineInline(ed) {
-      if (!helpers.getAiInlineComplete?.()) return;
+    function scheduleInlineOnPause(ed) {
+      if (!editorAcceptsInlineAi(ed)) return;
+      clearTimeout(ed._reaperInlinePauseTimer);
+      let delay = INLINE_PAUSE_MS;
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (model && position) {
+        const linePrefix = editorLinePrefix(model, position);
+        if (isWhitespaceOnlyLine(linePrefix)) {
+          delay = EMPTY_LINE_PAUSE_MS;
+        }
+      }
+      ed._reaperInlinePauseTimer = setTimeout(() => runInlineOnPause(ed), delay);
+    }
+
+    function runInlineOnPause(ed) {
+      if (!editorAcceptsInlineAi(ed)) return;
       const model = ed.getModel();
       const position = ed.getPosition();
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
       if (!model || !position || !repo || !path) return;
+
+      ed._reaperContent = model.getValue();
+      const linePrefix = editorLinePrefix(model, position);
+      const content = ed._reaperContent ?? model.getValue();
+      const onEmptyMarkup = isWhitespaceOnlyLine(linePrefix) && isMarkupOrConfigPath(path);
+      refreshInlineAfterEdit(ed, { light: onEmptyMarkup });
+
+      if (helpers.repoApi && !onEmptyMarkup && shouldPrefetchInlineOnPause(path, linePrefix, content, position.lineNumber)) {
+        prefetchIndexInlineGhost(ed, linePrefix, inlineIndexPrefix(linePrefix));
+      }
+      if (aiInlineFetchEnabled()) {
+        const routeAi = shouldRouteInlineToAi(
+          path, linePrefix, content, position.lineNumber, '', true,
+        );
+        if (
+          routeAi
+          && !isDeclarationTyping(path, linePrefix)
+          && !shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
+        ) {
+          scheduleAiInlineFetch();
+        }
+      }
+      if (shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
+        dismissInlineGhost(ed);
+        dismissSuggestUi(ed);
+      } else {
+        if (isDeclarationTyping(path, linePrefix)) {
+          dismissSuggestUi(ed);
+        }
+        queueInlineSuggestion(ed, { emptyLine: isWhitespaceOnlyLine(linePrefix) });
+      }
+    }
+
+    function scheduleEmptyLineInline(ed) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !repo || !path) return;
+      if (!editorAcceptsInlineAi(ed)) return;
       const linePrefix = editorLinePrefix(model, position);
       if (!isWhitespaceOnlyLine(linePrefix)) return;
       const javaLevel = inlineJavaLevel(helpers);
       const content = editorContent(ed, model);
       const cacheKey = buildInlineCacheKey(repo, path, position.lineNumber, position.column, linePrefix);
       const meta = inlineCacheMeta(repo, path, position, linePrefix);
-      const local = localInlineSuggestion(path, linePrefix, content, position.lineNumber, javaLevel);
-      if (local) {
+      const indexCtx = { helpers, model, position };
+      const local = inlineGhostSuffix(
+        path, linePrefix, content, position.lineNumber, javaLevel, position.column, indexCtx,
+      );
+      if (
+        local
+        && !shouldSuppressInlineGhost(
+          path, linePrefix, local, content, position.lineNumber, position.column,
+        )
+      ) {
         setInlineCache(ed, cacheKey, local, '', meta);
         return;
       }
-      scheduleAiInlineFetch();
+      if (helpers.repoApi && !skipLocalStatementTemplates()) {
+        prefetchIndexInlineGhost(ed, linePrefix, '');
+      }
+      if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
+    }
+
+    /** Keystroke path: LSP/index top completion when cached, else cheap local ghost; prefetch jdtls. */
+    function refreshInlineLocalFast(ed) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !repo || !path) {
+        clearInlineCache(ed);
+        return;
+      }
+      const linePrefix = editorLinePrefix(model, position);
+      const content = editorContent(ed, model);
+      if (isDeclarationTyping(path, linePrefix)) {
+        dismissSuggestUi(ed);
+      }
+      if (isDeclarationTyping(path, linePrefix)
+        || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
+        clearInlineCache(ed);
+        return;
+      }
+      const cacheKey = buildInlineCacheKey(
+        repo, path, position.lineNumber, position.column, linePrefix,
+      );
+      const meta = inlineCacheMeta(repo, path, position, linePrefix);
+      const javaLevel = inlineJavaLevel(helpers);
+      const indexCtx = { helpers, model, position };
+      const indexPrefix = inlineIndexPrefix(linePrefix);
+
+      if (shouldPreferLspInlineGhost(path, linePrefix, content, position.lineNumber)
+        && shouldFetchIndexCompletions(linePrefix, indexPrefix, path, {
+          content,
+          lineNumber: position.lineNumber,
+        })) {
+        const lspCached = inlineSuffixFromCachedIndex(
+          helpers, model, position, linePrefix, indexPrefix,
+        );
+        if (
+          lspCached
+          && !shouldSuppressInlineGhost(
+            path, linePrefix, lspCached, content, position.lineNumber, position.column,
+          )
+        ) {
+          setInlineCache(ed, cacheKey, lspCached, '', meta, { refresh: false });
+          queueInlineSuggestion(ed);
+          prefetchIndexInlineGhost(ed, linePrefix, indexPrefix);
+          return;
+        }
+        prefetchIndexInlineGhost(ed, linePrefix, indexPrefix);
+      }
+
+      const local = inlineGhostSuffix(
+        path, linePrefix, content, position.lineNumber, javaLevel, position.column, indexCtx,
+        { fast: true },
+      );
+      if (
+        local
+        && !shouldSuppressInlineGhost(
+          path, linePrefix, local, content, position.lineNumber, position.column,
+        )
+      ) {
+        setInlineCache(ed, cacheKey, local, '', meta, { refresh: false });
+        queueInlineSuggestion(ed);
+      } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+        clearInlineCache(ed);
+      }
+    }
+
+    function refreshInlineAfterEdit(ed, { light = false } = {}) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !repo || !path) {
+        clearInlineCache(ed);
+        return;
+      }
+      const linePrefix = editorLinePrefix(model, position);
+      const cacheKey = buildInlineCacheKey(
+        repo, path, position.lineNumber, position.column, linePrefix,
+      );
+      const meta = inlineCacheMeta(repo, path, position, linePrefix);
+      const javaLevel = inlineJavaLevel(helpers);
+      const content = editorContent(ed, model);
+      const aiOn = aiInlineFetchEnabled();
+
+      if (isDeclarationTyping(path, linePrefix)
+        || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
+        clearInlineCache(ed);
+        return;
+      }
+
+      if (light && isWhitespaceOnlyLine(linePrefix)) {
+        const ghost = inferEmptyLineContinuationSuffix(
+          path, content, position.lineNumber, linePrefix, javaLevel,
+        );
+        if (
+          ghost
+          && !shouldSuppressInlineGhost(
+            path, linePrefix, ghost, content, position.lineNumber, position.column,
+          )
+        ) {
+          setInlineCache(ed, cacheKey, ghost, '', meta);
+        } else {
+          const stale = inlineGhostFromCache(
+            aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix, content,
+          );
+          if (stale) {
+            aiInlineCache = {
+              key: cacheKey,
+              text: stale,
+              controlSnippet: '',
+              repo,
+              path,
+              lineNumber: position.lineNumber,
+              column: position.column,
+              linePrefix,
+            };
+            queueInlineSuggestion(ed, { emptyLine: true });
+          } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+            clearInlineCache(ed);
+          }
+        }
+        return;
+      }
+
+      const indexCtx = { helpers, model, position };
+      const preferAi = aiOn && shouldPreferAiStatementInline(
+        path, linePrefix, content, position.lineNumber,
+      );
+
+      let local = inlineGhostSuffix(
+        path, linePrefix, content, position.lineNumber, javaLevel, position.column, indexCtx,
+        { fast: preferAi || isMarkupOrConfigPath(path) },
+      );
+      if (!local && isWhitespaceOnlyLine(linePrefix)) {
+        local = inferEmptyLineContinuationSuffix(
+          path, content, position.lineNumber, linePrefix, javaLevel,
+        );
+      }
+      const routeAi = shouldRouteInlineToAi(
+        path, linePrefix, content, position.lineNumber, local, aiOn,
+      );
+      if (
+        local
+        && !shouldSuppressInlineGhost(
+          path, linePrefix, local, content, position.lineNumber, position.column,
+        )
+      ) {
+        setInlineCache(ed, cacheKey, local, '', meta);
+      } else {
+        const stale = inlineGhostFromCache(
+          aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix, content,
+        );
+        if (stale) {
+          aiInlineCache = {
+            key: cacheKey,
+            text: stale,
+            controlSnippet: '',
+            repo,
+            path,
+            lineNumber: position.lineNumber,
+            column: position.column,
+            linePrefix,
+          };
+          queueInlineSuggestion(ed, { emptyLine: isWhitespaceOnlyLine(linePrefix) });
+        } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+          clearInlineCache(ed);
+        }
+      }
+
+      if (dotQualifierFromLinePrefix(linePrefix)) {
+        if (
+          !local
+          && helpers.repoApi
+        ) {
+          const memberCtx = dotQualifierFromLinePrefix(linePrefix);
+          prefetchIndexInlineGhost(ed, linePrefix, memberCtx?.memberPrefix || '');
+        }
+        scheduleMemberCompletions(ed);
+        return;
+      }
+
+      if (isSpringConfigFile(path)) {
+        scheduleSpringConfigInline(ed);
+        scheduleAutocompleteSuggest(ed);
+        return;
+      }
+
+      if (helpers.repoApi) {
+        if (isWhitespaceOnlyLine(linePrefix)) {
+          if (!local && !preferAi) {
+            prefetchIndexInlineGhost(ed, linePrefix, '');
+          }
+        } else {
+          const token = extractInlinePartialToken(linePrefix);
+          if (token && shouldFetchIndexCompletions(linePrefix, token, path, { afterPause: true })) {
+            prefetchIndexInlineGhost(ed, linePrefix, token);
+          }
+        }
+      }
+
+      if (!preferAi && !isDeclarationTyping(path, linePrefix)) {
+        scheduleAutocompleteSuggest(ed);
+      }
+    }
+
+    function prefetchIndexInlineGhost(ed, linePrefix, prefix) {
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!repo || !path || !model || !position || !helpers.repoApi) return;
+      const tokenPrefix = prefix ?? inlineIndexPrefix(linePrefix);
+      if (
+        !shouldFetchIndexCompletions(linePrefix, tokenPrefix, path)
+        && !dotQualifierFromLinePrefix(linePrefix)
+      ) {
+        return;
+      }
+      const content = ed._reaperContent ?? model.getValue();
+      const member = dotQualifierFromLinePrefix(linePrefix);
+      const timeoutMs = member ? LSP_INLINE_MEMBER_FETCH_MS : LSP_INLINE_FETCH_MS;
+      void fetchCompletionsWithTimeout(
+        helpers, model, position, tokenPrefix, timeoutMs,
+      )
+        .then((items) => {
+          const suffix = inlineSuffixFromIndexItems(items, linePrefix, tokenPrefix, path);
+          if (
+            suffix
+            && !shouldSuppressInlineGhost(
+              path, linePrefix, suffix, content, position.lineNumber, position.column,
+            )
+          ) {
+            const cacheKey = buildInlineCacheKey(
+              repo, path, position.lineNumber, position.column, linePrefix,
+            );
+            setInlineCache(
+              ed,
+              cacheKey,
+              suffix,
+              '',
+              inlineCacheMeta(repo, path, position, linePrefix),
+            );
+            return;
+          }
+          if (items?.length && tokenPrefix) {
+            scheduleAutocompleteSuggest(ed, true);
+          }
+        })
+        .catch(() => {});
     }
 
     function insertInlineContinuationAtCursor(ed) {
@@ -5768,12 +8393,13 @@
       return true;
     }
 
-    async function fetchInlineComplete(model, position, linePrefix) {
+    async function fetchInlineComplete(model, position, linePrefix, localOnly = false) {
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
       if (!repo || !path) return '';
       const payload = contentForApiPayload(editorContent(editor, model), position.lineNumber);
-      const res = await helpers.api(helpers.repoApi(repo, '/workspace/inline-complete'), {
+      const timeoutMs = localOnly ? INLINE_LOCAL_FETCH_MS : INLINE_AI_FETCH_MS;
+      const request = helpers.api(helpers.repoApi(repo, '/workspace/inline-complete'), {
         method: 'POST',
         body: JSON.stringify({
           path,
@@ -5781,22 +8407,41 @@
           column: position.column,
           content: payload.content,
           line_prefix: linePrefix,
+          local_only: localOnly,
         }),
-      });
-      return res?.text ?? '';
+      }).then((res) => res?.text ?? '');
+      return Promise.race([
+        request,
+        new Promise((resolve) => setTimeout(() => resolve(''), timeoutMs)),
+      ]);
     }
 
     function scheduleAiInlineFetch() {
       if (!aiInlineFetchEnabled()) return;
+      if (!editorAcceptsInlineAi(editor)) return;
       const model = editor.getModel();
       const position = editor.getPosition();
-      if (model && position) {
-        const linePrefix = editorLinePrefix(model, position);
-        if (dotQualifierFromLinePrefix(linePrefix)) {
-          clearTimeout(aiInlineTimer);
-          return;
-        }
+      const repo = helpers.getRepo();
+      const path = helpers.getActivePath?.() || '';
+      if (!model || !position || !repo || !path) return;
+      const linePrefix = editorLinePrefix(model, position);
+      if (dotQualifierFromLinePrefix(linePrefix)) {
+        clearTimeout(aiInlineTimer);
+        aiInlinePendingKey = '';
+        return;
       }
+      const content = editorContent(editor, model);
+      if (!shouldRouteInlineToAi(path, linePrefix, content, position.lineNumber, '', aiInlineFetchEnabled())) {
+        clearTimeout(aiInlineTimer);
+        aiInlinePendingKey = '';
+        return;
+      }
+      const cacheKey = buildInlineCacheKey(
+        repo, path, position.lineNumber, position.column, linePrefix,
+      );
+      if (aiInlineCache.key === cacheKey && aiInlineCache.text) return;
+      if (aiInlinePendingKey === cacheKey && aiInlineTimer) return;
+      aiInlinePendingKey = cacheKey;
       clearTimeout(aiInlineTimer);
       const seq = ++aiInlineSeq;
       let debounceMs = AI_INLINE_DEBOUNCE_MS;
@@ -5804,7 +8449,9 @@
         const path = helpers.getActivePath?.() || '';
         const linePrefix = editorLinePrefix(model, position);
         const content = editorContent(editor, model);
-        if (
+        if (path && isWhitespaceOnlyLine(linePrefix)) {
+          debounceMs = EMPTY_LINE_AI_DEBOUNCE_MS;
+        } else if (
           path && shouldPreferAiStatementInline(
             path, linePrefix, content, position.lineNumber,
           )
@@ -5813,7 +8460,9 @@
         }
       }
       aiInlineTimer = setTimeout(async () => {
+        aiInlinePendingKey = '';
         if (seq !== aiInlineSeq) return;
+        if (!editorAcceptsInlineAi(editor)) return;
         const model = editor.getModel();
         const position = editor.getPosition();
         if (!model || !position) return;
@@ -5823,21 +8472,17 @@
         const linePrefix = editorLinePrefix(model, position);
         if (dotQualifierFromLinePrefix(linePrefix)) return;
         if (!inlineTypingReady()) return;
-        if (isJavaDeclarationTyping(path, linePrefix)) return;
+        if (isDeclarationTyping(path, linePrefix)) return;
+        if (shouldPauseInlineAtCursor(path, linePrefix, editorContent(editor, model), position.lineNumber, position.column)) {
+          return;
+        }
         const cacheKey = buildInlineCacheKey(
           repo, path, position.lineNumber, position.column, linePrefix,
         );
         const meta = inlineCacheMeta(repo, path, position, linePrefix);
         if (aiInlineCache.key === cacheKey && aiInlineCache.text) return;
-        const javaLevel = inlineJavaLevel(helpers);
-        const content = editorContent(editor, model);
-        const preferAi = shouldPreferAiStatementInline(
-          path, linePrefix, content, position.lineNumber,
-        );
-        const local = localInlineSuggestion(path, linePrefix, content, position.lineNumber, javaLevel);
-        if (local && local.length >= 4 && !preferAi) return;
         try {
-          const text = await fetchInlineComplete(model, position, linePrefix);
+          const text = await fetchInlineComplete(model, position, linePrefix, false);
           if (!text || seq !== aiInlineSeq) return;
           setInlineCache(editor, cacheKey, text, '', meta);
         } catch {
@@ -5848,13 +8493,16 @@
 
     monaco.languages.registerInlineCompletionsProvider(ALL_EDITOR_LANGS, {
       provideInlineCompletions: async (model, position, _context, token) => {
+        if (!editorAcceptsInlineAi(editor)) return { items: [] };
         const repo = helpers.getRepo();
         const path = helpers.getActivePath?.() || '';
-        if (!repo || !path) return { items: [] };
+        if (!repo || !path || !editorScopeMatches(path, model)) return { items: [] };
 
         const linePrefix = editorLinePrefix(model, position);
         if (!inlineTypingReady()) return { items: [] };
-        if (isJavaDeclarationTyping(path, linePrefix)) {
+        const content = editorContent(editor, model);
+        if (isDeclarationTyping(path, linePrefix)
+          || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
           clearInlineCache(editor);
           return { items: [] };
         }
@@ -5863,31 +8511,154 @@
           repo, path, position.lineNumber, position.column, linePrefix,
         );
         const javaLevel = inlineJavaLevel(helpers);
-        const content = editorContent(editor, model);
+        const indexCtx = { helpers, model, position };
         const memberContext = dotQualifierFromLinePrefix(linePrefix);
-        const preferAi = !memberContext && shouldPreferAiStatementInline(
-          path, linePrefix, content, position.lineNumber,
+        const aiOn = aiInlineFetchEnabled();
+        const routeAi = !memberContext && shouldRouteInlineToAi(
+          path, linePrefix, content, position.lineNumber, '', aiOn,
         );
 
+        const indexPrefix = memberContext
+          ? (memberContext.memberPrefix || '')
+          : (extractInlinePartialToken(linePrefix) || '');
+
+        async function buildLspInlineResult() {
+          if (!shouldFetchIndexCompletions(linePrefix, indexPrefix, path, {
+            content,
+            lineNumber: position.lineNumber,
+          })) return null;
+          const cachedSuffix = inlineSuffixFromCachedIndex(
+            helpers, model, position, linePrefix, indexPrefix,
+          );
+          if (
+            cachedSuffix
+            && !shouldSuppressInlineGhost(
+              path, linePrefix, cachedSuffix, content, position.lineNumber, position.column,
+            )
+            && !token.isCancellationRequested
+          ) {
+            return cachedSuffix;
+          }
+          const wantsFetch = memberContext || shouldPreferLspInlineGhost(
+            path, linePrefix, content, position.lineNumber,
+          );
+          if (!wantsFetch) return null;
+          try {
+            const suffix = await fetchIndexInlineSuffix(
+              helpers, model, position, linePrefix, indexPrefix,
+            );
+            if (
+              suffix
+              && !shouldSuppressInlineGhost(
+                path, linePrefix, suffix, content, position.lineNumber, position.column,
+              )
+              && !token.isCancellationRequested
+            ) {
+              return suffix;
+            }
+          } catch {
+            // fall through
+          }
+          return null;
+        }
+
         const cachedGhost = inlineGhostFromCache(
-          aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
+          aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix, content,
         );
         if (cachedGhost) {
           editor._reaperPendingControlSnippet = null;
           if (token.isCancellationRequested) return { items: [] };
-          return buildInlineItems(model, position, linePrefix, cachedGhost);
+          return buildInlineItems(model, position, linePrefix, cachedGhost, path);
         }
 
-        if (!preferAi) {
-          const local = inlineGhostSuffix(
-            path, linePrefix, content, position.lineNumber, javaLevel, position.column,
+        if (isWhitespaceOnlyLine(linePrefix)) {
+          if (!aiOn) {
+            const emptyLsp = await buildLspInlineResult();
+            if (
+              emptyLsp
+              && !shouldSuppressInlineGhost(
+                path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
+              )
+            ) {
+              const meta = inlineCacheMeta(repo, path, position, linePrefix);
+              setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
+              editor._reaperPendingControlSnippet = null;
+              if (token.isCancellationRequested) return { items: [] };
+              return buildInlineItems(model, position, linePrefix, emptyLsp, path);
+            }
+          }
+          const emptyLocal = inferEmptyLineContinuationSuffix(
+            path, content, position.lineNumber, linePrefix, javaLevel,
           );
-          if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
+          if (
+            emptyLocal
+            && !shouldSuppressInlineGhost(
+              path, linePrefix, emptyLocal, content, position.lineNumber, position.column,
+            )
+          ) {
             const meta = inlineCacheMeta(repo, path, position, linePrefix);
-            setInlineCache(editor, cacheKey, local, '', meta);
+            setInlineCache(editor, cacheKey, emptyLocal, '', meta, { refresh: false });
             editor._reaperPendingControlSnippet = null;
             if (token.isCancellationRequested) return { items: [] };
-            return buildInlineItems(model, position, linePrefix, local);
+            return buildInlineItems(model, position, linePrefix, emptyLocal, path);
+          }
+          if (aiOn) {
+            const emptyLsp = await buildLspInlineResult();
+            if (
+              emptyLsp
+              && !shouldSuppressInlineGhost(
+                path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
+              )
+            ) {
+              const meta = inlineCacheMeta(repo, path, position, linePrefix);
+              setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
+              editor._reaperPendingControlSnippet = null;
+              if (token.isCancellationRequested) return { items: [] };
+              return buildInlineItems(model, position, linePrefix, emptyLsp, path);
+            }
+          }
+          if (routeAi && aiOn) {
+            scheduleAiInlineFetch();
+            return { items: [] };
+          }
+        }
+
+        if (shouldPreferLspInlineGhost(path, linePrefix, content, position.lineNumber)) {
+          const lspSuffix = await buildLspInlineResult();
+          if (lspSuffix) {
+            const meta = inlineCacheMeta(repo, path, position, linePrefix);
+            setInlineCache(editor, cacheKey, lspSuffix, '', meta, { refresh: false });
+            editor._reaperPendingControlSnippet = null;
+            return buildInlineItems(model, position, linePrefix, lspSuffix, path);
+          }
+        }
+
+        if (!isDeclarationTyping(path, linePrefix)) {
+          const local = inlineGhostSuffix(
+            path, linePrefix, content, position.lineNumber, javaLevel, position.column, indexCtx,
+            { fast: true },
+          );
+          if (
+            local
+            && !shouldSuppressInlineGhost(
+              path, linePrefix, local, content, position.lineNumber, position.column,
+            )
+          ) {
+            const meta = inlineCacheMeta(repo, path, position, linePrefix);
+            setInlineCache(editor, cacheKey, local, '', meta, { refresh: false });
+            editor._reaperPendingControlSnippet = null;
+            if (token.isCancellationRequested) return { items: [] };
+            return buildInlineItems(model, position, linePrefix, local, path);
+          }
+        }
+
+        if (!shouldPreferLspInlineGhost(path, linePrefix, content, position.lineNumber)) {
+          const lspSuffix = await buildLspInlineResult();
+          if (lspSuffix) {
+            const meta = inlineCacheMeta(repo, path, position, linePrefix);
+            setInlineCache(editor, cacheKey, lspSuffix, '', meta, { refresh: false });
+            editor._reaperPendingControlSnippet = null;
+            return buildInlineItems(model, position, linePrefix, lspSuffix, path);
           }
         }
 
@@ -5905,8 +8676,8 @@
                 : '';
               if (suffix && !token.isCancellationRequested) {
                 const meta = inlineCacheMeta(repo, path, position, linePrefix);
-                setInlineCache(editor, cacheKey, suffix, '', meta);
-                return buildInlineItems(model, position, linePrefix, suffix);
+                setInlineCache(editor, cacheKey, suffix, '', meta, { refresh: false });
+                return buildInlineItems(model, position, linePrefix, suffix, path);
               }
             } catch {
               // fall through
@@ -5914,97 +8685,51 @@
           }
         }
 
-        if (!aiInlineFetchEnabled()) {
-          return { items: [] };
+        if (!routeAi && !isImportTypingLine(path, linePrefix)) {
+          try {
+            const text = await fetchInlineComplete(model, position, linePrefix, true);
+            if (
+              text
+              && !shouldSuppressInlineGhost(
+                path, linePrefix, text, content, position.lineNumber, position.column,
+              )
+              && !token.isCancellationRequested
+            ) {
+              const meta = inlineCacheMeta(repo, path, position, linePrefix);
+              setInlineCache(editor, cacheKey, text, '', meta, { refresh: false });
+              editor._reaperPendingControlSnippet = null;
+              return buildInlineItems(model, position, linePrefix, text, path);
+            }
+          } catch {
+            // fall through
+          }
         }
 
-        scheduleAiInlineFetch();
+        if (routeAi && aiOn) {
+          scheduleAiInlineFetch();
+        }
+
         return { items: [] };
       },
       freeInlineCompletions: () => {},
     });
 
+    if (!window.__reaperInlineVisibilityHook) {
+      window.__reaperInlineVisibilityHook = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') cancelAiInlineFetch();
+      });
+    }
+
     editor.onDidChangeModelContent(() => {
+      editor._reaperLastContentEditAt = Date.now();
       const model = editor.getModel();
-      const position = editor.getPosition();
       if (model) editor._reaperContent = model.getValue();
-
-      const repo = helpers.getRepo();
-      const path = helpers.getActivePath?.() || '';
-      let preferAi = false;
-      let linePrefix = '';
-      if (model && position) {
-        linePrefix = editorLinePrefix(model, position);
-      }
-      if (model && position && repo && path) {
-        const cacheKey = buildInlineCacheKey(
-          repo, path, position.lineNumber, position.column, linePrefix,
-        );
-        const meta = inlineCacheMeta(repo, path, position, linePrefix);
-        const javaLevel = inlineJavaLevel(helpers);
-        const content = editor._reaperContent;
-        preferAi = shouldPreferAiStatementInline(
-          path, linePrefix, content, position.lineNumber,
-        );
-        if (isJavaDeclarationTyping(path, linePrefix)) {
-          clearInlineCache(editor);
-        } else {
-          const local = preferAi
-            ? ''
-            : inlineGhostSuffix(
-              path, linePrefix, content, position.lineNumber, javaLevel, position.column,
-            );
-          if (local && !shouldSuppressInlineGhost(path, linePrefix, local)) {
-            setInlineCache(editor, cacheKey, local, '', meta);
-            if (aiInlineFetchEnabled() && local.length >= 4) {
-              scheduleAiInlineFetch();
-            }
-          } else {
-            const stale = inlineGhostFromCache(
-              aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix,
-            );
-            if (stale) {
-              aiInlineCache = {
-                key: cacheKey,
-                text: stale,
-                controlSnippet: '',
-                repo,
-                path,
-                lineNumber: position.lineNumber,
-                column: position.column,
-                linePrefix,
-              };
-              queueInlineSuggestion(editor);
-              if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
-            } else {
-              if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
-                clearInlineCache(editor);
-              }
-              if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
-            }
-          }
-        }
-      } else {
-        clearInlineCache(editor);
-      }
-
-      if (dotQualifierFromLinePrefix(linePrefix)) {
-        const memberGhost = inlineGhostSuffix(
-          path, linePrefix, editor._reaperContent, position.lineNumber, inlineJavaLevel(helpers), position.column,
-        );
-        if (memberGhost) {
-          const cacheKey = buildInlineCacheKey(
-            repo, path, position.lineNumber, position.column, linePrefix,
-          );
-          setInlineCache(editor, cacheKey, memberGhost, '', inlineCacheMeta(repo, path, position, linePrefix));
-        }
-        scheduleMemberCompletions(editor);
-      } else if (isSpringConfigFile(path) && !isJavaDeclarationTyping(path, linePrefix)) {
-        scheduleSpringConfigInline(editor);
-        scheduleAutocompleteSuggest(editor);
-      } else if (!preferAi && !isJavaDeclarationTyping(path, linePrefix)) {
-        scheduleAutocompleteSuggest(editor);
-      }
+      queueMicrotask(() => maybeExpandEmptyBraceBlock(editor));
+      queueMicrotask(() => maybeInsertJavaAssignSpace(editor));
+      if (!editorAcceptsInlineAi(editor)) return;
+      refreshInlineLocalFast(editor);
+      scheduleInlineOnPause(editor);
     });
 
     editor.onKeyDown((e) => {
@@ -6013,16 +8738,40 @@
         ev.preventDefault();
         ev.stopPropagation();
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
+        return;
+      }
+      if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+        if (hasActiveInlineSuggestion(editor)) {
+          const model = editor.getModel();
+          const position = editor.getPosition();
+          const path = helpers.getActivePath?.() || '';
+          const linePrefix = model && position ? editorLinePrefix(model, position) : '';
+          const token = extractInlinePartialToken(linePrefix);
+          const ghost = String(aiInlineCache.text || '').split('\n')[0];
+          const completingWord = !!(token && ghost && /^[\w$]+$/.test(ghost));
+          const contextual = isOperandContext(linePrefix)
+            || isReturnContext(linePrefix)
+            || isCallArgContext(linePrefix, path);
+          if (completingWord || contextual) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            acceptInlineOrControlSnippet(editor, { newlineOnRedundantBrace: false });
+            if (ghost && !ghost.endsWith(' ') && !ghost.endsWith('(') && !ghost.endsWith('.')) {
+              editor.trigger('keyboard', 'type', { text: ' ' });
+            }
+          }
+        }
       }
     });
 
     editor.onDidChangeCursorPosition((e) => {
-      const model = editor.getModel();
-      if (!model) return;
-      const linePrefix = editorLinePrefix(model, e.position);
-      if (!isWhitespaceOnlyLine(linePrefix)) return;
-      clearTimeout(editor._reaperEmptyLineTimer);
-      editor._reaperEmptyLineTimer = setTimeout(() => scheduleEmptyLineInline(editor), 120);
+      if (cursorMoveFromMouse(e)) {
+        if (editorAcceptsInlineAi(editor)) dismissCompletionOnCursorClick(editor);
+        return;
+      }
+      if (Date.now() - (editor._reaperLastContentEditAt || 0) < 80) return;
+      if (!editorAcceptsInlineAi(editor)) return;
+      scheduleInlineOnPause(editor);
     });
 
     monaco.languages.registerDocumentFormattingEditProvider(Array.from(langs).concat(['json', 'html', 'css', 'scss', 'less', 'yaml', 'markdown', 'xml', 'ini']), {
@@ -6053,6 +8802,7 @@
         }
         const path = pathFromReaperUri(resource);
         if (!path) return false;
+        markDefinitionNavigation();
         void helpers.openFileAt(path, selection?.startLineNumber || 1, selection?.startColumn || 1);
         return true;
       },
@@ -6089,6 +8839,7 @@
       id: 'reaper.goToDefinition',
       label: 'Go to Definition',
       keybindings: [monaco.KeyCode.F12],
+      // Context menu: use Monaco's editor.action.revealDefinition (same provideDefinition).
       run: async () => {
         const pos = editor.getPosition();
         if (!pos) return;
@@ -6096,15 +8847,102 @@
         if (!model) return;
         const loc = await lookupDefinition(helpers, model, pos);
         if (!loc) {
+          reportNoDefinition(helpers);
           helpers.toast?.('No definition found — wait for Java index or add import', 'info');
           return;
         }
+        markDefinitionNavigation();
         const path = pathFromReaperUri(loc.uri);
         if (path) {
           await helpers.openFileAt(path, loc.range.startLineNumber, loc.range.startColumn);
         }
       },
     });
+
+    editor.addAction({
+      id: 'reaper.findUsages',
+      label: 'Find Usages',
+      keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.F7],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 2.0,
+      run: () => runFindUsages(editor, helpers),
+    });
+
+    editor.addAction({
+      id: 'reaper.peekDefinition',
+      label: 'Peek Definition',
+      keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.F12],
+      // Context menu: use Monaco's editor.action.peekDefinition.
+      run: () => runPeekDefinition(editor),
+    });
+
+    editor.addAction({
+      id: 'reaper.renameSymbol',
+      label: 'Rename Symbol',
+      keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F6],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 3.0,
+      run: () => runRename(editor, helpers),
+    });
+
+    editor.addAction({
+      id: 'reaper.organizeImports',
+      label: 'Organize Imports',
+      keybindings: [
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyO,
+      ],
+      contextMenuGroupId: 'modification',
+      contextMenuOrder: 1.5,
+      run: () => runJavaOrganizeImports(editor, helpers),
+    });
+
+    editor.addAction({
+      id: 'reaper.parameterInfo',
+      label: 'Parameter Info',
+      keybindings: [
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Space,
+      ],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 4.0,
+      run: () => editor.trigger('keyboard', 'editor.action.triggerParameterHints', {}),
+    });
+
+    const signatureHelpLangs = ['java', 'c', 'cpp'];
+    try {
+      if (typeof monaco.languages.registerSignatureHelpProvider === 'function') {
+        monaco.languages.registerSignatureHelpProvider(signatureHelpLangs, {
+          signatureHelpTriggerCharacters: ['(', ','],
+          provideSignatureHelp: async (model, position) => {
+            const help = await postWorkspaceLsp(helpers, model, position, '/workspace/signature-help');
+            if (!help?.signatures?.length) {
+              return { value: { signatures: [], activeSignature: 0, activeParameter: 0 }, dispose: () => {} };
+            }
+            const signatures = help.signatures.map((sig) => ({
+              label: sig.label,
+              documentation: sig.documentation
+                ? lspMarkupContent(sig.documentation)
+                : undefined,
+              parameters: (sig.parameters || []).map((p) => ({
+                label: p.label,
+                documentation: p.documentation
+                  ? lspMarkupContent(p.documentation)
+                  : undefined,
+              })),
+            }));
+            return {
+              value: {
+                signatures,
+                activeSignature: help.active_signature || 0,
+                activeParameter: help.active_parameter ?? 0,
+              },
+              dispose: () => {},
+            };
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('[ReaperLang] registerSignatureHelpProvider failed', err);
+    }
 
     editor.onKeyDown((e) => {
       if (e.keyCode !== monaco.KeyCode.Tab || e.shiftKey) return;
@@ -6143,13 +8981,12 @@
       keybindings: [monaco.KeyCode.Enter],
       precondition: 'inlineSuggestionVisible && !suggestWidgetVisible',
       run: (ed) => {
-        acceptInlineOrControlSnippet(ed);
+        acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace: true });
       },
     });
 
     editor.onDidChangeModelContent(() => {
-      const lang = editor.getModel()?.getLanguageId() || 'plaintext';
-      helpers.setLanguageStatus?.(langLabel(lang));
+      helpers.setLanguageStatus?.();
     });
 
     if (reaperDotCompletionHandler) {
@@ -6210,7 +9047,7 @@
   }
 
   Object.assign(window.ReaperLang || {}, {
-    bundleRev: '342',
+    bundleRev: '353',
     completionRev: () => REAPER_COMPLETION_REV,
     clearCompletionCache: clearIndexCompleteCache,
     coreOnly: false,
@@ -6244,6 +9081,75 @@
       }
       return window.ReaperLang?.handleDotCompletion?.(ed) ?? -1;
     },
+    inlineTestHelpers: () => ({
+      memberInlineSuffix,
+      localInlineSuggestion,
+      inlineGhostSuffix,
+      skipLocalStatementTemplates,
+      shouldPreferAiStatementInline,
+      shouldRouteInlineToAi,
+      shouldFetchEmptyLineInline,
+      shouldFetchIndexCompletions,
+      extractInlinePartialToken,
+      scopeIdentifierInlineSuffix,
+      collectContentIdentifierCandidates,
+      isWhitespaceOnlyLine,
+      inferEmptyLineContinuationSuffix,
+      findEnclosingBlock,
+      emptyLineNeighborBelow,
+      emptyLineNeighborAbove,
+      inferEmptyLineFromBelowPath,
+      isNearbyLine,
+      isGradleBuildFile,
+      isGradlePropertiesFile,
+      gradlePropertiesLocalInline,
+      INLINE_NEARBY_LINES,
+      editorScopeMatches,
+      suggestionMatchesEditorLanguage,
+      maybeInsertJavaAssignSpace,
+      isCodeStatementLanguage,
+      isDeclarationTyping,
+      shouldSuppressInlineGhost,
+      supportsWorkspaceIndexInline,
+      isProseLanguage,
+      isMarkupOrConfigPath,
+      inlineSuffixFromIndexItems,
+      shouldPreferLspInlineGhost,
+      inlineSuffixFromLspItem,
+      javaSyncTypeInlineSuffix,
+      localJavaImportFqcn,
+      extractJavacClassSymbol,
+      keywordInlineSuffix,
+      statementKeywordsForPath,
+      shouldPreferJavaTypeInline,
+      shouldPreferControlKeywordInline,
+      controlStructureInlineSuffix,
+      rankIndexItemsForInline,
+      buildInlineItems,
+      buildInlineCacheKey,
+      inlineGhostFromCache,
+      shouldPrefetchInlineOnPause,
+      inlineIndexPrefix,
+      isImportTypingLine,
+      isControlKeywordPrefix,
+      parseJavaIndexedForLoop,
+      javaIndexedAccessExpr,
+      javaIndexedLoopBodyLine,
+      inlineJavaLevel,
+      isLineInlineComplete,
+      shouldPauseInlineAtCursor,
+      isOperandContext,
+      isAfterOperatorWithSpace,
+      fastLineWindowScopeSuffix,
+      operandInlineSuffix,
+      operatorTailMatch,
+      rankScopeCandidates,
+      isReturnContext,
+      isCallArgContext,
+      returnInlineSuffix,
+      callArgInlineSuffix,
+      inlineFilterUsesFullPrefix,
+    }),
   });
   window.__reaperLangBundleLoaded = true;
 })();

@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -6,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::classpath;
 use super::diagnostics::Diagnostic;
-use super::exec::run_java_command;
+use super::java_javac_inflight::{self, CancellableOutput};
 use super::gradle::{self, find_gradle_root};
 use super::maven::find_maven_root;
 use super::{safe_join};
@@ -18,28 +20,46 @@ const TEST_COMPILE_TTL: Duration = Duration::from_secs(120);
 
 pub type JavaDiagnostic = Diagnostic;
 
+fn run_cancellable_javac(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    args: &[&str],
+) -> Result<CancellableOutput> {
+    java_javac_inflight::run_cancellable_java_command(
+        ws,
+        rel_path,
+        "javac",
+        args,
+        fingerprint(content),
+    )
+}
+
+fn fingerprint(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn check_java(
     ws: &Path,
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
-) -> Result<Vec<Diagnostic>> {
+) -> Result<(Vec<Diagnostic>, bool)> {
     if !rel_path.ends_with(".java") {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
 
     let _ = safe_join(ws, rel_path)?;
 
     let project_root = find_gradle_root(ws, rel_path)?.or(find_maven_root(ws, rel_path)?);
 
-    let javac_diags = if let Some(root) = project_root {
-        check_project_java(ws, &root, rel_path, content, overlays)?
+    if let Some(root) = project_root.as_deref() {
+        check_project_java(ws, root, rel_path, content, overlays)
     } else {
-        check_plain_java(ws, rel_path, content)?
-    };
-
-    let local = local_file_class_name_diags(rel_path, content);
-    Ok(merge_file_name_diags(javac_diags, local))
+        check_plain_java(ws, rel_path, content)
+    }
 }
 
 fn check_project_java(
@@ -48,7 +68,7 @@ fn check_project_java(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
-) -> Result<Vec<Diagnostic>> {
+) -> Result<(Vec<Diagnostic>, bool)> {
     let _ = classpath::ensure_test_classpath_for_file(project_root, rel_path, content);
 
     if classpath::file_needs_test_classpath(rel_path, content)
@@ -58,8 +78,7 @@ fn check_project_java(
         if let Some(diags) =
             gradle_test_compile_diagnostics(ws, project_root, rel_path, content)?
         {
-            let local = local_file_class_name_diags(rel_path, content);
-            return Ok(merge_file_name_diags(diags, local));
+            return Ok((diags, false));
         }
     }
 
@@ -134,13 +153,45 @@ fn check_project_java(
     args.push(overlay_root.join(rel_path).to_string_lossy().into_owned());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_java_command(ws, "javac", &arg_refs)?;
+    let content_fp = fingerprint(content);
+    let out = run_cancellable_javac(ws, rel_path, content, &arg_refs)?;
+    let out = if out.cancelled {
+        java_javac_inflight::peek_cached(ws, rel_path, content_fp).unwrap_or(out)
+    } else {
+        out
+    };
+    if out.cancelled {
+        return Ok((Vec::new(), true));
+    }
 
+    Ok((
+        filter_project_javac_diags(
+            &out,
+            ws,
+            rel_path,
+            content,
+            project_root,
+            &jars,
+            overlays,
+        ),
+        false,
+    ))
+}
+
+fn filter_project_javac_diags(
+    out: &java_javac_inflight::CancellableOutput,
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    project_root: &Path,
+    jars: &[PathBuf],
+    overlays: &[(String, String)],
+) -> Vec<Diagnostic> {
     let mut diags = parse_compiler_output(&out.stderr, ws, rel_path, content);
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    diags = filter_stale_dependency_diags(diags, project_root, rel_path, content, &jars);
+    diags = filter_stale_dependency_diags(diags, project_root, rel_path, content, jars);
     diags = filter_javac_classpath_visibility_false_positives(
         diags,
         project_root,
@@ -171,7 +222,7 @@ fn check_project_java(
     );
     enrich_missing_dependency_diags(&mut diags, project_root, content);
     enrich_static_import_diags(&mut diags, content);
-    Ok(diags)
+    diags
 }
 
 fn sync_java_diagnostics_overlays(
@@ -713,15 +764,22 @@ fn parse_missing_class_symbol(message: &str) -> Option<String> {
     if !message.contains("cannot find symbol") {
         return None;
     }
-    let class_line = message
-        .lines()
-        .find(|l| l.contains("symbol:") && l.contains("class"))?;
-    let after_symbol = class_line.split("symbol:").nth(1)?.trim();
-    let type_part = after_symbol
-        .strip_prefix("class")
-        .or_else(|| after_symbol.split("class ").nth(1))
-        .unwrap_or(after_symbol)
-        .trim();
+    for line in message.lines() {
+        if let Some(type_name) = parse_class_symbol_on_line(line) {
+            return Some(type_name);
+        }
+    }
+    None
+}
+
+/// Only `symbol: class Foo` — not `symbol: variable x` or `location: class Foo`.
+fn parse_class_symbol_on_line(line: &str) -> Option<String> {
+    let sym_idx = line.find("symbol:")?;
+    let after = line[sym_idx + "symbol:".len()..].trim();
+    if !after.starts_with("class") {
+        return None;
+    }
+    let type_part = after.strip_prefix("class").unwrap_or(after).trim();
     let type_name = simple_type_name(type_part.split_whitespace().next().unwrap_or(type_part));
     if type_name.is_empty() {
         return None;
@@ -791,22 +849,46 @@ fn parse_missing_method_on_type(message: &str) -> Option<(String, String)> {
     if !message.contains("cannot find symbol") {
         return None;
     }
-    let method_line = message
-        .lines()
-        .find(|l| l.contains("symbol:") && l.contains("method "))?;
-    let method_part = method_line.split("method ").nth(1)?.trim();
+    let method_name = message.lines().find_map(parse_method_symbol_on_line)?;
+    let type_name = message.lines().find_map(parse_javac_location_type)?;
+    Some((method_name, type_name))
+}
+
+fn parse_method_symbol_on_line(line: &str) -> Option<String> {
+    let sym_idx = line.find("symbol:")?;
+    let after = line[sym_idx + "symbol:".len()..].trim();
+    if !after.contains("method ") {
+        return None;
+    }
+    let method_part = after.split("method ").nth(1)?.trim();
     let method_name = method_part.split('(').next()?.trim();
     if method_name.is_empty() {
         return None;
     }
-    let loc_line = message
-        .lines()
-        .find(|l| l.contains("location:") && l.contains("type "))?;
-    let type_name = loc_line.rsplit("type ").next()?.trim();
+    Some(method_name.to_string())
+}
+
+fn parse_javac_location_type(line: &str) -> Option<String> {
+    let loc_idx = line.find("location:")?;
+    let after = line[loc_idx + "location:".len()..].trim();
+    if let Some(of_type) = after.rsplit(" of type ").next() {
+        let type_name = of_type.trim();
+        if !type_name.is_empty() {
+            return Some(type_name.to_string());
+        }
+    }
+    let type_name = after
+        .strip_prefix("class ")
+        .or_else(|| after.strip_prefix("type "))
+        .or_else(|| after.strip_prefix("interface "))
+        .or_else(|| after.strip_prefix("enum "))
+        .or_else(|| after.strip_prefix("record "))
+        .unwrap_or(after)
+        .trim();
     if type_name.is_empty() {
         return None;
     }
-    Some((method_name.to_string(), type_name.to_string()))
+    Some(type_name.to_string())
 }
 
 fn is_spring_data_repository_method(
@@ -1161,7 +1243,6 @@ fn source_defines_type(content: &str, type_name: &str) -> bool {
 fn source_declares_method(content: &str, method_name: &str) -> bool {
     content.lines().any(|line| {
         super::symbols::java_method_name_on_line(line).as_deref() == Some(method_name)
-            || line.split("//").next().unwrap_or(line).contains(&format!("{method_name}("))
     })
 }
 
@@ -1214,7 +1295,7 @@ fn has_invalid_junit_assertion_import(content: &str) -> bool {
     })
 }
 
-fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diagnostic>> {
+fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<(Vec<Diagnostic>, bool)> {
     let overlay_file = ws.join(DIAG_ROOT).join("overlay").join(rel_path);
     if let Some(parent) = overlay_file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1230,9 +1311,11 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
         .to_string_lossy()
         .replace('\\', "/");
 
-    let out = run_java_command(
+    let content_fp = fingerprint(content);
+    let out = run_cancellable_javac(
         ws,
-        "javac",
+        rel_path,
+        content,
         &[
             "-encoding",
             "UTF-8",
@@ -1241,12 +1324,20 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<Vec<Diag
             &rel,
         ],
     )?;
+    let out = if out.cancelled {
+        java_javac_inflight::peek_cached(ws, rel_path, content_fp).unwrap_or(out)
+    } else {
+        out
+    };
+    if out.cancelled {
+        return Ok((Vec::new(), true));
+    }
 
     let mut diags = parse_compiler_output(&out.stderr, ws, rel_path, content);
     if diags.is_empty() {
         diags = parse_compiler_output(&out.stdout, ws, rel_path, content);
     }
-    Ok(diags)
+    Ok((diags, false))
 }
 
 fn enrich_missing_dependency_diags(
@@ -1423,23 +1514,31 @@ fn tag_value(section: &str, tag: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Effective Java source level for a file: min(selected JDK major, project sourceCompatibility).
-pub fn java_language_level(ws: &Path, path: &str) -> u32 {
-    let jdk_major = crate::jdk::effective_java_home()
+/// Major Java version from Settings → Compiler → Java (`effective_java_home`).
+pub fn configured_jdk_major() -> u32 {
+    crate::jdk::effective_java_home()
         .ok()
         .and_then(|h| crate::jdk::java_major_version(&h))
-        .unwrap_or(17);
+        .unwrap_or(17)
+}
+
+/// Java language level for completions: max(configured JDK, project source/release).
+/// Never min() — a higher configured JDK is not capped by an older project declaration.
+pub fn completion_java_level(ws: &Path, path: &str) -> u32 {
+    let jdk = configured_jdk_major();
+    project_java_release(ws, path)
+        .map(|project| jdk.max(project))
+        .unwrap_or(jdk)
+}
+
+/// Project `sourceCompatibility` / Maven `java.version` when a build root exists.
+/// Informational and for javac `-source`/`--release` — not used to cap inline completions.
+pub fn project_java_release(ws: &Path, path: &str) -> Option<u32> {
     let project_root = find_gradle_root(ws, path)
         .ok()
         .flatten()
-        .or_else(|| find_maven_root(ws, path).ok().flatten());
-    if let Some(root) = project_root {
-        let project = detect_java_release(&root)
-            .parse()
-            .unwrap_or(jdk_major);
-        return jdk_major.min(project);
-    }
-    jdk_major
+        .or_else(|| find_maven_root(ws, path).ok().flatten())?;
+    detect_java_release(&project_root).parse().ok()
 }
 
 fn extract_release_version(text: &str) -> Option<String> {
@@ -1635,6 +1734,170 @@ struct PublicTypeDecl {
 }
 
 /// Public top-level type name must match the `.java` file stem (javac rule).
+fn merge_diagnostics(mut base: Vec<Diagnostic>, extra: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    for d in extra {
+        let dup = base.iter().any(|existing| {
+            existing.line == d.line
+                && existing.severity == d.severity
+                && (existing.message.contains(&d.message)
+                    || d.message.contains(&existing.message)
+                    || same_missing_symbol(&existing.message, &d.message))
+        });
+        if !dup {
+            base.push(d);
+        }
+    }
+    base
+}
+
+fn same_missing_symbol(a: &str, b: &str) -> bool {
+    parse_missing_class_symbol(a)
+        .is_some_and(|sym| parse_missing_class_symbol(b).is_some_and(|other| sym == other))
+}
+
+const IMPLICIT_JAVA_TYPES: &[&str] = &[
+    "String", "Integer", "Long", "Boolean", "Double", "Float", "Object", "Class", "System",
+    "Math", "Runtime", "Thread", "Throwable", "Exception", "Error", "Override", "Deprecated",
+    "SuppressWarnings", "FunctionalInterface", "AutoCloseable", "Iterable", "Comparable",
+    "StringBuilder", "StringBuffer",
+];
+
+fn local_missing_import_type_diags(
+    ws: &Path,
+    project_root: Option<&Path>,
+    rel_path: &str,
+    content: &str,
+    overlays: &[(String, String)],
+    existing: &[Diagnostic],
+) -> Vec<Diagnostic> {
+    let unit = super::java_psi::parse_compilation_unit(content);
+    let imported: std::collections::HashSet<String> = unit.imports.explicit.keys().cloned().collect();
+    let declared = declared_type_names(&unit);
+    let package = unit.package.as_deref();
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or(line);
+        if code.trim().starts_with("import ") || code.trim().starts_with("package ") {
+            continue;
+        }
+        for simple in extract_used_type_names(code) {
+            if simple.len() < 2 || imported.contains(&simple) || declared.contains(&simple) {
+                continue;
+            }
+            if IMPLICIT_JAVA_TYPES.contains(&simple.as_str()) {
+                continue;
+            }
+            if is_well_known_external_type(&simple, content) {
+                continue;
+            }
+            if project_root.is_some_and(|root| {
+                type_visible_in_project(ws, root, package, content, overlays, &simple)
+            }) {
+                continue;
+            }
+            if existing.iter().any(|d| {
+                d.line == idx as u32 + 1 && d.message.contains(&simple)
+            }) {
+                continue;
+            }
+            if !seen.insert((idx as u32 + 1, simple.clone())) {
+                continue;
+            }
+            let column = line
+                .find(&simple)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            let end_column = column + simple.len() as u32;
+            out.push(Diagnostic {
+                path: rel_path.to_string(),
+                line: idx as u32 + 1,
+                column,
+                end_line: Some(idx as u32 + 1),
+                end_column: Some(end_column),
+                message: format!(
+                    "cannot find symbol\n  symbol:   class {simple}\n  location: class {}",
+                    declared.iter().next().map(String::as_str).unwrap_or("file")
+                ),
+                severity: "error".to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn declared_type_names(unit: &super::java_psi::CompilationUnit) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack: Vec<_> = unit.types.iter().collect();
+    while let Some(ty) = stack.pop() {
+        out.insert(ty.name.clone());
+        for nested in &ty.nested {
+            stack.push(nested);
+        }
+    }
+    out
+}
+
+fn extract_used_type_names(line: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if !c.is_ascii_alphabetic() && c != '_' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_ascii_alphanumeric() || c == '_' {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let token = &line[start..i];
+        if !(token.as_bytes()[0] as char).is_ascii_uppercase() {
+            continue;
+        }
+        let before = line[..start].trim_end();
+        let next = line[i..].trim_start();
+        let usage = next.starts_with('.')
+            || next.starts_with('(')
+            || before.ends_with('@')
+            || before.ends_with("new")
+            || before.ends_with("extends")
+            || before.ends_with("implements");
+        if usage {
+            names.push(token.to_string());
+        }
+    }
+    names
+}
+
+fn type_visible_in_project(
+    ws: &Path,
+    project_root: &Path,
+    package: Option<&str>,
+    content: &str,
+    overlays: &[(String, String)],
+    simple: &str,
+) -> bool {
+    if read_project_type_source(ws, project_root, simple, content, overlays).is_some() {
+        return true;
+    }
+    if let Some(pkg) = package {
+        let fqcn = format!("{pkg}.{simple}");
+        if read_project_type_source(ws, project_root, &fqcn, content, overlays).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 fn local_file_class_name_diags(rel_path: &str, content: &str) -> Vec<Diagnostic> {
     let stem = Path::new(rel_path)
         .file_stem()
@@ -1801,6 +2064,54 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     fn ignores_inner_public_class_for_file_name() {
         let content = "public class Outer {\n    public static class Inner {\n    }\n}\n";
         assert!(local_file_class_name_diags("Outer.java", content).is_empty());
+    }
+
+    #[test]
+    fn local_missing_import_flags_spring_application_usage() {
+        let content = r#"package com.example;
+
+@SpringBootApplication
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+    }
+}
+"#;
+        let diags = local_missing_import_type_diags(
+            Path::new("/repo"),
+            None,
+            "App.java",
+            content,
+            &[],
+            &[],
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("SpringApplication")),
+            "expected SpringApplication missing-import diagnostic, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn local_missing_import_does_not_treat_create_temp_file_as_temp_file_class() {
+        let content = r#"package com.example;
+public class App {
+    void x() {
+        File.createTempFile("a", ".tmp");
+    }
+}
+"#;
+        let diags = local_missing_import_type_diags(
+            Path::new("/repo"),
+            None,
+            "App.java",
+            content,
+            &[],
+            &[],
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("TempFile")),
+            "createTempFile must not produce a false TempFile class error: {diags:?}"
+        );
     }
 
     #[test]
@@ -2228,6 +2539,81 @@ class ScheduledTask {}
             &root,
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_class_symbol_ignores_variable_and_location_class() {
+        assert_eq!(
+            parse_missing_class_symbol(
+                "cannot find symbol symbol:   variable fike location: class AnalyticsServiceApplication"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_missing_class_symbol(
+                "cannot find symbol\n  symbol:   class File\n  location: class App"
+            ),
+            Some("File".to_string())
+        );
+    }
+
+    #[test]
+    fn does_not_filter_fike_or_bare_exists_as_project_false_positive() {
+        let ws = std::env::temp_dir().join("reaper-diag-analytics-fp");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        let content = r#"package com.example;
+public class App {
+  void m() {
+    System.out.println(fike.exists());
+    exists();
+  }
+}
+"#;
+        std::fs::write(
+            ws.join("src/main/java/com/example/App.java"),
+            content,
+        )
+        .unwrap();
+        let fike_msg = "cannot find symbol symbol:   variable fike location: class App";
+        assert!(!is_project_type_false_positive(&ws, &ws, content, &[], fike_msg));
+        let exists_msg =
+            "cannot find symbol symbol:   method exists() location: class App";
+        assert!(!is_project_method_false_positive(
+            &ws, &ws, content, &[], exists_msg
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn analytics_app_reports_real_javac_errors() {
+        let ws = Path::new("/Users/sunny/reaper/workspaces/Spring-maven-complicated");
+        if !ws.is_dir() {
+            return;
+        }
+        let rel = "services/analytics-service/src/main/java/com/enterprise/analytics/AnalyticsServiceApplication.java";
+        let content = std::fs::read_to_string(ws.join(rel)).unwrap_or_default();
+        if content.is_empty() {
+            return;
+        }
+        let (diags, cancelled) = check_java(ws, rel, &content, &[]).unwrap();
+        eprintln!("cancelled={cancelled} count={}", diags.len());
+        for d in &diags {
+            eprintln!("L{}: {}", d.line, d.message.lines().next().unwrap_or(""));
+        }
+        assert!(
+            !cancelled,
+            "javac diagnostics should complete for analytics app (cancelled with no cache)"
+        );
+        let joined = diags
+            .iter()
+            .map(|d| d.message.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("fike") || joined.contains("exists()") || joined.contains("null"),
+            "expected javac errors for fike/exists/null, got: {joined}"
+        );
     }
 
     #[test]

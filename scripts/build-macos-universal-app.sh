@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
+# Build a universal Reaper.app (arm64 + x86_64) for all Apple Silicon and Intel Macs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/dist/Reaper.app"
-BINARY="$ROOT/target/release/reaper"
+ARM_BIN="$ROOT/target/release/reaper"
+INTEL_BIN="$ROOT/target/x86_64-apple-darwin/release/reaper"
 
 echo "Running editor regression suite…"
 "$ROOT/scripts/test-editor-regression.sh"
 
-echo "Building release binary…"
+echo "Building arm64 release binary…"
 env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
 
-echo "Assembling Reaper.app…"
+echo "Building x86_64 release binary…"
+env -u CARGO_TARGET_DIR cargo build --release \
+  --manifest-path "$ROOT/Cargo.toml" \
+  --target x86_64-apple-darwin \
+  --target-dir "$ROOT/target"
+
+echo "Creating universal reaper binary…"
+lipo -create -output "$ROOT/target/reaper-universal" "$ARM_BIN" "$INTEL_BIN"
+lipo -info "$ROOT/target/reaper-universal"
+
+echo "Assembling universal Reaper.app…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/static" "$APP/Contents/Resources/cursor-bridge" "$APP/Contents/Resources/gradle" "$APP/Contents/Resources/gradle/wrapper"
 
-cp "$BINARY" "$APP/Contents/MacOS/reaper"
+cp "$ROOT/target/reaper-universal" "$APP/Contents/MacOS/reaper"
 chmod +x "$APP/Contents/MacOS/reaper"
 cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 
@@ -23,8 +35,8 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 "$ROOT/scripts/sync-launch-splash.sh"
 "$ROOT/scripts/vendor-monaco.sh"
 "$ROOT/scripts/vendor-google-java-format.sh"
-"$ROOT/scripts/copy-bundled-node.sh" "$APP"
-"$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
+REAPER_UNIVERSAL=1 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
+REAPER_UNIVERSAL=1 "$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
 "$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
@@ -66,25 +78,30 @@ cp "$ROOT/gradle/wrapper/gradle-wrapper.jar" "$APP/Contents/Resources/gradle/wra
 cp "$ROOT/gradle/wrapper/gradle-wrapper.properties" "$APP/Contents/Resources/gradle/wrapper/"
 
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
-  if [[ ! -f "$ROOT/cursor-bridge/node_modules/@connectrpc/connect/package.json" ]]; then
-    echo "Installing cursor-bridge dependencies for bundle…"
-    ARCH="$(uname -m)"
-    export REAPER_MACOS_ARCH="$ARCH"
-    "$ROOT/scripts/vendor-node-macos.sh"
-    BUILD_NODE="$ROOT/resources/node-macos-${ARCH}/bin/node"
+  BRIDGE_TMP="$ROOT/dist/cursor-bridge-universal-staging"
+  rm -rf "$BRIDGE_TMP"
+  mkdir -p "$BRIDGE_TMP"
+  cp "$ROOT/cursor-bridge/server.mjs" \
+    "$ROOT/cursor-bridge/install-deps.mjs" \
+    "$ROOT/cursor-bridge/package.json" \
+    "$BRIDGE_TMP/"
+  cp "$ROOT/cursor-bridge/package-lock.json" "$BRIDGE_TMP/" 2>/dev/null || true
+  if [[ ! -f "$BRIDGE_TMP/node_modules/@connectrpc/connect/package.json" ]]; then
+    echo "Installing cursor-bridge dependencies for universal bundle…"
+    BUILD_NODE="$ROOT/resources/node-macos-arm64/bin/node"
     if [[ -x "$BUILD_NODE" ]]; then
-      (cd "$ROOT/cursor-bridge" && "$BUILD_NODE" install-deps.mjs)
+      (cd "$BRIDGE_TMP" && "$BUILD_NODE" install-deps.mjs)
     elif command -v npm >/dev/null 2>&1; then
-      (cd "$ROOT/cursor-bridge" && npm install --omit=dev)
+      (cd "$BRIDGE_TMP" && npm install --omit=dev)
     else
       echo "Warning: cursor-bridge node_modules missing and bundled node/npm unavailable" >&2
     fi
   fi
-  cp -R "$ROOT/cursor-bridge/." "$APP/Contents/Resources/cursor-bridge/"
+  cp -R "$BRIDGE_TMP/." "$APP/Contents/Resources/cursor-bridge/"
 fi
 
 echo "Signing Reaper.app…"
 "$ROOT/scripts/sign-macos-app.sh" "$APP"
 
-echo "Built $APP"
+echo "Built universal $APP"
 echo "Open with: open \"$APP\""

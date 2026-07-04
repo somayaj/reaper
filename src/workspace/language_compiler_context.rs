@@ -16,10 +16,24 @@ pub struct CompilerToolHint {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct LanguageCompilerContext {
     pub language: String,
+    /// Project file target (Gradle, tsconfig, etc.) — informational only, not used for completions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialect: Option<String>,
+    /// Settings → Compiler → Java major version (informational).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jdk_level: Option<u32>,
+    /// Gradle/Maven declared source/release level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_java_level: Option<u32>,
+    /// max(configured JDK, project release) — drives inline/AI completion syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java_level: Option<u32>,
+    /// Primary configured compiler tool id for this file type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tool: Option<String>,
+    /// `--version` of the configured primary compiler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_version: Option<String>,
     pub compilers: Vec<CompilerToolHint>,
     pub rules: Vec<String>,
 }
@@ -29,17 +43,32 @@ pub fn detect(ws: &Path, path: &str) -> LanguageCompilerContext {
         .unwrap_or("plaintext")
         .to_string();
     let compilers = compiler_hints_for_path(path);
-    let dialect = detect_dialect(ws, path, &language);
-    let java_level = if language == "java" {
-        Some(java_diagnostics::java_language_level(ws, path))
+    let dialect = detect_project_target(ws, path, &language);
+    let jdk_level = if language == "java" {
+        Some(java_diagnostics::configured_jdk_major())
     } else {
         None
     };
-    let rules = build_rules(&language, &dialect, java_level);
+    let project_java_level = if language == "java" {
+        java_diagnostics::project_java_release(ws, path)
+    } else {
+        None
+    };
+    let java_level = if language == "java" {
+        Some(java_diagnostics::completion_java_level(ws, path))
+    } else {
+        None
+    };
+    let (completion_tool, completion_version) = primary_compiler(&compilers);
+    let rules = build_rules(&language, &compilers, java_level);
     LanguageCompilerContext {
         language,
         dialect,
+        jdk_level,
+        project_java_level,
         java_level,
+        completion_tool,
+        completion_version,
         compilers,
         rules,
     }
@@ -49,13 +78,22 @@ pub fn append_to_prompt(out: &mut String, ctx: &LanguageCompilerContext) {
     writeln!(out, "\n--- Compiler / language target ---").ok();
     writeln!(out, "Language: {}", ctx.language).ok();
     if let Some(d) = &ctx.dialect {
-        writeln!(out, "Project dialect / target: {d}").ok();
+        writeln!(out, "Project file target (informational): {d}").ok();
+    }
+    if let Some(level) = ctx.jdk_level {
+        writeln!(out, "Configured JDK (Settings → Compiler → Java): {level}").ok();
+    }
+    if let Some(level) = ctx.project_java_level {
+        writeln!(out, "Project source/release level: {level}").ok();
     }
     if let Some(level) = ctx.java_level {
-        writeln!(out, "Java language level: {level}").ok();
+        writeln!(out, "Completion language level: {level} (max of configured JDK and project)").ok();
+    }
+    if let (Some(tool), Some(ver)) = (&ctx.completion_tool, &ctx.completion_version) {
+        writeln!(out, "Completion compiler: {tool} — {ver}").ok();
     }
     if !ctx.compilers.is_empty() {
-        writeln!(out, "Configured compilers (effective on PATH):").ok();
+        writeln!(out, "Configured compilers (Settings → Compiler):").ok();
         for c in &ctx.compilers {
             let ver = c.version.as_deref().unwrap_or("unknown");
             writeln!(out, "  {} — {ver}", c.id).ok();
@@ -69,9 +107,20 @@ pub fn append_to_prompt(out: &mut String, ctx: &LanguageCompilerContext) {
     }
     writeln!(
         out,
-        "Suggest only syntax and APIs valid for this language version and compiler — no newer features."
+        "Suggest only syntax and APIs valid for the completion language level — not an older JDK alone."
     )
     .ok();
+}
+
+fn primary_compiler(compilers: &[CompilerToolHint]) -> (Option<String>, Option<String>) {
+    let Some(c) = compilers
+        .iter()
+        .find(|c| c.version.is_some())
+        .or_else(|| compilers.first())
+    else {
+        return (None, None);
+    };
+    (Some(c.id.clone()), c.version.clone())
 }
 
 fn compiler_hints_for_path(path: &str) -> Vec<CompilerToolHint> {
@@ -90,10 +139,10 @@ fn compiler_hints_for_path(path: &str) -> Vec<CompilerToolHint> {
         .collect()
 }
 
-fn detect_dialect(ws: &Path, path: &str, language: &str) -> Option<String> {
+fn detect_project_target(ws: &Path, path: &str, language: &str) -> Option<String> {
     match language {
-        "java" => Some(java_diagnostics::java_language_level(ws, path).to_string()),
-        "kotlin" | "groovy" => detect_jvm_dialect(ws, path),
+        "java" => java_diagnostics::project_java_release(ws, path).map(|v| v.to_string()),
+        "kotlin" | "groovy" => detect_jvm_project_target(ws, path),
         "rust" => read_cargo_edition(ws, path),
         "go" => read_go_version(ws, path),
         "typescript" => read_tsconfig_dialect(ws, path),
@@ -108,12 +157,36 @@ fn detect_dialect(ws: &Path, path: &str, language: &str) -> Option<String> {
     }
 }
 
-fn build_rules(language: &str, dialect: &Option<String>, java_level: Option<u32>) -> Vec<String> {
+fn configured_java_from_compilers(compilers: &[CompilerToolHint]) -> Option<u32> {
+    compilers
+        .iter()
+        .find(|c| c.id == "java")
+        .and_then(|c| c.version.as_deref())
+        .and_then(parse_major_version)
+}
+
+fn parse_major_version(version: &str) -> Option<u32> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok())
+}
+
+fn build_rules(language: &str, compilers: &[CompilerToolHint], jdk_level: Option<u32>) -> Vec<String> {
     let mut rules = Vec::new();
+    let primary = compilers
+        .iter()
+        .find(|c| c.version.is_some())
+        .or(compilers.first());
+
     match language {
         "java" => {
-            let level = java_level.unwrap_or(17);
-            rules.push(format!("Use only Java {level} syntax and standard-library APIs"));
+            let level = jdk_level
+                .or_else(|| configured_java_from_compilers(compilers))
+                .unwrap_or(17);
+            rules.push(format!(
+                "Use only Java {level} syntax and standard-library APIs (completion language level)"
+            ));
             if level >= 21 {
                 rules.push("Records, pattern matching, sequenced collections OK".into());
             } else if level >= 17 {
@@ -130,87 +203,62 @@ fn build_rules(language: &str, dialect: &Option<String>, java_level: Option<u32>
             }
         }
         "kotlin" => {
-            rules.push("Kotlin JVM — match project JVM target".into());
-            if let Some(d) = dialect {
-                rules.push(format!("Project: {d}"));
+            push_configured_compiler_rule(&mut rules, primary, "Kotlin");
+            if let Some(jdk) = configured_java_from_compilers(compilers) {
+                rules.push(format!("Configured JVM/JDK for Kotlin: Java {jdk}"));
             }
         }
         "groovy" => {
-            rules.push("Groovy on JVM — valid Gradle/Groovy syntax only".into());
-        }
-        "rust" => {
-            let edition = dialect.as_deref().unwrap_or("2021");
-            rules.push(format!("Rust edition {edition}"));
-            if edition == "2015" || edition == "2018" {
-                rules.push("No let-else or edition 2021-only features".into());
+            push_configured_compiler_rule(&mut rules, primary, "Groovy");
+            if let Some(jdk) = configured_java_from_compilers(compilers) {
+                rules.push(format!("Configured JVM/JDK for Groovy: Java {jdk}"));
             }
         }
-        "go" => {
-            if let Some(v) = dialect {
-                rules.push(format!("Go {v} module language version"));
-            } else {
-                rules.push("Valid Go syntax for module go version".into());
-            }
-        }
-        "typescript" => {
-            if let Some(d) = dialect {
-                rules.push(format!("TypeScript compiler options: {d}"));
-            }
-            rules.push("Valid TypeScript types and ES target — no invalid syntax".into());
-        }
-        "javascript" => {
-            if let Some(d) = dialect {
-                rules.push(format!("JavaScript environment: {d}"));
-            }
-            rules.push("Valid ECMAScript for project target — no TypeScript-only syntax".into());
-        }
-        "python" => {
-            if let Some(v) = dialect {
-                rules.push(format!("Python {v}"));
-            }
-            rules.push("Valid Python 3 syntax for project version".into());
-        }
-        "ruby" => {
-            if let Some(v) = dialect {
-                rules.push(format!("Ruby {v}"));
-            }
-            rules.push("Valid Ruby syntax for project version".into());
-        }
-        "php" => {
-            if let Some(v) = dialect {
-                rules.push(format!("PHP {v}"));
-            }
-            rules.push("Valid PHP syntax for project version".into());
-        }
-        "swift" => {
-            if let Some(v) = dialect {
-                rules.push(format!("Swift tools {v}"));
-            }
-        }
-        "csharp" => {
-            if let Some(t) = dialect {
-                rules.push(format!("Target framework {t}"));
-            }
-        }
+        "rust" => push_configured_compiler_rule(&mut rules, primary, "Rust"),
+        "go" => push_configured_compiler_rule(&mut rules, primary, "Go"),
+        "typescript" => push_configured_compiler_rule(&mut rules, primary, "TypeScript"),
+        "javascript" => push_configured_compiler_rule(&mut rules, primary, "JavaScript"),
+        "python" => push_configured_compiler_rule(&mut rules, primary, "Python"),
+        "ruby" => push_configured_compiler_rule(&mut rules, primary, "Ruby"),
+        "php" => push_configured_compiler_rule(&mut rules, primary, "PHP"),
+        "swift" => push_configured_compiler_rule(&mut rules, primary, "Swift"),
+        "csharp" => push_configured_compiler_rule(&mut rules, primary, "C#"),
         "c" | "cpp" => {
-            rules.push("Valid C/C++ for project standard".into());
-            if let Some(d) = dialect {
-                rules.push(d.clone());
+            if let Some(c) = compilers.iter().find(|c| matches!(c.id.as_str(), "clang" | "gcc" | "clangd")) {
+                push_configured_compiler_rule(&mut rules, Some(c), "C/C++");
+            } else {
+                push_configured_compiler_rule(&mut rules, primary, "C/C++");
             }
         }
-        "shell" => {
-            rules.push("POSIX/bash shell — valid for configured bash version".into());
-        }
-        "sql" => {
-            rules.push("Valid SQL for configured database dialect".into());
-        }
-        _ => {
-            if dialect.is_some() {
-                rules.push(format!("Project target: {}", dialect.as_deref().unwrap_or("")));
-            }
-        }
+        "shell" => push_configured_compiler_rule(&mut rules, primary, "Shell"),
+        "sql" => push_configured_compiler_rule(&mut rules, primary, "SQL"),
+        "lua" => push_configured_compiler_rule(&mut rules, primary, "Lua"),
+        "dart" => push_configured_compiler_rule(&mut rules, primary, "Dart"),
+        _ => push_configured_compiler_rule(&mut rules, primary, language),
     }
     rules
+}
+
+fn push_configured_compiler_rule(
+    rules: &mut Vec<String>,
+    primary: Option<&CompilerToolHint>,
+    label: &str,
+) {
+    if let Some(c) = primary {
+        if let Some(v) = &c.version {
+            rules.push(format!(
+                "Use only {label} syntax and APIs supported by configured {} ({v})",
+                c.id
+            ));
+            return;
+        }
+        rules.push(format!(
+            "Use only {label} syntax valid for configured compiler {}",
+            c.id
+        ));
+        return;
+    }
+    rules.push(format!("Use only valid {label} syntax for configured compiler"));
 }
 
 fn walk_search_dirs(ws: &Path, rel_path: &str) -> Vec<PathBuf> {
@@ -250,10 +298,10 @@ fn read_json_in_parents(ws: &Path, rel_path: &str, name: &str) -> Option<serde_j
         .and_then(|t| serde_json::from_str(&t).ok())
 }
 
-fn detect_jvm_dialect(ws: &Path, path: &str) -> Option<String> {
+fn detect_jvm_project_target(ws: &Path, path: &str) -> Option<String> {
     if gradle::find_gradle_root(ws, path).ok().flatten().is_some() {
-        let level = java_diagnostics::java_language_level(ws, path);
-        return Some(format!("JVM source level {level}"));
+        return java_diagnostics::project_java_release(ws, path)
+            .map(|v| format!("JVM project source {v}"));
     }
     None
 }
@@ -437,9 +485,58 @@ mod tests {
     }
 
     #[test]
-    fn java_rules_respect_level() {
-        let rules = build_rules("java", &Some("11".into()), Some(11));
-        assert!(rules.iter().any(|r| r.contains("Java 11")));
-        assert!(rules.iter().any(|r| r.contains("var in locals")));
+    fn java_rules_use_configured_jdk_not_project() {
+        let rules = build_rules("java", &[], Some(21));
+        assert!(rules.iter().any(|r| r.contains("Java 21")));
+        assert!(rules.iter().any(|r| r.contains("configured compiler JDK")));
+        assert!(rules.iter().any(|r| r.contains("sequenced collections")));
+        let rules17 = build_rules("java", &[], Some(17));
+        assert!(rules17.iter().any(|r| r.contains("Java 17")));
+        assert!(!rules17.iter().any(|r| r.contains("sequenced collections")));
+    }
+
+    #[test]
+    fn python_rules_use_configured_compiler_not_project() {
+        let compilers = vec![CompilerToolHint {
+            id: "python".into(),
+            version: Some("Python 3.12.1".into()),
+        }];
+        let rules = build_rules("python", &compilers, None);
+        assert!(rules.iter().any(|r| r.contains("configured python")));
+        assert!(rules.iter().any(|r| r.contains("3.12.1")));
+    }
+
+    #[test]
+    fn typescript_rules_use_configured_tsc() {
+        let compilers = vec![CompilerToolHint {
+            id: "tsc".into(),
+            version: Some("Version 5.4.5".into()),
+        }];
+        let rules = build_rules("typescript", &compilers, None);
+        assert!(rules.iter().any(|r| r.contains("configured tsc")));
+    }
+
+    #[test]
+    fn kotlin_rules_include_configured_jdk() {
+        let compilers = vec![
+            CompilerToolHint {
+                id: "kotlin".into(),
+                version: Some("Kotlin 2.0.0".into()),
+            },
+            CompilerToolHint {
+                id: "java".into(),
+                version: Some("21.0.2".into()),
+            },
+        ];
+        let rules = build_rules("kotlin", &compilers, None);
+        assert!(rules.iter().any(|r| r.contains("configured kotlin")));
+        assert!(rules.iter().any(|r| r.contains("Java 21")));
+    }
+
+    #[test]
+    fn parse_major_version_handles_common_strings() {
+        assert_eq!(parse_major_version("21.0.2"), Some(21));
+        assert_eq!(parse_major_version("Python 3.12.1"), Some(3));
+        assert_eq!(parse_major_version("openjdk version \"17.0.9\""), Some(17));
     }
 }

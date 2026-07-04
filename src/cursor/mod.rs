@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 mod spawn;
 
-pub use spawn::{bridge_dir, ensure_bridge_running, last_bridge_error, reclaim_bridge_port, stop_bridge};
+pub use spawn::{ensure_bridge_running, last_bridge_error, reclaim_bridge_port, stop_bridge};
 
 static BRIDGE_URL: RwLock<Option<String>> = RwLock::new(None);
 
