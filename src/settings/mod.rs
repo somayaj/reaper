@@ -191,7 +191,7 @@ impl SettingsStore {
             .and_then(|g| g.jdk_home.clone())
             .filter(|h| !h.is_empty());
 
-        let (configured, java_home, source) = if let Some(home) = from_file {
+        let (_configured, java_home, source) = if let Some(home) = from_file {
             (true, Some(home), Some("settings".to_string()))
         } else if let Some(home) = from_env {
             (true, Some(home), Some("env:REAPER_JAVA_HOME".to_string()))
@@ -328,6 +328,16 @@ impl SettingsStore {
         Ok(())
     }
 
+    pub fn show_repo(&self, name: &str) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let before = guard.hidden_repos.len();
+        guard.hidden_repos.retain(|n| n != name);
+        if guard.hidden_repos.len() != before {
+            self.save(&guard)?;
+        }
+        Ok(())
+    }
+
     pub fn general_view(&self) -> GeneralSettingsView {
         let (default_repo, last_repo, java_index_mode) = self
             .inner
@@ -347,10 +357,10 @@ impl SettingsStore {
                         .java_index_mode
                         .clone()
                         .filter(|m| !m.is_empty())
-                        .unwrap_or_else(|| "standard".into()),
+                        .unwrap_or_else(|| "lazy".into()),
                 )
             })
-            .unwrap_or_else(|| (None, None, "standard".into()));
+            .unwrap_or_else(|| (None, None, "lazy".into()));
         GeneralSettingsView {
             default_repo,
             last_repo,

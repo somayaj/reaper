@@ -4,6 +4,7 @@ mod cursor;
 mod gemini_chat;
 mod git_http;
 mod settings;
+mod ui_preferences;
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .merge(cursor::routes())
         .merge(gemini_chat::routes())
         .merge(settings::routes())
+        .merge(ui_preferences::routes())
         .merge(git_http::routes())
         .route_service(
             "/",

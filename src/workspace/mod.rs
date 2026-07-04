@@ -6,6 +6,8 @@ mod ruby_nav;
 mod shell;
 mod solargraph;
 mod clangd;
+mod jdtls;
+mod lsp;
 pub mod terminal;
 mod build_tasks;
 mod native_build_tasks;
@@ -14,11 +16,13 @@ mod classpath;
 pub use classpath::CompletionItem;
 mod gradle;
 mod maven;
+mod maven_classpath_inflight;
 mod inline_context;
 mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+mod java_javac_inflight;
 mod java_classpath;
 mod java_psi;
 mod java_sources;
@@ -368,9 +372,8 @@ pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
         if !status.success() {
             bail!("failed to reveal in file manager");
         }
+        return Ok(());
     }
-
-    Ok(())
 }
 
 const JAVA_DIAG_OVERLAY_PREFIX: &str = ".reaper/java-diagnostics/overlay/";
@@ -858,8 +861,7 @@ pub fn db_query(
     db_viewer::run_query(ws, database_url, ssl, sql, limit)
 }
 
-pub use db_viewer::{DbConnectionRequest, DbQueryRequest, DbQueryResult, DbSchemaResponse};
-pub use metadata::DbSslSettings;
+pub use db_viewer::{DbConnectionRequest, DbQueryRequest};
 
 pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     let path = safe_join(ws, rel_path)?;
@@ -900,8 +902,8 @@ pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
         if !status.success() {
             bail!("failed to open path");
         }
+        return Ok(());
     }
-    Ok(())
 }
 
 pub fn stream_workspace_run_task(
@@ -967,6 +969,10 @@ pub fn is_gradle_workspace(ws: &Path) -> bool {
     classpath::is_gradle_workspace(ws)
 }
 
+pub fn is_java_indexable_workspace(ws: &Path) -> bool {
+    classpath::is_java_indexable_workspace(ws)
+}
+
 pub fn warm_java_index(ws: &Path) -> Result<classpath::WarmIndexStatus> {
     classpath::warm_index(ws)
 }
@@ -983,19 +989,26 @@ pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfi
     project_profile::detect(ws)
 }
 
-pub use index_jobs::{JavaIndexJobs, JavaIndexStatus};
-pub use project_jobs::{ProjectIndexJobs, ProjectIndexStatus};
-pub use project_profile::ProjectProfile;
-pub use quick_fix::{QuickFix, QuickFixDiagnostic, QuickFixEdit, suggest_local_quick_fixes};
+pub use index_jobs::JavaIndexJobs;
+pub use project_jobs::ProjectIndexJobs;
+pub use quick_fix::{
+    QuickFix, QuickFixDiagnostic, QuickFixEdit, merge_quick_fixes, suggest_local_quick_fixes,
+};
+pub use jdtls::JdtlsCodeAction;
+pub use lsp::{FileTextEdits, ReferenceLocation, RenameRange, SignatureHelp};
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
 pub fn ensure_developer_path() {
     exec::ensure_developer_path();
 }
 
-/// Go-to-definition from these paths uses the Gradle/Java index; Ruby and other languages do not.
+/// Paths that use the custom Java index (Go to Class, Spring props). Completions merge index + jdtls.
 pub fn definition_uses_java_index(from_path: &str) -> bool {
     classpath::is_java_like(from_path)
+}
+
+pub fn should_ensure_java_index_for_completions(from_path: &str) -> bool {
+    definition_uses_java_index(from_path) || uses_spring_property_completions(from_path)
 }
 
 pub fn uses_spring_property_completions(from_path: &str) -> bool {
@@ -1243,6 +1256,22 @@ pub fn find_hover_with_content(
         }
     }
 
+    if from_path.ends_with(".java") {
+        if let Some(hit) =
+            classpath::find_external_definition(ws, from_path, line, column, &content)?
+        {
+            if classpath::definition_path_is_openable(ws, &hit.path) {
+                let def_content = read_file(ws, &hit.path).unwrap_or_else(|_| content.clone());
+                return Ok(Some(symbols::hover_info_from_location(
+                    &def_content, &hit,
+                )));
+            }
+        }
+        if let Some(info) = jdtls::find_hover(ws, from_path, line, column, &content)? {
+            return Ok(Some(info));
+        }
+    }
+
     let hit = find_definition_with_content(ws, from_path, line, column, Some(&content))?;
     let Some(hit) = hit else {
         return Ok(None);
@@ -1262,13 +1291,19 @@ pub fn find_definition_with_content(
         Some(c) => c.to_string(),
         None => read_file(ws, from_path)?,
     };
-    // Java/Kotlin: indexed imports + JDK/dependency sources beat workspace-wide text search
-    // (otherwise "String" in a .java file can jump to jquery.js).
+    // Java: indexed classpath navigation first (in-memory, cached), then jdtls LSP.
     if classpath::is_java_like(from_path) {
         if let Some(hit) =
             classpath::find_external_definition(ws, from_path, line, column, &content)?
         {
-            return Ok(Some(hit));
+            if classpath::definition_path_is_openable(ws, &hit.path) {
+                return Ok(Some(hit));
+            }
+        }
+        if let Some(hit) = jdtls::find_definition(ws, from_path, line, column, &content)? {
+            if classpath::definition_path_is_openable(ws, &hit.path) {
+                return Ok(Some(hit));
+            }
         }
     }
     if ruby_nav::is_ruby_path(from_path) {
@@ -1285,6 +1320,322 @@ pub fn find_definition_with_content(
         }
     }
     symbols::find_definition(ws, from_path, line, column, &content)
+}
+
+pub fn workspace_references(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Vec<ReferenceLocation>> {
+    if classpath::is_java_like(from_path) {
+        let jdtls_refs = jdtls::find_references(ws, from_path, line, column, content)?;
+        let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
+        return Ok(merge_reference_locations(jdtls_refs, fallback_refs));
+    }
+    if languages::is_c_like_path(from_path) {
+        let refs = clangd::find_references(ws, from_path, line, column, content)?;
+        if !refs.is_empty() {
+            return Ok(refs);
+        }
+    }
+    if ruby_nav::is_ruby_path(from_path) {
+        let refs = solargraph::find_references(ws, from_path, line, column, content)?;
+        if !refs.is_empty() {
+            return Ok(refs);
+        }
+    }
+    Ok(find_word_references_fallback(ws, from_path, line, column, content))
+}
+
+pub fn java_references(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Vec<ReferenceLocation>> {
+    workspace_references(ws, from_path, line, column, content)
+}
+
+fn merge_reference_locations(
+    mut primary: Vec<ReferenceLocation>,
+    secondary: Vec<ReferenceLocation>,
+) -> Vec<ReferenceLocation> {
+    for r in secondary {
+        if !primary.iter().any(|e| reference_same(e, &r)) {
+            primary.push(r);
+        }
+    }
+    primary.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    primary
+}
+
+fn reference_same(a: &ReferenceLocation, b: &ReferenceLocation) -> bool {
+    a.path == b.path && a.line == b.line && a.column == b.column
+}
+
+fn find_word_references_fallback(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Vec<ReferenceLocation> {
+    let Some(word) = symbols::word_at(content, line, column) else {
+        return Vec::new();
+    };
+    if word.is_empty() || symbols::is_keyword(&word) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let scan_root = reference_scan_root(ws, from_path);
+    scan_word_references(ws, &scan_root, from_path, &word, &mut out);
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    out
+}
+
+/// Limit text-based reference search to the enclosing build (Gradle wrapper root,
+/// Maven reactor, or plain-Java root) so multi-module projects include sibling modules.
+fn reference_scan_root(ws: &Path, from_path: &str) -> PathBuf {
+    if let Ok(Some(root)) = gradle::find_gradle_root(ws, from_path) {
+        let repo_root = gradle::find_gradle_wrapper_root(&root);
+        if repo_root.is_dir() {
+            return repo_root;
+        }
+    }
+    if let Ok(Some(module)) = maven::find_maven_root(ws, from_path) {
+        if let Some(reactor) = maven::find_maven_reactor_root(&module) {
+            if reactor.is_dir() {
+                return reactor;
+            }
+        }
+        if module.is_dir() {
+            return module;
+        }
+    }
+    if let Ok(Some(root)) = classpath::index_root_for_path(ws, from_path) {
+        let root = if root.is_absolute() {
+            root
+        } else {
+            ws.join(root)
+        };
+        if root.is_dir() {
+            return root;
+        }
+    }
+    ws.to_path_buf()
+}
+
+fn file_matches_reference_scope(from_path: &str, candidate: &str) -> bool {
+    if languages::is_c_like_path(from_path) {
+        return languages::is_c_like_path(candidate);
+    }
+    if classpath::is_java_like(from_path) {
+        return classpath::is_java_like(candidate);
+    }
+    if ruby_nav::is_ruby_path(from_path) {
+        return ruby_nav::is_ruby_path(candidate);
+    }
+    languages::language_for_path(from_path) == languages::language_for_path(candidate)
+}
+
+fn scan_word_references(
+    ws: &Path,
+    dir: &Path,
+    from_path: &str,
+    word: &str,
+    out: &mut Vec<ReferenceLocation>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if should_skip_tree_name(&name, true) {
+                continue;
+            }
+            scan_word_references(ws, &path, from_path, word, out);
+            continue;
+        }
+        let rel = path
+            .strip_prefix(ws)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if should_skip_search_path(&rel) || !file_matches_reference_scope(from_path, &rel) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (idx, line_text) in text.lines().enumerate() {
+            if let Some(col) = column_of_word(line_text, word) {
+                out.push(ReferenceLocation {
+                    path: rel.clone(),
+                    line: (idx + 1) as u32,
+                    column: col,
+                    end_line: (idx + 1) as u32,
+                    end_column: col + word.len() as u32,
+                });
+            }
+        }
+    }
+}
+
+pub fn workspace_prepare_rename(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<RenameRange>> {
+    if classpath::is_java_like(from_path) {
+        if let Some(range) = jdtls::prepare_rename(ws, from_path, line, column, content)? {
+            return Ok(Some(range));
+        }
+    }
+    if languages::is_c_like_path(from_path) {
+        if let Some(range) = clangd::prepare_rename(ws, from_path, line, column, content)? {
+            return Ok(Some(range));
+        }
+    }
+    Ok(None)
+}
+
+pub fn workspace_rename(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+) -> Result<Vec<FileTextEdits>> {
+    if classpath::is_java_like(from_path) {
+        let edits = jdtls::rename_symbol(ws, from_path, line, column, content, new_name)?;
+        if !edits.is_empty() {
+            return Ok(edits);
+        }
+    }
+    if languages::is_c_like_path(from_path) {
+        let edits = clangd::rename_symbol(ws, from_path, line, column, content, new_name)?;
+        if !edits.is_empty() {
+            return Ok(edits);
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn column_of_word(line: &str, word: &str) -> Option<u32> {
+    let mut i = 0;
+    while let Some(idx) = line[i..].find(word) {
+        let start = i + idx;
+        let before_ok = start == 0 || !is_ident_char(line.as_bytes()[start - 1]);
+        let end = start + word.len();
+        let after_ok = end >= line.len() || !is_ident_char(line.as_bytes()[end]);
+        if before_ok && after_ok {
+            return Some((start + 1) as u32);
+        }
+        i = end;
+    }
+    None
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+pub fn java_prepare_rename(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<RenameRange>> {
+    workspace_prepare_rename(ws, from_path, line, column, content)
+}
+
+pub fn java_rename(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+) -> Result<Vec<FileTextEdits>> {
+    workspace_rename(ws, from_path, line, column, content, new_name)
+}
+
+pub fn workspace_signature_help(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<SignatureHelp>> {
+    if classpath::is_java_like(from_path) {
+        if let Some(help) = jdtls::signature_help(ws, from_path, line, column, content)? {
+            return Ok(Some(help));
+        }
+    }
+    if languages::is_c_like_path(from_path) {
+        if let Some(help) = clangd::signature_help(ws, from_path, line, column, content)? {
+            return Ok(Some(help));
+        }
+    }
+    Ok(None)
+}
+
+pub fn java_signature_help(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<SignatureHelp>> {
+    workspace_signature_help(ws, from_path, line, column, content)
+}
+
+pub fn java_code_actions(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    only: &[&str],
+) -> Result<Vec<JdtlsCodeAction>> {
+    jdtls::code_actions(ws, from_path, line, column, content, only)
+}
+
+pub fn jdtls_code_actions_as_quick_fixes(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    only: &[&str],
+) -> Result<Vec<QuickFix>> {
+    let actions = java_code_actions(ws, from_path, line, column, content, only)?;
+    Ok(actions
+        .into_iter()
+        .filter_map(|action| {
+            let edits = action
+                .edits
+                .into_iter()
+                .find(|f| f.path == from_path)
+                .map(|f| f.edits)
+                .filter(|e| !e.is_empty())?;
+            Some(QuickFix {
+                title: action.title,
+                edits,
+                provider: Some("jdtls".into()),
+            })
+        })
+        .collect())
 }
 
 pub fn java_completions(
@@ -1310,6 +1661,13 @@ pub fn java_completions(
         Vec::new()
     };
 
+    if from_path.ends_with(".java") {
+        let jdtls_items = jdtls::find_completions(ws, from_path, line, column, &content)?;
+        if !jdtls_items.is_empty() {
+            items = merge_completion_items(jdtls_items, items, 80);
+        }
+    }
+
     let sym_items = symbols::completions(ws, from_path, &content, prefix, line, column)?;
     if items.is_empty() {
         return Ok(sym_items);
@@ -1328,6 +1686,33 @@ pub fn java_completions(
     Ok(items)
 }
 
+fn merge_completion_items(
+    primary: Vec<classpath::CompletionItem>,
+    fallback: Vec<classpath::CompletionItem>,
+    limit: usize,
+) -> Vec<classpath::CompletionItem> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in primary {
+        if seen.insert(item.label.clone()) {
+            out.push(item);
+        }
+        if out.len() >= limit {
+            return out;
+        }
+    }
+    for item in fallback {
+        if seen.insert(item.label.clone()) {
+            out.push(item);
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
 pub fn format_file(ws: &Path, rel_path: &str, content: &str) -> Result<String> {
     let _path = safe_join(ws, rel_path)?;
     symbols::format_content(ws, rel_path, content)
@@ -1338,12 +1723,8 @@ pub fn file_diagnostics(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
-) -> Result<Vec<diagnostics::Diagnostic>> {
-    diagnostics::check_file(ws, rel_path, content, overlays)
-}
-
-pub fn java_language_level(ws: &Path, rel_path: &str) -> u32 {
-    java_diagnostics::java_language_level(ws, rel_path)
+) -> Result<diagnostics::FileDiagnosticsResult> {
+    diagnostics::diagnose_file(ws, rel_path, content, overlays)
 }
 
 pub fn language_compiler_context(ws: &Path, rel_path: &str) -> language_compiler_context::LanguageCompilerContext {
@@ -1405,10 +1786,64 @@ pub fn should_prefer_ai_statement_inline(
     inline_context::should_prefer_ai_statement_inline(path, line_prefix, content, line)
 }
 
+pub fn is_import_typing_line(path: &str, content: &str, line: u32, line_prefix: &str) -> bool {
+    inline_context::is_import_typing_line(path, content, line, line_prefix)
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn reference_scan_root_uses_gradle_wrapper_root_for_submodules() {
+        let root = std::env::temp_dir().join(format!("reaper-ref-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gradle/wrapper")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'root'\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\nexit 0\n").unwrap();
+        let module = root.join("api");
+        std::fs::create_dir_all(module.join("src/main/java/com/example")).unwrap();
+        std::fs::write(module.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            module.join("src/main/java/com/example/Foo.java"),
+            "package com.example; class Foo {}",
+        )
+        .unwrap();
+
+        let from = "api/src/main/java/com/example/Foo.java";
+        let scan = reference_scan_root(&root, from);
+        assert_eq!(
+            scan.canonicalize().unwrap_or(scan.clone()),
+            root.canonicalize().unwrap_or(root.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_reference_locations_dedupes_by_path_line_column() {
+        let a = ReferenceLocation {
+            path: "app/src/Main.java".into(),
+            line: 10,
+            column: 5,
+            end_line: 10,
+            end_column: 22,
+        };
+        let dup = a.clone();
+        let other = ReferenceLocation {
+            path: "common/src/Util.java".into(),
+            line: 3,
+            column: 12,
+            end_line: 3,
+            end_column: 29,
+        };
+        let merged = merge_reference_locations(vec![a], vec![dup, other.clone()]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].path, "app/src/Main.java");
+        assert_eq!(merged[1].path, other.path);
+    }
 
     #[test]
     fn read_file_accepts_absolute_paths_outside_workspace() {

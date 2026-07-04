@@ -74,7 +74,13 @@ Git smart HTTP:
 
 ## Releases
 
-macOS DMGs (Apple Silicon and Intel) are published at [reaper-org/releases](https://github.com/reaper-org/releases/releases). Build locally with `./scripts/build-macos-dmg.sh` (arm64) or `./scripts/build-macos-intel-dmg.sh` (x86_64), then `./scripts/release-macos.sh`.
+macOS DMGs (Apple Silicon and Intel) are published at [reaper-org/releases](https://github.com/reaper-org/releases/releases). Build locally:
+
+- **Split release (recommended):** `./scripts/build-macos-split-dmgs.sh` — arm64 + x86_64 DMGs (~half the size each vs universal)
+- **This Mac only:** `./scripts/build-macos-dmg.sh` (arm64 on Apple Silicon) or `./scripts/build-macos-intel-dmg.sh` (x86_64)
+- **Universal (both archs in one app):** `./scripts/build-macos-universal-dmg.sh`
+
+Publish: `./scripts/release-macos-split.sh` or per-arch `./scripts/release-macos.sh`
 
 Editor regression tests run automatically on `cargo build` (skip with `REAPER_SKIP_EDITOR_TESTS=1`).
 

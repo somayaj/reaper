@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, patch, put},
+    routing::{delete, get, patch},
 };
 use serde::Deserialize;
 

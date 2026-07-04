@@ -100,7 +100,7 @@ pub fn has_cached_properties(gradle_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn build_index(ws: &Path, gradle_root: &Path, jars: &[PathBuf]) -> Result<()> {
+pub fn build_index(_ws: &Path, gradle_root: &Path, jars: &[PathBuf]) -> Result<()> {
     let mut by_name: HashMap<String, SpringPropertyEntry> = HashMap::new();
 
     for jar in jars {

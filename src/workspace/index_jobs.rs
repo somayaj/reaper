@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -31,13 +31,21 @@ fn default_index_complete() -> bool {
     true
 }
 
+struct QueuedModule {
+    root: PathBuf,
+    root_key: String,
+}
+
 #[derive(Default)]
 struct JobEntry {
     building: bool,
     background_running: bool,
     tooling_running: bool,
-    /// Module roots currently indexing (lazy on-demand).
-    root_building: std::collections::HashSet<String>,
+    /// Module roots queued or currently indexing (lazy on-demand).
+    root_building: HashSet<String>,
+    /// FIFO queue — one module indexed at a time per repo to avoid Maven/CPU spikes.
+    module_queue: VecDeque<QueuedModule>,
+    module_queue_running: bool,
     status: JavaIndexStatus,
 }
 
@@ -97,6 +105,52 @@ impl JavaIndexJobs {
 
     /// Start a background index build if one is not already running.
     pub fn ensure_building(&self, repo: &str, ws: &Path) {
+        self.ensure_building_inner(repo, ws, false);
+    }
+
+    /// Mark the repo ready for on-demand per-module indexing (no full-repo warm at open).
+    pub fn init_on_demand(&self, repo: &str, ws: &Path) {
+        if !classpath::is_java_indexable_workspace(ws) {
+            return;
+        }
+        self.refresh_status_from_disk(repo, ws);
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let entry = guard.entry(repo.to_string()).or_default();
+        if entry.building || entry.background_running || entry.module_queue_running {
+            return;
+        }
+        if entry.status.state.is_empty()
+            || entry.status.state == "idle"
+            || (entry.status.phase == "on-demand" && entry.status.symbol_count == 0)
+        {
+            entry.status = JavaIndexStatus {
+                state: "ready".into(),
+                phase: "on-demand".into(),
+                index_complete: true,
+                ..Default::default()
+            };
+        }
+    }
+
+    /// Go to Class: build the dependency class index on first use (lazy mode skips until this).
+    pub fn ensure_for_class_search(&self, repo: &str, ws: &Path) {
+        if !classpath::is_java_indexable_workspace(ws) {
+            return;
+        }
+        let has_symbols = classpath::peek_index_status(ws)
+            .ok()
+            .is_some_and(|p| p.symbol_count > 0);
+        if has_symbols {
+            self.refresh_status_from_disk(repo, ws);
+            return;
+        }
+        self.ensure_building_inner(repo, ws, true);
+    }
+
+    fn ensure_building_inner(&self, repo: &str, ws: &Path, force: bool) {
         if !classpath::is_java_indexable_workspace(ws) {
             let mut guard = match self.inner.lock() {
                 Ok(g) => g,
@@ -112,24 +166,8 @@ impl JavaIndexJobs {
             return;
         }
 
-        if classpath::java_index_is_lazy() {
-            self.refresh_status_from_disk(repo, ws);
-            let mut guard = match self.inner.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            let entry = guard.entry(repo.to_string()).or_default();
-            if entry.building || entry.status.state == "running" {
-                return;
-            }
-            if entry.status.symbol_count == 0 {
-                entry.status = JavaIndexStatus {
-                    state: "ready".into(),
-                    phase: "on-demand".into(),
-                    index_complete: true,
-                    ..Default::default()
-                };
-            }
+        if classpath::java_index_on_demand_modules() && !force {
+            self.init_on_demand(repo, ws);
             return;
         }
 
@@ -153,7 +191,9 @@ impl JavaIndexJobs {
                     if !entry.building {
                         entry.status = status_from_warm(peek, None);
                     }
-                    let spawn_bg = background_pending && !entry.background_running;
+                    let spawn_bg = background_pending
+                        && !entry.background_running
+                        && classpath::java_index_background_enabled();
                     let return_ready = !needs_tooling
                         && peek.cached
                         && peek.index_complete
@@ -259,6 +299,9 @@ impl JavaIndexJobs {
     }
 
     fn spawn_background_index(&self, repo_key: &str, ws: &Path) {
+        if !classpath::java_index_background_enabled() {
+            return;
+        }
         let should_spawn = {
             let mut guard = match self.inner.lock() {
                 Ok(g) => g,
@@ -345,12 +388,8 @@ impl JavaIndexJobs {
         });
     }
 
-    /// Lazy mode: index the module containing `rel_path` when a file is opened or completions run.
+    /// Index the module containing `rel_path` when a file is opened or completions run.
     pub fn ensure_module_for_path(&self, repo: &str, ws: &Path, rel_path: &str) {
-        if !classpath::java_index_is_lazy() {
-            self.ensure_building(repo, ws);
-            return;
-        }
         if !classpath::is_java_indexable_workspace(ws) {
             return;
         }
@@ -358,9 +397,13 @@ impl JavaIndexJobs {
             return;
         };
         let root_for_index = root.canonicalize().unwrap_or(root);
+        if classpath::module_index_is_cached(ws, &root_for_index) {
+            self.refresh_status_from_disk(repo, ws);
+            return;
+        }
         let root_key = root_for_index.display().to_string();
 
-        let should_spawn = {
+        let should_start_worker = {
             let mut guard = match self.inner.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -370,69 +413,120 @@ impl JavaIndexJobs {
                 return;
             }
             entry.root_building.insert(root_key.clone());
+            entry.module_queue.push_back(QueuedModule {
+                root: root_for_index,
+                root_key,
+            });
             if entry.status.state.is_empty() || entry.status.state == "idle" {
                 entry.status.state = "ready".into();
                 entry.status.phase = "on-demand".into();
             }
-            true
+            let start = !entry.module_queue_running;
+            if start {
+                entry.module_queue_running = true;
+            }
+            start
         };
-        if !should_spawn {
-            return;
-        }
 
+        if should_start_worker {
+            self.spawn_module_queue_worker(repo, ws);
+        }
+    }
+
+    fn spawn_module_queue_worker(&self, repo: &str, ws: &Path) {
         let inner = Arc::clone(&self.inner);
         let repo_key = repo.to_string();
         let ws_path = ws.to_path_buf();
         std::thread::spawn(move || {
-            if crate::process_registry::is_shutdown_requested() {
-                return;
-            }
-            let progress_inner = Arc::clone(&inner);
-            let progress_repo = repo_key.clone();
-            let progress: Box<dyn Fn(&str, usize) + Send> = Box::new(move |phase: &str, count: usize| {
-                if let Ok(mut guard) = progress_inner.lock() {
-                    if let Some(entry) = guard.get_mut(&progress_repo) {
-                        entry.status.state = "running".into();
-                        entry.status.phase = phase.to_string();
-                        entry.status.symbol_count = count;
-                    }
+            loop {
+                if crate::process_registry::is_shutdown_requested() {
+                    break;
                 }
-            });
-            let warm = classpath::warm_single_root_index(&ws_path, &root_for_index, Some(&progress));
-            let mut guard = match inner.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            let Some(entry) = guard.get_mut(&repo_key) else {
-                return;
-            };
-            entry.root_building.remove(&root_key);
-            match warm {
-                Ok(w) if w.symbol_count > 0 => {
-                    entry.status = status_from_warm(&w, None);
-                    if !w.index_complete {
-                        drop(guard);
-                        JavaIndexJobs {
-                            inner: Arc::clone(&inner),
-                        }
-                        .spawn_background_index_for_root(&repo_key, &ws_path, &root_for_index);
-                    }
-                }
-                Ok(_) => {
-                    entry.status.phase = "on-demand".into();
-                }
-                Err(e) => {
-                    entry.status = JavaIndexStatus {
-                        state: "error".into(),
-                        error: Some(e.to_string()),
-                        ..Default::default()
+
+                let next = {
+                    let mut guard = match inner.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
                     };
+                    let Some(entry) = guard.get_mut(&repo_key) else {
+                        break;
+                    };
+                    entry.module_queue.pop_front()
+                };
+
+                let Some(queued) = next else {
+                    let mut guard = match inner.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    if let Some(entry) = guard.get_mut(&repo_key) {
+                        entry.module_queue_running = false;
+                    }
+                    break;
+                };
+
+                let root_for_index = queued.root;
+                let root_key = queued.root_key.clone();
+
+                let progress_inner = Arc::clone(&inner);
+                let progress_repo = repo_key.clone();
+                let progress: Box<dyn Fn(&str, usize) + Send> =
+                    Box::new(move |phase: &str, count: usize| {
+                        if let Ok(mut guard) = progress_inner.lock() {
+                            if let Some(entry) = guard.get_mut(&progress_repo) {
+                                entry.status.state = "running".into();
+                                entry.status.phase = phase.to_string();
+                                entry.status.symbol_count = count;
+                            }
+                        }
+                    });
+
+                let warm =
+                    classpath::warm_single_root_index(&ws_path, &root_for_index, Some(&progress));
+
+                // On-demand modules use lazy JAR limits and never background-sweep.
+                let needs_background = false;
+
+                {
+                    let mut guard = match inner.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    let Some(entry) = guard.get_mut(&repo_key) else {
+                        break;
+                    };
+                    entry.root_building.remove(&root_key);
+                    match warm {
+                        Ok(w) if w.symbol_count > 0 => {
+                            entry.status = status_from_warm(&w, None);
+                        }
+                        Ok(_) => {
+                            entry.status.phase = "on-demand".into();
+                        }
+                        Err(e) => {
+                            entry.status = JavaIndexStatus {
+                                state: "error".into(),
+                                error: Some(e.to_string()),
+                                ..Default::default()
+                            };
+                        }
+                    }
+                }
+
+                if needs_background {
+                    JavaIndexJobs {
+                        inner: Arc::clone(&inner),
+                    }
+                    .spawn_background_index_for_root(&repo_key, &ws_path, &root_for_index);
                 }
             }
         });
     }
 
     fn spawn_background_index_for_root(&self, repo_key: &str, ws: &Path, root: &Path) {
+        if !classpath::java_index_background_enabled() {
+            return;
+        }
         let root_key = root
             .canonicalize()
             .unwrap_or_else(|_| root.to_path_buf())
@@ -609,5 +703,44 @@ fn status_from_warm(warm: &WarmIndexStatus, error: Option<String>) -> JavaIndexS
         jars_indexed: warm.jars_indexed,
         jars_total: warm.jars_total,
         index_complete: warm.index_complete,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_queue_dedupes_same_root() {
+        let jobs = JavaIndexJobs::new();
+        let repo = "test-repo";
+        let mut guard = jobs.inner.lock().expect("lock");
+        let entry = guard.entry(repo.to_string()).or_default();
+        entry.root_building.insert("/tmp/module-a".into());
+        entry.module_queue.push_back(QueuedModule {
+            root: PathBuf::from("/tmp/module-a"),
+            root_key: "/tmp/module-a".into(),
+        });
+        entry.module_queue_running = true;
+        drop(guard);
+
+        // Second enqueue for same root should be ignored when root_building contains key.
+        let should_start = {
+            let mut guard = jobs.inner.lock().expect("lock");
+            let entry = guard.entry(repo.to_string()).or_default();
+            if entry.root_building.contains("/tmp/module-a") {
+                false
+            } else {
+                entry.root_building.insert("/tmp/module-a".into());
+                entry.module_queue.push_back(QueuedModule {
+                    root: PathBuf::from("/tmp/module-a"),
+                    root_key: "/tmp/module-a".into(),
+                });
+                true
+            }
+        };
+        assert!(!should_start);
+        let guard = jobs.inner.lock().expect("lock");
+        assert_eq!(guard.get(repo).unwrap().module_queue.len(), 1);
     }
 }

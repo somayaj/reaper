@@ -1,3 +1,4 @@
+mod platform;
 mod config;
 mod cursor;
 mod port;
@@ -13,6 +14,7 @@ mod settings;
 mod state;
 mod system;
 mod toolchain;
+mod ui_preferences;
 mod web;
 mod workspace;
 
@@ -24,6 +26,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use config::{Config, running_in_app_bundle};
 use settings::SettingsStore;
 use state::AppState;
+use ui_preferences::UiPreferencesStore;
 
 fn main() -> anyhow::Result<()> {
     workspace::ensure_developer_path();
@@ -103,6 +106,7 @@ async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
     config.ensure_dirs()?;
 
     let settings = SettingsStore::load(&config.settings_path)?;
+    let ui_preferences = UiPreferencesStore::load(&config.ui_preferences_path)?;
 
     cursor::reclaim_bridge_port().await;
     match cursor::ensure_bridge_running().await {
@@ -112,7 +116,7 @@ async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
         ),
     }
 
-    Ok(AppState::new(config, settings))
+    Ok(AppState::new(config, settings, ui_preferences))
 }
 
 fn prefetch_startup_index(state: &AppState) {

@@ -190,6 +190,7 @@ pub fn run(url: &str) -> anyhow::Result<()> {
         }
     });
 
+    #[allow(unreachable_code)]
     Ok(())
 }
 

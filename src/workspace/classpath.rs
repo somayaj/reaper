@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -14,6 +13,8 @@ use super::java_psi::{self, ImportMap};
 use super::symbols::{ClassSearchHit, SymbolLocation, class_name_match_score};
 
 const PEEK_INDEX_CACHE_TTL: Duration = Duration::from_secs(10);
+/// Shorter TTL while indexing is incomplete — avoids stamp walks on every UI poll.
+const PEEK_INDEX_CACHE_TTL_PENDING: Duration = Duration::from_secs(3);
 const NEEDS_REFRESH_CACHE_TTL: Duration = Duration::from_secs(15);
 
 static PEEK_INDEX_CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, WarmIndexStatus)>>> =
@@ -44,6 +45,8 @@ const INDEX_VERSION: u32 = 12;
 const STARTUP_JAR_LIMIT_STANDARD: usize = 2000;
 /// Fewer JARs for light profile; no background continuation.
 const STARTUP_JAR_LIMIT_LIGHT: usize = 400;
+/// Lazy mode: small priority-JAR slice; no background sweep (jdtls covers editing).
+const STARTUP_JAR_LIMIT_LAZY: usize = 64;
 const BACKGROUND_JAR_SLEEP_MS: u64 = 250;
 const FOREGROUND_JAR_YIELD_EVERY: usize = 8;
 const FOREGROUND_JAR_SLEEP_MS: u64 = 12;
@@ -83,12 +86,13 @@ impl JavaIndexProfile {
     fn startup_jar_limit(self) -> usize {
         match self {
             Self::Standard => STARTUP_JAR_LIMIT_STANDARD,
-            Self::Light | Self::Lazy => STARTUP_JAR_LIMIT_LIGHT,
+            Self::Light => STARTUP_JAR_LIMIT_LIGHT,
+            Self::Lazy => STARTUP_JAR_LIMIT_LAZY,
         }
     }
 
     fn background_enabled(self) -> bool {
-        matches!(self, Self::Standard | Self::Lazy)
+        matches!(self, Self::Standard | Self::Light)
     }
 
     fn index_all_modules_on_startup(self) -> bool {
@@ -99,6 +103,16 @@ impl JavaIndexProfile {
 /// True when Java indexes load per module as files are opened.
 pub fn java_index_is_lazy() -> bool {
     JavaIndexProfile::current() == JavaIndexProfile::Lazy
+}
+
+/// Index only the module for the file being edited (default for all profiles).
+pub fn java_index_on_demand_modules() -> bool {
+    true
+}
+
+/// True when staged JAR indexing may continue in a background thread.
+pub fn java_index_background_enabled() -> bool {
+    JavaIndexProfile::current().background_enabled()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -440,7 +454,7 @@ pub fn warm_single_root_index(
     let index = if cached {
         load_index(ws, root)?
     } else {
-        build_index(ws, root, progress)?
+        build_index(ws, root, progress, true)?
     };
     let meta = index_meta(root);
     let mut status = empty_warm_status();
@@ -503,10 +517,11 @@ fn cache_definition(key: String, hit: Option<SymbolLocation>) {
 }
 
 fn cached_definition(key: &str) -> Option<Option<SymbolLocation>> {
-    DEFINITION_CACHE
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(key).cloned())
+    DEFINITION_CACHE.lock().ok().and_then(|guard| {
+        guard.get(key).cloned().map(|hit| {
+            hit.filter(|loc| !loc.path.ends_with(".jar"))
+        })
+    })
 }
 
 fn parse_imports_cached(gradle_root: &Path, from_path: &str, content: &str) -> ImportMap {
@@ -685,6 +700,7 @@ fn find_plain_java_root(ws: &Path, rel_path: &str) -> Option<PathBuf> {
 }
 
 const TOOLING_CLASSPATH_DONE: &str = "tooling-classpath.done";
+const REACTOR_TOOLING_CLASSPATH_DONE: &str = "reactor-tooling-classpath.done";
 const TEST_CLASSPATH_DONE: &str = "tooling-test-classpath.done";
 const CLASSPATH_JARS_CACHE: &str = "classpath-jars.json";
 const CLASSPATH_OUTPUTS_CACHE: &str = "classpath-outputs.json";
@@ -1020,6 +1036,20 @@ pub fn needs_tooling_classpath_resolve(project_root: &Path) -> bool {
     if !index_build_tooling_enabled() || !is_build_tool_project_root(project_root) {
         return false;
     }
+    if tooling_classpath_resolved(project_root) {
+        return false;
+    }
+    if super::maven::is_maven_project_root(project_root) {
+        if maven_offline_classpath_sufficient(project_root) {
+            let _ = persist_maven_offline_classpath(project_root);
+            return false;
+        }
+        let anchor = super::maven_classpath_inflight::reactor_lock_anchor(project_root);
+        if reactor_tooling_resolved(&anchor) {
+            let _ = fan_out_reactor_classpaths_from_cache(&anchor, None);
+            return !tooling_classpath_resolved(project_root);
+        }
+    }
     !tooling_classpath_resolved(project_root)
 }
 
@@ -1172,12 +1202,32 @@ fn resolve_maven_classpath_via_tooling(
     maven_root: &Path,
     progress: IndexProgress,
 ) -> Result<GradleClasspath> {
-    ensure_maven_dependencies(maven_root, progress)?;
-    let resolved = resolve_classpath_from_m2(maven_root);
-    if !resolved.jars.is_empty() {
-        return Ok(resolved);
+    ensure_maven_reactor_classpath_resolved(maven_root, progress)?;
+    let mut resolved = resolve_classpath_from_m2(maven_root);
+    match resolve_maven_classpath_via_mvn(maven_root, progress) {
+        Ok(mvn_cp) if !mvn_cp.jars.is_empty() => {
+            resolved.jars = merge_classpath_jars(&resolved.jars, &mvn_cp.jars);
+            resolved.source_jars = merge_classpath_jars(&resolved.source_jars, &mvn_cp.source_jars);
+            if resolved.log.is_empty() {
+                resolved.log = mvn_cp.log;
+            } else if !mvn_cp.log.is_empty() {
+                resolved.log = format!("{} + {}", resolved.log, mvn_cp.log);
+            }
+        }
+        Ok(_) if resolved.jars.is_empty() => {
+            return resolve_maven_classpath_via_mvn(maven_root, progress);
+        }
+        Err(e) if resolved.jars.is_empty() => return Err(e),
+        Err(e) => {
+            tracing::debug!(
+                "mvn dependency:build-classpath failed for {} (using M2 tree): {e:#}",
+                maven_root.display()
+            );
+        }
+        _ => {}
     }
-    resolve_maven_classpath_via_mvn(maven_root, progress)
+    resolved.jars = supplement_jakarta_persistence_api(&resolved.jars);
+    Ok(resolved)
 }
 
 pub fn compile_classpath_jars(gradle_root: &Path) -> Result<Vec<PathBuf>> {
@@ -1535,6 +1585,43 @@ fn jar_provides_package(jar: &Path, package: &str) -> bool {
     s.contains(&format!("/{}/", pkg.replace('.', "/")))
 }
 
+fn classpath_has_jakarta_persistence_api(jars: &[PathBuf]) -> bool {
+    jars.iter().any(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| {
+                n.starts_with("jakarta.persistence-api")
+                    || n.starts_with("javax.persistence-api")
+            })
+    })
+}
+
+/// JPA entity annotations (`@OneToMany`, etc.) live in jakarta.persistence-api — ensure it is present for javac.
+fn supplement_jakarta_persistence_api(jars: &[PathBuf]) -> Vec<PathBuf> {
+    if classpath_has_jakarta_persistence_api(jars) {
+        return jars.to_vec();
+    }
+    let needs_jpa = jars.iter().any(|p| {
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.contains("hibernate-core")
+            || s.contains("spring-data-jpa")
+            || s.contains("spring-boot-starter-data-jpa")
+    });
+    if !needs_jpa {
+        return jars.to_vec();
+    }
+    for version in ["3.1.0", "3.1.1", "3.0.0", "2.2.3"] {
+        if let Some(jar) =
+            super::maven::find_m2_jar("jakarta.persistence", "jakarta.persistence-api", version)
+        {
+            if jar.is_file() {
+                return merge_classpath_jars(jars, &[jar]);
+            }
+        }
+    }
+    jars.to_vec()
+}
+
 fn merge_classpath_jars(primary: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -1575,6 +1662,7 @@ pub fn resolve_javac_classpath_for_file(
 ) -> Vec<PathBuf> {
     let include_test = file_needs_test_classpath(rel_path, content);
     let mut jars = collect_dependency_jars_for_javac(project_root, include_test);
+    jars = supplement_jakarta_persistence_api(&jars);
     jars = super::java_classpath::complete_classpath(jars, include_test);
     jars = dedupe_classpath_entries(filter_existing_classpath_entries(
         jars.into_iter().filter(|p| p.is_file()).collect(),
@@ -1665,7 +1753,72 @@ pub fn import_fqcn_for_symbol(
 fn well_known_import(symbol: &str) -> Option<&'static str> {
     WELL_KNOWN_JAVA_IMPORTS
         .iter()
+        .chain(WELL_KNOWN_JDK_IMPORTS.iter())
         .find_map(|(name, fqcn)| (*name == symbol).then_some(*fqcn))
+}
+
+fn well_known_lombok_import(symbol: &str) -> Option<&'static str> {
+    WELL_KNOWN_LOMBOK_IMPORTS
+        .iter()
+        .find_map(|(name, fqcn)| (*name == symbol).then_some(*fqcn))
+}
+
+const WELL_KNOWN_LOMBOK_IMPORTS: &[(&str, &str)] = &[
+    ("Slf4j", "lombok.extern.slf4j.Slf4j"),
+    ("Log", "lombok.extern.java.Log"),
+    ("Log4j", "lombok.extern.log4j.Log4j"),
+    ("Log4j2", "lombok.extern.log4j.Log4j2"),
+    ("CommonsLog", "lombok.extern.apachecommons.CommonsLog"),
+    ("Data", "lombok.Data"),
+    ("Getter", "lombok.Getter"),
+    ("Setter", "lombok.Setter"),
+    ("RequiredArgsConstructor", "lombok.RequiredArgsConstructor"),
+    ("AllArgsConstructor", "lombok.AllArgsConstructor"),
+    ("NoArgsConstructor", "lombok.NoArgsConstructor"),
+    ("Builder", "lombok.Builder"),
+    ("EqualsAndHashCode", "lombok.EqualsAndHashCode"),
+    ("ToString", "lombok.ToString"),
+    ("With", "lombok.With"),
+    ("Value", "lombok.Value"),
+    ("NonNull", "lombok.NonNull"),
+    ("Cleanup", "lombok.Cleanup"),
+    ("Synchronized", "lombok.Synchronized"),
+    ("Singular", "lombok.Singular"),
+    ("SuperBuilder", "lombok.experimental.SuperBuilder"),
+    ("UtilityClass", "lombok.experimental.UtilityClass"),
+    ("FieldDefaults", "lombok.experimental.FieldDefaults"),
+    ("Accessors", "lombok.experimental.Accessors"),
+    ("Jacksonized", "lombok.extern.jackson.Jacksonized"),
+];
+
+fn project_uses_lombok(gradle_root: &Path) -> bool {
+    classpath_includes_lombok(&cached_classpath_jars(gradle_root))
+}
+
+/// Resolve Lombok annotation simple names when the file or project uses Lombok.
+fn infer_lombok_fqcn(content: &str, symbol: &str, gradle_root: &Path) -> Option<String> {
+    if !super::java_ecosystem::file_uses_lombok(content) && !project_uses_lombok(gradle_root) {
+        return None;
+    }
+    if !content.contains(&format!("@{symbol}")) {
+        let names = super::java_psi::annotation_simple_names(content);
+        if !names.iter().any(|n| n == symbol) {
+            return None;
+        }
+    }
+    well_known_lombok_import(symbol).map(str::to_string)
+}
+
+fn library_location_for_indexed_type(
+    ws: &Path,
+    root: &Path,
+    hit: &IndexedSymbol,
+    symbol: &str,
+) -> Option<SymbolLocation> {
+    if is_library_fqcn(&hit.qualified) || hit.path.contains("classpath-jar") {
+        return resolve_library_type_location(ws, root, &hit.qualified, symbol);
+    }
+    None
 }
 
 const WELL_KNOWN_JAVA_IMPORTS: &[(&str, &str)] = &[
@@ -1695,6 +1848,75 @@ const WELL_KNOWN_JAVA_IMPORTS: &[(&str, &str)] = &[
     ("Pageable", "org.springframework.data.domain.Pageable"),
     ("PageRequest", "org.springframework.data.domain.PageRequest"),
     ("Sort", "org.springframework.data.domain.Sort"),
+];
+
+const WELL_KNOWN_JDK_IMPORTS: &[(&str, &str)] = &[
+    ("List", "java.util.List"),
+    ("ArrayList", "java.util.ArrayList"),
+    ("LinkedList", "java.util.LinkedList"),
+    ("Map", "java.util.Map"),
+    ("HashMap", "java.util.HashMap"),
+    ("LinkedHashMap", "java.util.LinkedHashMap"),
+    ("TreeMap", "java.util.TreeMap"),
+    ("Set", "java.util.Set"),
+    ("HashSet", "java.util.HashSet"),
+    ("LinkedHashSet", "java.util.LinkedHashSet"),
+    ("TreeSet", "java.util.TreeSet"),
+    ("Deque", "java.util.Deque"),
+    ("ArrayDeque", "java.util.ArrayDeque"),
+    ("Queue", "java.util.Queue"),
+    ("Optional", "java.util.Optional"),
+    ("Arrays", "java.util.Arrays"),
+    ("Collections", "java.util.Collections"),
+    ("Objects", "java.util.Objects"),
+    ("UUID", "java.util.UUID"),
+    ("Properties", "java.util.Properties"),
+    ("Comparator", "java.util.Comparator"),
+    ("Iterator", "java.util.Iterator"),
+    ("Pattern", "java.util.regex.Pattern"),
+    ("Matcher", "java.util.regex.Matcher"),
+    ("Stream", "java.util.stream.Stream"),
+    ("Collectors", "java.util.stream.Collectors"),
+    ("CompletableFuture", "java.util.concurrent.CompletableFuture"),
+    ("Future", "java.util.concurrent.Future"),
+    ("ExecutorService", "java.util.concurrent.ExecutorService"),
+    ("Executors", "java.util.concurrent.Executors"),
+    ("ConcurrentHashMap", "java.util.concurrent.ConcurrentHashMap"),
+    ("File", "java.io.File"),
+    ("FileInputStream", "java.io.FileInputStream"),
+    ("FileOutputStream", "java.io.FileOutputStream"),
+    ("InputStream", "java.io.InputStream"),
+    ("OutputStream", "java.io.OutputStream"),
+    ("Reader", "java.io.Reader"),
+    ("Writer", "java.io.Writer"),
+    ("BufferedReader", "java.io.BufferedReader"),
+    ("BufferedWriter", "java.io.BufferedWriter"),
+    ("PrintWriter", "java.io.PrintWriter"),
+    ("PrintStream", "java.io.PrintStream"),
+    ("IOException", "java.io.IOException"),
+    ("Path", "java.nio.file.Path"),
+    ("Paths", "java.nio.file.Paths"),
+    ("Files", "java.nio.file.Files"),
+    ("StandardCharsets", "java.nio.charset.StandardCharsets"),
+    ("LocalDate", "java.time.LocalDate"),
+    ("LocalTime", "java.time.LocalTime"),
+    ("LocalDateTime", "java.time.LocalDateTime"),
+    ("Instant", "java.time.Instant"),
+    ("Duration", "java.time.Duration"),
+    ("Period", "java.time.Period"),
+    ("ZonedDateTime", "java.time.ZonedDateTime"),
+    ("ZoneId", "java.time.ZoneId"),
+    ("DateTimeFormatter", "java.time.format.DateTimeFormatter"),
+    ("BigDecimal", "java.math.BigDecimal"),
+    ("BigInteger", "java.math.BigInteger"),
+    ("URI", "java.net.URI"),
+    ("URL", "java.net.URL"),
+    ("Function", "java.util.function.Function"),
+    ("Consumer", "java.util.function.Consumer"),
+    ("Supplier", "java.util.function.Supplier"),
+    ("Predicate", "java.util.function.Predicate"),
+    ("Logger", "org.slf4j.Logger"),
+    ("LoggerFactory", "org.slf4j.LoggerFactory"),
 ];
 
 pub fn well_known_spring_data_simple_names() -> impl Iterator<Item = &'static str> {
@@ -1775,7 +1997,7 @@ pub fn warm_index_with_progress(
         let index = if cached {
             load_index(ws, &root)?
         } else {
-            build_index(ws, &root, progress.as_ref())?
+            build_index(ws, &root, progress.as_ref(), false)?
         };
         let meta = index_meta(&root);
         combined.indexed = true;
@@ -1800,17 +2022,20 @@ pub fn peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
     let key = workspace_cache_key(ws);
     if let Ok(guard) = PEEK_INDEX_CACHE.lock() {
         if let Some((at, status)) = guard.get(&key) {
-            if at.elapsed() < PEEK_INDEX_CACHE_TTL {
+            let ttl = if status.index_complete && status.symbol_count > 0 {
+                PEEK_INDEX_CACHE_TTL
+            } else {
+                PEEK_INDEX_CACHE_TTL_PENDING
+            };
+            if at.elapsed() < ttl {
                 return Ok(status.clone());
             }
         }
     }
 
     let status = compute_peek_index_status(ws)?;
-    if status.index_complete && status.symbol_count > 0 {
-        if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
-            guard.insert(key, (Instant::now(), status.clone()));
-        }
+    if let Ok(mut guard) = PEEK_INDEX_CACHE.lock() {
+        guard.insert(key, (Instant::now(), status.clone()));
     }
     Ok(status)
 }
@@ -1837,8 +2062,10 @@ fn compute_peek_index_status(ws: &Path) -> Result<WarmIndexStatus> {
     };
 
     for root in roots {
-        let cached = is_index_cached(ws, &root)?;
-        if let Some(index) = try_load_index(ws, &root)? {
+        let Some((index, cached)) = try_load_index_with_cached(ws, &root)? else {
+            continue;
+        };
+        {
             let meta = index_meta(&root);
             combined.indexed = true;
             combined.project_root = Some(index.project_root);
@@ -2033,6 +2260,9 @@ pub fn continue_background_index(
 }
 
 pub fn background_index_pending(ws: &Path) -> bool {
+    if !java_index_background_enabled() {
+        return false;
+    }
     find_all_index_roots(ws)
         .ok()
         .is_some_and(|roots| {
@@ -2053,6 +2283,16 @@ fn continue_background_index_root(
         return Ok(());
     }
     if !JavaIndexProfile::current().background_enabled() {
+        if !meta.index_complete {
+            write_index_meta(
+                gradle_root,
+                &IndexMeta {
+                    index_complete: true,
+                    ..meta
+                },
+            )?;
+            invalidate_lookup_cache(gradle_root);
+        }
         return Ok(());
     }
 
@@ -2160,6 +2400,37 @@ fn continue_background_index_root(
     Ok(())
 }
 
+/// Whether a definition target path can be opened in the editor (workspace-relative or absolute).
+pub fn definition_path_is_openable(ws: &Path, path: &str) -> bool {
+    resolve_definition_path(ws, path)
+        .map(|p| p.is_file())
+        .unwrap_or(false)
+}
+
+fn resolve_definition_path(ws: &Path, path: &str) -> Result<PathBuf> {
+    let path = path.replace('\\', "/");
+    if path.starts_with('/') || path.chars().nth(1) == Some(':') {
+        Ok(PathBuf::from(path))
+    } else {
+        super::safe_join(ws, &path)
+    }
+}
+
+/// Resolve a library type (e.g. `org.springframework.boot.SpringApplication`) to extracted sources.
+pub fn resolve_java_library_definition(
+    ws: &Path,
+    from_path: &str,
+    fqcn: &str,
+    symbol: &str,
+) -> Result<Option<SymbolLocation>> {
+    let Some(root) = cached_gradle_root(ws, from_path)? else {
+        return Ok(None);
+    };
+    let _ = ensure_navigation_sources(ws, &root);
+    let lookup = get_lookup(ws, &root)?;
+    Ok(resolve_type_by_fqcn(ws, &root, &lookup, fqcn, symbol))
+}
+
 pub fn find_external_definition(
     ws: &Path,
     from_path: &str,
@@ -2223,6 +2494,19 @@ fn find_external_definition_inner(
         return Ok(Some(loc));
     }
 
+    if is_annotation_context(content, line, column)
+        || content.contains(&format!("@{symbol}"))
+    {
+        if let Some(fqcn) = infer_lombok_fqcn(content, &symbol, root) {
+            if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
+                return Ok(Some(loc));
+            }
+            if let Some(loc) = resolve_library_type_location(ws, root, &fqcn, &symbol) {
+                return Ok(Some(loc));
+            }
+        }
+    }
+
     if let Some(fqcn) = resolve_type_fqcn(&lookup, &symbol, &imports, root) {
         if is_library_fqcn(&fqcn) {
             if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
@@ -2257,7 +2541,11 @@ fn find_external_definition_inner(
     }
 
     if candidates.len() == 1 {
-        return Ok(Some(to_location(ws, root, candidates[0])));
+        let hit = candidates[0];
+        if let Some(loc) = library_location_for_indexed_type(ws, root, hit, &symbol) {
+            return Ok(Some(loc));
+        }
+        return Ok(Some(to_location(ws, root, hit)));
     }
 
     candidates.sort_by(|a, b| {
@@ -2265,7 +2553,11 @@ fn find_external_definition_inner(
             .cmp(&import_match_priority(&b.qualified, &imports))
             .then_with(|| spring_priority(&a.qualified).cmp(&spring_priority(&b.qualified)))
     });
-    Ok(Some(to_location(ws, root, candidates[0])))
+    let hit = candidates[0];
+    if let Some(loc) = library_location_for_indexed_type(ws, root, hit, &symbol) {
+        return Ok(Some(loc));
+    }
+    Ok(Some(to_location(ws, root, hit)))
 }
 
 pub fn java_completions(
@@ -2986,6 +3278,11 @@ fn push_known_jdk_static_members(
     }
 }
 
+/// True when a module root already has a fresh on-disk Java index.
+pub fn module_index_is_cached(ws: &Path, module_root: &Path) -> bool {
+    is_index_cached(ws, module_root).unwrap_or(false)
+}
+
 fn is_index_cached(ws: &Path, gradle_root: &Path) -> Result<bool> {
     let cache = reaper_dir(gradle_root).join("java-index.json");
     if !cache.is_file() {
@@ -3005,6 +3302,10 @@ fn load_index(ws: &Path, gradle_root: &Path) -> Result<JavaIndex> {
 }
 
 fn try_load_index(ws: &Path, gradle_root: &Path) -> Result<Option<JavaIndex>> {
+    Ok(try_load_index_with_cached(ws, gradle_root)?.map(|(index, _)| index))
+}
+
+fn try_load_index_with_cached(ws: &Path, gradle_root: &Path) -> Result<Option<(JavaIndex, bool)>> {
     let cache = reaper_dir(gradle_root).join("java-index.json");
     if !cache.is_file() {
         return Ok(None);
@@ -3012,11 +3313,11 @@ fn try_load_index(ws: &Path, gradle_root: &Path) -> Result<Option<JavaIndex>> {
     let text = std::fs::read_to_string(&cache)?;
     let index: JavaIndex = serde_json::from_str(&text)?;
     if index_fresh(ws, gradle_root, &index)? {
-        return Ok(Some(index));
+        return Ok(Some((index, true)));
     }
     // Use a stale index while a background rebuild runs so navigation keeps working.
     if !index.symbols.is_empty() {
-        return Ok(Some(index));
+        return Ok(Some((index, false)));
     }
     Ok(None)
 }
@@ -3147,6 +3448,7 @@ fn build_index(
     ws: &Path,
     gradle_root: &Path,
     progress: Option<&Box<dyn Fn(&str, usize) + Send>>,
+    on_demand: bool,
 ) -> Result<JavaIndex> {
     fn report(progress: Option<&Box<dyn Fn(&str, usize) + Send>>, phase: &str, count: usize) {
         if let Some(cb) = progress {
@@ -3218,8 +3520,12 @@ fn build_index(
         let profile = JavaIndexProfile::current();
         let jar_refs = prioritize_jars_for_fallback(&classpath.jars);
         jars_total = jar_refs.len();
-        let startup_limit = profile.startup_jar_limit();
-        let staged = profile.background_enabled() && jars_total > startup_limit;
+        let startup_limit = if on_demand {
+            STARTUP_JAR_LIMIT_LAZY
+        } else {
+            profile.startup_jar_limit()
+        };
+        let staged = !on_demand && profile.background_enabled() && jars_total > startup_limit;
         let jar_options = if jars_total > startup_limit {
             JarIndexOptions {
                 skip_jars: 0,
@@ -3400,15 +3706,7 @@ fn ensure_navigation_sources(ws: &Path, project_root: &Path) -> Result<()> {
         let _ = materialize_jdk_sources(&jdk_dest);
     }
 
-    let deps_root = reaper_dir(project_root).join("java-sources/deps");
-    let has_deps = deps_root.is_dir()
-        && std::fs::read_dir(&deps_root)
-            .ok()
-            .and_then(|mut it| it.next())
-            .is_some();
-    if has_deps {
-        return Ok(());
-    }
+    ensure_maven_dependency_sources_for_navigation(project_root)?;
 
     let mut jars = resolve_dependency_tree_jars(project_root, true);
     if jars.is_empty() {
@@ -3421,6 +3719,25 @@ fn ensure_navigation_sources(ws: &Path, project_root: &Path) -> Result<()> {
     let source_jars = discover_source_jars_for_jars(&jars);
     let _ = materialize_sources(ws, project_root, &jars, &source_jars, None);
     invalidate_library_source_dirs_cache(project_root);
+    Ok(())
+}
+
+/// Download Maven *-sources.jar on demand for library go-to-definition (even when classpath tooling is lightweight).
+fn ensure_maven_dependency_sources_for_navigation(maven_root: &Path) -> Result<()> {
+    if !super::maven::is_maven_project_root(maven_root) || !index_build_tooling_enabled() {
+        return Ok(());
+    }
+    let output = super::maven::run_maven(
+        maven_root,
+        &["-q", "dependency:resolve-sources", "dependency:sources"],
+    )?;
+    if !output.status.success() {
+        tracing::debug!(
+            "mvn dependency:resolve-sources failed for {}: {}",
+            maven_root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -3776,11 +4093,114 @@ fn resolve_classpath_for_maven_offline(maven_root: &Path) -> GradleClasspath {
 }
 
 fn ensure_maven_dependencies(maven_root: &Path, progress: IndexProgress) -> Result<()> {
-    report_index_progress(progress, "running-maven-classpath", 0);
-    let output = super::maven::run_maven(
-        maven_root,
-        &["-q", "dependency:resolve", maven_dependency_scope_flag()],
+    ensure_maven_reactor_classpath_resolved(maven_root, progress)
+}
+
+fn maven_offline_classpath_sufficient(module_root: &Path) -> bool {
+    if !super::maven::is_maven_project_root(module_root) {
+        return false;
+    }
+    let cp = resolve_classpath_from_m2(module_root);
+    build_tree_classpath_sufficient(module_root, &cp.jars)
+}
+
+fn persist_maven_offline_classpath(module_root: &Path) -> Result<()> {
+    let cp = resolve_classpath_from_m2(module_root);
+    if cp.jars.is_empty() {
+        return Ok(());
+    }
+    persist_tooling_classpath(
+        module_root,
+        &cp,
+        has_materialized_java_index(module_root),
+    )
+}
+
+fn reactor_tooling_resolved(reactor: &Path) -> bool {
+    reaper_dir(reactor)
+        .join(REACTOR_TOOLING_CLASSPATH_DONE)
+        .is_file()
+}
+
+fn mark_reactor_tooling_done(reactor: &Path) -> Result<()> {
+    std::fs::create_dir_all(reaper_dir(reactor))?;
+    std::fs::write(
+        reaper_dir(reactor).join(REACTOR_TOOLING_CLASSPATH_DONE),
+        reactor.display().to_string(),
     )?;
+    Ok(())
+}
+
+fn reactor_modules_tooling_done(reactor: &Path) -> bool {
+    super::maven::list_reactor_leaf_modules(reactor)
+        .iter()
+        .all(|module| tooling_classpath_resolved(module))
+}
+
+fn try_offline_all_reactor_modules(reactor: &Path) -> Result<bool> {
+    let modules = super::maven::list_reactor_leaf_modules(reactor);
+    if modules.is_empty() {
+        return Ok(false);
+    }
+    if !modules
+        .iter()
+        .all(|module| maven_offline_classpath_sufficient(module))
+    {
+        return Ok(false);
+    }
+    for module in modules {
+        persist_maven_offline_classpath(&module)?;
+    }
+    mark_reactor_tooling_done(reactor)?;
+    Ok(true)
+}
+
+fn fan_out_reactor_classpaths_from_cache(
+    reactor: &Path,
+    progress: IndexProgress,
+) -> Result<()> {
+    for module in super::maven::list_reactor_leaf_modules(reactor) {
+        if tooling_classpath_resolved(&module) {
+            continue;
+        }
+        let mut resolved = resolve_classpath_from_m2(&module);
+        if resolved.jars.is_empty() {
+            if let Ok(mvn_cp) = resolve_maven_classpath_via_mvn(&module, progress) {
+                if !mvn_cp.jars.is_empty() {
+                    resolved.jars = mvn_cp.jars;
+                    resolved.source_jars = mvn_cp.source_jars;
+                    resolved.log = mvn_cp.log;
+                }
+            }
+        }
+        if resolved.jars.is_empty() {
+            continue;
+        }
+        resolved.jars = supplement_jakarta_persistence_api(&resolved.jars);
+        persist_tooling_classpath(
+            &module,
+            &resolved,
+            has_materialized_java_index(&module),
+        )?;
+    }
+    Ok(())
+}
+
+fn run_reactor_maven_dependency_goals(
+    reactor: &Path,
+    trigger_module: &Path,
+    progress: IndexProgress,
+) -> Result<()> {
+    report_index_progress(progress, "running-maven-classpath", 0);
+    let pl_args: Vec<String> = super::maven::maven_reactor_context(trigger_module)
+        .filter(|ctx| !ctx.module_pl.is_empty())
+        .map(|ctx| vec!["-pl".into(), ctx.module_pl, "-am".into()])
+        .unwrap_or_default();
+    let mut resolve_args: Vec<&str> = vec!["-q", "-T", "1"];
+    resolve_args.extend(pl_args.iter().map(String::as_str));
+    resolve_args.push("dependency:resolve");
+    resolve_args.push(maven_dependency_scope_flag());
+    let output = super::maven::run_maven_from(reactor, &resolve_args)?;
     if !output.status.success() {
         bail!(
             "mvn dependency:resolve failed: {}",
@@ -3791,14 +4211,10 @@ fn ensure_maven_dependencies(maven_root: &Path, progress: IndexProgress) -> Resu
         return Ok(());
     }
     report_index_progress(progress, "running-maven-sources", 0);
-    let output = super::maven::run_maven(
-        maven_root,
-        &[
-            "-q",
-            "dependency:resolve-sources",
-            "dependency:sources",
-        ],
-    )?;
+    let mut sources_args: Vec<&str> = vec!["-q", "-T", "1"];
+    sources_args.extend(pl_args.iter().map(String::as_str));
+    sources_args.extend(["dependency:resolve-sources", "dependency:sources"]);
+    let output = super::maven::run_maven_from(reactor, &sources_args)?;
     if !output.status.success() {
         bail!(
             "mvn dependency:resolve-sources failed: {}",
@@ -3806,6 +4222,48 @@ fn ensure_maven_dependencies(maven_root: &Path, progress: IndexProgress) -> Resu
         );
     }
     Ok(())
+}
+
+fn ensure_maven_reactor_classpath_resolved(
+    module_root: &Path,
+    progress: IndexProgress,
+) -> Result<()> {
+    if tooling_classpath_resolved(module_root) {
+        return Ok(());
+    }
+    if maven_offline_classpath_sufficient(module_root) {
+        return persist_maven_offline_classpath(module_root);
+    }
+
+    let anchor = super::maven_classpath_inflight::reactor_lock_anchor(module_root);
+    super::maven_classpath_inflight::with_reactor_lock(module_root, || {
+        if tooling_classpath_resolved(module_root) {
+            return Ok(());
+        }
+        if reactor_tooling_resolved(&anchor) {
+            fan_out_reactor_classpaths_from_cache(&anchor, progress)?;
+            if tooling_classpath_resolved(module_root) {
+                return Ok(());
+            }
+        }
+        if reactor_modules_tooling_done(&anchor) {
+            let _ = mark_reactor_tooling_done(&anchor);
+            return Ok(());
+        }
+        if try_offline_all_reactor_modules(&anchor)? {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Resolving Maven reactor classpath once for {} (triggered by {})",
+            anchor.display(),
+            module_root.display()
+        );
+        run_reactor_maven_dependency_goals(&anchor, module_root, progress)?;
+        fan_out_reactor_classpaths_from_cache(&anchor, progress)?;
+        mark_reactor_tooling_done(&anchor)?;
+        Ok(())
+    })
 }
 
 fn resolve_classpath_from_m2(maven_root: &Path) -> GradleClasspath {
@@ -3900,8 +4358,7 @@ fn resolve_maven_classpath_via_mvn(maven_root: &Path, progress: IndexProgress) -
             "-q",
             "dependency:build-classpath",
             &format!("-Dmdep.includeScope={scope}"),
-            "-Dmdep.outputFile",
-            out_path,
+            &format!("-Dmdep.outputFile={out_path}"),
         ],
     )?;
     if !output.status.success() {
@@ -5025,6 +5482,14 @@ fn find_sources_jar(jar: &Path) -> Option<PathBuf> {
         }
     }
 
+    if let Some(coord) = super::java_classpath::coord_from_jar_path(jar) {
+        if let Some(sources) =
+            super::maven::find_m2_sources_jar(&coord.group, &coord.artifact, &coord.version)
+        {
+            return Some(sources);
+        }
+    }
+
     None
 }
 
@@ -5489,6 +5954,7 @@ fn is_annotation_index_symbol(sym: &IndexedSymbol) -> bool {
         return true;
     }
     well_known_import(&sym.name).is_some_and(|fqcn| fqcn.contains(".annotation."))
+        || well_known_lombok_import(&sym.name).is_some()
 }
 
 const ACC_INTERFACE: u16 = 0x0200;
@@ -6059,10 +6525,6 @@ fn package_from_source_or_path(content: &str, rel_path: &str) -> Option<String> 
     java_psi::package_name(content, rel_path)
 }
 
-fn package_from_source_or_path(content: &str, rel_path: &str) -> Option<String> {
-    find_package(content).or_else(|| infer_package_from_java_path(rel_path))
-}
-
 fn infer_package_from_java_path(rel_path: &str) -> Option<String> {
     let norm = rel_path.replace('\\', "/");
     for marker in ["src/main/java/", "src/test/java/"] {
@@ -6124,6 +6586,7 @@ fn is_library_fqcn(fqcn: &str) -> bool {
         || fqcn.starts_with("javax.")
         || fqcn.starts_with("jakarta.")
         || fqcn.starts_with("org.springframework.")
+        || fqcn.starts_with("lombok.")
         || fqcn.starts_with("kotlin.")
 }
 
@@ -6255,18 +6718,26 @@ fn resolve_type_by_fqcn(
     let cache_key = format!("{}:{}", root.display(), fqcn);
     if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
         if let Some(loc) = guard.get(&cache_key) {
-            return Some(loc.clone());
+            if !loc.path.ends_with(".jar") {
+                return Some(loc.clone());
+            }
         }
-    }
-
-    if let Some(hit) = lookup.type_by_qualified(fqcn) {
-        let loc = to_location(ws, root, hit);
-        cache_fqcn_location(&cache_key, &loc);
-        return Some(loc);
     }
 
     if is_library_fqcn(fqcn) {
         if let Some(loc) = resolve_library_type_location(ws, root, fqcn, symbol) {
+            cache_fqcn_location(&cache_key, &loc);
+            return Some(loc);
+        }
+    }
+
+    if let Some(hit) = lookup.type_by_qualified(fqcn) {
+        if let Some(loc) = library_location_for_indexed_type(ws, root, hit, symbol) {
+            cache_fqcn_location(&cache_key, &loc);
+            return Some(loc);
+        }
+        let loc = to_location(ws, root, hit);
+        if !loc.path.ends_with(".jar") && !loc.path.contains("classpath-jar") {
             cache_fqcn_location(&cache_key, &loc);
             return Some(loc);
         }
@@ -6403,12 +6874,14 @@ fn spring_priority(qualified: &str) -> u8 {
         0
     } else if qualified.starts_with("org.springframework.") {
         1
-    } else if qualified.starts_with("jakarta.") || qualified.starts_with("javax.") {
+    } else if qualified.starts_with("lombok.") {
         2
-    } else if qualified.starts_with("java.") || qualified.starts_with("jdk.") {
+    } else if qualified.starts_with("jakarta.") || qualified.starts_with("javax.") {
         3
-    } else {
+    } else if qualified.starts_with("java.") || qualified.starts_with("jdk.") {
         4
+    } else {
+        5
     }
 }
 
@@ -7089,6 +7562,79 @@ dependencies {
     }
 
     #[test]
+    fn resolves_lombok_slf4j_without_import_from_dependency_sources() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-lombok-nav-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(
+            ws.join(".reaper/java-sources/deps/lombok/lombok/extern/slf4j"),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/lombok/lombok/extern/slf4j/Slf4j.java"),
+            "package lombok.extern.slf4j;\n\npublic @interface Slf4j {\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper")).unwrap();
+        let lombok_jar = ws.join(".reaper/lombok-1.18.36.jar");
+        std::fs::write(&lombok_jar, b"PK").unwrap();
+        save_classpath_jars_cache(&ws, &[lombok_jar]).unwrap();
+        std::fs::write(
+            ws.join("build.gradle"),
+            "plugins { id 'java' }\ndependencies { compileOnly 'org.projectlombok:lombok:1.18.36' }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/App.java"),
+            "package com.example;\n\n@Slf4j\npublic class App {\n}\n",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(ws.join("src/main/java/com/example/App.java")).unwrap();
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 3, 2, &content)
+            .expect("lookup ok")
+            .expect("Slf4j location");
+        assert!(hit.path.contains("Slf4j.java"), "path={}", hit.path);
+        assert!(definition_path_is_openable(&ws, &hit.path));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn infer_lombok_fqcn_maps_common_annotations() {
+        assert_eq!(
+            infer_lombok_fqcn("@Slf4j\nclass App {}\n", "Slf4j", Path::new(".")),
+            Some("lombok.extern.slf4j.Slf4j".into())
+        );
+        assert_eq!(
+            infer_lombok_fqcn("@Data\nclass User {}\n", "Data", Path::new(".")),
+            Some("lombok.Data".into())
+        );
+        assert!(infer_lombok_fqcn("class App {}\n", "Slf4j", Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn spring_application_definition_live() {
+        let ws = Path::new("/Users/sunny/reaper/workspaces/Spring-maven-complicated");
+        if !ws.is_dir() {
+            return;
+        }
+        let rel =
+            "order-service/src/main/java/com/enterprise/platform/order/OrderServiceApplication.java";
+        let content = match std::fs::read_to_string(ws.join(rel)) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let hit = find_external_definition(ws, rel, 3, 35, &content)
+            .expect("lookup")
+            .expect("SpringApplication location");
+        assert!(hit.path.contains("SpringApplication.java"), "path={}", hit.path);
+        assert!(definition_path_is_openable(ws, &hit.path));
+    }
+
+    #[test]
     fn definition_lookup_is_cached() {
         let ws = std::env::temp_dir().join("reaper-jdk-def-cache");
         let _ = std::fs::remove_dir_all(&ws);
@@ -7235,7 +7781,7 @@ dependencies {
 
     #[test]
     fn test_classpath_resolve_full_defaults_lightweight() {
-        let _guard = env_var_guard::new("REAPER_CLASSPATH_FULL");
+        let _guard = EnvVarGuard::new("REAPER_CLASSPATH_FULL");
         assert!(!classpath_resolve_full());
         assert_eq!(maven_build_classpath_scope(), "compile");
         std::env::set_var("REAPER_CLASSPATH_FULL", "1");
@@ -7271,16 +7817,16 @@ dependencies {
     }
 }
 
-struct env_var_guard(&'static str);
+struct EnvVarGuard(&'static str);
 
-impl env_var_guard {
+impl EnvVarGuard {
     fn new(key: &'static str) -> Self {
         std::env::remove_var(key);
         Self(key)
     }
 }
 
-impl Drop for env_var_guard {
+impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         std::env::remove_var(self.0);
     }

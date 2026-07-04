@@ -66,8 +66,7 @@ impl ProjectIndexJobs {
     pub fn on_open(&self, repo: &str, ws: &Path) {
         let profile = project_profile::detect(ws).unwrap_or_default();
         if profile.indexers.iter().any(|i| i == "java") {
-            self.java.refresh_status_from_disk(repo, ws);
-            self.java.ensure_building(repo, ws);
+            self.java.init_on_demand(repo, ws);
         }
         self.start(repo, ws, profile, false);
     }
@@ -96,6 +95,7 @@ impl ProjectIndexJobs {
 
     /// Invalidate Maven/Gradle caches and rebuild indexes (build file save, manual reload).
     pub fn reload(&self, repo: &str, ws: &Path) {
+        super::jdtls::drop_workspace_session(ws);
         let _ = classpath::invalidate_caches(ws);
         symbols::invalidate_symbol_cache(ws);
         self.java.clear_repo(repo);
@@ -171,7 +171,7 @@ impl ProjectIndexJobs {
             return;
         }
 
-        if profile.indexers.iter().any(|i| i == "java") {
+        if profile.indexers.iter().any(|i| i == "java") && !classpath::java_index_on_demand_modules() {
             self.java.ensure_building(repo, ws);
         }
 
@@ -199,7 +199,7 @@ impl ProjectIndexJobs {
 
             if profile_clone.indexers.iter().any(|i| i == "java") {
                 touch_project_phase(&inner, &repo_key, "java-index", workspace_symbols);
-                if !classpath::java_index_is_lazy() {
+                if !classpath::java_index_on_demand_modules() && !classpath::java_index_is_lazy() {
                     for _ in 0..600 {
                         let status = java_jobs.status(&repo_key);
                         if status.state.is_empty()
@@ -218,7 +218,7 @@ impl ProjectIndexJobs {
             let needs_java = profile_clone.indexers.iter().any(|i| i == "java");
             let state = if error.is_some() || java.state == "error" {
                 "error".into()
-            } else if needs_java && java.state == "running" && !classpath::java_index_is_lazy() {
+            } else if needs_java && java.state == "running" && !classpath::java_index_on_demand_modules() && !classpath::java_index_is_lazy() {
                 "running".into()
             } else if java.state == "ready" || workspace_symbols > 0 {
                 "ready".into()
@@ -261,8 +261,13 @@ impl ProjectIndexJobs {
         let needs_symbols = profile.indexers.iter().any(|i| i == "workspace-symbols");
 
         let java_ok = !needs_java || {
+            let java = self.java.status(repo);
+            if java.phase == "on-demand"
+                && (java.state == "ready" || java.state == "idle" || java.state.is_empty())
+            {
+                return true;
+            }
             if classpath::java_index_is_lazy() {
-                let java = self.java.status(repo);
                 java.state == "ready" || java.phase == "on-demand"
             } else {
                 classpath::peek_index_status(ws)
@@ -283,7 +288,9 @@ impl ProjectIndexJobs {
             let java = self.java.status(repo);
             let java_running = java.state == "running";
             let java_ready = java.state == "ready"
-                && (java.symbol_count > 0 || classpath::java_index_is_lazy());
+                && (java.symbol_count > 0
+                    || java.phase == "on-demand"
+                    || classpath::java_index_is_lazy());
             entry.status = ProjectIndexStatus {
                 state: if java_running {
                     "running".into()

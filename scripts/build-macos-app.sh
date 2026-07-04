@@ -24,6 +24,8 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 "$ROOT/scripts/vendor-monaco.sh"
 "$ROOT/scripts/vendor-google-java-format.sh"
 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
+"$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
+"$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then

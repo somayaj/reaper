@@ -161,6 +161,123 @@
     return html;
   }
 
+  /** True when text looks like LSP/JDT markdown rather than plain Javadoc. */
+  function looksLikeLspMarkdown(text) {
+    const doc = String(text || '');
+    if (!doc.trim()) return false;
+    if (/```/.test(doc)) return true;
+    if (/^#{1,6}\s/m.test(doc)) return true;
+    if (/\*\*[^*\n]+\*\*/.test(doc)) return true;
+    if (/^[\s]*[-*+]\s+\S/m.test(doc)) return true;
+    if (/^\s*\d+\.\s+\S/m.test(doc)) return true;
+    if (/\[[^\]]+\]\([^)]+\)/.test(doc)) return true;
+    if (/^>\s/m.test(doc)) return true;
+    return false;
+  }
+
+  function isJdtlsSourceLine(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (/^source:/i.test(t) && (/jdt\.ls/i.test(t) || /file:\/\//i.test(t) || /jdt:\/\//i.test(t))) {
+      return true;
+    }
+    return /jdt\.ls-java-project/i.test(t);
+  }
+
+  function fileLabelFromJdtlsUrl(url) {
+    const raw = String(url || '').trim();
+    const hashIdx = raw.indexOf('#');
+    const pathPart = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+    const linePart = hashIdx >= 0 ? raw.slice(hashIdx + 1) : '';
+    let path = pathPart.replace(/^file:\/\//i, '');
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      /* keep encoded path */
+    }
+    const base = path.split(/[/\\]/).filter(Boolean).pop() || path;
+    if (/^\d+$/.test(linePart)) return `${base}:${linePart}`;
+    return base;
+  }
+
+  /** Replace jdtls branding in hover docs; keep Source links with real file names. */
+  function stripJdtlsSourceAttribution(text) {
+    let doc = String(text || '');
+    doc = doc.replace(
+      /\[(jdt\.ls(?:-java-project)?)\]\((file:[^)\s<>"']+)\)/gi,
+      (_, _label, url) => {
+        const name = fileLabelFromJdtlsUrl(url);
+        return name ? `[${name}](${url})` : `(${url})`;
+      },
+    );
+    doc = doc.replace(
+      /\*\[(jdt\.ls(?:-java-project)?)\]\((file:[^)]+)\)\*/gi,
+      (_, _label, url) => {
+        const name = fileLabelFromJdtlsUrl(url);
+        return name ? `*[${name}](${url})*` : '';
+      },
+    );
+    doc = doc.replace(
+      /<a\b([^>]*\bhref\s*=\s*["'](file:[^"']+)["'][^>]*)>\s*jdt\.ls(?:-java-project)?\s*<\/a>/gi,
+      (_, attrs, url) => {
+        const name = fileLabelFromJdtlsUrl(url);
+        return name ? `<a${attrs}>${name}</a>` : '';
+      },
+    );
+    doc = doc.replace(/\bjdt\.ls-java-project\b/gi, '');
+    doc = doc.replace(/\bjdt\.ls\b/gi, '');
+    doc = doc.replace(/\bjdtls\b/gi, '');
+    doc = doc.replace(/Source:\s*\*\s*\*/g, 'Source:');
+    return doc.trim();
+  }
+
+  /** True when Javadoc from jdtls/Eclipse includes HTML markup. */
+  function looksLikeJavadocHtml(text) {
+    const doc = String(text || '');
+    if (!doc.trim()) return false;
+    return /<\/?(?:ul|ol|li|pre|p|code|div|span|dl|dt|dd|h[1-6]|table)\b/i.test(doc)
+      || /\{@(?:link|code|literal)\b/.test(doc);
+  }
+
+  function normalizeJavadocInlineTags(text) {
+    return String(text || '')
+      .replace(/\{@link\s+([^}]+)\}/g, (_, target) => {
+        const t = target.trim();
+        const simple = t.split(/[#.\s]/).filter(Boolean).pop() || t;
+        return `<code>${escapeHtml(simple)}</code>`;
+      })
+      .replace(/\{@code\s+([^}]+)\}/g, (_, code) => `<code>${escapeHtml(code.trim())}</code>`)
+      .replace(/\{@literal\s+([^}]+)\}/g, (_, lit) => escapeHtml(lit.trim()));
+  }
+
+  /** Render Eclipse/jdtls Javadoc HTML (lists, pre/code blocks, {@link …}). */
+  function renderJavadocHtml(text) {
+    const stripped = stripJdtlsSourceAttribution(text);
+    if (!stripped) return '';
+    let html = decodeHtmlEntities(stripped);
+    html = normalizeJavadocInlineTags(html);
+    if (window.DOMPurify?.sanitize) {
+      const clean = window.DOMPurify.sanitize(html, {
+        ADD_TAGS: ['ul', 'ol', 'li', 'pre', 'code', 'p', 'br', 'dl', 'dt', 'dd', 'em', 'strong', 'span', 'div', 'h3', 'h4'],
+        ADD_ATTR: ['class', 'href'],
+      });
+      return `<div class="reaper-javadoc-html reaper-lsp-doc agent-text-rich">${clean}</div>`;
+    }
+    return `<div class="reaper-javadoc-html">${escapeHtml(html).replace(/\n/g, '<br>')}</div>`;
+  }
+
+  /** Render LSP markdown documentation to sanitized HTML for hovers / doc panels. */
+  function renderLspDocumentation(text) {
+    const doc = stripJdtlsSourceAttribution(text);
+    if (!doc) return '';
+    if (!libsReady()) {
+      return `<div class="reaper-lsp-doc agent-text-rich">${escapeHtml(doc).replace(/\n/g, '<br>')}</div>`;
+    }
+    ensureMarkedRenderer();
+    const html = renderMarkdown(doc);
+    return `<div class="reaper-lsp-doc agent-text-rich">${html}</div>`;
+  }
+
   async function renderMermaidIn(el) {
     if (!el || typeof el.querySelectorAll !== 'function') return;
     const nodes = el.querySelectorAll('pre.mermaid:not([data-processed])');
@@ -229,9 +346,15 @@
   }
 
   window.ReaperAgentMarkdown = {
+    stripJdtlsSourceAttribution,
+    isJdtlsSourceLine,
+    looksLikeJavadocHtml,
+    renderJavadocHtml,
     renderAgentContent,
     renderPlain,
     prepareAgentMarkdown,
+    renderLspDocumentation,
+    looksLikeLspMarkdown,
     libsReady,
   };
 })();

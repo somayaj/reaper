@@ -5,14 +5,13 @@ use axum::{
     body::Body,
     extract::{
         Path, Query, State,
-        ws::{WebSocket, WebSocketUpgrade},
+        ws::WebSocketUpgrade,
     },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::git;
@@ -31,6 +30,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/version", get(app_version))
         .route("/api/repos", get(list_repos).post(create_repo))
+        .route("/api/repos/hidden", get(list_hidden_repos_handler))
         .route("/api/repos/import", post(import_repo_handler))
         .route("/api/repos/import/local", post(import_local_repo_handler))
         .route("/api/system/pick-folder", post(pick_folder_handler))
@@ -121,10 +121,19 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/project/reload", post(reload_project_index))
         .route("/api/repos/{name}/workspace/diagnostics", post(workspace_diagnostics))
         .route("/api/repos/{name}/workspace/quick-fixes", post(workspace_quick_fixes))
-        .route("/api/repos/{name}/workspace/java-level", get(workspace_java_level))
+        .route("/api/repos/{name}/workspace/java/references", post(workspace_java_references))
+        .route("/api/repos/{name}/workspace/references", post(workspace_references))
+        .route("/api/repos/{name}/workspace/java/prepare-rename", post(workspace_java_prepare_rename))
+        .route("/api/repos/{name}/workspace/prepare-rename", post(workspace_prepare_rename))
+        .route("/api/repos/{name}/workspace/java/rename", post(workspace_java_rename))
+        .route("/api/repos/{name}/workspace/rename", post(workspace_rename))
+        .route("/api/repos/{name}/workspace/java/code-actions", post(workspace_java_code_actions))
+        .route("/api/repos/{name}/workspace/java/signature-help", post(workspace_java_signature_help))
+        .route("/api/repos/{name}/workspace/signature-help", post(workspace_signature_help))
         .route("/api/repos/{name}/workspace/language-context", get(workspace_language_context))
         .route("/api/repos/{name}/workspace/format", post(workspace_format))
         .route("/api/repos/{name}/unregister", post(unregister_repo_handler))
+        .route("/api/repos/{name}/restore", post(restore_repo_handler))
         .route(
             "/api/repos/{name}",
             get(get_repo).delete(delete_repo_handler),
@@ -133,6 +142,13 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
 
 async fn list_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match repos::list_repos(&state.config, &state.settings) {
+        Ok(repos) => Json(repos).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn list_hidden_repos_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match repos::list_hidden_repos(&state.config, &state.settings) {
         Ok(repos) => Json(repos).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -210,6 +226,16 @@ async fn unregister_repo_handler(
 ) -> impl IntoResponse {
     match repos::unregister_repo(&state.config, &state.settings, &name) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn restore_repo_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match repos::restore_repo(&state.config, &state.settings, &name) {
+        Ok(repo) => Json(repo).into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, e),
     }
 }
@@ -1480,9 +1506,6 @@ async fn workspace_definition(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let from_path = q.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
-        ensure_java_index_for_file(&state, &name, &ws, from_path);
-    }
     match workspace::find_definition_with_content(&ws, from_path, q.line, q.column, None) {
         Ok(hit) => Json(hit).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
@@ -1512,9 +1535,6 @@ async fn workspace_definition_post(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let from_path = body.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
-        ensure_java_index_for_file(&state, &name, &ws, from_path);
-    }
     match workspace::find_definition_with_content(
         &ws,
         from_path,
@@ -1537,9 +1557,6 @@ async fn workspace_hover(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let from_path = q.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
-        ensure_java_index_for_file(&state, &name, &ws, from_path);
-    }
     let result = if let Some(member) = q.member.as_deref().filter(|m| !m.is_empty()) {
         workspace::find_member_hover_with_content(&ws, from_path, q.line, q.column, member, None)
     } else if let Some(symbol) = q.symbol.as_deref().filter(|s| !s.is_empty()) {
@@ -1563,9 +1580,6 @@ async fn workspace_hover_post(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let from_path = body.path.trim();
-    if workspace::definition_uses_java_index(from_path) {
-        ensure_java_index_for_file(&state, &name, &ws, from_path);
-    }
     let result = if let Some(member) = body.member.as_deref().filter(|m| !m.is_empty()) {
         workspace::find_member_hover_with_content(
             &ws,
@@ -1614,8 +1628,8 @@ async fn workspace_classes(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    if workspace::is_gradle_workspace(&ws) {
-        state.java_index_jobs.ensure_building(&name, &ws);
+    if workspace::is_java_indexable_workspace(&ws) {
+        state.java_index_jobs.ensure_for_class_search(&name, &ws);
     }
     let query = q.q.unwrap_or_default();
     let limit = q.limit.unwrap_or(50);
@@ -1634,9 +1648,6 @@ async fn workspace_search(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    if workspace::is_gradle_workspace(&ws) {
-        state.java_index_jobs.ensure_building(&name, &ws);
-    }
     let query = q.q.unwrap_or_default();
     let limit = q.limit.unwrap_or(50);
     match workspace::search_workspace(&ws, &query, limit) {
@@ -1664,9 +1675,7 @@ async fn workspace_completions(
     };
     let prefix = q.prefix.unwrap_or_default();
     let from_path = q.path.trim();
-    if workspace::definition_uses_java_index(from_path)
-        || workspace::uses_spring_property_completions(from_path)
-    {
+    if workspace::should_ensure_java_index_for_completions(from_path) {
         ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     match workspace::java_completions(&ws, from_path, q.line, q.column, &prefix, None, &[]) {
@@ -1725,9 +1734,7 @@ async fn workspace_completions_post(
     };
     let prefix = body.prefix.unwrap_or_default();
     let from_path = body.path.trim();
-    if workspace::definition_uses_java_index(from_path)
-        || workspace::uses_spring_property_completions(from_path)
-    {
+    if workspace::should_ensure_java_index_for_completions(from_path) {
         ensure_java_index_for_file(&state, &name, &ws, from_path);
     }
     let overlays: Vec<(String, String)> = body
@@ -1814,6 +1821,9 @@ struct InlineCompleteRequest {
     content: String,
     #[serde(default)]
     line_prefix: String,
+    /// Index/symbol fallback only — skip Gemini (fast path for inline ghost).
+    #[serde(default)]
+    local_only: bool,
 }
 
 #[derive(Serialize)]
@@ -1830,6 +1840,10 @@ async fn workspace_inline_complete(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
+    let from_path = body.path.trim();
+    if workspace::should_ensure_java_index_for_completions(from_path) {
+        ensure_java_index_for_file(&state, &name, &ws, from_path);
+    }
     match git_agent::suggest_inline_completion(
         &state.settings,
         &ws,
@@ -1838,6 +1852,7 @@ async fn workspace_inline_complete(
         body.column,
         &body.content,
         &body.line_prefix,
+        body.local_only,
     )
     .await
     {
@@ -1908,23 +1923,6 @@ async fn reload_project_index(
     Json(state.project_index_jobs.status(&name)).into_response()
 }
 
-async fn workspace_java_level(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    Query(q): Query<PathQuery>,
-) -> impl IntoResponse {
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
-        Ok(ws) => ws,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
-    };
-    let path = q.path.trim().to_string();
-    if path.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "path required");
-    }
-    let level = workspace::java_language_level(&ws, &path);
-    Json(serde_json::json!({ "level": level })).into_response()
-}
-
 async fn workspace_language_context(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1963,7 +1961,7 @@ async fn workspace_diagnostics(
     })
     .await
     {
-        Ok(Ok(items)) => Json(items).into_response(),
+        Ok(Ok(result)) => Json(result).into_response(),
         Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("diagnostics task failed: {e:#}")),
     }
@@ -1985,17 +1983,271 @@ async fn workspace_quick_fixes(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match git_agent::suggest_quick_fixes(
+    let path = body.path.trim();
+    let mut fixes = match workspace::suggest_local_quick_fixes(
+        &ws,
+        path,
+        &body.content,
+        &body.diagnostics,
+    ) {
+        Ok(f) => f,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    if path.ends_with(".java") {
+        if let Some(diag) = body.diagnostics.first() {
+            if let Ok(jdtls) = workspace::jdtls_code_actions_as_quick_fixes(
+                &ws,
+                path,
+                diag.line,
+                diag.column,
+                &body.content,
+                &["quickfix"],
+            ) {
+                workspace::merge_quick_fixes(&mut fixes, jdtls);
+            }
+        }
+    }
+    match git_agent::suggest_ai_quick_fixes(
         &state.settings,
         &ws,
-        body.path.trim(),
+        path,
         &body.content,
         &body.diagnostics,
         Some(&state.cursor_bridge),
     )
     .await
     {
-        Ok(fixes) => Json(fixes).into_response(),
+        Ok(ai) => workspace::merge_quick_fixes(&mut fixes, ai),
+        Err(e) => {
+            if fixes.is_empty() {
+                return api_error(StatusCode::BAD_REQUEST, e);
+            }
+            tracing::warn!("ai quick fixes failed (returning local/jdtls): {e:#}");
+        }
+    }
+    Json(fixes).into_response()
+}
+
+#[derive(Deserialize)]
+struct JavaPositionBody {
+    path: String,
+    line: u32,
+    column: u32,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct JavaRenameBody {
+    path: String,
+    line: u32,
+    column: u32,
+    content: String,
+    new_name: String,
+}
+
+#[derive(Deserialize)]
+struct JavaCodeActionsBody {
+    path: String,
+    line: u32,
+    column: u32,
+    content: String,
+    #[serde(default)]
+    only: Vec<String>,
+}
+
+async fn workspace_java_references(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::java_references(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_java_prepare_rename(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::java_prepare_rename(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(range) => Json(range).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_java_rename(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaRenameBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::java_rename(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+        &body.new_name,
+    ) {
+        Ok(edits) => Json(edits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_java_code_actions(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaCodeActionsBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let only: Vec<&str> = if body.only.is_empty() {
+        vec!["source.organizeImports"]
+    } else {
+        body.only.iter().map(String::as_str).collect()
+    };
+    match workspace::java_code_actions(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+        &only,
+    ) {
+        Ok(actions) => Json(actions).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_java_signature_help(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::java_signature_help(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(help) => Json(help).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_references(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::workspace_references(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(items) => Json(items).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_prepare_rename(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::workspace_prepare_rename(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(range) => Json(range).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_rename(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaRenameBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::workspace_rename(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+        &body.new_name,
+    ) {
+        Ok(edits) => Json(edits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_signature_help(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<JavaPositionBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::workspace_signature_help(
+        &ws,
+        body.path.trim(),
+        body.line,
+        body.column,
+        &body.content,
+    ) {
+        Ok(help) => Json(help).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }

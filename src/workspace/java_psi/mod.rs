@@ -10,15 +10,11 @@ mod lexer;
 mod parse;
 
 pub use annotations::{
-    annotation_simple_names, file_uses_lombok_annotations, lombok_symbol_in_message,
-    stale_imported_dependency_diag,
+    annotation_simple_names, lombok_symbol_in_message, stale_imported_dependency_diag,
 };
 pub use imports::{ImportMap, type_import_fqcns};
-pub use index::{JavaSymbol, index_source, infer_package_from_path, package_name};
-pub use parse::{
-    CompilationUnit, MemberDecl, MemberKind, TypeDecl, TypeKind, find_type_position,
-    parse_compilation_unit,
-};
+pub use index::{JavaSymbol, index_source, package_name};
+pub use parse::{CompilationUnit, find_type_position, parse_compilation_unit};
 
 /// Parse and index a `.java` file.
 pub fn analyze_source(content: &str, rel_path: &str, index_members: bool) -> (CompilationUnit, Vec<JavaSymbol>) {

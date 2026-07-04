@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use tokio::sync::mpsc as async_mpsc;
 
-use crate::git::{self, GitOutput};
+use crate::git::GitOutput;
 use crate::jdk;
 use crate::process_registry;
 use crate::toolchain;

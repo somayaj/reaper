@@ -438,7 +438,7 @@ fn resolve_coverage_lines(
     package: &str,
     xml: &str,
 ) -> (Vec<LineCoverage>, String, Option<String>) {
-    let mut lines = parse_sourcefile_lines(xml, package, filename);
+    let lines = parse_sourcefile_lines(xml, package, filename);
     if !lines.is_empty() {
         return (lines, rel_path.to_string(), None);
     }

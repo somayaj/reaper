@@ -2,7 +2,7 @@ mod gemini;
 mod gemini_chat;
 
 pub use gemini::GeminiClient;
-pub use gemini_chat::{ChatTurn, GeminiChatStore};
+pub use gemini_chat::GeminiChatStore;
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
-use crate::git::{self, GitOutput};
+use crate::git;
 use crate::settings::SettingsStore;
 use crate::workspace;
 
@@ -189,7 +189,20 @@ pub async fn suggest_inline_completion(
     column: u32,
     content: &str,
     line_prefix: &str,
+    local_only: bool,
 ) -> Result<String> {
+    if workspace::is_import_typing_line(path, content, line, line_prefix) {
+        return Ok(apply_inline_fallback(
+            ws, path, line, column, content, line_prefix,
+        ));
+    }
+
+    if local_only {
+        return Ok(apply_inline_fallback(
+            ws, path, line, column, content, line_prefix,
+        ));
+    }
+
     let prefer_ai =
         workspace::should_prefer_ai_statement_inline(path, line_prefix, content, line);
     let local = if prefer_ai {
@@ -206,11 +219,23 @@ pub async fn suggest_inline_completion(
             workspace::build_inline_completion_context(ws, path, line, column, content, line_prefix);
         let client = GeminiClient::new(api_key, settings.gemini_model());
         if let Ok(raw) = client.suggest_inline_completion(&context).await {
-            let normalized = normalize_inline_suggestion(&raw, line_prefix);
+            let is_prose = matches!(
+                workspace::language_for_path(path),
+                Some(
+                    "markdown" | "plaintext" | "yaml" | "json" | "html" | "xml" | "toml" | "ini"
+                        | "css" | "scss" | "less" | "sql" | "dockerfile" | "makefile" | "cmake"
+                        | "graphql" | "protobuf"
+                )
+            );
+            let normalized = if is_prose {
+                normalize_inline_suggestion_loose(&raw, line_prefix)
+            } else {
+                normalize_inline_suggestion(&raw, line_prefix)
+            };
             if !normalized.is_empty() {
                 return Ok(normalized);
             }
-            if !raw.trim().is_empty() {
+            if !raw.trim().is_empty() && !is_prose {
                 let loose = normalize_inline_suggestion_loose(&raw, line_prefix);
                 if !loose.is_empty() {
                     return Ok(loose);
@@ -268,7 +293,7 @@ pub async fn suggest_ai_completions(
 
 pub async fn suggest_run_target(
     settings: &SettingsStore,
-    ws: &Path,
+    _ws: &Path,
     path: &str,
     line: u32,
     content: &str,
@@ -355,7 +380,7 @@ struct AiQuickFixRaw {
 
 const QUICK_FIX_CURSOR_TIMEOUT: Duration = Duration::from_secs(12);
 
-pub async fn suggest_quick_fixes(
+pub async fn suggest_ai_quick_fixes(
     settings: &SettingsStore,
     ws: &Path,
     path: &str,
@@ -365,11 +390,6 @@ pub async fn suggest_quick_fixes(
 ) -> Result<Vec<workspace::QuickFix>> {
     if diagnostics.is_empty() {
         return Ok(Vec::new());
-    }
-
-    let fixes = workspace::suggest_local_quick_fixes(ws, path, content, diagnostics)?;
-    if !fixes.is_empty() {
-        return Ok(fixes);
     }
 
     let context = build_quick_fix_context(path, content, diagnostics);
@@ -471,6 +491,13 @@ fn build_quick_fix_context(
         "Return JSON quick fixes that resolve the errors above. Minimal edits only."
     )
     .ok();
+    if path.ends_with(".java") {
+        writeln!(
+            out,
+            "Java: call instance methods on the receiver (e.g. file.exists(), not exists())."
+        )
+        .ok();
+    }
 
     out
 }
@@ -514,6 +541,7 @@ const QUICK_FIX_SYSTEM: &str = "You are an IDE quick-fix engine.\n\
     RULES:\n\
     - Fix the reported errors using minimal correct edits.\n\
     - For missing imports, insert after package or at top of file.\n\
+    - Java: instance methods need a receiver (file.exists(), never bare exists()).\n\
     - Do not repeat unchanged file content — only edit regions.\n\
     - Code only in text fields — no markdown or explanations.\n\
     - If no safe fix, return [].";
@@ -763,6 +791,14 @@ fn inline_looks_like_prose(text: &str) -> bool {
         || t.starts_with("//")
         || t.starts_with("/*")
         || t.starts_with("#")
+        || t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("> ")
+        || t.starts_with("| ")
+        || t
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
     {
         return false;
     }

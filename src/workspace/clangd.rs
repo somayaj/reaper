@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::languages;
+use super::lsp::{self, ReferenceLocation, RenameRange, FileTextEdits, SignatureHelp};
 use super::symbols::{self, HoverInfo, SymbolLocation};
 
 const LSP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -118,6 +119,267 @@ pub fn find_definition(
     Ok(parse_definition_location(
         &ws, rel_path, content, line, column, &result,
     ))
+}
+
+pub fn find_references(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Vec<ReferenceLocation>> {
+    if !languages::is_c_like_path(rel_path) {
+        return Ok(Vec::new());
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(Vec::new());
+    }
+    let uri = file_uri(&abs_file)?;
+    let deadline = Instant::now() + LSP_TIMEOUT;
+    let result = match query_references(&ws, rel_path, &uri, line, column, content, deadline) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("clangd references failed: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
+    Ok(lsp::parse_reference_locations(&ws, &result))
+}
+
+pub fn prepare_rename(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<RenameRange>> {
+    if !languages::is_c_like_path(rel_path) {
+        return Ok(None);
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(None);
+    }
+    let uri = file_uri(&abs_file)?;
+    let deadline = Instant::now() + LSP_TIMEOUT;
+    let result = match query_prepare_rename(&ws, rel_path, &uri, line, column, content, deadline) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("clangd prepareRename failed: {e:#}");
+            return Ok(None);
+        }
+    };
+    Ok(lsp::parse_rename_range(&result))
+}
+
+pub fn rename_symbol(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+) -> Result<Vec<FileTextEdits>> {
+    if !languages::is_c_like_path(rel_path) || new_name.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(Vec::new());
+    }
+    let uri = file_uri(&abs_file)?;
+    let deadline = Instant::now() + LSP_TIMEOUT;
+    let result = query_rename(
+        &ws,
+        rel_path,
+        &uri,
+        line,
+        column,
+        content,
+        new_name.trim(),
+        deadline,
+    )?;
+    lsp::parse_workspace_edit(&ws, &result)
+}
+
+pub fn signature_help(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Option<SignatureHelp>> {
+    if !languages::is_c_like_path(rel_path) {
+        return Ok(None);
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(None);
+    }
+    let uri = file_uri(&abs_file)?;
+    let deadline = Instant::now() + LSP_TIMEOUT;
+    let result = match query_signature_help(&ws, rel_path, &uri, line, column, content, deadline)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("clangd signatureHelp failed: {e:#}");
+            return Ok(None);
+        }
+    };
+    Ok(lsp::parse_signature_help(&result))
+}
+
+fn query_references(
+    ws: &Path,
+    rel_path: &str,
+    uri: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    lsp_request(
+        ws,
+        rel_path,
+        uri,
+        content,
+        deadline,
+        id,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": line.saturating_sub(1),
+                    "character": column.saturating_sub(1)
+                },
+                "context": { "includeDeclaration": true }
+            }
+        }),
+    )
+}
+
+fn query_prepare_rename(
+    ws: &Path,
+    rel_path: &str,
+    uri: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    lsp_request(
+        ws,
+        rel_path,
+        uri,
+        content,
+        deadline,
+        id,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/prepareRename",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": line.saturating_sub(1),
+                    "character": column.saturating_sub(1)
+                }
+            }
+        }),
+    )
+}
+
+fn query_rename(
+    ws: &Path,
+    rel_path: &str,
+    uri: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    lsp_request(
+        ws,
+        rel_path,
+        uri,
+        content,
+        deadline,
+        id,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/rename",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": line.saturating_sub(1),
+                    "character": column.saturating_sub(1)
+                },
+                "newName": new_name
+            }
+        }),
+    )
+}
+
+fn query_signature_help(
+    ws: &Path,
+    rel_path: &str,
+    uri: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut params = json!({
+        "textDocument": { "uri": uri },
+        "position": {
+            "line": line.saturating_sub(1),
+            "character": column.saturating_sub(1)
+        }
+    });
+    if let Some((trigger_kind, trigger_character)) = lsp::signature_help_trigger(content, line, column)
+    {
+        params["context"] = json!({
+            "triggerKind": trigger_kind,
+            "triggerCharacter": trigger_character,
+            "isRetrigger": false
+        });
+    }
+    lsp_request(
+        ws,
+        rel_path,
+        uri,
+        content,
+        deadline,
+        id,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/signatureHelp",
+            "params": params
+        }),
+    )
 }
 
 fn query_hover(
@@ -271,7 +533,14 @@ fn initialize_session(child: &mut Child, root_uri: &str, deadline: Instant) -> R
                 "capabilities": {
                     "textDocument": {
                         "hover": { "contentFormat": ["markdown", "plaintext"] },
-                        "definition": { "linkSupport": true }
+                        "definition": { "linkSupport": true },
+                        "references": {},
+                        "rename": { "prepareSupport": true },
+                        "signatureHelp": {
+                            "signatureInformation": {
+                                "documentationFormat": ["markdown", "plaintext"]
+                            }
+                        }
                     }
                 }
             }
@@ -653,6 +922,104 @@ mod tests {
             .expect("hover result");
         assert_eq!(info.name, "add");
         assert!(info.signature.as_ref().is_some_and(|s| s.contains("add")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    const CLANGD_DEMO: &str = "int add(int a, int b) { return a + b; }\nint main() { return add(1, 2); }\n";
+    const CLANGD_REL: &str = "demo.c";
+
+    fn setup_clangd_workspace() -> Option<std::path::PathBuf> {
+        if crate::toolchain::resolve_program("clangd").is_none() {
+            return None;
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-clangd-lsp-{}-{}",
+            std::process::id(),
+            id
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).ok()?;
+        std::fs::write(ws.join(CLANGD_REL), CLANGD_DEMO).ok()?;
+        Some(ws)
+    }
+
+    #[test]
+    fn clangd_definition_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let def = find_definition(&ws, CLANGD_REL, 2, 21, CLANGD_DEMO)
+            .expect("definition query")
+            .expect("definition for add");
+        assert!(def.path.contains("demo.c"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn clangd_find_references_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let refs = find_references(&ws, CLANGD_REL, 2, 21, CLANGD_DEMO).expect("references query");
+        assert!(
+            refs.len() >= 2,
+            "expected declaration + usage references, got {}",
+            refs.len()
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn clangd_prepare_rename_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let prep = prepare_rename(&ws, CLANGD_REL, 2, 21, CLANGD_DEMO).expect("prepareRename query");
+        if let Some(prep) = prep {
+            assert!(prep.column > 0);
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn clangd_rename_symbol_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let edits = rename_symbol(&ws, CLANGD_REL, 2, 21, CLANGD_DEMO, "sum")
+            .expect("rename query");
+        assert!(!edits.is_empty(), "rename should produce workspace edits");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn clangd_signature_help_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let help = signature_help(&ws, CLANGD_REL, 2, 28, CLANGD_DEMO)
+            .expect("signatureHelp query");
+        if let Some(help) = help {
+            assert!(
+                help.signatures.iter().any(|s| s.label.contains("add")),
+                "expected add() signature, got {:?}",
+                help
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn clangd_peek_definition_regression() {
+        let Some(ws) = setup_clangd_workspace() else {
+            return;
+        };
+        let def = find_definition(&ws, CLANGD_REL, 2, 21, CLANGD_DEMO)
+            .expect("peek definition query")
+            .expect("definition location for peek");
+        assert!(def.path.contains("demo.c"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

@@ -13,7 +13,7 @@ use futures_util::{
     sink::SinkExt,
     stream::StreamExt,
 };
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Deserialize;
 use tokio::sync::mpsc as async_mpsc;
 

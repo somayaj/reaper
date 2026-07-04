@@ -410,6 +410,44 @@ pub fn java_version_string(home: &Path) -> Result<String> {
         .context("empty java -version output")
 }
 
+/// JDK used to launch jdtls (must be 21+). Never Settings → Java / project JDK 17.
+pub fn jdtls_java_home() -> Result<PathBuf> {
+    if let Some(home) = crate::config::bundled_jdtls_java_home() {
+        if java_major_version(&home).is_some_and(|m| m >= 21) {
+            return validate_java_home(&home);
+        }
+    }
+    detect_java_home_for_versions(&["21", "25", "23", "24", "26"]).context(
+        "jdtls requires JDK 21 or newer to run. Rebuild Reaper.app to bundle JDK 21, \
+         or install openjdk@21 (e.g. brew install openjdk@21). Keep JDK 17 in Settings → Java for your project.",
+    )
+}
+
+/// JDK for jdtls project analysis — Settings → Java when it matches `release`, else Homebrew/PATH.
+pub fn project_java_home_for_release(release: u32) -> Result<PathBuf> {
+    if let Ok(home) = effective_java_home() {
+        if java_major_version(&home) == Some(release) {
+            return validate_java_home(&home);
+        }
+    }
+    let version = if release == 8 {
+        "1.8".to_string()
+    } else {
+        release.to_string()
+    };
+    detect_java_home_for_versions(&[&version]).with_context(|| {
+        format!(
+            "JDK {release} required for this project. Set it in Settings → Java or install openjdk@{release}."
+        )
+    })
+}
+
+pub fn apply_jdtls_java_env(cmd: &mut std::process::Command) {
+    if let Ok(home) = jdtls_java_home() {
+        apply_java_home(cmd, &home);
+    }
+}
+
 pub fn apply_java_env(cmd: &mut Command) {
     if let Ok(home) = effective_java_home() {
         apply_java_home(cmd, &home);

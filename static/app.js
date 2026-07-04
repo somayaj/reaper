@@ -24,10 +24,17 @@ const AI_INLINE_COMPLETE_KEY = 'reaper-ai-inline-complete';
 const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
 const AUTO_SAVE_DELAY_MS = 800;
-const DIAG_DELAY_MS = 150;
-const ALL_JAVA_DIAG_DELAY_MS = 250;
+const DIAG_DELAY_MS = 200;
+const JAVA_DIAG_DELAY_MS = 800;
+const ALL_JAVA_DIAG_DELAY_MS = 2000;
+const CONFIG_DIAG_DELAY_MS = 900;
+const BUILD_DIAG_DELAY_MS = 1400;
+const TAB_RENDER_DELAY_MS = 200;
+const EDITOR_CONTENT_SYNC_DELAY_MS = 120;
+const TEST_DECOR_DELAY_MS = 200;
+const COVERAGE_CLEAR_DELAY_MS = 250;
 const PROJECT_RELOAD_DELAY_MS = 2000;
-const PROJECT_BUILD_RELOAD_DELAY_MS = 1500;
+const PROJECT_BUILD_RELOAD_DELAY_MS = 3000;
 const PROJECT_INDEX_POLL_MS = 750;
 const PROJECT_INDEX_POLL_BACKGROUND_MS = 5000;
 const PROJECT_AUTO_REFRESH_MAX = 3;
@@ -383,6 +390,7 @@ const AGENT_PROVIDERS = {
 const state = {
   repo: null,
   repos: [],
+  hiddenRepos: [],
   branches: [],
   tabs: [],
   tabContents: new Map(),
@@ -425,6 +433,9 @@ const state = {
   agentSeenPaths: new Set(),
   agentHadFileChanges: false,
   cloneBusy: false,
+  publishBusy: false,
+  pushBusy: false,
+  commitBusy: false,
   cloneSource: 'remote',
   currentBranch: '',
   defaultBranch: '',
@@ -450,6 +461,7 @@ const state = {
   indexFreezeActive: false,
   projectProfile: null,
   repoPickerUnregisterName: null,
+  repoPickerUnregisterBusy: false,
   patTokenPendingRemove: null,
   treeNavAnchor: null,
   mergeState: null,
@@ -460,6 +472,7 @@ const state = {
   testMethodsByLine: new Map(),
   fileCoverage: new Map(),
   coverageDecorationIds: [],
+  coverageInlineEnabled: true,
   coveragePanelOpen: false,
   coverageReport: null,
   dbViewerPanelOpen: false,
@@ -500,7 +513,16 @@ const state = {
 
 let diagTimer = null;
 let allJavaDiagTimer = null;
+let tabRenderTimer = null;
+let editorContentSyncTimer = null;
+let testDecorTimer = null;
+let coverageClearTimer = null;
 let diagSeq = 0;
+let diagRetryTimer = null;
+let diagRetryDelayMs = 2500;
+let allJavaDiagRefreshGen = 0;
+/** @type {Map<string, { controller: AbortController, promise: Promise<unknown>, content: string }>} */
+const diagFetchByPath = new Map();
 let fileDiags = [];
 let diagJumpIndex = 0;
 
@@ -645,9 +667,26 @@ function setCompleteDebugStatus(msg) {
 function setGlobalLoading(on, text = 'Loading…') {
   const overlay = $('#loading-overlay');
   const label = $('#loading-text');
+  const spinner = $('#loading-spinner');
+  const logo = overlay?.querySelector('[data-reaper-logo]');
   if (label) label.textContent = text;
+  spinner?.classList.toggle('hidden', !on);
+  logo?.classList.toggle('hidden', on);
   overlay?.classList.toggle('hidden', !on);
   overlay?.classList.toggle('flex', on);
+}
+
+function busyIndicatorHtml({ large = false } = {}) {
+  const sizeClass = large ? ' ij-busy-indicator--lg' : '';
+  return `<span class="ij-busy-indicator${sizeClass}" aria-hidden="true"><span class="ij-busy-indicator-ring"></span><span class="ij-busy-indicator-glow"></span></span>`;
+}
+
+function navigationBusyHtml(message) {
+  return `<span class="ij-nav-busy">${busyIndicatorHtml()}<span class="ij-nav-busy-label">${escapeHtml(message)}</span></span>`;
+}
+
+function busyStatusHtml(message) {
+  return `<span class="ij-busy-status">${busyIndicatorHtml()}<span>${escapeHtml(message)}</span></span>`;
 }
 
 function hideLaunchSplash() {
@@ -694,6 +733,52 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
     if (input) input.disabled = busy;
   });
   state.cloneBusy = busy;
+}
+
+function setPublishModalState({ busy = false, status = '', error = '' } = {}) {
+  const errEl = $('#publish-error');
+  const statusEl = $('#publish-status');
+  const statusText = $('#publish-status-text');
+  const cancelBtn = $('#publish-modal-cancel');
+  const submitBtn = $('#btn-publish-submit');
+  const overlay = $('#publish-modal-overlay');
+  const busyLabel = 'Publishing to GitHub…';
+
+  if (errEl) {
+    errEl.textContent = error;
+    errEl.classList.toggle('hidden', !error);
+    if (error) errEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+  if (statusEl) {
+    if (statusText) statusText.textContent = status || busyLabel;
+    statusEl.classList.toggle('hidden', !status);
+  }
+  if (overlay) overlay.classList.toggle('ij-clone-modal--busy', busy);
+  if (cancelBtn) cancelBtn.disabled = busy;
+  if (submitBtn) {
+    submitBtn.disabled = busy;
+    submitBtn.textContent = busy ? busyLabel : 'Publish';
+  }
+  ['#publish-github-repo', 'input[name="create"]', 'input[name="private"]'].forEach((sel) => {
+    const input = $(sel);
+    if (input) input.disabled = busy;
+  });
+  state.publishBusy = busy;
+}
+
+function setPushModalBusy({ busy = false, text = 'Pushing…' } = {}) {
+  const overlay = $('#push-modal-overlay');
+  const modal = overlay?.querySelector('.ij-push-modal');
+  const busyEl = $('#push-modal-busy');
+  const busyText = $('#push-modal-busy-text');
+  const cancelBtn = $('#push-modal-cancel');
+  const confirmBtn = $('#push-modal-confirm');
+  if (busyText) busyText.textContent = text;
+  busyEl?.classList.toggle('hidden', !busy);
+  modal?.classList.toggle('ij-push-modal--busy', busy);
+  if (cancelBtn) cancelBtn.disabled = busy;
+  if (confirmBtn && busy) confirmBtn.disabled = true;
+  state.pushBusy = busy;
 }
 
 function setCloneModalTab(source) {
@@ -849,17 +934,28 @@ async function refreshJavaLanguageLevel() {
   try {
     const jdk = await api('/api/settings/jdk');
     const ver = jdk?.effective_version || jdk?.version || '';
-    const m = String(ver).match(/(\d+)/);
-    state.javaLanguageLevel = m ? parseInt(m[1], 10) : 17;
+    state.javaLanguageLevel = parseJavaMajorVersion(ver);
   } catch {
     state.javaLanguageLevel = 17;
   }
 }
 
+/** Parse `21.0.2`, `1.8.0_392`, `openjdk version "21"` → major version. */
+function parseJavaMajorVersion(ver) {
+  const s = String(ver || '').trim();
+  if (!s) return 17;
+  const legacy = s.match(/^1\.(\d+)/);
+  if (legacy) return parseInt(legacy[1], 10) || 17;
+  const m = s.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) || 17 : 17;
+}
+
 async function refreshLanguageContextForPath(path) {
   if (!state.repo || !path) {
     state.languageContext = null;
-    return refreshJavaLanguageLevel();
+    await refreshJavaLanguageLevel();
+    updateStatusLanguage(path);
+    return;
   }
   try {
     const q = new URLSearchParams({ path });
@@ -867,15 +963,77 @@ async function refreshLanguageContextForPath(path) {
     if (res) {
       state.languageContext = res;
       if (res.java_level) state.javaLanguageLevel = res.java_level;
+      else if (res.jdk_level) state.javaLanguageLevel = res.jdk_level;
       else if (path.endsWith('.java')) await refreshJavaLanguageLevel();
+      updateStatusLanguage(path);
       return;
     }
   } catch {
     /* fall back */
   }
-  if (path.endsWith('.java')) return refreshJavaLanguageLevelForPath(path);
   state.languageContext = null;
-  return refreshJavaLanguageLevel();
+  await refreshJavaLanguageLevel();
+  updateStatusLanguage(path);
+}
+
+function completionLevelForPath(path, ctx) {
+  if (!path?.endsWith('.java')) return null;
+  return ctx?.java_level ?? ctx?.jdk_level ?? state.javaLanguageLevel ?? null;
+}
+
+function shortCompilerVersion(raw) {
+  const line = String(raw || '').split('\n')[0].trim();
+  if (!line) return '';
+  const semver = line.match(/(\d+(?:\.\d+){0,2})/);
+  if (semver) return semver[1];
+  return line.slice(0, 40);
+}
+
+function updateStatusLanguage(path) {
+  const el = $('#status-language');
+  if (!el) return;
+  const lang = window.ReaperLang?.langLabelForPath?.(path)
+    || window.ReaperLang?.langLabel?.(langForPath(path))
+    || 'Plain Text';
+  const ctx = state.languageContext;
+  const primary = ctx?.compilers?.find((c) => c.version) || ctx?.compilers?.[0];
+  const tool = ctx?.completion_tool || primary?.id;
+  const verRaw = ctx?.completion_version || primary?.version || '';
+  const ver = shortCompilerVersion(verRaw);
+  const level = completionLevelForPath(path, ctx);
+  if (tool && ver) {
+    if (level != null && path?.endsWith('.java')) {
+      el.textContent = `${lang} · ${level} · ${tool} ${ver}`;
+    } else {
+      el.textContent = `${lang} · ${tool} ${ver}`;
+    }
+    const parts = [`Completions use ${tool} ${ver}`];
+    if (level != null && path?.endsWith('.java')) {
+      parts.push(`Java language level ${level}`);
+      if (ctx?.jdk_level && ctx.jdk_level !== level) {
+        parts.push(`configured JDK ${ctx.jdk_level}`);
+      }
+      if (ctx?.project_java_level) {
+        parts.push(`project declares ${ctx.project_java_level}`);
+      }
+    } else if (ctx?.dialect) {
+      parts.push(`project declares ${ctx.dialect}`);
+    }
+    el.title = parts.join(' · ');
+    return;
+  }
+  if (level != null && path?.endsWith('.java')) {
+    el.textContent = `${lang} · Java ${level}`;
+    const parts = [`Java completions use language level ${level}`];
+    if (ctx?.project_java_level) {
+      parts.push(`project declares ${ctx.project_java_level}`);
+    }
+    el.title = parts.join(' · ');
+    return;
+  }
+  const compilers = window.ReaperLang?.compilerLabelsForPath?.(path);
+  el.textContent = compilers ? `${lang} · ${compilers}` : lang;
+  el.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
 }
 
 async function refreshJavaLanguageLevelForPath(path) {
@@ -1480,6 +1638,7 @@ function switchSettingsTab(tab) {
   });
   $('.ij-settings-modal')?.classList.toggle('ij-settings-modal--compiler', tab === 'compilers');
   if (tab === 'compilers') {
+    void loadCompilersSettingsSection();
     setTimeout(() => $('#settings-compiler-search')?.focus(), 0);
   }
 }
@@ -1730,6 +1889,9 @@ async function loadCompilersSettingsSection() {
       ...COMPILER_ORDER.map((id) => byId[id]).filter(Boolean),
       ...tools.filter((t) => !COMPILER_ORDER.includes(t.id)),
     ];
+    if (!ordered.length) {
+      list.innerHTML = '<p class="ij-settings-empty">No language compilers loaded. Try reopening Settings → Compiler.</p>';
+    } else {
     list.innerHTML = `<div class="ij-compiler-table">
       <div class="ij-compiler-head" aria-hidden="true">
         <span>Language</span>
@@ -1740,6 +1902,7 @@ async function loadCompilersSettingsSection() {
       <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled })).join('')}</div>
     </div>`;
     bindCompilerRows(list);
+    }
 
     const search = $('#settings-compiler-search');
     if (search && !search.dataset.bound) {
@@ -1802,7 +1965,8 @@ async function saveCompilerFromSettings(id) {
       body: JSON.stringify({ id, path }),
     });
     await loadCompilersSettingsSection();
-    void refreshJavaLanguageLevel();
+    await refreshJavaLanguageLevel();
+    if (state.activeTab) await refreshLanguageContextForPath(state.activeTab);
     toast(`${id} compiler saved`, 'success');
   } catch (err) {
     toast(err.message || `Failed to save ${id}`, 'error');
@@ -1813,7 +1977,8 @@ async function clearCompilerFromSettings(id) {
   try {
     await api(`/api/settings/compilers/${encodeURIComponent(id)}`, { method: 'DELETE' });
     await loadCompilersSettingsSection();
-    void refreshJavaLanguageLevel();
+    await refreshJavaLanguageLevel();
+    if (state.activeTab) await refreshLanguageContextForPath(state.activeTab);
     toast(`${id} using system default`, 'success');
   } catch (err) {
     toast(err.message || `Failed to clear ${id}`, 'error');
@@ -2293,6 +2458,83 @@ function setStatusMessage(msg) {
   if (el) el.textContent = msg;
 }
 
+const NAV_BUSY_DELAY_MS = 1000;
+const NAV_RESULT_MS = 4500;
+let navBusyDepth = 0;
+let navBusyTimer = null;
+let navResultTimer = null;
+let navBusyPrevMessage = 'Ready';
+
+function showNavigationBusy(label) {
+  const slot = $('#status-nav-indicator');
+  const left = $('#status-left');
+  if (slot) {
+    slot.innerHTML = navigationBusyHtml(label);
+    slot.classList.remove('hidden');
+  }
+  left?.setAttribute('aria-busy', 'true');
+}
+
+function hideNavigationBusy() {
+  const slot = $('#status-nav-indicator');
+  const left = $('#status-left');
+  if (slot) {
+    slot.innerHTML = '';
+    slot.classList.add('hidden');
+  }
+  left?.removeAttribute('aria-busy');
+}
+
+function stopNavigationBusyIndicator() {
+  clearTimeout(navBusyTimer);
+  navBusyTimer = null;
+  hideNavigationBusy();
+}
+
+function clearNavigationResult() {
+  if (navResultTimer) {
+    clearTimeout(navResultTimer);
+    navResultTimer = null;
+  }
+  const el = $('#status-message');
+  el?.classList.remove('is-nav-hint', 'is-nav-warn');
+}
+
+/** Brief status-bar note after navigation (e.g. no definition found). */
+function showNavigationResult(message, kind = 'info') {
+  if (navBusyDepth <= 1) {
+    stopNavigationBusyIndicator();
+  }
+  clearNavigationResult();
+  const el = $('#status-message');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle('is-nav-hint', kind === 'info');
+  el.classList.toggle('is-nav-warn', kind === 'warn');
+  navResultTimer = setTimeout(() => {
+    el.classList.remove('is-nav-hint', 'is-nav-warn');
+    el.textContent = navBusyPrevMessage || 'Ready';
+    navResultTimer = null;
+  }, NAV_RESULT_MS);
+}
+
+/** Status-bar spinner when navigation (F12, usages, rename) exceeds NAV_BUSY_DELAY_MS. */
+function runWithNavigationBusy(label, fn) {
+  navBusyDepth += 1;
+  if (navBusyDepth === 1) {
+    navBusyPrevMessage = $('#status-message')?.textContent || 'Ready';
+    clearTimeout(navBusyTimer);
+    navBusyTimer = setTimeout(() => {
+      if (navBusyDepth > 0) showNavigationBusy(label);
+    }, NAV_BUSY_DELAY_MS);
+  }
+  return Promise.resolve().then(fn).finally(() => {
+    navBusyDepth = Math.max(0, navBusyDepth - 1);
+    if (navBusyDepth > 0) return;
+    stopNavigationBusyIndicator();
+  });
+}
+
 function startCommandStatus(label, terminalId) {
   const term = resolveTerminal(terminalId);
   if (!term) return;
@@ -2525,7 +2767,15 @@ function startProjectIndexPolling() {
   state.projectIndexNotified = false;
   state.projectIndexStartedAt = Date.now();
   pollProjectIndexStatus();
-  ensureProjectIndexPollInterval(PROJECT_INDEX_POLL_MS);
+  ensureProjectIndexPollInterval(PROJECT_INDEX_POLL_BACKGROUND_MS);
+}
+
+function ensureJavaModuleForPath(path) {
+  if (!state.repo || !path) return;
+  const p = stripJavaDiagOverlayPath(path).trim();
+  if (!p.endsWith('.java')) return;
+  const q = new URLSearchParams({ path: p });
+  void api(repoApi(state.repo, `/workspace/java/ensure-module?${q}`), { method: 'POST' }).catch(() => {});
 }
 
 function startupRepoFromSettings(general) {
@@ -3145,7 +3395,7 @@ function scheduleBuildTasksRefresh(options = {}) {
     } else if (state.buildTasksPanelOpen) {
       void loadBuildTasksTree(tab);
     }
-  }, 180);
+  }, 400);
 }
 
 function applyBuildTasksDock() {
@@ -3744,9 +3994,14 @@ async function pollProjectIndexStatus() {
       ensureProjectIndexPollInterval(PROJECT_INDEX_POLL_BACKGROUND_MS);
     } else if (projectIndexNeedsFreeze(status)) {
       ensureProjectIndexPollInterval(PROJECT_INDEX_POLL_MS);
+    } else {
+      ensureProjectIndexPollInterval(PROJECT_INDEX_POLL_BACKGROUND_MS);
     }
     const javaStillRunning = status?.profile?.indexers?.includes('java') && status?.java?.state === 'running';
-    if ((status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') && !javaStillRunning && !backgroundActive) {
+    const onDemandReady = status?.java?.phase === 'on-demand'
+      && status?.java?.state !== 'running'
+      && !backgroundActive;
+    if ((status?.state === 'ready' || status?.state === 'error' || status?.state === 'idle') && !javaStillRunning && (onDemandReady || !backgroundActive)) {
       stopProjectIndexPolling();
     }
   } catch {
@@ -4087,10 +4342,155 @@ function showGoToClass(initialQuery = '') {
 
 function hideGoToClass() {
   $('#goto-class-overlay')?.classList.remove('open');
-  if (gotoClassTimer) {
-    clearTimeout(gotoClassTimer);
-    gotoClassTimer = null;
+}
+
+let javaReferencesHits = [];
+let javaReferencesIndex = 0;
+
+function hideJavaReferences() {
+  $('#java-references-overlay')?.classList.remove('open');
+  javaReferencesHits = [];
+  javaReferencesIndex = 0;
+}
+
+function renderJavaReferencesHits() {
+  const el = $('#java-references-results');
+  if (!el) return;
+  if (!javaReferencesHits.length) {
+    el.innerHTML = '<div class="ij-palette-empty px-3 py-2 text-xs text-gray-500">No usages found</div>';
+    return;
   }
+  el.innerHTML = javaReferencesHits.map((hit, i) => {
+    const active = i === javaReferencesIndex ? ' active' : '';
+    const loc = `${hit.path}:${hit.line}:${hit.column}`;
+    return `<button type="button" class="ij-palette-item${active}" data-ref-idx="${i}"><span class="ij-palette-item-label">${escapeHtml(loc)}</span></button>`;
+  }).join('');
+  el.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+async function openJavaReferenceHit(hit) {
+  if (!hit?.path) return;
+  hideJavaReferences();
+  await openFileAt(hit.path, hit.line || 1, hit.column || 1);
+}
+
+function showJavaReferences(refs, title) {
+  javaReferencesHits = Array.isArray(refs) ? refs : [];
+  javaReferencesIndex = 0;
+  const heading = $('#java-references-title');
+  if (heading) heading.textContent = title || 'Find Usages';
+  renderJavaReferencesHits();
+  $('#java-references-overlay')?.classList.add('open');
+}
+
+function applyTextEditsToLines(lines, edits) {
+  const sorted = [...edits].sort((a, b) => {
+    if (a.start_line !== b.start_line) return b.start_line - a.start_line;
+    return b.start_column - a.start_column;
+  });
+  for (const edit of sorted) {
+    const startIdx = Math.max(0, edit.start_line - 1);
+    const endIdx = Math.max(0, edit.end_line - 1);
+    if (startIdx >= lines.length) continue;
+    const startCol = Math.max(0, edit.start_column - 1);
+    const endCol = Math.max(0, edit.end_column - 1);
+    if (startIdx === endIdx) {
+      const line = lines[startIdx] ?? '';
+      lines[startIdx] = line.slice(0, startCol) + (edit.text ?? '') + line.slice(endCol);
+    } else {
+      const first = lines[startIdx] ?? '';
+      const last = lines[endIdx] ?? '';
+      const merged = first.slice(0, startCol) + (edit.text ?? '') + last.slice(endCol);
+      lines.splice(startIdx, endIdx - startIdx + 1, merged);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function applyJavaWorkspaceEdits(fileEdits) {
+  if (!state.repo || !Array.isArray(fileEdits) || !fileEdits.length) return 0;
+  let changed = 0;
+  for (const batch of fileEdits) {
+    const path = batch.path;
+    const edits = batch.edits || [];
+    if (!path || !edits.length) continue;
+    if (path === state.activeTab && state.editor) {
+      const lines = state.editor.getValue().split('\n');
+      const next = applyTextEditsToLines(lines, edits);
+      state.suppressEditorChange = true;
+      state.editor.setValue(next);
+      state.suppressEditorChange = false;
+      state.tabContents.set(path, next);
+      state.dirty.add(path);
+      updateSaveButton();
+      renderTabs();
+      await saveFile({ silent: true, skipProjectReload: true });
+      changed += 1;
+      continue;
+    }
+    let content = state.tabContents.get(path);
+    if (content == null) {
+      try {
+        const res = await api(repoApi(state.repo, `/workspace/file?${new URLSearchParams({ path })}`));
+        content = res?.content ?? '';
+      } catch {
+        continue;
+      }
+    }
+    const next = applyTextEditsToLines(content.split('\n'), edits);
+    try {
+      await api(repoApi(state.repo, '/workspace/file'), {
+        method: 'PUT',
+        body: JSON.stringify({ path, content: next }),
+      });
+      state.tabContents.set(path, next);
+      state.dirty.delete(path);
+      changed += 1;
+    } catch { /* skip */ }
+  }
+  if (changed > 0) {
+    scheduleAllJavaDiagnostics();
+    if (hasAutoReloadProject()) scheduleProjectReload(400);
+  }
+  return changed;
+}
+
+function bindJavaReferences() {
+  $('#java-references-results')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-ref-idx]');
+    if (!btn) return;
+    const idx = Number(btn.dataset.refIdx);
+    if (Number.isFinite(idx) && javaReferencesHits[idx]) {
+      void openJavaReferenceHit(javaReferencesHits[idx]);
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (!$('#java-references-overlay')?.classList.contains('open')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideJavaReferences();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      javaReferencesIndex = Math.min(javaReferencesIndex + 1, Math.max(javaReferencesHits.length - 1, 0));
+      renderJavaReferencesHits();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      javaReferencesIndex = Math.max(javaReferencesIndex - 1, 0);
+      renderJavaReferencesHits();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void openJavaReferenceHit(javaReferencesHits[javaReferencesIndex]);
+    }
+  });
+  $('#java-references-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#java-references-overlay')) hideJavaReferences();
+  });
 }
 
 function showGoToLine() {
@@ -4360,6 +4760,7 @@ function showRepoPicker() {
 }
 
 function hideRepoPicker() {
+  if (state.repoPickerUnregisterBusy) return;
   state.repoPickerUnregisterName = null;
   $('#repo-picker-overlay')?.classList.remove('open');
 }
@@ -4367,16 +4768,26 @@ function hideRepoPicker() {
 function renderRepoPickerResults() {
   const results = $('#repo-picker-results');
   if (!results) return;
-  if (!state.repos.length) {
+  const hidden = state.hiddenRepos || [];
+  if (!state.repos.length && !hidden.length) {
     results.innerHTML = '<p class="ij-repo-picker-empty">No repositories yet — import or create one from the welcome screen.</p>';
     return;
   }
   const current = state.repo;
   const pending = state.repoPickerUnregisterName;
-  results.innerHTML = state.repos.map((r) => {
+  const activeRows = state.repos.map((r) => {
     const label = r.name;
     const isCurrent = r.name === current;
     if (pending === r.name) {
+      if (state.repoPickerUnregisterBusy) {
+        return `
+      <div class="ij-repo-picker-row ij-repo-picker-row--confirm ij-repo-picker-row--busy" role="option" aria-busy="true">
+        <span class="ij-repo-picker-confirm-status">
+          <span class="ij-clone-spinner" aria-hidden="true"></span>
+          <span>Removing <strong>${escapeHtml(r.name)}</strong>…</span>
+        </span>
+      </div>`;
+      }
       return `
       <div class="ij-repo-picker-row ij-repo-picker-row--confirm" role="option">
         <span class="ij-repo-picker-confirm-text">Remove <strong>${escapeHtml(r.name)}</strong> from Reaper?</span>
@@ -4395,11 +4806,39 @@ function renderRepoPickerResults() {
       <button type="button" class="ij-repo-picker-remove" data-repo-remove="${escapeHtml(r.name)}" title="Remove from Reaper" aria-label="Remove ${escapeHtml(r.name)} from Reaper">×</button>
     </div>`;
   }).join('');
+
+  const hiddenSection = hidden.length
+    ? `<div class="ij-repo-picker-section">
+        <div class="ij-repo-picker-section-title">Removed from Reaper</div>
+        ${hidden.map((r) => `
+        <div class="ij-repo-picker-row ij-repo-picker-row--hidden" role="option">
+          <span class="ij-repo-picker-name ij-repo-picker-name--muted">${escapeHtml(r.name)}</span>
+          <button type="button" class="ij-repo-picker-restore" data-repo-restore="${escapeHtml(r.name)}">Add back</button>
+        </div>`).join('')}
+      </div>`
+    : '';
+
+  results.innerHTML = activeRows + hiddenSection;
+}
+
+async function restoreRepo(name) {
+  if (!name) return;
+  try {
+    await api(repoApi(name, '/restore'), { method: 'POST' });
+    toast(`Added ${name} back to Reaper`, 'success');
+    hideRepoPicker();
+    await loadRepos();
+    await selectRepo(name);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 async function unregisterRepo(name) {
   const repoName = name || state.repo;
-  if (!repoName) return;
+  if (!repoName || state.repoPickerUnregisterBusy) return;
+  state.repoPickerUnregisterBusy = true;
+  if ($('#repo-picker-overlay')?.classList.contains('open')) renderRepoPickerResults();
   try {
     await api(repoApi(repoName, '/unregister'), { method: 'POST' });
     toast(`Removed ${repoName} from Reaper`, 'success');
@@ -4410,10 +4849,14 @@ async function unregisterRepo(name) {
       resetUI();
       updateWindowTitle();
     }
+    state.repoPickerUnregisterBusy = false;
     hideRepoPicker();
     await loadRepos();
   } catch (err) {
     toast(err.message, 'error');
+    if ($('#repo-picker-overlay')?.classList.contains('open')) renderRepoPickerResults();
+  } finally {
+    state.repoPickerUnregisterBusy = false;
   }
 }
 
@@ -4940,6 +5383,7 @@ function bindRepoPicker() {
     if (e.target === $('#repo-picker-overlay')) hideRepoPicker();
   });
   $('#repo-picker-results')?.addEventListener('click', (e) => {
+    if (state.repoPickerUnregisterBusy) return;
     const removeBtn = e.target.closest('[data-repo-remove]');
     if (removeBtn) {
       e.preventDefault();
@@ -4967,6 +5411,13 @@ function bindRepoPicker() {
       e.preventDefault();
       e.stopPropagation();
       requestRepoSelection(openBtn.dataset.repoOpen);
+      return;
+    }
+    const restoreBtn = e.target.closest('[data-repo-restore]');
+    if (restoreBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      void restoreRepo(restoreBtn.dataset.repoRestore);
     }
   });
 }
@@ -5468,6 +5919,10 @@ function gutterRunPlayIconHtml() {
   return '<svg class="ij-gutter-run-icon" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.1 1.2 8.4 5 2.1 8.8Z" fill="currentColor"/></svg>';
 }
 
+function gutterCoverageIconHtml() {
+  return '<svg class="ij-gutter-cov-icon" viewBox="0 0 10 10" aria-hidden="true"><text x="5" y="7.1" text-anchor="middle" font-size="8.8" font-family="system-ui,sans-serif" fill="currentColor">©</text></svg>';
+}
+
 function findNativeMainLine(content) {
   const lines = String(content || '').split('\n');
   for (let i = 0; i < lines.length; i += 1) {
@@ -5564,7 +6019,8 @@ function createSpringBootRunWidget(target) {
 function createTestCoverageWidget(method) {
   const domNode = document.createElement('button');
   domNode.type = 'button';
-  domNode.className = 'ij-test-cov-widget';
+  domNode.className = 'ij-test-cov-widget ij-gutter-cov-btn';
+  domNode.innerHTML = gutterCoverageIconHtml();
   const label = method.isClass
     ? `Run all tests with coverage in ${method.filter}`
     : `Run ${method.filter} with coverage`;
@@ -5603,7 +6059,6 @@ function applyTestRunDecorations() {
       if (!methods.length) {
         methods = classLevelTestMethods(path, content);
       }
-      const showCoverage = projectSupportsCoverage();
       if (!methods.length) {
         const springApps = listSpringBootAppGutterTargets(path, content);
         if (springApps.length) {
@@ -5624,11 +6079,6 @@ function applyTestRunDecorations() {
         state.editor.addGlyphMarginWidget(runWidget);
         state.testRunWidgets.push(runWidget);
         state.testMethodsByLine.set(method.glyphLine, method);
-        if (showCoverage) {
-          const covWidget = createTestCoverageWidget(method);
-          state.editor.addGlyphMarginWidget(covWidget);
-          state.testCovWidgets.push(covWidget);
-        }
       }
       return;
     }
@@ -5651,7 +6101,78 @@ function clearCoverageDecorations() {
   state.coverageDecorationIds = state.editor.deltaDecorations(state.coverageDecorationIds ?? [], []);
 }
 
+const COVERAGE_INLINE_KEY = 'reaper-coverage-inline';
+
+async function persistCoverageInlinePref(enabled) {
+  try {
+    await api('/api/ui-preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ coverage_inline_enabled: enabled }),
+    });
+  } catch (err) {
+    console.warn('[Reaper] Failed to save ui-preferences.json:', err);
+  }
+}
+
+async function loadCoverageInlinePref() {
+  try {
+    const prefs = await api('/api/ui-preferences');
+    state.coverageInlineEnabled = prefs.coverage_inline_enabled !== false;
+    const legacy = localStorage.getItem(COVERAGE_INLINE_KEY);
+    if (legacy !== null) {
+      const legacyEnabled = legacy !== '0';
+      if (legacyEnabled !== state.coverageInlineEnabled) {
+        state.coverageInlineEnabled = legacyEnabled;
+        await persistCoverageInlinePref(legacyEnabled);
+      }
+      localStorage.removeItem(COVERAGE_INLINE_KEY);
+    }
+  } catch {
+    state.coverageInlineEnabled = true;
+  }
+  syncCoverageInlineButton();
+}
+
+function getCoverageInlineEnabled() {
+  return state.coverageInlineEnabled !== false;
+}
+
+function setCoverageInlineEnabled(enabled) {
+  state.coverageInlineEnabled = enabled;
+  void persistCoverageInlinePref(enabled);
+  syncCoverageInlineButton();
+  if (!enabled) {
+    clearCoverageDecorations();
+  } else {
+    reapplyCoverageForTab(state.activeTab);
+  }
+}
+
+function toggleCoverageInline() {
+  setCoverageInlineEnabled(!getCoverageInlineEnabled());
+}
+
+function syncCoverageInlineButton() {
+  const btn = $('#tb-coverage-inline');
+  const panelBtn = $('#btn-coverage-toggle-inline');
+  const show = Boolean(state.repo && state.activeTab?.endsWith('.java'));
+  for (const el of [btn, panelBtn]) {
+    if (!el) continue;
+    el.classList.toggle('hidden', !show);
+    const on = getCoverageInlineEnabled();
+    el.classList.toggle('is-active', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    el.title = on
+      ? 'Hide covered / uncovered line highlighting in editor'
+      : 'Show covered / uncovered line highlighting in editor';
+  }
+}
+
 function applyCoverageDecorations(path, cov) {
+  if (!getCoverageInlineEnabled()) {
+    clearCoverageDecorations();
+    return;
+  }
   if (!state.editor || !window.monaco || state.activeTab !== path) return;
   const lines = cov?.lines ?? [];
   const decorations = lines.map(({ line, status }) => {
@@ -7501,6 +8022,15 @@ async function fetchAndApplyCoverage(path) {
 
 function reapplyCoverageForTab(path) {
   if (!path) return;
+  if (!getCoverageInlineEnabled()) {
+    clearCoverageDecorations();
+    let covOff = state.fileCoverage?.get(path);
+    if (!coverageHasUsableData(covOff) && covOff?.coverage_path) {
+      covOff = state.fileCoverage.get(covOff.coverage_path) || covOff;
+    }
+    updateCoverageStatus(coverageHasUsableData(covOff) ? covOff : null);
+    return;
+  }
   let cov = state.fileCoverage?.get(path);
   if (!coverageHasLineData(cov) && cov?.coverage_path) {
     cov = state.fileCoverage.get(cov.coverage_path) || cov;
@@ -7828,6 +8358,10 @@ function initEditor() {
     ensureGeminiReady().finally(() => {
     void refreshJavaLanguageLevel();
     window.ReaperThemes?.defineMonacoThemes();
+    const activeTheme = window.ReaperThemes?.getTheme(window.ReaperThemes.getStoredTheme());
+    if (activeTheme) {
+      window.ReaperThemes?.syncMonacoEditorTheme?.(activeTheme);
+    }
     const fontSize = getEditorFontSize();
     const fontSpec = getEditorFontSpec();
     ensureEditorFontLoaded(fontSpec);
@@ -7866,7 +8400,7 @@ function initEditor() {
         filterGraceful: true,
         localityBonus: true,
         showStatusBar: false,
-        shareSuggestSelections: true,
+        shareSuggestSelections: false,
         showInlineDetails: true,
         acceptSuggestionOnCommitCharacter: false,
       },
@@ -7874,7 +8408,7 @@ function initEditor() {
         enabled: true,
         showToolbar: false,
         suppressSuggestions: false,
-        mode: 'subwordSmart',
+        mode: 'prefix',
       },
       lightbulb: {
         enabled: monaco.editor.ShowLightbulbIconMode?.Off ?? false,
@@ -7915,10 +8449,16 @@ function initEditor() {
       getGeminiConfigured: () => state.geminiConfigured,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
+      getActiveTabContent: () => {
+        if (!state.activeTab) return '';
+        return state.tabContents.get(state.activeTab) ?? state.editor?.getModel()?.getValue() ?? '';
+      },
       toast,
       terminalLog,
       setCompleteDebugStatus,
       setStatusMessage,
+      runWithNavigationBusy,
+      showNavigationResult,
       showQuickFixMenu,
       hideQuickFixMenu,
       isQuickFixMenuOpen,
@@ -7936,11 +8476,12 @@ function initEditor() {
       },
       diagnosticSpan: (model, d) => diagnosticMarkerSpan(model, d),
       diagnosticFriendlyHint,
-      setLanguageStatus: (label) => {
-        const el = $('#status-language');
-        if (el) el.textContent = label;
+      setLanguageStatus: () => {
+        updateStatusLanguage(state.activeTab);
       },
       getDbSchema: () => state.dbSchema,
+      showJavaReferences,
+      applyJavaWorkspaceEdits,
     });
       setCompleteDebugStatus('editor features OK');
       if (window.__reaperLangBundleError) {
@@ -7955,29 +8496,21 @@ function initEditor() {
     state.editor.onDidChangeModelContent(() => {
       if (state.suppressEditorChange || !state.activeTab) return;
       if (isExternalEditorPath(state.activeTab)) return;
-      state.tabContents.set(state.activeTab, state.editor.getValue());
-      state.dirty.add(state.activeTab);
-      updateSaveButton();
+      markActiveTabDirty();
+      scheduleEditorContentSync();
       if (isRunToolbarPath(state.activeTab)) refreshRunInfo();
       else if (state.activeTab?.endsWith('.java')) updateRunButtons();
-      renderTabs();
+      scheduleRenderTabs();
       scheduleAutoSave();
       scheduleDiagnostics();
       if (shouldAutoOpenBuildTasks(state.activeTab)) {
-        scheduleProjectReload();
-        scheduleBuildTasksRefresh();
+        if (state.buildTasksPanelOpen) scheduleBuildTasksRefresh();
       } else if (shouldAutoOpenPackageManifest(state.activeTab)) {
         schedulePackageManifestRefresh();
-      } else if (isProjectSourceFile(state.activeTab)) {
-        scheduleAllJavaDiagnostics();
       }
-      updateConflictUi();
-      applyTestRunDecorations();
-      if (state.activeTab) {
-        state.fileCoverage.delete(state.activeTab);
-        clearCoverageDecorations();
-        updateCoverageStatus(null);
-      }
+      if (state.conflictFiles.has(state.activeTab)) updateConflictUi();
+      scheduleTestRunDecorations();
+      scheduleCoverageClear();
       const model = state.editor.getModel();
       const position = state.editor.getPosition();
       if (model && position) {
@@ -8013,7 +8546,12 @@ function initEditor() {
 
 // --- Repos ---
 async function loadRepos() {
-  state.repos = await api('/api/repos');
+  const [repos, hiddenRepos] = await Promise.all([
+    api('/api/repos'),
+    api('/api/repos/hidden').catch(() => []),
+  ]);
+  state.repos = repos;
+  state.hiddenRepos = hiddenRepos;
   setRepoPickerLabel(state.repo);
   if ($('#repo-picker-overlay')?.classList.contains('open')) {
     renderRepoPickerResults();
@@ -8050,36 +8588,53 @@ async function selectRepo(name) {
 
   state.repo = name;
   resetTerminalCwds();
-  const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
-  state.projectProfile = opened?.profile || null;
-  state.projectFolder = opened?.path || null;
-  startProjectIndexPolling();
-  updateProjectReloadButton();
-  const detail = await api(repoApi(name));
-  state.branches = normalizeBranchList(detail.branches);
-  state.defaultBranch = resolveDefaultBranch(
-    detail.default_branch || detail.summary?.default_branch || '',
-    state.branches,
-  );
-  updateBranchSelect();
-  updateDefaultBranchUi();
-  updateRepoInfo(detail);
-  enableControls();
-  updateAgentUi();
-  await refreshTree({ resetExpanded: true });
-  await refreshGitStatus();
-  await refreshHistory();
-  await openFile('README.md', { silent: true });
-  terminalLog(`Opened workspace: ${name}`);
-  if (state.activeTab) {
-    $('#empty-state')?.classList.add('hidden');
-  } else {
-    $('#empty-state')?.classList.remove('hidden');
+  let showedLoading = false;
+  try {
+    if (switching) {
+      setGlobalLoading(true, `Opening ${name}…`);
+      showedLoading = true;
+    }
+    const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
+    state.projectProfile = opened?.profile || null;
+    state.projectFolder = opened?.path || null;
+    startProjectIndexPolling();
+    updateProjectReloadButton();
+    const detail = await api(repoApi(name));
+    state.branches = normalizeBranchList(detail.branches);
+    state.defaultBranch = resolveDefaultBranch(
+      detail.default_branch || detail.summary?.default_branch || '',
+      state.branches,
+    );
+    updateBranchSelect();
+    updateDefaultBranchUi();
+    updateRepoInfo(detail);
+    enableControls();
+    updateAgentUi();
+    await refreshTree({ resetExpanded: true });
+    await refreshGitStatus();
+    await refreshHistory();
+    await openFile('README.md', { silent: true });
+    terminalLog(`Opened workspace: ${name}`);
+    if (state.activeTab) {
+      $('#empty-state')?.classList.add('hidden');
+    } else {
+      $('#empty-state')?.classList.remove('hidden');
+    }
+    syncWelcomeLayout();
+    updateMenuState();
+    updateWindowTitle();
+    setRepoPickerLabel(name);
+  } catch (err) {
+    toast(err.message, 'error');
+    if (switching) {
+      state.repo = null;
+      resetUI();
+      updateWindowTitle();
+      setRepoPickerLabel('');
+    }
+  } finally {
+    if (showedLoading) setGlobalLoading(false);
   }
-  syncWelcomeLayout();
-  updateMenuState();
-  updateWindowTitle();
-  setRepoPickerLabel(name);
 }
 
 function showNoRepoFileTree() {
@@ -8248,14 +8803,22 @@ function hideRepoInfoModal() {
 
 async function deleteRepo() {
   if (!state.repo || !confirm(`Delete ${state.repo}? This cannot be undone.`)) return;
-  await api(repoApi(state.repo), { method: 'DELETE' });
-  toast(`Deleted ${state.repo}`, 'success');
-  hideRepoInfoModal();
-  state.repo = null;
-  state.repoDetail = null;
-  setRepoPickerLabel('');
-  resetUI();
-  await loadRepos();
+  const repoName = state.repo;
+  setGlobalLoading(true, `Deleting ${repoName}…`);
+  try {
+    await api(repoApi(repoName), { method: 'DELETE' });
+    toast(`Deleted ${repoName}`, 'success');
+    hideRepoInfoModal();
+    state.repo = null;
+    state.repoDetail = null;
+    setRepoPickerLabel('');
+    resetUI();
+    await loadRepos();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    setGlobalLoading(false);
+  }
 }
 
 async function createRepo(e) {
@@ -8266,15 +8829,19 @@ async function createRepo(e) {
     description: fd.get('description') || null,
     init_with_readme: fd.get('init_readme') === 'on',
   };
+  setGlobalLoading(true, 'Creating repository…');
   try {
     const repo = await api('/api/repos', { method: 'POST', body: JSON.stringify(body) });
     hideModal();
     e.target.reset();
     await loadRepos();
+    setGlobalLoading(false);
     await selectRepo(repo.name);
     toast(`Created ${repo.name}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
+  } finally {
+    setGlobalLoading(false);
   }
 }
 
@@ -8323,12 +8890,15 @@ function showPublishModal() {
   if (nameInput && !nameInput.value && !state.repo.includes('/')) {
     nameInput.placeholder = `your-github-user/${state.repo}`;
   }
+  setPublishModalState({ busy: false, status: '', error: '' });
   $('#publish-modal-overlay')?.classList.remove('hidden');
   $('#publish-modal-overlay')?.classList.add('flex');
   $('#publish-github-repo')?.focus();
 }
 
 function hidePublishModal() {
+  if (state.publishBusy) return;
+  setPublishModalState({ busy: false, status: '', error: '' });
   $('#publish-modal-overlay')?.classList.add('hidden');
   $('#publish-modal-overlay')?.classList.remove('flex');
 }
@@ -8432,10 +9002,7 @@ async function importLocalRepo() {
 
 async function publishToGitHub(e) {
   e.preventDefault();
-  if (!state.repo) {
-    toast('Select a repository first', 'info');
-    return;
-  }
+  if (!state.repo || state.publishBusy) return;
   if (!(await hasGitHubPat())) {
     toast('Add a GitHub PAT in Settings → Git hosts', 'error');
     showSettingsModal('git');
@@ -8443,6 +9010,7 @@ async function publishToGitHub(e) {
   }
   const fd = new FormData(e.target);
   const githubRepo = String(fd.get('github_repo') || '').trim();
+  setPublishModalState({ busy: true, status: 'Creating GitHub repo and pushing — this can take a minute…', error: '' });
   try {
     const body = {
       github_repo: githubRepo,
@@ -8453,6 +9021,7 @@ async function publishToGitHub(e) {
       method: 'POST',
       body: JSON.stringify(body),
     });
+    setPublishModalState({ busy: false });
     hidePublishModal();
     e.target.reset();
     const detail = await api(repoApi(state.repo));
@@ -8467,7 +9036,10 @@ async function publishToGitHub(e) {
       toast(msg, 'success');
     }
   } catch (err) {
+    setPublishModalState({ busy: false, error: err.message, status: '' });
     toast(err.message, 'error');
+  } finally {
+    if (state.publishBusy) setPublishModalState({ busy: false });
   }
 }
 
@@ -8476,6 +9048,8 @@ async function pushRemote() {
 }
 
 function hidePushModal() {
+  if (state.pushBusy) return;
+  setPushModalBusy({ busy: false });
   const overlay = $('#push-modal-overlay');
   overlay?.classList.add('hidden');
   overlay?.classList.remove('flex');
@@ -8545,9 +9119,10 @@ async function showPushModal() {
   const overlay = $('#push-modal-overlay');
   const body = $('#push-modal-body');
   const confirm = $('#push-modal-confirm');
+  setPushModalBusy({ busy: false });
   overlay?.classList.remove('hidden');
   overlay?.classList.add('flex');
-  if (body) body.innerHTML = '<p class="text-sm text-gray-500">Loading push preview…</p>';
+  if (body) body.innerHTML = busyStatusHtml('Loading push preview…');
   if (confirm) {
     confirm.disabled = true;
     confirm.textContent = 'Push';
@@ -8563,13 +9138,13 @@ async function showPushModal() {
 }
 
 async function executePush() {
-  if (!state.repo) return;
+  if (!state.repo || state.pushBusy) return;
   const confirm = $('#push-modal-confirm');
-  if (confirm) confirm.disabled = true;
-  setGlobalLoading(true, 'Pushing…');
+  setPushModalBusy({ busy: true, text: 'Pushing to remote…' });
   try {
     const out = await api(repoApi(state.repo, '/remote/push'), { method: 'POST' });
     terminalLog(out.stdout || out.stderr || 'Pushed');
+    setPushModalBusy({ busy: false });
     hidePushModal();
     setStatusMessage(`Pushed ${state.currentBranch || 'branch'} to remote`);
     toast(
@@ -8579,9 +9154,9 @@ async function executePush() {
     await refreshGitStatus();
   } catch (err) {
     toast(err.message, 'error');
-  } finally {
     if (confirm) confirm.disabled = false;
-    setGlobalLoading(false);
+  } finally {
+    setPushModalBusy({ busy: false });
   }
 }
 
@@ -9694,25 +10269,6 @@ function rememberTreeAnchorCursor() {
   };
 }
 
-function shouldTriggerJavaModuleIndex(path) {
-  if (!path) return false;
-  const lower = path.toLowerCase();
-  const base = lower.split('/').pop() || lower;
-  return lower.endsWith('.java')
-    || lower.endsWith('.kt')
-    || base === 'pom.xml'
-    || base === 'build.gradle'
-    || base === 'build.gradle.kts';
-}
-
-function scheduleJavaModuleIndex(path) {
-  if (!state.repo || !shouldTriggerJavaModuleIndex(path)) return;
-  const q = encodeURIComponent(path);
-  api(`/api/repos/${encodeURIComponent(state.repo)}/workspace/java/ensure-module?path=${q}`, {
-    method: 'POST',
-  }).catch(() => {});
-}
-
 async function openFileFromTree(path) {
   if (state.editor && state.activeTab === path) {
     const pos = state.editor.getPosition();
@@ -9738,7 +10294,6 @@ async function goBackToTreeFile() {
 
 async function openFile(path, { silent = false, skipPrimaryNav = false } = {}) {
   path = workspaceExplorerPath(path);
-  scheduleJavaModuleIndex(path);
   if (state.tabs.includes(path)) {
     try {
       if (!state.tabContents.has(path)) await hydrateTabContent(path);
@@ -9779,6 +10334,62 @@ async function openFile(path, { silent = false, skipPrimaryNav = false } = {}) {
     }
     if (!silent) toast(err.message, 'error');
   }
+}
+
+function scheduleRenderTabs({ immediate = false } = {}) {
+  if (immediate) {
+    clearTimeout(tabRenderTimer);
+    tabRenderTimer = null;
+    renderTabs();
+    return;
+  }
+  clearTimeout(tabRenderTimer);
+  tabRenderTimer = setTimeout(() => {
+    tabRenderTimer = null;
+    renderTabs();
+  }, TAB_RENDER_DELAY_MS);
+}
+
+function markActiveTabDirty() {
+  if (!state.activeTab || isExternalEditorPath(state.activeTab)) return;
+  const wasDirty = state.dirty.has(state.activeTab);
+  state.dirty.add(state.activeTab);
+  updateSaveButton();
+  if (!wasDirty) {
+    const tab = document.querySelector(`.ij-tab[data-tab="${CSS.escape(state.activeTab)}"]`);
+    tab?.classList.add('dirty');
+  }
+}
+
+function scheduleEditorContentSync() {
+  clearTimeout(editorContentSyncTimer);
+  editorContentSyncTimer = setTimeout(() => {
+    editorContentSyncTimer = null;
+    if (state.suppressEditorChange || !state.activeTab || !state.editor) return;
+    if (isExternalEditorPath(state.activeTab)) return;
+    state.tabContents.set(state.activeTab, state.editor.getValue());
+  }, EDITOR_CONTENT_SYNC_DELAY_MS);
+}
+
+function scheduleTestRunDecorations() {
+  if (!state.activeTab?.endsWith('.java')) return;
+  clearTimeout(testDecorTimer);
+  testDecorTimer = setTimeout(() => {
+    testDecorTimer = null;
+    applyTestRunDecorations();
+  }, TEST_DECOR_DELAY_MS);
+}
+
+function scheduleCoverageClear() {
+  if (!state.activeTab) return;
+  clearTimeout(coverageClearTimer);
+  coverageClearTimer = setTimeout(() => {
+    coverageClearTimer = null;
+    if (!state.activeTab) return;
+    state.fileCoverage.delete(state.activeTab);
+    clearCoverageDecorations();
+    updateCoverageStatus(null);
+  }, COVERAGE_CLEAR_DELAY_MS);
 }
 
 function renderTabs() {
@@ -9839,15 +10450,7 @@ function activateTabShell(path) {
     setMainView('editor');
   }
   updateBreadcrumbs(path);
-  const langEl = $('#status-language');
-  if (langEl) {
-    const lang = window.ReaperLang?.langLabelForPath?.(path)
-      || window.ReaperLang?.langLabel?.(langForPath(path))
-      || 'Plain Text';
-    const compilers = window.ReaperLang?.compilerLabelsForPath?.(path);
-    langEl.textContent = compilers ? `${lang} · ${compilers}` : lang;
-    langEl.title = compilers ? `Language: ${lang}. Compiler(s): ${compilers}` : `Language: ${lang}`;
-  }
+  updateStatusLanguage(path);
   if (state.editor) updateEditorStatus(state.editor.getPosition());
   applyEditorReadOnlyForPath(path);
   $$('.tree-file').forEach((b) => b.classList.toggle('active', treePathMatchesTab(b.dataset.path, path)));
@@ -9864,6 +10467,7 @@ function activateTabShell(path) {
     void refreshRunInfo();
   }
   if (path) void refreshLanguageContextForPath(path);
+  ensureJavaModuleForPath(path);
   updateMenuState();
   setStatusMessage(path.split('/').pop() || path);
   fileDiags = [];
@@ -9875,12 +10479,21 @@ function activateTabShell(path) {
   updateConflictUi();
 }
 
+function flushEditorContentSync() {
+  clearTimeout(editorContentSyncTimer);
+  editorContentSyncTimer = null;
+  if (state.suppressEditorChange || !state.activeTab || !state.editor) return;
+  if (isExternalEditorPath(state.activeTab)) return;
+  state.tabContents.set(state.activeTab, state.editor.getValue());
+}
+
 function activateTab(path) {
+  flushEditorContentSync();
   activateTabShell(path);
   if (state.tabContents.has(path)) {
     setEditorContent(path, state.tabContents.get(path));
   }
-  renderTabs();
+  scheduleRenderTabs({ immediate: true });
 }
 
 function isDiagnosablePath(path) {
@@ -9894,8 +10507,12 @@ function scheduleDiagnostics() {
     clearDiagnostics();
     return;
   }
+  let delay = DIAG_DELAY_MS;
+  if (state.activeTab.endsWith('.java')) delay = JAVA_DIAG_DELAY_MS;
+  else if (isProjectBuildFile(state.activeTab)) delay = BUILD_DIAG_DELAY_MS;
+  else if (window.ReaperLang?.isMarkupOrConfigPath?.(state.activeTab)) delay = CONFIG_DIAG_DELAY_MS;
   // Keep existing squiggles until the next compile finishes (no flicker while typing).
-  diagTimer = setTimeout(runDiagnostics, DIAG_DELAY_MS);
+  diagTimer = setTimeout(runDiagnostics, delay);
 }
 
 function clearDiagDecorations() {
@@ -9961,6 +10578,22 @@ function adjustDiagnosticPosition(model, d) {
   return { ...d, line, column };
 }
 
+function lineWithoutJavaStringLiterals(lineText) {
+  let out = '';
+  let inString = false;
+  for (const ch of lineText) {
+    if (ch === '"') {
+      inString = !inString;
+      out += ' ';
+    } else if (inString) {
+      out += ' ';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 function diagnosticMarkerSpan(model, d) {
   const adjusted = adjustDiagnosticPosition(model, d);
   const line = Math.max(1, adjusted.line || 1);
@@ -9977,18 +10610,50 @@ function diagnosticMarkerSpan(model, d) {
 
   const msg = String(d.message || '');
   const msgLower = msg.toLowerCase();
-  if (msgLower.includes('cannot find symbol') || msgLower.includes('package') && msgLower.includes('does not exist')) {
+  if (msgLower.includes('cannot find symbol') || msgLower.includes('does not exist')) {
     const sym = msg.match(/symbol:\s*(?:class|interface|variable|method|package)?\s*([A-Za-z_][\w.]*)/i)
       || msg.match(/package\s+([A-Za-z_][\w.]*)/i);
     if (sym?.[1]) {
-      const idx = lineText.indexOf(sym[1]);
+      let name = sym[1].split('.').pop().replace(/\(\).*$/, '').replace(/\(\s*$/, '');
+      const scanLine = lineWithoutJavaStringLiterals(lineText);
+      const memberRe = new RegExp(`([A-Za-z_][\\w]*)\\.${name}(?!\\s*\\()`, 'g');
+      let memberMatch = null;
+      let m;
+      while ((m = memberRe.exec(scanLine)) !== null) {
+        memberMatch = m;
+      }
+      if (memberMatch) {
+        const idx = memberMatch.index;
+        startCol = idx + 1;
+        return {
+          startLineNumber: line,
+          startColumn: startCol,
+          endLineNumber: line,
+          endColumn: startCol + memberMatch[0].length,
+        };
+      }
+      const dotIdx = scanLine.indexOf(`${name}.`);
+      const plainIdx = scanLine.indexOf(name);
+      const idx = dotIdx >= 0 ? dotIdx : plainIdx;
       if (idx >= 0) {
         startCol = idx + 1;
         return {
           startLineNumber: line,
           startColumn: startCol,
           endLineNumber: line,
-          endColumn: startCol + sym[1].length,
+          endColumn: startCol + name.length,
+        };
+      }
+      // Bare method call: exists() with no receiver
+      const bareRe = new RegExp(`\\b${name}\\s*\\(`);
+      const bareMatch = scanLine.match(bareRe);
+      if (bareMatch && bareMatch.index != null) {
+        startCol = bareMatch.index + 1;
+        return {
+          startLineNumber: line,
+          startColumn: startCol,
+          endLineNumber: line,
+          endColumn: startCol + name.length + 2,
         };
       }
     }
@@ -10268,21 +10933,41 @@ async function runDiagnostics() {
   const content = state.editor.getValue();
   const seq = ++diagSeq;
   try {
-    const diags = await fetchDiagnosticsForPath(path, content);
+    const result = normalizeDiagnosticsResponse(
+      await fetchDiagnosticsForPath(path, content),
+    );
     if (seq !== diagSeq || path !== state.activeTab) return;
-    applyDiagnostics(path, Array.isArray(diags) ? diags : []);
-  } catch {
+    if (result.cancelled && !result.diagnostics.length) {
+      clearTimeout(diagRetryTimer);
+      diagRetryTimer = setTimeout(() => {
+        diagRetryTimer = null;
+        if (state.activeTab === path) void runDiagnostics();
+      }, diagRetryDelayMs);
+      diagRetryDelayMs = Math.min(Math.round(diagRetryDelayMs * 1.5), 15000);
+      return;
+    }
+    clearTimeout(diagRetryTimer);
+    diagRetryTimer = null;
+    diagRetryDelayMs = 2500;
+    applyDiagnostics(path, result.diagnostics);
+  } catch (err) {
+    if (isDiagFetchAbort(err)) return;
     if (seq === diagSeq) clearDiagnostics();
   }
 }
 
-function scheduleAllJavaDiagnostics(delayMs = ALL_JAVA_DIAG_DELAY_MS) {
+/** Classpath / batch edits — refresh every open Java tab (not on typing). */
+function scheduleAllJavaDiagnostics() {
   if (!state.repo) return;
   clearTimeout(allJavaDiagTimer);
   allJavaDiagTimer = setTimeout(() => {
     allJavaDiagTimer = null;
     void refreshAllJavaTabDiagnostics();
-  }, delayMs);
+  }, ALL_JAVA_DIAG_DELAY_MS);
+}
+
+function isDiagFetchAbort(err) {
+  return err?.name === 'AbortError';
 }
 
 function collectJavaDiagnosticOverlays(excludePath) {
@@ -10298,35 +10983,82 @@ function collectJavaDiagnosticOverlays(excludePath) {
   return overlays;
 }
 
-async function fetchDiagnosticsForPath(path, content) {
-  return api(repoApi(state.repo, '/workspace/diagnostics'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      path,
-      content,
-      overlays: collectJavaDiagnosticOverlays(path),
-    }),
-  });
+function normalizeDiagnosticsResponse(body) {
+  if (Array.isArray(body)) {
+    return { diagnostics: body, cancelled: false };
+  }
+  return {
+    diagnostics: Array.isArray(body?.diagnostics) ? body.diagnostics : [],
+    cancelled: body?.cancelled === true,
+  };
 }
 
-/** Re-validate imports/diagnostics on every open Java tab after classpath changes. */
+async function fetchDiagnosticsForPath(path, content, { signal: outerSignal } = {}) {
+  const prev = diagFetchByPath.get(path);
+  // Same file + same buffer: share the in-flight compile (don't abort — javac can take 30s+).
+  if (prev && prev.content === content) {
+    if (outerSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    return prev.promise;
+  }
+  if (prev) prev.controller.abort();
+
+  const controller = new AbortController();
+  if (outerSignal) {
+    if (outerSignal.aborted) controller.abort();
+    else outerSignal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  const promise = (async () => {
+    try {
+      return await api(repoApi(state.repo, '/workspace/diagnostics'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          path,
+          content,
+          overlays: collectJavaDiagnosticOverlays(path),
+        }),
+      });
+    } finally {
+      if (diagFetchByPath.get(path)?.controller === controller) {
+        diagFetchByPath.delete(path);
+      }
+    }
+  })();
+
+  diagFetchByPath.set(path, { controller, promise, content });
+  return promise;
+}
+
+/** Re-validate every open Java tab after classpath or batch workspace edits. */
 async function refreshAllJavaTabDiagnostics() {
   if (!state.repo) return;
-  const javaTabs = state.tabs.filter((p) => isDiagnosablePath(p));
+  let javaTabs = state.tabs.filter((p) => isDiagnosablePath(p));
   if (!javaTabs.length) return;
+  const refreshGen = ++allJavaDiagRefreshGen;
   const activePath = state.activeTab;
-  await Promise.all(javaTabs.map(async (path) => {
+  for (const path of javaTabs) {
+    if (path === activePath) continue;
+    if (refreshGen !== allJavaDiagRefreshGen) return;
     const content = path === activePath && state.editor
       ? state.editor.getValue()
       : (state.tabContents.get(path) ?? '');
     try {
-      const diags = await fetchDiagnosticsForPath(path, content);
+      const result = normalizeDiagnosticsResponse(
+        await fetchDiagnosticsForPath(path, content),
+      );
+      if (refreshGen !== allJavaDiagRefreshGen) return;
+      if (result.cancelled && !result.diagnostics.length) continue;
       if (path === state.activeTab) {
-        applyDiagnostics(path, Array.isArray(diags) ? diags : []);
+        applyDiagnostics(path, result.diagnostics);
       }
-    } catch { /* ignore transient errors */ }
-  }));
+    } catch (err) {
+      if (!isDiagFetchAbort(err)) { /* ignore transient errors */ }
+    }
+  }
 }
 
 function refreshProjectClasspathUi() {
@@ -11064,6 +11796,7 @@ function updateRunButtons() {
   if (tbSave) tbSave.disabled = !state.activeTab || !state.dirty.has(state.activeTab) || isExternalEditorPath(state.activeTab);
   updateRollbackButton();
   updateProjectReloadButton();
+  syncCoverageInlineButton();
 }
 
 function primaryJavaNavTarget(content) {
@@ -11220,7 +11953,7 @@ async function saveFile(options = {}) {
     if (!skipProjectReload && isProjectClasspathFile(savedPath) && hasAutoReloadProject()) {
       if (isProjectSourceFile(savedPath)) {
         window.ReaperLang?.clearCompletionCache?.();
-        scheduleAllJavaDiagnostics(0);
+        scheduleAllJavaDiagnostics();
       }
       scheduleProjectReload(0);
     }
@@ -11805,7 +12538,7 @@ function updateCommitSelectionUi(files, { mergeBlocked = false } = {}) {
     }
   }
 
-  const commitDisabled = rows.length === 0 || mergeBlocked || selectedCount === 0;
+  const commitDisabled = rows.length === 0 || mergeBlocked || selectedCount === 0 || state.commitBusy;
   const commitOnlyBtn = $('#btn-commit-only');
   const commitPushBtn = $('#btn-commit-push');
   const suggestBtn = $('#btn-suggest-commit');
@@ -12094,22 +12827,35 @@ async function runCommit({ push = false } = {}) {
   if (!message) { toast('Enter a commit message', 'error'); return; }
   const paths = getSelectedCommitPaths();
   if (!paths.length) { toast('Select at least one file to commit', 'error'); return; }
-  const out = await api(repoApi(state.repo, '/workspace/commit'), {
-    method: 'POST',
-    body: JSON.stringify({ message, paths, push }),
-  });
-  if (out.exit_code !== 0) {
-    terminalLog(out.stderr || out.stdout || 'Commit failed');
-    toast(out.stderr?.trim() || out.stdout?.trim() || 'Commit failed', 'error');
-    return;
+  if (state.commitBusy) return;
+  state.commitBusy = true;
+  updateCommitSelectionUi(state.lastGitStatusFiles, { mergeBlocked: state.mergeBlockedCommit });
+  const useGlobalLoading = push;
+  if (useGlobalLoading) setGlobalLoading(true, 'Committing & pushing…');
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/commit'), {
+      method: 'POST',
+      body: JSON.stringify({ message, paths, push }),
+    });
+    if (out.exit_code !== 0) {
+      terminalLog(out.stderr || out.stdout || 'Commit failed');
+      toast(out.stderr?.trim() || out.stdout?.trim() || 'Commit failed', 'error');
+      return;
+    }
+    terminalLog(out.stdout || out.stderr || (push ? 'Committed and pushed' : 'Committed'));
+    $('#commit-message').value = '';
+    state.commitKnownPaths.clear();
+    await refreshGitStatus();
+    await refreshHistory();
+    await refreshTree();
+    toast(push ? 'Committed & pushed' : 'Committed locally — use Push when ready', push ? 'success' : 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    state.commitBusy = false;
+    if (useGlobalLoading) setGlobalLoading(false);
+    updateCommitSelectionUi(state.lastGitStatusFiles, { mergeBlocked: state.mergeBlockedCommit });
   }
-  terminalLog(out.stdout || out.stderr || (push ? 'Committed and pushed' : 'Committed'));
-  $('#commit-message').value = '';
-  state.commitKnownPaths.clear();
-  await refreshGitStatus();
-  await refreshHistory();
-  await refreshTree();
-  toast(push ? 'Committed & pushed' : 'Committed locally — use Push when ready', push ? 'success' : 'success');
 }
 
 function commitOnly() {
@@ -12210,15 +12956,22 @@ async function syncPull() {
 }
 
 async function checkoutBranch(branch) {
-  const out = await api(repoApi(state.repo, '/workspace/checkout'), {
-    method: 'POST',
-    body: JSON.stringify({ branch }),
-  });
-  terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
-  await refreshTree();
-  await refreshGitStatus();
-  await refreshHistory();
-  startProjectIndexPolling();
+  setGlobalLoading(true, `Switching to ${branch}…`);
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/checkout'), {
+      method: 'POST',
+      body: JSON.stringify({ branch }),
+    });
+    terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
+    await refreshTree();
+    await refreshGitStatus();
+    await refreshHistory();
+    startProjectIndexPolling();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    setGlobalLoading(false);
+  }
 }
 
 // --- Terminal (xterm + PTY WebSocket) ---
@@ -14094,6 +14847,8 @@ function bindEvents() {
   $('#toast .ij-toast-dismiss')?.addEventListener('click', dismissToast);
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
   $('#status-coverage')?.addEventListener('click', () => toggleCoveragePanel());
+  $('#tb-coverage-inline')?.addEventListener('click', () => toggleCoverageInline());
+  $('#btn-coverage-toggle-inline')?.addEventListener('click', () => toggleCoverageInline());
   $('#btn-coverage-close')?.addEventListener('click', hideCoveragePanel);
   $('#btn-coverage-refresh')?.addEventListener('click', () => void refreshCoveragePanel(state.activeTab));
   $('#btn-coverage-run')?.addEventListener('click', () => void runActiveFileWithCoverage());
@@ -14351,6 +15106,11 @@ function bindEvents() {
         hideGoToClass();
         return;
       }
+      if ($('#java-references-overlay')?.classList.contains('open')) {
+        e.preventDefault();
+        hideJavaReferences();
+        return;
+      }
       if ($('#goto-line-overlay')?.classList.contains('open')) {
         e.preventDefault();
         hideGoToLine();
@@ -14494,6 +15254,7 @@ async function init() {
   populateFontFamilySelects();
   populateAgentFontSelects();
   applyUiTypography();
+  await loadCoverageInlinePref();
   syncFontSizeControls(getEditorFontSize());
   ensureEditorFontLoaded(getEditorFontSpec());
   applyAgentTypography();
@@ -14507,6 +15268,7 @@ async function init() {
   bindMenus();
   bindPalette();
   bindGoToClass();
+  bindJavaReferences();
   bindGoToLine();
   bindSearchEverywhere();
   bindBranchPicker();

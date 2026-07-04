@@ -110,6 +110,7 @@ fn symbol_referenced_in_source(content: &str, simple: &str) -> bool {
         || content.contains(&format!(".{simple}"))
         || content.contains(&format!(" {simple},"))
         || content.contains(&format!("({simple},"))
+        || content.contains(&format!("{simple}."))
 }
 
 #[cfg(test)]

@@ -975,6 +975,22 @@ pub fn build_workspace_module_map(reactor_root: &Path) -> HashMap<String, PathBu
     map
 }
 
+/// Leaf Maven module directories under a reactor (or the module itself when standalone).
+pub fn list_reactor_leaf_modules(module_or_reactor: &Path) -> Vec<PathBuf> {
+    let anchor = find_maven_reactor_root(module_or_reactor)
+        .unwrap_or_else(|| module_or_reactor.to_path_buf());
+    let map = build_workspace_module_map(&anchor);
+    if map.is_empty() {
+        return vec![anchor
+            .canonicalize()
+            .unwrap_or(anchor)];
+    }
+    let mut modules: Vec<PathBuf> = map.into_values().collect();
+    modules.sort_by(|a, b| a.display().to_string().cmp(&b.display().to_string()));
+    modules.dedup();
+    modules
+}
+
 fn collect_workspace_modules(dir: &Path, out: &mut HashMap<String, PathBuf>) {
     if !dir.join("pom.xml").is_file() {
         return;

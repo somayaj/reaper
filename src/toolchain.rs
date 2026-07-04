@@ -142,6 +142,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_CLANGD"),
     },
     ToolDef {
+        id: "jdtls",
+        label: "Java language server (jdtls)",
+        kind: ToolKind::Binary,
+        defaults: &["jdtls"],
+        env_key: Some("REAPER_JDTLS"),
+    },
+    ToolDef {
         id: "gcc",
         label: "C/C++ (gcc)",
         kind: ToolKind::Binary,
@@ -341,6 +348,11 @@ pub fn resolve_program(id: &str) -> Option<PathBuf> {
     }
     if id == "node" {
         if let Some(path) = crate::config::bundled_node() {
+            return Some(path);
+        }
+    }
+    if id == "jdtls" {
+        if let Some(path) = crate::config::bundled_jdtls() {
             return Some(path);
         }
     }

@@ -12,5 +12,7 @@
 
 # Vendored Node.js binaries (downloaded at build time)
 /resources/node-macos-*/
+/resources/jdk-macos-*/
+/resources/jdtls/
 /resources/.cache/
 .reaper/

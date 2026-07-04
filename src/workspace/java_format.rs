@@ -20,24 +20,24 @@ const GJF_JVM_EXPORTS: &[&str] = &[
 
 /// Format Java source with [Google Java Format](https://github.com/google/google-java-format).
 pub fn format_java(ws: &Path, content: &str) -> Result<String> {
-    let mut last_err: Option<String> = None;
+    let mut errors: Vec<String> = Vec::new();
 
     if let Some(bin) = bundled_google_java_format_bin() {
         match try_stdin_command(ws, bin.to_string_lossy().as_ref(), &["-"], content) {
             Ok(formatted) => return Ok(formatted),
-            Err(e) => last_err = Some(e.to_string()),
+            Err(e) => errors.push(e.to_string()),
         }
     }
 
     match super::exec::try_tool_stdin(ws, "google-java-format", &["-"], content) {
         Ok(formatted) => return Ok(formatted),
-        Err(e) => last_err = Some(e.to_string()),
+        Err(e) => errors.push(e.to_string()),
     }
 
     for bin in google_java_format_bins() {
         match try_stdin_command(ws, bin.to_string_lossy().as_ref(), &["-"], content) {
             Ok(formatted) => return Ok(formatted),
-            Err(e) => last_err = Some(e.to_string()),
+            Err(e) => errors.push(e.to_string()),
         }
     }
 
@@ -49,11 +49,12 @@ pub fn format_java(ws: &Path, content: &str) -> Result<String> {
     if let Some(jar) = bundled_google_java_format_jar() {
         match try_java_jar_stdin(ws, &jar, content) {
             Ok(formatted) => return Ok(formatted),
-            Err(e) => last_err = Some(e.to_string()),
+            Err(e) => errors.push(e.to_string()),
         }
     }
 
-    let hint = last_err
+    let hint = errors
+        .last()
         .map(|e| format!(" ({e})"))
         .unwrap_or_default();
     bail!(

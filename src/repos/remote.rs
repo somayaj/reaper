@@ -70,6 +70,9 @@ pub fn import_local_repo(
 
     let path = config.repo_path(&name);
     if path.exists() {
+        if settings.is_repo_hidden(&name) {
+            return super::restore_repo(config, settings, &name);
+        }
         bail!("repository already exists");
     }
     if let Some(parent) = path.parent() {
@@ -139,6 +142,9 @@ pub fn import_repo(
     }
     let path = config.repo_path(&name);
     if path.exists() {
+        if settings.is_repo_hidden(&name) {
+            return super::restore_repo(config, settings, &name);
+        }
         bail!("repository already exists");
     }
     if let Some(parent) = path.parent() {

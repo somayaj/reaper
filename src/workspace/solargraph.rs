@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use super::lsp::{self, ReferenceLocation};
 use super::symbols::SymbolLocation;
 
 const LSP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -54,6 +55,107 @@ pub fn find_definition(
     };
 
     parse_definition_response(&ws, rel_path, &response)
+}
+
+pub fn find_references(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Result<Vec<ReferenceLocation>> {
+    if !rel_path.to_lowercase().ends_with(".rb") {
+        return Ok(Vec::new());
+    }
+
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let uri = file_uri(&abs_file)?;
+    let deadline = Instant::now() + LSP_TIMEOUT;
+
+    let response = match query_references(&ws, &uri, line, column, content, deadline) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("solargraph references failed: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
+
+    Ok(lsp::parse_reference_locations(&ws, &response))
+}
+
+fn query_references(
+    ws: &Path,
+    uri: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let mut map = SESSIONS.lock().expect("solargraph sessions");
+    purge_stale_sessions(&mut map);
+
+    if !session_alive(map.get_mut(ws)) {
+        map.remove(ws);
+        let mut child = spawn_solargraph(ws)?;
+        let root_uri = file_uri(ws)?;
+        initialize_session(&mut child, &root_uri, deadline)?;
+        map.insert(
+            ws.to_path_buf(),
+            SolargraphSession {
+                child,
+                last_used: Instant::now(),
+            },
+        );
+    }
+
+    let session = map.get_mut(ws).context("solargraph session")?;
+    session.last_used = Instant::now();
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+    let stdin = session.child.stdin.as_mut().context("solargraph stdin")?;
+    let stdout = session.child.stdout.as_mut().context("solargraph stdout")?;
+
+    write_message(
+        stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "ruby",
+                    "version": id as i64,
+                    "text": content
+                }
+            }
+        }),
+    )?;
+
+    write_message(
+        stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": line.saturating_sub(1),
+                    "character": column.saturating_sub(1)
+                },
+                "context": { "includeDeclaration": true }
+            }
+        }),
+    )?;
+
+    wait_for_id(stdout, id, deadline)
 }
 
 fn query_definition(
