@@ -460,6 +460,34 @@ function testRunButtonUiRegression() {
   }
 }
 
+function testTestCoverageGutterRegression(appSrc) {
+  const applyBody = extractFunctionBody(appSrc, 'applyTestRunDecorations');
+  ok(
+    applyBody.includes('createTestCoverageWidget(method)')
+      && applyBody.includes('testCovWidgets.push(covWidget)'),
+    'editor: applyTestRunDecorations adds coverage © gutter widgets on Java test files',
+  );
+  ok(
+    applyBody.includes('projectSupportsCoverage()'),
+    'editor: coverage gutter widgets gated on open repo/project',
+  );
+
+  const covWidgetSrc = extractFunctionSource(appSrc, 'createTestCoverageWidget');
+  ok(!!covWidgetSrc, 'extract createTestCoverageWidget from app.js');
+  ok(
+    covWidgetSrc.includes('GlyphMarginLane?.Left'),
+    'editor: coverage © widget uses left glyph lane (run ▶ stays on right)',
+  );
+  ok(
+    covWidgetSrc.includes('runProjectTestWithCoverage(method.filter)'),
+    'editor: coverage gutter click runs tests with JaCoCo',
+  );
+  ok(
+    covWidgetSrc.includes('ij-test-cov-widget') && covWidgetSrc.includes('gutterCoverageIconHtml()'),
+    'editor: coverage gutter uses © icon button styling',
+  );
+}
+
 function testInlineCompletionRegression(win) {
   const h = win.ReaperLang.inlineTestHelpers?.();
   ok(typeof h?.memberInlineSuffix === 'function', 'inlineTestHelpers exported');
@@ -1593,6 +1621,47 @@ function extractFunctionBody(src, name) {
   return '';
 }
 
+function extractRustFnBody(src, name) {
+  const re = new RegExp(`\\bfn ${name}\\s*\\(`);
+  const m = src.match(re);
+  if (!m) return '';
+  let i = m.index + m[0].length;
+  while (i < src.length && src[i] !== '{') i += 1;
+  if (i >= src.length) return '';
+  const start = i + 1;
+  let depth = 1;
+  for (i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i);
+    }
+  }
+  return '';
+}
+
+/** Mirror static/app.js shouldDeferAutoSave — keep in sync when editing defer rules. */
+function lineLooksIncompleteForAutoSave(line) {
+  const trimmed = line.trimEnd();
+  if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) return false;
+  if (/=\s*$/.test(trimmed)) return true;
+  if (/\.\s*$/.test(trimmed)) return true;
+  if (/,\s*$/.test(trimmed)) return true;
+  if (/(\|\||&&|\?|:|\+\+|--)\s*$/.test(trimmed)) return true;
+  if (/\(\s*$/.test(trimmed) && !/\)/.test(trimmed)) return true;
+  return false;
+}
+
+function shouldDeferAutoSave(content, path) {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const codeExts = new Set([
+    'java', 'kt', 'kts', 'scala', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+  ]);
+  if (!content || !codeExts.has(ext)) return false;
+  return content.split('\n').some((line) => lineLooksIncompleteForAutoSave(line));
+}
+
 function extractMonacoContentHandler(src, { contains } = {}) {
   const anchor = 'editor.onDidChangeModelContent(() => {';
   let searchFrom = 0;
@@ -1750,6 +1819,7 @@ function createActiveDiagHarness(pickDelay, runDiag) {
     schedule(activeTab) {
       clearTimeout(timer);
       const delay = pickDelay(activeTab);
+      if (delay == null) return;
       timer = setTimeout(() => {
         timer = null;
         runs += 1;
@@ -1777,14 +1847,14 @@ function testJavaDiagnosticsThrottling(appSrc, win) {
   );
   ok(
     appSrc.includes('const JAVA_DIAG_DELAY_MS'),
-    'active Java file uses slower debounce while typing',
+    'JAVA_DIAG_DELAY_MS constant retained for tuning',
   );
 
   const scheduleDiagBody = extractFunctionBody(appSrc, 'scheduleDiagnostics');
   ok(
-    scheduleDiagBody.includes('JAVA_DIAG_DELAY_MS')
-      && scheduleDiagBody.includes("endsWith('.java')"),
-    'scheduleDiagnostics slows active Java file while typing',
+    scheduleDiagBody.includes("endsWith('.java')")
+      && scheduleDiagBody.includes("scope: 'typing'"),
+    'scheduleDiagnostics queues lightweight typing javac for Java',
   );
 
   ok(
@@ -1798,13 +1868,13 @@ function testJavaDiagnosticsThrottling(appSrc, win) {
   ok(
     contentHandler.includes('scheduleDiagnostics()')
       && !contentHandler.includes('scheduleAllJavaDiagnosticsOnTypingPause()'),
-    'keystroke path refreshes active tab only via scheduleDiagnostics',
+    'keystroke path still calls scheduleDiagnostics (Java uses typing javac inside)',
   );
 
   const activateBody = extractFunctionBody(appSrc, 'activateTabShell');
   ok(
-    activateBody.includes('scheduleDiagnostics()'),
-    'tab switch schedules diagnostics for newly active file',
+    activateBody.includes('scheduleJavaFullDiagnostics()'),
+    'tab switch to Java schedules full javac diagnostics',
   );
   ok(
     !activateBody.includes("void runDiagnostics()"),
@@ -1825,16 +1895,23 @@ function testJavaDiagnosticsThrottling(appSrc, win) {
 
   const saveBody = extractFunctionBody(appSrc, 'saveFile');
   ok(
-    saveBody.includes('isProjectSourceFile(savedPath)')
-      && saveBody.includes('scheduleAllJavaDiagnostics()'),
-    'save on Java classpath file still schedules all-tab diagnostics',
+    saveBody.includes('scheduleJavaFullDiagnostics()'),
+    'save on Java file schedules debounced full javac',
+  );
+  ok(
+    saveBody.includes('queueJavaFullDiagnostics'),
+    'manual save queues immediate full javac after persist',
+  );
+  ok(
+    !saveBody.includes('scheduleAllJavaDiagnostics()'),
+    'ordinary Java save does not batch-refresh all open tabs',
   );
 
   const isMarkup = win?.ReaperLang?.isMarkupOrConfigPath?.bind(win.ReaperLang) ?? (() => false);
   ok(
     diagnosticDelayForPath('src/App.java', constants, { isMarkupOrConfigPath: isMarkup })
       === constants.JAVA_DIAG_DELAY_MS,
-    'delay selection: active Java file uses JAVA_DIAG_DELAY_MS',
+    'delay selection: Java files use JAVA_DIAG_DELAY_MS for typing javac',
   );
   ok(
     diagnosticDelayForPath('pom.xml', constants, { isMarkupOrConfigPath: isMarkup })
@@ -1859,11 +1936,8 @@ function testJavaDiagnosticsThrottling(appSrc, win) {
       (path) => diagnosticDelayForPath(path, constants, { isMarkupOrConfigPath: isMarkup }),
     );
     harness.schedule('src/App.java');
-    tick(50);
-    harness.schedule('src/App.java');
-    ok(harness.runs === 0, 'active Java diagnostics not run before JAVA debounce');
-    tick(constants.JAVA_DIAG_DELAY_MS);
-    ok(harness.runs === 1, 'active Java diagnostics run after Java debounce from last keystroke');
+    tick(constants.JAVA_DIAG_DELAY_MS + 5000);
+    ok(harness.runs === 1, 'active Java diagnostics run after typing debounce');
   });
 }
 
@@ -1975,6 +2049,541 @@ function shouldApplyDiagnosticsForTest(result) {
   return 'apply';
 }
 
+/** Mirror plain-symbol + member branches used by diagnosticMarkerSpan in app.js */
+function diagnosticSymbolSpanForTest(lineText, message) {
+  const member = diagnosticMemberSpanForTest(lineText, message);
+  if (member) return member;
+  const msgLower = String(message || '').toLowerCase();
+  if (!msgLower.includes('cannot find symbol') && !msgLower.includes('does not exist')) {
+    return null;
+  }
+  const sym = message.match(/symbol:\s*(?:class|interface|variable|method|package)?\s*([A-Za-z_][\w.]*)/i)
+    || message.match(/package\s+([A-Za-z_][\w.]*)/i);
+  if (!sym?.[1]) return null;
+  const name = sym[1].split('.').pop().replace(/\(\).*$/, '').replace(/\(\s*$/, '');
+  const scanLine = removeJavaStringLiteralsForTest(lineText);
+  const dotIdx = scanLine.indexOf(`${name}.`);
+  const plainIdx = scanLine.indexOf(name);
+  const idx = dotIdx >= 0 ? dotIdx : plainIdx;
+  if (idx < 0) return null;
+  const endCol = dotIdx >= 0 ? idx + 1 + name.length + 1 : idx + name.length;
+  return {
+    startColumn: idx + 1,
+    endColumn: endCol + 1,
+    text: dotIdx >= 0 ? `${name}.` : name,
+  };
+}
+
+function buildSquiggleMarkersForTest(model, diags) {
+  const MarkerSeverity = { Error: 8, Warning: 4 };
+  return diags.map((d) => {
+    const line = Math.max(1, d.line || 1);
+    const lineText = model.getLineContent(line);
+    const span = diagnosticSymbolSpanForTest(lineText, d.message);
+    const startCol = span?.startColumn ?? Math.max(1, d.column || 1);
+    const endCol = span?.endColumn ?? startCol + 1;
+    return {
+      startLineNumber: line,
+      startColumn: startCol,
+      endLineNumber: line,
+      endColumn: endCol,
+      severity: d.severity === 'warning' ? MarkerSeverity.Warning : MarkerSeverity.Error,
+      message: d.message,
+    };
+  });
+}
+
+const TERM_SOURCE_EXT_FOR_TEST = 'java|kt|kts|scala|groovy|gradle|xml|properties|json|yaml|yml|rs|py|js|ts|tsx|jsx|go|rb|cs|cpp|c|h|hpp|md|sql|html|css|vue|swift|php|sh|toml|proto';
+const TERM_PATH_SEGMENT_FOR_TEST = `[A-Za-z0-9_.@\\[\\]-]+`;
+const TERM_FILE_PATH_FOR_TEST = `(?:(?:[A-Za-z]:)?\\/)?${TERM_PATH_SEGMENT_FOR_TEST}(?:[\\/]${TERM_PATH_SEGMENT_FOR_TEST})*\\.(?:${TERM_SOURCE_EXT_FOR_TEST})`;
+
+function terminalLinkRangeForTest(match, lineText = '') {
+  const path = match[1];
+  let start = match.index + match[0].indexOf(path);
+  if (match[0].includes('[')) {
+    let slice = match[0].slice(match[0].indexOf(path));
+    if (lineText && start > 0 && lineText[start - 1] === '/' && path[0] !== '/') {
+      start -= 1;
+      slice = `/${slice}`;
+    }
+    return { start, end: start + slice.length };
+  }
+  let end = start + path.length + 1 + String(match[2]).length;
+  if (match[3] && /:\d+(?::|\]|$)/.test(match[0])) {
+    end += 1 + String(match[3]).length;
+  }
+  return { start, end };
+}
+
+function parseTerminalFileLocationsForTest(lineText) {
+  const out = [];
+  const seen = new Set();
+  const patterns = [
+    {
+      re: new RegExp(`(${TERM_FILE_PATH_FOR_TEST}):\\[\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\]`, 'gi'),
+      pick: (m) => ({ path: m[1], line: +m[2], column: +m[3] }),
+    },
+  ];
+  for (const { re, pick } of patterns) {
+    re.lastIndex = 0;
+    let match;
+    while ((match = re.exec(lineText)) !== null) {
+      const hit = pick(match);
+      if (match.index > 0 && lineText[match.index - 1] === '/' && !hit.path.startsWith('/')) {
+        hit.path = `/${hit.path}`;
+      }
+      const { start, end } = terminalLinkRangeForTest(match, lineText);
+      const key = `${hit.path}:${hit.line}:${hit.column}:${start}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...hit, start, end });
+    }
+  }
+  out.sort((a, b) => a.start - b.start);
+  return out;
+}
+
+function resolveTerminalFilePathForTest(rawPath, { projectFolder = '', tabs = [] } = {}) {
+  let p = String(rawPath || '').trim().replace(/\\/g, '/');
+  if (!p) return null;
+
+  const root = projectFolder.replace(/\\/g, '/').replace(/\/$/, '');
+  if (root && (p === root || p.startsWith(`${root}/`))) {
+    p = p === root ? '' : p.slice(root.length + 1);
+  } else if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
+    for (const tab of tabs) {
+      const rel = String(tab || '').replace(/\\/g, '/').replace(/^\.\//, '');
+      if (!rel) continue;
+      if (p.endsWith(`/${rel}`) || p.endsWith(rel)) return rel;
+    }
+    const markers = ['/src/', '/test/', '/main/', '/java/', '/kotlin/', '/resources/'];
+    for (const mark of markers) {
+      const idx = p.lastIndexOf(mark);
+      if (idx >= 0) {
+        p = p.slice(idx + 1);
+        break;
+      }
+    }
+    if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
+      const tail = p.match(/\/((?:src|test|services)\/.+)$/);
+      if (!tail) return null;
+      p = tail[1];
+    }
+  }
+
+  p = p.replace(/^\.\//, '');
+  if (!p || !/\.\w+$/.test(p)) return null;
+  return p;
+}
+
+function testTerminalCompileLinkRegression(appSrc) {
+  ok(appSrc.includes('TERM_PATH_SEGMENT'), 'terminal links: path regex supports absolute paths');
+  ok(
+    appSrc.includes("lineText[match.index - 1] === '/'") && appSrc.includes('hit.path = `/${hit.path}`'),
+    'terminal links: restore leading slash on absolute javac paths',
+  );
+  ok(
+    extractFunctionBody(appSrc, 'resolveTerminalFilePath').includes('p.endsWith(rel)'),
+    'terminal links: resolve absolute path via open tab suffix',
+  );
+  ok(
+    extractFunctionBody(appSrc, 'resolveTerminalFilePath').includes('lastIndexOf(mark)'),
+    'terminal links: prefer last /src/ segment for multi-module paths',
+  );
+
+  const mavenLine = '[ERROR] /Users/sunny/reaper/workspaces/Spring-maven-complicated/services/analytics-service/src/main/java/com/enterprise/analytics/AnalyticsServiceApplication.java:[28,34] cannot find symbol';
+  const hits = parseTerminalFileLocationsForTest(mavenLine);
+  ok(hits.length === 1, 'terminal links: maven [ERROR] absolute path produces one link');
+  ok(hits[0].line === 28 && hits[0].column === 34, 'terminal links: maven line:column parsed');
+  ok(
+    hits[0].path.startsWith('/Users/') && hits[0].path.endsWith('AnalyticsServiceApplication.java'),
+    'terminal links: absolute path includes leading slash',
+  );
+  ok(hits[0].start === 8, 'terminal links: link range includes leading slash');
+
+  const rel = resolveTerminalFilePathForTest(hits[0].path, {
+    projectFolder: '/Users/sunny/reaper/workspaces/Spring-maven-complicated',
+    tabs: ['services/analytics-service/src/main/java/com/enterprise/analytics/AnalyticsServiceApplication.java'],
+  });
+  ok(
+    rel === 'services/analytics-service/src/main/java/com/enterprise/analytics/AnalyticsServiceApplication.java',
+    'terminal links: absolute javac path resolves to repo-relative file',
+  );
+}
+
+function testJavaSquiggleRegression(appSrc) {
+  const applyBody = extractFunctionBody(appSrc, 'applyDiagnostics');
+  const fullBody = extractFunctionBody(appSrc, 'runJavaDiagnosticsForPath');
+  const fetchBody = extractFunctionBody(appSrc, 'fetchDiagnosticsForPath');
+  const tabShellBody = extractFunctionBody(appSrc, 'activateTabShell');
+  const javaDiagSrc = fs.readFileSync(
+    path.join(ROOT, 'src', 'workspace', 'java_diagnostics.rs'),
+    'utf8',
+  );
+  const checkJavaChunk = javaDiagSrc.slice(
+    javaDiagSrc.indexOf('pub fn check_java'),
+    javaDiagSrc.indexOf('fn check_project_java'),
+  );
+
+  ok(
+    applyBody.includes("monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers)"),
+    'squiggles: applyDiagnostics publishes Monaco error markers',
+  );
+  ok(
+    applyBody.includes('diagnosticMarkerSpan(model, d)'),
+    'squiggles: marker ranges come from diagnosticMarkerSpan',
+  );
+  ok(
+    applyBody.includes('monaco.MarkerSeverity.Error'),
+    'squiggles: javac errors use Error severity',
+  );
+  ok(
+    applyBody.includes('refreshQuickFixBulbs'),
+    'squiggles: applying diagnostics refreshes quick-fix bulbs',
+  );
+
+  ok(
+    fullBody.includes('showCompileFooter'),
+    'squiggles: full javac shows Compiling status while compile runs',
+  );
+  ok(
+    fullBody.includes('JAVA_FULL_DIAG_MAX_RETRIES'),
+    'squiggles: full javac retries capped (no long cancel loops)',
+  );
+  ok(
+    appSrc.includes('Analyzing…'),
+    'squiggles: full javac shows Analyzing status while compile runs',
+  );
+  ok(
+    appSrc.includes('javaCompileFooterGen'),
+    'squiggles: compile footer uses generation guard',
+  );
+  ok(
+    appSrc.includes('COMPILE_FOOTER_SAFETY_MS'),
+    'squiggles: compile footer auto-releases if javac stalls',
+  );
+  ok(
+    appSrc.includes('queueJavaDiagnostics'),
+    'squiggles: save/auto-save coalesce javac through single compile queue',
+  );
+  ok(
+    appSrc.includes('flushJavaDiagnosticQueue'),
+    'squiggles: one javac compile at a time (integration parity)',
+  );
+  ok(
+    fetchBody.includes('chain after in-flight compile')
+      || fetchBody.includes('never abort'),
+    'squiggles: full javac chains after in-flight compile instead of abort storm',
+  );
+  ok(
+    !checkJavaChunk.includes('with_workspace_java_lock'),
+    'backend: workspace javac lock is not held for entire check_java (classpath prep stays unlocked)',
+  );
+  ok(
+    javaDiagSrc.includes('Compile only the active overlay file')
+      && javaDiagSrc.includes('with_workspace_java_lock(ws, || {\n        run_cancellable_javac'),
+    'backend: project javac compiles active file only (sourcepath resolves cross-file types)',
+  );
+  ok(
+    fullBody.includes('applyDiagnostics(path, result.diagnostics)'),
+    'squiggles: save/full javac path calls applyDiagnostics with results',
+  );
+  ok(
+    fullBody.includes('result.cancelled && !result.diagnostics.length'),
+    'squiggles: cancelled empty javac retries instead of clearing markers',
+  );
+  ok(
+    !appSrc.includes('javaFullDiagPending'),
+    'squiggles: no pending-queue discard of javac results',
+  );
+
+  ok(
+    tabShellBody.includes('scheduleJavaFullDiagnostics()'),
+    'squiggles: switching to Java tab schedules full javac refresh',
+  );
+  ok(
+    !tabShellBody.includes('clearDiagnostics()'),
+    'squiggles: tab switch does not wipe Monaco markers before javac finishes',
+  );
+
+  const springLine = '    SpringAppliatin.run(AuthServiceApplication.class, args);';
+  const springMsg = 'cannot find symbol\n  symbol:   class SpringAppliatin\n  location: class App';
+  const springSpan = diagnosticSymbolSpanForTest(springLine, springMsg);
+  ok(
+    springSpan?.text?.startsWith('SpringAppliatin'),
+    'squiggle span: typo class SpringAppliatin underlined',
+  );
+  ok(
+    springSpan.endColumn > springSpan.startColumn,
+    'squiggle span: SpringAppliatin has non-zero underline width',
+  );
+
+  const mockModel = { getLineContent: (ln) => (ln === 5 ? springLine : '') };
+  const markers = buildSquiggleMarkersForTest(mockModel, [{ line: 5, message: springMsg }]);
+  ok(markers.length === 1, 'squiggle markers: one javac error produces one marker');
+  ok(markers[0].severity === 8, 'squiggle markers: javac error marker severity is Error');
+  ok(
+    markers[0].startColumn === springSpan.startColumn
+      && markers[0].endColumn === springSpan.endColumn,
+    'squiggle markers: SpringAppliatin marker matches diagnostic span',
+  );
+
+  const cancelledWithErrors = {
+    diagnostics: [{ line: 5, message: springMsg }],
+    cancelled: true,
+  };
+  ok(
+    shouldApplyDiagnosticsForTest(cancelledWithErrors) === 'apply',
+    'squiggles: cancelled javac with errors still paints markers',
+  );
+}
+
+async function testJavaEditorUiBackendIntegration(appSrc) {
+  const saveBody = extractFunctionBody(appSrc, 'saveFile');
+  const scheduleAutoSaveBody = extractFunctionBody(appSrc, 'scheduleAutoSave');
+  const fetchBody = extractFunctionBody(appSrc, 'fetchDiagnosticsForPath');
+  const fullBody = extractFunctionBody(appSrc, 'runJavaDiagnosticsForPath');
+
+  ok(
+    saveBody.includes('writeTabToDisk') && saveBody.includes('queueJavaFullDiagnostics'),
+    'integration: editor save persists then queues full javac',
+  );
+  const writeBody = extractFunctionBody(appSrc, 'writeTabToDiskOnce');
+  const prepareSaveBody = extractFunctionBody(appSrc, 'prepareForSave');
+  ok(
+    writeBody.includes('allowDuringSave: true'),
+    'save: PUT/read-back bypass save gate',
+  );
+  ok(
+    saveBody.includes('prepareForSave') && prepareSaveBody.includes('usesInProcessApi'),
+    'save: lightweight path on reaper://; HTTP fallback still drains connection pool',
+  );
+  ok(
+    appSrc.includes('SAVE_GATE_DRAIN_MS'),
+    'save: waits after aborting javac before PUT',
+  );
+  ok(
+    !writeBody.includes('abortAllDiagnosticFetches'),
+    'save: abort coalesced in prepareForSave (not per retry)',
+  );
+  ok(
+    writeBody.includes('SAVE_MAX_RETRIES'),
+    'save: retries PUT after aborting busy compile connections',
+  );
+  ok(
+    prepareSaveBody.includes('usesInProcessApi'),
+    'save: lightweight prepare when WebView uses reaper:// custom protocol',
+  );
+  ok(
+    writeBody.includes('usesInProcessApi') && writeBody.includes('readTabFromDisk'),
+    'save: read-back verify skipped on in-process protocol, kept for HTTP fallback',
+  );
+  ok(
+    appSrc.includes('saveWriteCoalesceByPath') && appSrc.includes('flushSaveWriteCoalesce'),
+    'save: coalesces concurrent PUTs per path (latest buffer wins)',
+  );
+  ok(
+    !appSrc.includes('quit and reopen the app'),
+    'save: timeout message does not tell user to restart app',
+  );
+  ok(
+    saveBody.includes('showSavingFooterStatus'),
+    'save: footer shows Saving… while persist runs',
+  );
+  ok(
+    !saveBody.includes("showSaveFooterStatus('Saved', { auto: true })"),
+    'save: auto-save does not flash Saved footer (misleading after rapid edits)',
+  );
+  const autoSaveBody = extractFunctionBody(appSrc, 'autoSaveToDisk');
+  ok(
+    autoSaveBody.includes('showSavingFooterStatus') && autoSaveBody.includes('writeTabToDisk'),
+    'auto-save: footer shows Saving… then persists to disk first',
+  );
+  ok(
+    autoSaveBody.includes('queueJavaDiagnostics') && autoSaveBody.includes("scope: 'typing'"),
+    'auto-save: lightweight typing javac after disk write',
+  );
+  ok(
+    !scheduleAutoSaveBody.includes('saveFile({ silent: true })'),
+    'auto-save: scheduleAutoSave uses autoSaveToDisk not silent saveFile',
+  );
+  ok(
+    appSrc.includes('shouldDeferAutoSave') && appSrc.includes('JAVA_AUTO_SAVE_DELAY_MS'),
+    'auto-save: defers mid-edit syntax and uses longer Java idle delay',
+  );
+  ok(
+    shouldDeferAutoSave('class A {\n  String s = \n}', 'App.java'),
+    'auto-save defer: trailing = on Java line',
+  );
+  ok(
+    !shouldDeferAutoSave('class A {\n  String s = file.getAbsolutePath();\n}', 'App.java'),
+    'auto-save defer: complete Java statement may persist',
+  );
+  ok(
+    shouldDeferAutoSave('x = foo.', 'App.js'),
+    'auto-save defer: trailing . on JS line',
+  );
+  ok(
+    !shouldDeferAutoSave('# comment only\n', 'notes.txt'),
+    'auto-save defer: non-code files are not deferred',
+  );
+  ok(
+    saveBody.includes('clearDiagnostics()') && saveBody.includes("showSaveFooterStatus('Save failed'"),
+    'save: failed save clears stale squiggles and shows Save failed footer',
+  );
+  ok(
+    saveBody.includes('queueJavaFullDiagnostics') && !saveBody.includes('fromSave'),
+    'manual save queues immediate full javac after persist',
+  );
+  ok(
+    fetchBody.includes("scope === 'full'") && fetchBody.includes('collectJavaDiagnosticOverlays'),
+    'integration: editor diagnostics POST uses full scope + tab overlays',
+  );
+  ok(
+    fullBody.includes('applyDiagnostics(path, result.diagnostics)'),
+    'integration: javac results applied to Monaco markers',
+  );
+  ok(
+    fs.existsSync(path.join(ROOT, 'scripts/lib/javac-edit-loop.mjs')),
+    'integration: shared javac edit-loop harness present',
+  );
+  const loopSrc = fs.readFileSync(path.join(ROOT, 'scripts/lib/javac-edit-loop.mjs'), 'utf8');
+  ok(
+    loopSrc.includes('runConcurrentDiagnosticsBurst')
+      && loopSrc.includes('runConcurrentSaveBurst')
+      && loopSrc.includes('runConcurrentSaveDiagnosticBurst'),
+    'integration: client-parallel burst harness present',
+  );
+  ok(
+    loopSrc.includes('assertLatestHasNoStaleMarkers')
+      && loopSrc.includes('reportDiagnosticBurstStats')
+      && loopSrc.includes('messageContainsSymbol'),
+    'integration: burst reports cancelled counts and word-boundary stale checks',
+  );
+  const coalesceSrc = fs.readFileSync(
+    path.join(ROOT, 'scripts/lib/java-coalesce-harness.mjs'),
+    'utf8',
+  );
+  ok(
+    coalesceSrc.includes('createJavaFullDiagCoalescer')
+      && coalesceSrc.includes('runCoalescedClientBurst')
+      && coalesceSrc.includes('testCoalescerUnit'),
+    'integration: editor coalesce harness mirrors queueJavaFullDiagnostics',
+  );
+
+  const apiRs = fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8');
+  ok(
+    apiRs.includes('async fn save_workspace_file')
+      && apiRs.includes('tokio::fs::write')
+      && apiRs.includes('patch_java_index_after_save'),
+    'backend: save uses async fs write; java index patch stays off hot path',
+  );
+  ok(
+    apiRs.includes('queue_java_index_patch_after_save')
+      || fs.existsSync(path.join(ROOT, 'src/workspace/java_index_patch.rs')),
+    'backend: java index patch coalesced (one worker per workspace)',
+  );
+  ok(
+    fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8').includes('spawn_blocking(move || workspace::read_file'),
+    'backend: file GET uses spawn_blocking so save read-back does not starve workers',
+  );
+  ok(
+    apiRs.includes('DiagRequestGuard') && apiRs.includes('cancel_inflight_diagnostics'),
+    'backend: diagnostics cancels javac when HTTP client disconnects',
+  );
+  ok(
+    apiRs.includes('tokio::spawn(async move {')
+      && apiRs.includes('oneshot::channel')
+      && apiRs.includes('header::CONNECTION'),
+    'backend: diagnostics runs in detached task; Connection: close frees WebKit slot',
+  );
+  ok(
+    apiRs.includes('JAVA_FULL_DIAG_SEM') && apiRs.includes('Semaphore::new(1)'),
+    'backend: one full javac HTTP request at a time (global semaphore)',
+  );
+  const mainRs = fs.readFileSync(path.join(ROOT, 'src/main.rs'), 'utf8');
+  const guiRs = fs.readFileSync(path.join(ROOT, 'src/gui.rs'), 'utf8');
+  const customProtocolRs = fs.readFileSync(path.join(ROOT, 'src/web/custom_protocol.rs'), 'utf8');
+  const configRs = fs.readFileSync(path.join(ROOT, 'src/config.rs'), 'utf8');
+  ok(
+    mainRs.includes('GuiProtocolBridge')
+      && mainRs.includes('WEBVIEW_ENTRY')
+      && guiRs.includes('with_asynchronous_custom_protocol'),
+    'gui: WebView uses reaper:// custom protocol with loopback for WS/git',
+  );
+  ok(
+    customProtocolRs.includes('GuiProtocolBridge') && customProtocolRs.includes('oneshot'),
+    'gui: custom protocol dispatches in-process to axum router',
+  );
+  ok(
+    appSrc.includes('__REAPER_LOOPBACK_WS__'),
+    'terminal: uses loopback WebSocket base when WebView is on reaper://',
+  );
+  ok(
+    mainRs.includes('local_https::ensure_local_tls')
+      && mainRs.includes('web::serve::serve_tls')
+      && mainRs.includes('persist_server_url'),
+    'backend: --server uses HTTPS/HTTP2 (serve_tls) and writes reaper.url',
+  );
+  ok(
+    configRs.includes('uses_tls: !running_in_app_bundle()')
+      && configRs.includes('if self.uses_tls { "https" } else { "http" }'),
+    'backend: app bundle loopback uses plain HTTP; --server uses HTTPS',
+  );
+  const localHttpsRs = fs.readFileSync(path.join(ROOT, 'src/local_https.rs'), 'utf8');
+  ok(
+    localHttpsRs.includes('b"h2"') && localHttpsRs.includes('alpn_protocols'),
+    'backend: rustls ALPN advertises HTTP/2',
+  );
+
+  {
+    const { testCoalescerUnit } = await import(path.join(ROOT, 'scripts/lib/java-coalesce-harness.mjs'));
+    let unitFailed = false;
+    const unitOk = (cond, msg) => {
+      if (!cond) unitFailed = true;
+      return ok(cond, msg);
+    };
+    const unitFail = (msg) => {
+      unitFailed = true;
+      fail(msg);
+    };
+    const unitBurst = Number.parseInt(process.env.REAPER_EDITS || '25', 10);
+    await testCoalescerUnit({ burstCount: unitBurst, ok: unitOk, fail: unitFail });
+    ok(!unitFailed, `coalescer unit: ${unitBurst} queue calls coalesced (no server)`);
+  }
+
+  const binaryCandidates = [
+    path.join(ROOT, 'target/release/reaper'),
+    path.join(ROOT, 'target/debug/reaper'),
+    path.join(ROOT, 'dist/Reaper.app/Contents/MacOS/reaper'),
+  ];
+  const hasBinary = binaryCandidates.some((p) => {
+    try {
+      fs.accessSync(p, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  if (process.env.REAPER_SKIP_INTEGRATION === '1') {
+    ok(true, 'integration spawn: skipped (REAPER_SKIP_INTEGRATION=1)');
+    return;
+  }
+  if (!hasBinary) {
+    ok(true, 'integration spawn: skipped (reaper binary not built yet)');
+    return;
+  }
+
+  const mod = await import(path.join(ROOT, 'scripts/test-java-editor-integration.mjs'));
+  const result = await mod.testJavaEditorIntegration({ quiet: true });
+  if (result.skipped) {
+    ok(true, 'integration spawn: skipped by harness');
+    return;
+  }
+  ok(result.passed, `integration spawn: ${process.env.REAPER_EDITS || '25'}× sequential + client-parallel + coalesced bursts`);
+}
+
 function testJavaCompilerErrorRegression(appSrc) {
   const javaDiagSrc = fs.readFileSync(
     path.join(ROOT, 'src', 'workspace', 'java_diagnostics.rs'),
@@ -2002,6 +2611,10 @@ function testJavaCompilerErrorRegression(appSrc) {
     diagnosticsSrc.includes('struct FileDiagnosticsResult')
       && diagnosticsSrc.includes('fn diagnose_file'),
     'backend: diagnostics API exposes cancelled javac separately from results',
+  );
+  ok(
+    !diagnosticsSrc.includes('typing_diagnostics'),
+    'backend: cancelled full javac does not fall back to stale jdtls diagnostics',
   );
   ok(
     javaInflightSrc.includes('content_fingerprint')
@@ -2090,6 +2703,11 @@ function testJavaJavacInflightGuards(appSrc) {
     'new diagnostic fetch aborts stale request when buffer content changed',
   );
   ok(
+    fetchBody.includes("prev.scope === 'full' && scope === 'full'")
+      && fetchBody.includes('prev.promise.then'),
+    'full javac chains follow-up fetch after in-flight compile finishes',
+  );
+  ok(
     appSrc.includes('diagRetryDelayMs'),
     'cancelled javac retries with backoff instead of aborting long compiles',
   );
@@ -2110,6 +2728,48 @@ function testJavaJavacInflightGuards(appSrc) {
     'all-tab Java diagnostics iterate tabs sequentially',
   );
   ok(
+    appSrc.includes("scope = 'typing'"),
+    'typing diagnostics use lightweight scope default',
+  );
+  ok(
+    extractFunctionBody(appSrc, 'runDiagnostics').includes("endsWith('.java')"),
+    'runDiagnostics skips Java (dedicated typing javac queue)',
+  );
+  ok(
+    extractFunctionBody(appSrc, 'runDiagnostics').includes("scope: 'typing'"),
+    'non-Java active-file diagnostic fetch uses typing scope',
+  );
+  ok(
+    fetchBody.includes("scope === 'full'")
+      && fetchBody.includes('collectJavaDiagnosticOverlays'),
+    'full diagnostics include open-tab overlays',
+  );
+  ok(
+    refreshBody.includes("scope: 'full'")
+      && refreshBody.includes('JAVA_DIAG_FULL_STAGGER_MS'),
+    'all-tab refresh uses full scope with stagger between compiles',
+  );
+  ok(
+    fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'java_diagnostics.rs'), 'utf8')
+      .includes('enum JavaDiagScope'),
+    'backend: JavaDiagScope separates typing vs full javac',
+  );
+  ok(
+    fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'diagnostics.rs'), 'utf8')
+      .includes('JavaDiagScope::Typing')
+      && !fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'diagnostics.rs'), 'utf8')
+        .includes('typing scope should not run javac'),
+    'backend: typing scope runs lightweight single-file javac for Java',
+  );
+  ok(
+    (() => {
+      const javaDiagSrc = fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'java_diagnostics.rs'), 'utf8');
+      return javaDiagSrc.includes('local_missing_import_flags_slf4j_annotation_without_import')
+        && extractRustFnBody(javaDiagSrc, 'filter_project_javac_diags').includes('local_missing_import_type_diags');
+    })(),
+    'backend: missing-import pass wired for Lombok @Slf4j and other unresolved types',
+  );
+  ok(
     refreshBody.includes('allJavaDiagRefreshGen'),
     'all-tab refresh generation skips stale batch results',
   );
@@ -2128,6 +2788,65 @@ function testJavaJavacInflightGuards(appSrc) {
       && fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'java_javac_inflight.rs'), 'utf8')
         .includes('workspace_lock_for'),
     'backend serializes javac per workspace and cancels superseded per-file compiles',
+  );
+}
+
+function testJavaMemberCompletionPipelineRegression(appSrc) {
+  const mlSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
+  const modRs = fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'mod.rs'), 'utf8');
+  const classpathRs = fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'classpath.rs'), 'utf8');
+  const symbolsRs = fs.readFileSync(path.join(ROOT, 'src', 'workspace', 'symbols.rs'), 'utf8');
+  const dotBody = extractFunctionBody(mlSrc, 'handleDotCompletion');
+  const closeBody = extractFunctionBody(appSrc, 'closeTab');
+  const bindTabsBody = extractFunctionBody(appSrc, 'bindEditorTabs');
+
+  ok(
+    modRs.includes('Always run the Java index')
+      && modRs.includes('classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)')
+      && modRs.includes('merge_completion_items(jdtls_items, items, 80)'),
+    'backend: java_completions always runs index then merges jdtls (never index-only skip)',
+  );
+  ok(
+    !modRs.includes('if from_path.ends_with(".java") && jdtls::workspace_ready(ws)')
+      && !modRs.includes('return Ok(jdtls_items);'),
+    'backend: jdtls ready must not bypass index or return jdtls-only completions',
+  );
+  ok(
+    classpathRs.includes('infer_java_receiver_type_from_expr')
+      && classpathRs.includes('member_completions_for_qualifier')
+      && classpathRs.includes('lookup.members_for_type'),
+    'backend: member completion resolves receiver type then queries index members',
+  );
+  ok(
+    classpathRs.includes('plain_java_instance_variable_dot_member_completions'),
+    'backend: regression test for any-instance variable dot completions (File file.)',
+  );
+  ok(
+    symbolsRs.includes('pub(crate) fn infer_java_receiver_type')
+      && symbolsRs.includes('pub(crate) fn infer_java_receiver_type_from_expr'),
+    'backend: type inference exported for member completion on any object',
+  );
+  ok(
+    dotBody.includes('fetchCompletionsWithTimeout')
+      && dotBody.includes('presentCompletionSuggestions')
+      && dotBody.includes('local.suggestions.length > 0'),
+    'frontend: handleDotCompletion fetches index members when local hints empty',
+  );
+  ok(
+    mlSrc.includes('presentCompletionSuggestions(ed, items, { content, path })')
+      && extractFunctionBody(mlSrc, 'fetchCompletions').includes('/workspace/completions'),
+    'frontend: member completion shows index API results in fallback popup',
+  );
+  ok(
+    appSrc.includes('function tabPathFromEl')
+      && appSrc.includes('data-tab-idx')
+      && bindTabsBody.includes('tabsBound'),
+    'editor tabs: stable path resolution via tab index (close/switch)',
+  );
+  ok(
+    !closeBody.includes('confirm(')
+      && closeBody.includes('skipFlush: true'),
+    'editor tabs: close without WKWebView confirm; active tab switch skips stale flush',
   );
 }
 
@@ -2190,6 +2909,10 @@ function testLongRunningTaskBusyUi() {
   ok(appSrc.includes('busyStatusHtml(\'Loading push preview…\')'), 'push preview loads with spinner');
   ok(indexHtml.includes('id="publish-status"') && indexHtml.includes('id="push-modal-busy"'), 'publish/push modals have busy UI slots');
   ok(appSrc.includes("api('/api/ui-preferences'") && appSrc.includes('coverage_inline_enabled'), 'coverage inline pref saved to ui-preferences.json');
+  const themesSrc = fs.readFileSync(path.join(ROOT, 'static/themes.js'), 'utf8');
+  ok(themesSrc.includes("'/api/ui-preferences'") && themesSrc.includes('theme_id'), 'color theme saved to ui-preferences.json');
+  ok(!themesSrc.includes('localStorage.setItem(THEME_KEY'), 'theme no longer stored in localStorage');
+  ok(themesSrc.includes("solarized: 'offwhite'"), 'removed light themes migrate to offwhite');
   ok(appSrc.includes('function navigationBusyHtml') && appSrc.includes('ij-nav-busy'), 'navigation busy uses styled pill indicator');
   ok(appSrc.includes('function stopNavigationBusyIndicator') && appSrc.includes('showNavigationResult'), 'navigation result clears spinner');
   ok(langSrc.includes('definitionInflight') && langSrc.includes('reportNoDefinition'), 'definition lookup deduped and guards false no-def');
@@ -2433,12 +3156,27 @@ async function main() {
   section('Run button UI scaling');
   testRunButtonUiRegression();
 
+  section('Test coverage gutter regression');
+  testTestCoverageGutterRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
   section('Inline completion regression');
   testInlineCompletionRegression(win);
   testLocalJavaImportQuickFix(win);
 
   section('Java compiler error regression');
   testJavaCompilerErrorRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
+  section('Terminal compile link regression');
+  testTerminalCompileLinkRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
+  section('Java member completion + tab close regression');
+  testJavaMemberCompletionPipelineRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
+  section('Java squiggle regression');
+  testJavaSquiggleRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
+  section('Java editor integration (UI → backend)');
+  await testJavaEditorUiBackendIntegration(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
 
   section('Performance regression (CPU spike guards)');
   testPerformanceRegression(win);

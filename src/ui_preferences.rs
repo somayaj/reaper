@@ -9,16 +9,23 @@ fn default_true() -> bool {
     true
 }
 
+fn default_theme_id() -> String {
+    "navy".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiPreferences {
     #[serde(default = "default_true")]
     pub coverage_inline_enabled: bool,
+    #[serde(default = "default_theme_id")]
+    pub theme_id: String,
 }
 
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
             coverage_inline_enabled: true,
+            theme_id: default_theme_id(),
         }
     }
 }
@@ -59,6 +66,13 @@ impl UiPreferencesStore {
         Ok(guard.clone())
     }
 
+    pub fn set_theme_id(&self, theme_id: &str) -> Result<UiPreferences> {
+        let mut guard = self.inner.write().expect("ui preferences lock poisoned");
+        guard.theme_id = theme_id.to_string();
+        self.save(&guard)?;
+        Ok(guard.clone())
+    }
+
     fn save(&self, prefs: &UiPreferences) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -89,6 +103,25 @@ mod tests {
         store.set_coverage_inline_enabled(false).unwrap();
         let reloaded = UiPreferencesStore::load(&path).unwrap();
         assert!(!reloaded.view().coverage_inline_enabled);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn saves_and_loads_theme_id() {
+        let path = std::env::temp_dir().join(format!(
+            "reaper-ui-prefs-theme-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = UiPreferencesStore::load(&path).unwrap();
+        assert_eq!(store.view().theme_id, "navy");
+
+        store.set_theme_id("darcula").unwrap();
+        let reloaded = UiPreferencesStore::load(&path).unwrap();
+        assert_eq!(reloaded.view().theme_id, "darcula");
         let _ = fs::remove_file(path);
     }
 }

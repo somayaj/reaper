@@ -1520,6 +1520,7 @@
 
   function inlineIndexPrefix(linePrefix) {
     const memberCtx = dotQualifierFromLinePrefix(linePrefix);
+
     if (memberCtx) return memberCtx.memberPrefix || '';
     return extractInlinePartialToken(linePrefix) || '';
   }
@@ -3401,6 +3402,43 @@
     EqualsAndHashCode: 'lombok.EqualsAndHashCode',
     ToString: 'lombok.ToString',
     NonNull: 'lombok.NonNull',
+    With: 'lombok.With',
+    Value: 'lombok.Value',
+    // JUnit 5
+    Test: 'org.junit.jupiter.api.Test',
+    BeforeEach: 'org.junit.jupiter.api.BeforeEach',
+    AfterEach: 'org.junit.jupiter.api.AfterEach',
+    BeforeAll: 'org.junit.jupiter.api.BeforeAll',
+    AfterAll: 'org.junit.jupiter.api.AfterAll',
+    DisplayName: 'org.junit.jupiter.api.DisplayName',
+    Disabled: 'org.junit.jupiter.api.Disabled',
+    ExtendWith: 'org.junit.jupiter.api.extension.ExtendWith',
+    ParameterizedTest: 'org.junit.jupiter.params.ParameterizedTest',
+    SpringExtension: 'org.springframework.test.context.junit.jupiter.SpringExtension',
+    MockitoExtension: 'org.mockito.junit.jupiter.MockitoExtension',
+    Assertions: 'org.junit.jupiter.api.Assertions',
+    // JUnit 4
+    RunWith: 'org.junit.runner.RunWith',
+    Before: 'org.junit.Before',
+    After: 'org.junit.After',
+    BeforeClass: 'org.junit.BeforeClass',
+    AfterClass: 'org.junit.AfterClass',
+    Assert: 'org.junit.Assert',
+    // Mockito
+    Mock: 'org.mockito.Mock',
+    Spy: 'org.mockito.Spy',
+    InjectMocks: 'org.mockito.InjectMocks',
+    Captor: 'org.mockito.Captor',
+    Mockito: 'org.mockito.Mockito',
+    ArgumentMatchers: 'org.mockito.ArgumentMatchers',
+    // Spring Boot test
+    SpringBootTest: 'org.springframework.boot.test.context.SpringBootTest',
+    WebMvcTest: 'org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest',
+    DataJpaTest: 'org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest',
+    MockBean: 'org.springframework.boot.test.mock.mockito.MockBean',
+    SpyBean: 'org.springframework.boot.test.mock.mockito.SpyBean',
+    MockMvc: 'org.springframework.test.web.servlet.MockMvc',
+    ActiveProfiles: 'org.springframework.test.context.ActiveProfiles',
     // Spring
     RestController: 'org.springframework.web.bind.annotation.RestController',
     Controller: 'org.springframework.stereotype.Controller',
@@ -3430,7 +3468,212 @@
     SpringApplication: 'org.springframework.boot.SpringApplication',
     HttpServletRequest: 'jakarta.servlet.http.HttpServletRequest',
     HttpServletResponse: 'jakarta.servlet.http.HttpServletResponse',
+    ApplicationContext: 'org.springframework.context.ApplicationContext',
+    Environment: 'org.springframework.core.env.Environment',
+    Model: 'org.springframework.ui.Model',
+    ModelAttribute: 'org.springframework.web.bind.annotation.ModelAttribute',
+    RequestHeader: 'org.springframework.web.bind.annotation.RequestHeader',
+    CrossOrigin: 'org.springframework.web.bind.annotation.CrossOrigin',
+    ExceptionHandler: 'org.springframework.web.bind.annotation.ExceptionHandler',
+    ResponseStatus: 'org.springframework.web.bind.annotation.ResponseStatus',
+    Valid: 'jakarta.validation.Valid',
+    Validated: 'org.springframework.validation.annotation.Validated',
+    Transactional: 'org.springframework.transaction.annotation.Transactional',
+    Qualifier: 'org.springframework.beans.factory.annotation.Qualifier',
+    Primary: 'org.springframework.context.annotation.Primary',
+    Lazy: 'org.springframework.context.annotation.Lazy',
+    ConfigurationProperties: 'org.springframework.boot.context.properties.ConfigurationProperties',
+    EnableScheduling: 'org.springframework.scheduling.annotation.EnableScheduling',
+    Scheduled: 'org.springframework.scheduling.annotation.Scheduled',
+    MediaType: 'org.springframework.http.MediaType',
+    HttpHeaders: 'org.springframework.http.HttpHeaders',
+    RestTemplate: 'org.springframework.web.client.RestTemplate',
+    WebClient: 'org.springframework.web.reactive.function.client.WebClient',
+    JdbcTemplate: 'org.springframework.jdbc.core.JdbcTemplate',
+    Entity: 'jakarta.persistence.Entity',
+    Table: 'jakarta.persistence.Table',
+    Id: 'jakarta.persistence.Id',
+    GeneratedValue: 'jakarta.persistence.GeneratedValue',
+    JpaRepository: 'org.springframework.data.jpa.repository.JpaRepository',
+    CrudRepository: 'org.springframework.data.repository.CrudRepository',
   };
+
+  const JAVA_STATIC_IMPORT_MEMBERS = {
+    'org.junit.jupiter.api.Assertions': [
+      'assertEquals', 'assertNotEquals', 'assertNull', 'assertNotNull', 'assertTrue', 'assertFalse',
+      'assertSame', 'assertNotSame', 'assertThrows', 'assertDoesNotThrow', 'assertAll', 'fail',
+    ],
+    'org.junit.Assert': [
+      'assertEquals', 'assertNotEquals', 'assertNull', 'assertNotNull', 'assertTrue', 'assertFalse', 'fail',
+    ],
+    'org.mockito.Mockito': [
+      'mock', 'spy', 'verify', 'when', 'doReturn', 'doThrow', 'times', 'never', 'atLeast', 'reset',
+    ],
+    'org.mockito.ArgumentMatchers': [
+      'any', 'anyString', 'anyInt', 'anyLong', 'anyBoolean', 'eq', 'isA', 'isNull', 'notNull',
+    ],
+    'org.apache.commons.lang3.StringUtils': [
+      'isBlank', 'isEmpty', 'isNotBlank', 'isNotEmpty', 'trim', 'join', 'split', 'equals',
+    ],
+  };
+
+  function parseJavaImports(content) {
+    const explicit = new Map();
+    const wildcards = [];
+    for (const line of String(content || '').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('import ')) continue;
+      const imp = trimmed.slice('import '.length).replace(/;$/, '').trim();
+      if (imp.startsWith('static ')) {
+        const rest = imp.slice('static '.length).trim();
+        if (rest.endsWith('.*')) wildcards.push(rest.slice(0, -2));
+        else {
+          const dot = rest.lastIndexOf('.');
+          if (dot >= 0) explicit.set(rest.slice(dot + 1), rest);
+        }
+        continue;
+      }
+      if (imp.endsWith('.*')) wildcards.push(imp.slice(0, -2));
+      else {
+        const dot = imp.lastIndexOf('.');
+        if (dot >= 0) explicit.set(imp.slice(dot + 1), imp);
+      }
+    }
+    return { explicit, wildcards };
+  }
+
+  function staticImportCompletionItems(content, prefix) {
+    const { explicit, wildcards } = parseJavaImports(content);
+    const prefixLower = String(prefix || '').toLowerCase();
+    const seen = new Set();
+    const items = [];
+    const push = (label, detail) => {
+      if (!label || seen.has(label)) return;
+      if (prefix && !label.toLowerCase().startsWith(prefixLower)) return;
+      seen.add(label);
+      items.push({ label, kind: 'method', detail });
+    };
+    for (const [simple, fqcn] of explicit) {
+      if (simple && simple[0] === simple[0].toLowerCase()) push(simple, `static ${fqcn}`);
+    }
+    for (const pkg of wildcards) {
+      const members = JAVA_STATIC_IMPORT_MEMBERS[pkg];
+      if (!members) continue;
+      for (const name of members) push(name, `static ${pkg}.${name}`);
+    }
+    return items;
+  }
+
+  function lombokSyntheticScopeVariables(content, throughLine) {
+    const lines = String(content || '').split(/\r?\n/);
+    let classLine = -1;
+    const limit = Math.min(throughLine, lines.length);
+    for (let i = limit - 1; i >= 0; i -= 1) {
+      const t = lines[i].trim();
+      if (/\b(class|interface|enum|record)\b/.test(t) && !t.includes('(')) {
+        classLine = i;
+        break;
+      }
+    }
+    if (classLine < 0) return [];
+    const classAnns = [];
+    for (let i = classLine - 1; i >= Math.max(0, classLine - 12); i -= 1) {
+      const t = lines[i].trim();
+      if (!t) continue;
+      if (t.startsWith('@')) {
+        classAnns.push(t.replace(/^@/, '').split('(')[0].split('.').pop());
+        continue;
+      }
+      if (!t.startsWith('//')) break;
+    }
+    const out = [];
+    const seen = new Set();
+    const add = (name, typeHint) => {
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      out.push({ name, typeHint });
+    };
+    const logging = [
+      ['Slf4j', 'log', 'Logger'],
+      ['Log', 'log', 'Logger'],
+      ['Log4j', 'log', 'Logger'],
+      ['Log4j2', 'log', 'Logger'],
+      ['CommonsLog', 'log', 'Log'],
+    ];
+    for (const [ann, field, ty] of logging) {
+      if (classAnns.includes(ann)) add(field, ty);
+    }
+    for (let i = classLine; i < limit; i += 1) {
+      const t = lines[i].trim();
+      if (!t || t.startsWith('//') || t.startsWith('@')) continue;
+      const m = t.match(/^(?:public|private|protected|static|final|\s)*([\w<>,\[\].?]+)\s+(\w+)\s*[;=]/);
+      if (!m) continue;
+      const ty = m[1];
+      const name = m[2];
+      if (/@Mock\b/.test(t) || /@Spy\b/.test(t) || /@InjectMocks\b/.test(t) || /@Captor\b/.test(t)) {
+        add(name, ty);
+      }
+    }
+    return out;
+  }
+
+  function lombokSyntheticMembers(content, qualifier, memberPrefix) {
+    if (qualifier !== 'this' && qualifier !== 'super') return [];
+    const lines = String(content || '').split(/\r?\n/);
+    let classLine = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      const t = lines[i].trim();
+      if (/\b(class|interface|enum|record)\b/.test(t) && !t.includes('(')) {
+        classLine = i;
+        break;
+      }
+    }
+    if (classLine < 0) return [];
+    const classAnns = [];
+    for (let i = classLine - 1; i >= Math.max(0, classLine - 12); i -= 1) {
+      const t = lines[i].trim();
+      if (!t) continue;
+      if (t.startsWith('@')) {
+        classAnns.push(t.replace(/^@/, '').split('(')[0].split('.').pop());
+        continue;
+      }
+      if (!t.startsWith('//')) break;
+    }
+    const hasData = classAnns.includes('Data');
+    const hasGetter = hasData || classAnns.includes('Getter');
+    const hasSetter = hasData || classAnns.includes('Setter');
+    const prefixLower = String(memberPrefix || '').toLowerCase();
+    const items = [];
+    const seen = new Set();
+    const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
+    for (let i = classLine; i < lines.length; i += 1) {
+      const t = lines[i].trim();
+      if (!t || t.startsWith('//') || t.startsWith('@') || t.includes('(')) continue;
+      const m = t.match(/^(?:public|private|protected|static|final|\s)*([\w<>,\[\].?]+)\s+(\w+)\s*;/);
+      if (!m) continue;
+      const ty = m[1];
+      const field = m[2];
+      if (field.startsWith('$')) continue;
+      if (hasGetter) {
+        const getter = (ty === 'boolean' || ty === 'Boolean') ? `is${cap(field)}` : `get${cap(field)}`;
+        if ((!memberPrefix || getter.toLowerCase().startsWith(prefixLower)) && seen.add(getter)) {
+          items.push({ label: getter, kind: 'method', detail: `${ty} (lombok)` });
+        }
+      }
+      if (hasSetter) {
+        const setter = `set${cap(field)}`;
+        if ((!memberPrefix || setter.toLowerCase().startsWith(prefixLower)) && seen.add(setter)) {
+          items.push({ label: setter, kind: 'method', detail: 'void (lombok)' });
+        }
+      }
+    }
+    for (const { name, typeHint } of lombokSyntheticScopeVariables(content, lines.length)) {
+      if ((!memberPrefix || name.toLowerCase().startsWith(prefixLower)) && seen.add(name)) {
+        items.push({ label: name, kind: 'field', detail: `${typeHint} (lombok)` });
+      }
+    }
+    return items;
+  }
 
   const JAVA_LANG_NO_IMPORT = new Set([
     'String', 'Object', 'Integer', 'Long', 'Boolean', 'Double', 'Float', 'Byte', 'Short',
@@ -3470,7 +3713,11 @@
       else if (trimmed.startsWith('import ')) lastImport = i;
     }
     const insertLine = lastImport ? lastImport + 1 : Math.max(1, insertAfter + 1);
-    const text = insertLine > 1 ? `\n${importLine}` : `${importLine}\n`;
+    const nextTrimmed = insertLine <= lineCount ? model.getLineContent(insertLine).trim() : '';
+    const blankBeforeBody = nextTrimmed.startsWith('@')
+      || /^(public |private |protected |class |interface |enum |record )/.test(nextTrimmed);
+    const suffix = blankBeforeBody ? '\n\n' : '\n';
+    const text = insertLine > 1 ? `\n${importLine}${suffix}` : `${importLine}${suffix}`;
     return {
       start_line: insertLine,
       start_column: 1,
@@ -3693,6 +3940,9 @@
     }
 
     if (qualifier === 'this' || qualifier === 'self' || qualifier === 'super') {
+      for (const m of lombokSyntheticMembers(content, qualifier, memberPrefix)) {
+        if (seen.add(m.label)) items.push(m);
+      }
       for (const lineText of lines) {
         const trimmed = lineText.trim();
         if (lang === 'ruby') {
@@ -3848,6 +4098,22 @@
     return false;
   }
 
+  function shouldOfferJavaScopeCompletions(content, lineNumber, linePrefix) {
+    if (/^\s*import\b/.test(String(linePrefix || ''))) return false;
+    const trimmed = String(linePrefix || '').trimEnd();
+    if (/\bnew\s+[A-Z]\w*$/.test(trimmed)) return false;
+    if (/\b(?:extends|implements|throws)\s+\w/i.test(trimmed)) return false;
+    const lines = String(content || '').split(/\r?\n/);
+    let depth = 0;
+    for (let i = 0; i < Math.min(lineNumber, lines.length); i += 1) {
+      for (const ch of lines[i]) {
+        if (ch === '{') depth += 1;
+        else if (ch === '}') depth = Math.max(0, depth - 1);
+      }
+    }
+    return depth > 0;
+  }
+
   function collectJavaScopeVariables(content, throughLine) {
     const out = [];
     const seen = new Set();
@@ -3890,6 +4156,9 @@
         if (!s || /^(for|if|while|switch|return)\b/.test(s)) return;
         parseLocal(s);
       });
+    }
+    for (const { name, typeHint } of lombokSyntheticScopeVariables(content, throughLine)) {
+      add(name, typeHint);
     }
     return out;
   }
@@ -3968,7 +4237,9 @@
     'FileInputStream', 'FileOutputStream', 'SpringApplication', 'Autowired', 'Component',
     'Service', 'Repository', 'Controller', 'RestController', 'RequestMapping', 'Bean',
     'Configuration', 'Value', 'Logger', 'LoggerFactory', 'HttpServletRequest', 'ResponseEntity',
-    'HttpStatus', 'CompletableFuture', 'Future', 'Function', 'Consumer', 'Supplier',
+    'HttpStatus', 'Test', 'Mock', 'Mockito', 'SpringBootTest', 'MockBean', 'MockMvc',
+    'Data', 'Slf4j', 'Builder', 'Entity', 'Table', 'Transactional', 'Valid', 'JdbcTemplate',
+    'WebClient', 'CompletableFuture', 'Future', 'Function', 'Consumer', 'Supplier',
     'Predicate', 'Runnable', 'Comparable', 'Iterator', 'Iterable', 'Enum', 'Record',
   ];
 
@@ -4409,6 +4680,17 @@
         push(m.label, m.kind, m.detail || `${dot.qualifier}.${m.label}`, insert, '0', filterText);
       }
       return { suggestions, linePrefix, prefix, range, seen };
+    }
+
+    if (isJavaLikePath(path) && shouldOfferJavaScopeCompletions(text, position.lineNumber, linePrefix)) {
+      for (const { name, typeHint } of collectJavaScopeVariables(text, position.lineNumber)) {
+        if (!prefix || name.toLowerCase().startsWith(prefix.toLowerCase())) {
+          push(name, 'variable', typeHint || 'variable', name, '0');
+        }
+      }
+      for (const m of staticImportCompletionItems(text, prefix)) {
+        push(m.label, m.kind, m.detail, `${m.label}()`, '0');
+      }
     }
 
     if (langForPath(path) === 'java' && isInsideControlParen(linePrefix)) {
@@ -5146,7 +5428,7 @@
     const useServerOrder = member || supportsWorkspaceIndexInline(path);
     const ordered = useServerOrder ? items : rankIndexItemsForInline(items);
 
-    // Empty line: top jdtls/index completion is the ghost (VS Code / LSP behavior).
+    // Empty line: top jdtls/index completion is the ghost (LSP behavior).
     if (!member && !tokenPrefix && isWhitespaceOnlyLine(linePrefix)) {
       for (const item of ordered) {
         if (!isCodeLikeCompletion(item.label, item.kind)) continue;
@@ -6513,6 +6795,14 @@
           enrichJavaSuggestion(item, content, path);
         }
         showMemberSuggestFallback(ed, local.suggestions);
+      } else {
+        const memberPrefix = memberContext.memberPrefix || '';
+        void fetchCompletionsWithTimeout(
+          helpers, model, position, memberPrefix, COMPLETION_FETCH_TIMEOUT_MS,
+        ).then((items) => {
+          if (!items?.length || activeEditor() !== ed) return;
+          presentCompletionSuggestions(ed, items, { content, path });
+        }).catch(() => {});
       }
       fireCompletionsSuggest(ed, { force: true });
       return local.suggestions.length;
@@ -7194,7 +7484,7 @@
       if (!showMenu && actionable.length === 1) {
         if (applyQuickFixEdits(ed, actionable[0], markers)) {
           helpers.toast?.(`Applied: ${quickFixActionTitle(actionable[0])}`, 'success');
-          helpers.scheduleDiagnostics?.();
+          (helpers.refreshDiagnosticsAfterFix || helpers.scheduleDiagnostics)?.();
         } else {
           helpers.toast?.('Could not apply fix — try again', 'error');
         }
@@ -7206,7 +7496,7 @@
       helpers.showQuickFixMenu?.(menuItems, (fix) => {
         if (applyQuickFixEdits(ed, fix, markers)) {
           helpers.toast?.(`Applied: ${quickFixActionTitle(fix)}`, 'success');
-          helpers.scheduleDiagnostics?.();
+          (helpers.refreshDiagnosticsAfterFix || helpers.scheduleDiagnostics)?.();
         } else {
           helpers.toast?.('Could not apply fix', 'error');
         }
@@ -7920,6 +8210,8 @@
                       ? [...suggestions, ...fromIndex.filter((i) => !suggestions.some((s) => s.label === i.label))]
                       : fromIndex;
                     presentCompletionSuggestions(ed, merged, { content, path });
+                  } else if (suggestions.length === 0) {
+                    presentCompletionSuggestions(ed, items, { content, path });
                   }
                 }
               })
@@ -8113,13 +8405,10 @@
         setInlineCache(ed, cacheKey, local, '', meta);
         return;
       }
-      if (helpers.repoApi && !skipLocalStatementTemplates()) {
-        prefetchIndexInlineGhost(ed, linePrefix, '');
-      }
       if (aiInlineFetchEnabled()) scheduleAiInlineFetch();
     }
 
-    /** Keystroke path: LSP/index top completion when cached, else cheap local ghost; prefetch jdtls. */
+    /** Keystroke path: cached LSP top completion when available, else cheap local ghost. */
     function refreshInlineLocalFast(ed) {
       const model = ed.getModel();
       const position = ed.getPosition();
@@ -8163,10 +8452,8 @@
         ) {
           setInlineCache(ed, cacheKey, lspCached, '', meta, { refresh: false });
           queueInlineSuggestion(ed);
-          prefetchIndexInlineGhost(ed, linePrefix, indexPrefix);
           return;
         }
-        prefetchIndexInlineGhost(ed, linePrefix, indexPrefix);
       }
 
       const local = inlineGhostSuffix(
@@ -8290,13 +8577,6 @@
       }
 
       if (dotQualifierFromLinePrefix(linePrefix)) {
-        if (
-          !local
-          && helpers.repoApi
-        ) {
-          const memberCtx = dotQualifierFromLinePrefix(linePrefix);
-          prefetchIndexInlineGhost(ed, linePrefix, memberCtx?.memberPrefix || '');
-        }
         scheduleMemberCompletions(ed);
         return;
       }
@@ -8305,19 +8585,6 @@
         scheduleSpringConfigInline(ed);
         scheduleAutocompleteSuggest(ed);
         return;
-      }
-
-      if (helpers.repoApi) {
-        if (isWhitespaceOnlyLine(linePrefix)) {
-          if (!local && !preferAi) {
-            prefetchIndexInlineGhost(ed, linePrefix, '');
-          }
-        } else {
-          const token = extractInlinePartialToken(linePrefix);
-          if (token && shouldFetchIndexCompletions(linePrefix, token, path, { afterPause: true })) {
-            prefetchIndexInlineGhost(ed, linePrefix, token);
-          }
-        }
       }
 
       if (!preferAi && !isDeclarationTyping(path, linePrefix)) {

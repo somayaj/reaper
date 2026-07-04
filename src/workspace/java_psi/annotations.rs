@@ -92,7 +92,7 @@ pub fn stale_imported_dependency_diag(
             }
         }
         if missing_symbol
-            && message.contains(simple)
+            && javac_missing_symbol_matches(simple, message)
             && symbol_referenced_in_source(content, simple)
             && !package_on_classpath(pkg)
         {
@@ -100,6 +100,32 @@ pub fn stale_imported_dependency_diag(
         }
     }
     false
+}
+
+/// True when `simple` is the javac-reported missing symbol (exact match — not substring).
+fn javac_missing_symbol_matches(simple: &str, message: &str) -> bool {
+    parse_javac_missing_symbol(message).is_some_and(|sym| sym == simple)
+}
+
+fn parse_javac_missing_symbol(message: &str) -> Option<String> {
+    for line in message.lines() {
+        let sym_idx = match line.find("symbol:") {
+            Some(i) => i,
+            None => continue,
+        };
+        let after = line[sym_idx + "symbol:".len()..].trim();
+        let name = after
+            .strip_prefix("class")
+            .or_else(|| after.strip_prefix("variable"))
+            .or_else(|| after.strip_prefix("method"))
+            .unwrap_or(after)
+            .trim();
+        let name = name.split('(').next()?.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 fn symbol_referenced_in_source(content: &str, simple: &str) -> bool {
@@ -193,5 +219,19 @@ public record CreateUserRequest(@NotBlank String name) {}
             content,
             |_| true,
         ));
+    }
+
+    #[test]
+    fn stale_imported_file_does_not_swallow_files_class_error() {
+        let content = r#"
+import java.io.File;
+class App {
+  void m() {
+    var files = new Files();
+  }
+}
+"#;
+        let files_msg = "cannot find symbol\n  symbol:   class Files\n  location: class App";
+        assert!(!stale_imported_dependency_diag(files_msg, content, |_| false));
     }
 }

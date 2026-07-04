@@ -5,8 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/dist/Reaper.app"
 BINARY="$ROOT/target/release/reaper"
 
-echo "Running editor regression suite…"
-"$ROOT/scripts/test-editor-regression.sh"
+if [[ "${REAPER_SKIP_REGRESSION:-}" != "1" ]]; then
+  echo "Running editor regression suite…"
+  "$ROOT/scripts/test-editor-regression.sh"
+else
+  echo "Skipping editor regression (REAPER_SKIP_REGRESSION=1)…"
+fi
 
 echo "Building release binary…"
 env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"

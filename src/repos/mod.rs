@@ -139,8 +139,8 @@ pub fn create_repo(
     if req.init_with_readme.unwrap_or(true) {
         let readme = req.readme.unwrap_or_else(|| {
             format!(
-                "# {}\n\nManaged by [Reaper](http://{}:{}).\n",
-                req.name, config.host, config.port
+                "# {}\n\nManaged by [Reaper]({}).\n",
+                req.name, config.base_url()
             )
         });
         git::seed_bare_repo_with_readme(&path, &readme)?;

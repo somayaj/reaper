@@ -1,5 +1,14 @@
 //! macOS native window (WKWebView via wry).
 
+use std::sync::Arc;
+
+use crate::web::SharedGuiProtocolBridge;
+
+pub struct GuiLaunch {
+    pub webview_url: String,
+    pub init_script: String,
+}
+
 #[cfg(target_os = "macos")]
 pub fn show_error(message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
@@ -96,14 +105,15 @@ fn parse_ipc_open_url(body: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn create_window(
-    url: &str,
+    launch: &GuiLaunch,
+    protocol_bridge: SharedGuiProtocolBridge,
     event_loop: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
     use tao::window::WindowBuilder;
     use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
-    let title = window_title_from_url(url);
+    let title = window_title_from_url(&launch.webview_url);
     let window = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
@@ -115,11 +125,23 @@ fn create_window(
     let show_proxy = proxy.clone();
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
+    let init_script = format!(
+        "document.documentElement.style.backgroundColor='#0a0a0a';\n{}",
+        launch.init_script
+    );
     let webview = WebViewBuilder::new()
-        .with_url(url)
+        .with_url(&launch.webview_url)
         .with_background_color((10, 10, 10, 255))
-        .with_initialization_script(
-            "document.documentElement.style.backgroundColor='#0a0a0a';",
+        .with_initialization_script(&init_script)
+        .with_asynchronous_custom_protocol(
+            crate::web::SCHEME.into(),
+            move |_webview_id, request, responder| {
+                let bridge = Arc::clone(&protocol_bridge);
+                std::thread::spawn(move || {
+                    let response = bridge.dispatch_sync(request);
+                    responder.respond(response);
+                });
+            },
         )
         .with_on_page_load_handler(move |event, _loaded_url| {
             if matches!(event, PageLoadEvent::Finished) {
@@ -141,7 +163,7 @@ fn create_window(
 }
 
 #[cfg(target_os = "macos")]
-pub fn run(url: &str) -> anyhow::Result<()> {
+pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyhow::Result<()> {
     use std::collections::HashMap;
 
     use tao::{
@@ -156,7 +178,10 @@ pub fn run(url: &str) -> anyhow::Result<()> {
     let proxy = event_loop.create_proxy();
     let mut webviews: HashMap<WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
 
-    let (window, webview) = create_window(url, &event_loop, proxy.clone())?;
+    let protocol_bridge_loop = Arc::clone(&protocol_bridge);
+    let child_init_script = launch.init_script.clone();
+
+    let (window, webview) = create_window(launch, protocol_bridge, &event_loop, proxy.clone())?;
     webviews.insert(window.id(), (window, webview));
 
     event_loop.run(move |event, event_loop, control_flow| {
@@ -179,7 +204,16 @@ pub fn run(url: &str) -> anyhow::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::OpenWindow(next_url)) => {
-                match create_window(&next_url, event_loop, proxy.clone()) {
+                let child_launch = GuiLaunch {
+                    webview_url: next_url,
+                    init_script: child_init_script.clone(),
+                };
+                match create_window(
+                    &child_launch,
+                    Arc::clone(&protocol_bridge_loop),
+                    event_loop,
+                    proxy.clone(),
+                ) {
                     Ok((window, webview)) => {
                         webviews.insert(window.id(), (window, webview));
                     }
@@ -195,6 +229,6 @@ pub fn run(url: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run(_url: &str) -> anyhow::Result<()> {
+pub fn run(_launch: &GuiLaunch, _protocol_bridge: SharedGuiProtocolBridge) -> anyhow::Result<()> {
     anyhow::bail!("GUI mode is only supported on macOS")
 }

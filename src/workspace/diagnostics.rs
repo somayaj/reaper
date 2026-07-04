@@ -53,6 +53,7 @@ pub fn check_file(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: java_diagnostics::JavaDiagScope,
 ) -> Result<Vec<Diagnostic>> {
     if rel_path.starts_with(".reaper/") {
         return Ok(Vec::new());
@@ -64,7 +65,7 @@ pub fn check_file(
 
     if lower.ends_with(".java") {
         let (diagnostics, cancelled) =
-            java_diagnostics::check_java(ws, rel_path, content, overlays)?;
+            java_diagnostics::check_java(ws, rel_path, content, overlays, scope)?;
         if cancelled {
             return Ok(Vec::new());
         }
@@ -172,6 +173,7 @@ pub fn diagnose_file(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: java_diagnostics::JavaDiagScope,
 ) -> Result<FileDiagnosticsResult> {
     if rel_path.starts_with(".reaper/") {
         return Ok(FileDiagnosticsResult::ready(Vec::new()));
@@ -180,15 +182,16 @@ pub fn diagnose_file(
     if lower.ends_with(".java") {
         let _ = safe_join(ws, rel_path)?;
         let (diagnostics, cancelled) =
-            java_diagnostics::check_java(ws, rel_path, content, overlays)?;
-        return Ok(if cancelled {
-            FileDiagnosticsResult::cancelled()
-        } else {
-            FileDiagnosticsResult::ready(diagnostics)
-        });
+            java_diagnostics::check_java(ws, rel_path, content, overlays, scope)?;
+        if cancelled {
+            // Do not fall back to jdtls publishDiagnostics — cache is stale after supersede
+            // and paints incorrect squiggles while the next javac run is in flight.
+            return Ok(FileDiagnosticsResult::cancelled());
+        }
+        return Ok(FileDiagnosticsResult::ready(diagnostics));
     }
     Ok(FileDiagnosticsResult::ready(check_file(
-        ws, rel_path, content, overlays,
+        ws, rel_path, content, overlays, scope,
     )?))
 }
 
@@ -1861,11 +1864,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let content = "public class RightName {\n}\n";
-        let diags = check_file(&ws, "WrongFile.java", content, &[]).unwrap();
+        let diags = check_file(
+            &ws,
+            "WrongFile.java",
+            content,
+            &[],
+            crate::workspace::JavaDiagScope::Full,
+        )
+        .unwrap();
         assert!(
             diags.iter().any(|d| d.message.contains("should be declared in a file named")),
-            "unsaved Java files should still get file/class diagnostics: {:?}",
+            "unsaved Java files should still get file/class diagnostics on save: {:?}",
             diags
+        );
+        let typing = check_file(
+            &ws,
+            "WrongFile.java",
+            content,
+            &[],
+            crate::workspace::JavaDiagScope::Typing,
+        )
+        .unwrap();
+        assert!(
+            typing.iter().any(|d| d.message.contains("should be declared in a file named")),
+            "typing scope runs single-file javac for Java: {:?}",
+            typing
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -1875,11 +1898,25 @@ mod tests {
         let ws = std::env::temp_dir().join("reaper-diag-smoke");
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
-        let json_diags = check_file(&ws, "bad.json", "{ invalid", &[]).unwrap();
+        let json_diags = check_file(
+            &ws,
+            "bad.json",
+            "{ invalid",
+            &[],
+            crate::workspace::JavaDiagScope::Typing,
+        )
+        .unwrap();
         assert!(!json_diags.is_empty(), "JSON syntax errors should surface");
         assert_eq!(json_diags[0].severity, "error");
 
-        let yaml_diags = check_file(&ws, "bad.yaml", "foo: [bar\n", &[]).unwrap();
+        let yaml_diags = check_file(
+            &ws,
+            "bad.yaml",
+            "foo: [bar\n",
+            &[],
+            crate::workspace::JavaDiagScope::Typing,
+        )
+        .unwrap();
         assert!(!yaml_diags.is_empty(), "YAML syntax errors should surface");
         assert_eq!(yaml_diags[0].severity, "error");
 
@@ -1893,10 +1930,17 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let content = "public class RightName {\n}\n";
         std::fs::write(ws.join("WrongFile.java"), content).unwrap();
-        let diags = check_file(&ws, "WrongFile.java", content, &[]).unwrap();
+        let diags = check_file(
+            &ws,
+            "WrongFile.java",
+            content,
+            &[],
+            crate::workspace::JavaDiagScope::Full,
+        )
+        .unwrap();
         assert!(
             diags.iter().any(|d| d.message.contains("should be declared in a file named")),
-            "Java file/class mismatch should show in editor diagnostics: {:?}",
+            "Java file/class mismatch should show in editor diagnostics on save: {:?}",
             diags
         );
         let _ = std::fs::remove_dir_all(&ws);

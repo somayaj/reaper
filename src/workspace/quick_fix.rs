@@ -110,6 +110,105 @@ pub fn merge_quick_fixes(into: &mut Vec<QuickFix>, from: Vec<QuickFix>) {
     }
 }
 
+/// Drop AI import-only fixes that guess the wrong type when local/well-known imports exist.
+pub fn filter_ai_import_fixes(
+    ws: &Path,
+    path: &str,
+    content: &str,
+    local: &[QuickFix],
+    ai: Vec<QuickFix>,
+    diagnostics: &[QuickFixDiagnostic],
+) -> Vec<QuickFix> {
+    let preferred = preferred_import_fqcns(ws, path, content, local, diagnostics);
+    if preferred.is_empty() {
+        return ai;
+    }
+    ai.into_iter()
+        .filter(|fix| !should_drop_ai_import_fix(fix, &preferred))
+        .collect()
+}
+
+fn preferred_import_fqcns(
+    ws: &Path,
+    path: &str,
+    content: &str,
+    local: &[QuickFix],
+    diagnostics: &[QuickFixDiagnostic],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for fix in local {
+        if fix.provider.as_deref() != Some("local") {
+            continue;
+        }
+        let Some(symbol) = import_fix_symbol(&fix.title) else {
+            continue;
+        };
+        let Some(fqcn) = fix.edits.iter().find_map(|e| parse_import_fqcn(&e.text)) else {
+            continue;
+        };
+        out.insert(symbol.to_string(), fqcn);
+    }
+    for diag in diagnostics {
+        let Some(symbol) = extract_class_symbol(&diag.message) else {
+            continue;
+        };
+        if out.contains_key(&symbol) {
+            continue;
+        }
+        if let Ok(Some(fqcn)) = classpath::import_fqcn_for_symbol(ws, path, content, &symbol) {
+            out.entry(symbol).or_insert(fqcn);
+        }
+    }
+    out
+}
+
+fn should_drop_ai_import_fix(
+    fix: &QuickFix,
+    preferred: &std::collections::HashMap<String, String>,
+) -> bool {
+    if !is_import_only_fix(fix) {
+        return false;
+    }
+    let ai_imports: Vec<String> = fix
+        .edits
+        .iter()
+        .filter_map(|e| parse_import_fqcn(&e.text))
+        .collect();
+    if ai_imports.is_empty() {
+        return false;
+    }
+    for pref in preferred.values() {
+        if ai_imports.iter().any(|imp| imp == pref) {
+            return false;
+        }
+    }
+    true
+}
+
+fn import_fix_symbol(title: &str) -> Option<&str> {
+    title.strip_prefix("Add import for ")
+}
+
+fn parse_import_fqcn(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let t = line.trim();
+        t.strip_prefix("import ")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .map(|fqcn| fqcn.trim().to_string())
+            .filter(|fqcn| !fqcn.is_empty())
+    })
+}
+
+fn is_import_only_fix(fix: &QuickFix) -> bool {
+    !fix.edits.is_empty()
+        && fix.edits.iter().all(|e| {
+            e.text.lines().all(|line| {
+                let t = line.trim();
+                t.is_empty() || t.starts_with("import ")
+            })
+        })
+}
+
 fn file_exists_receiver_fix_for_diagnostic(
     content: &str,
     diag: &QuickFixDiagnostic,
@@ -268,6 +367,27 @@ fn extract_class_symbol(message: &str) -> Option<String> {
     }
 }
 
+fn import_insert_suffix(content: &str, insert_line: u32) -> String {
+    let next = content
+        .lines()
+        .nth(insert_line.saturating_sub(1) as usize)
+        .map(str::trim)
+        .unwrap_or("");
+    let blank_before_body = next.starts_with('@')
+        || next.starts_with("public ")
+        || next.starts_with("private ")
+        || next.starts_with("protected ")
+        || next.starts_with("class ")
+        || next.starts_with("interface ")
+        || next.starts_with("enum ")
+        || next.starts_with("record ");
+    if blank_before_body {
+        "\n\n".to_string()
+    } else {
+        "\n".to_string()
+    }
+}
+
 fn import_insert_edit(content: &str, fqcn: &str) -> QuickFixEdit {
     let import_line = format!("import {fqcn};");
     let lines: Vec<&str> = content.lines().collect();
@@ -287,11 +407,12 @@ fn import_insert_edit(content: &str, fqcn: &str) -> QuickFixEdit {
     }
 
     let insert_line = last_import.map(|i| i + 2).unwrap_or(insert_after + 1).max(1) as u32;
+    let suffix = import_insert_suffix(content, insert_line);
     let needs_leading_newline = insert_line > 1;
     let text = if needs_leading_newline {
-        format!("\n{import_line}")
+        format!("\n{import_line}{suffix}")
     } else {
-        format!("{import_line}\n")
+        format!("{import_line}{suffix}")
     };
 
     QuickFixEdit {
@@ -314,6 +435,14 @@ mod tests {
             extract_class_symbol(msg).as_deref(),
             Some("RestController")
         );
+    }
+
+    #[test]
+    fn import_insert_before_annotation_leaves_blank_line() {
+        let content = "package com.example;\n\nimport org.springframework.boot.SpringApplication;\n@SpringBootApplication\npublic class App {}\n";
+        let edit = import_insert_edit(content, "org.springframework.stereotype.Service");
+        assert!(edit.text.contains("import org.springframework.stereotype.Service;"));
+        assert!(edit.text.ends_with("\n\n"), "expected blank line before @ annotation, got {:?}", edit.text);
     }
 
     #[test]
@@ -347,6 +476,96 @@ public class App {
     }
 
     #[test]
+    fn filters_ai_wrong_import_when_well_known_local_exists() {
+        let local = vec![QuickFix {
+            title: "Add import for Files".into(),
+            edits: vec![QuickFixEdit {
+                start_line: 2,
+                start_column: 1,
+                end_line: 2,
+                end_column: 1,
+                text: "\nimport java.nio.file.Files;".into(),
+            }],
+            provider: Some("local".into()),
+        }];
+        let ai_wrong = QuickFix {
+            title: "Import File".into(),
+            edits: vec![QuickFixEdit {
+                start_line: 2,
+                start_column: 1,
+                end_line: 2,
+                end_column: 1,
+                text: "\nimport java.io.File;".into(),
+            }],
+            provider: Some("gemini".into()),
+        };
+        let ai_right = QuickFix {
+            title: "Import Files".into(),
+            edits: vec![QuickFixEdit {
+                start_line: 2,
+                start_column: 1,
+                end_line: 2,
+                end_column: 1,
+                text: "\nimport java.nio.file.Files;".into(),
+            }],
+            provider: Some("gemini".into()),
+        };
+        let diags = vec![QuickFixDiagnostic {
+            line: 5,
+            column: 22,
+            message: "cannot find symbol\n  symbol:   class Files\n  location: class App".into(),
+            severity: "error".into(),
+        }];
+        let ws = std::env::temp_dir().join("reaper-qf-filter");
+        let filtered = filter_ai_import_fixes(&ws, "App.java", "class App {}", &local, vec![ai_wrong, ai_right], &diags);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].edits[0].text.contains("java.nio.file.Files"));
+    }
+
+    #[test]
+    fn keeps_ai_fix_when_it_also_edits_code() {
+        let local = vec![QuickFix {
+            title: "Add import for Files".into(),
+            edits: vec![QuickFixEdit {
+                start_line: 2,
+                start_column: 1,
+                end_line: 2,
+                end_column: 1,
+                text: "\nimport java.nio.file.Files;".into(),
+            }],
+            provider: Some("local".into()),
+        }];
+        let ai_mixed = QuickFix {
+            title: "Fix Files usage".into(),
+            edits: vec![
+                QuickFixEdit {
+                    start_line: 2,
+                    start_column: 1,
+                    end_line: 2,
+                    end_column: 1,
+                    text: "\nimport java.io.File;".into(),
+                },
+                QuickFixEdit {
+                    start_line: 5,
+                    start_column: 1,
+                    end_line: 5,
+                    end_column: 30,
+                    text: "Files.exists(path)".into(),
+                },
+            ],
+            provider: Some("gemini".into()),
+        };
+        let diags = vec![QuickFixDiagnostic {
+            line: 5,
+            column: 22,
+            message: "cannot find symbol\n  symbol:   class Files\n  location: class App".into(),
+            severity: "error".into(),
+        }];
+        let ws = std::env::temp_dir().join("reaper-qf-filter-mixed");
+        let filtered = filter_ai_import_fixes(&ws, "App.java", "class App {}", &local, vec![ai_mixed], &diags);
+        assert_eq!(filtered.len(), 1);
+    }
+
     fn file_exists_receiver_fix_replaces_member_without_parens() {
         let content = r#"import java.io.File;
 public class App {

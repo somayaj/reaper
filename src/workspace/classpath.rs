@@ -213,6 +213,12 @@ impl IndexLookup {
         })
     }
 
+    fn member_by_qualified(&self, type_fqcn: &str, member: &str) -> Option<&IndexedSymbol> {
+        self.by_qualified
+            .get(&format!("{type_fqcn}.{member}"))
+            .map(|&i| &self.symbols[i])
+    }
+
     fn types_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a IndexedSymbol> {
         self.by_name
             .get(name)
@@ -365,6 +371,17 @@ static JDK_LOCATION_CACHE: LazyLock<Mutex<HashMap<String, SymbolLocation>>> =
 
 static LIBRARY_SOURCE_DIRS_CACHE: LazyLock<Mutex<HashMap<String, Vec<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static NAVIGATION_SOURCES_WARM: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static INDEX_FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn index_file_lock(path: &Path) -> Arc<Mutex<()>> {
+    let mut map = INDEX_FILE_LOCKS.lock().expect("index file locks");
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 const DEFINITION_CACHE_MAX: usize = 4096;
 
@@ -389,6 +406,10 @@ fn invalidate_lookup_cache(gradle_root: &Path) {
         if let Ok(mut guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
             guard.remove(&key_str);
         }
+        if let Ok(mut guard) = NAVIGATION_SOURCES_WARM.lock() {
+            guard.remove(&key_str);
+        }
+        let _ = std::fs::remove_file(reaper_dir(&key).join("navigation-sources.stamp"));
     }
 }
 
@@ -1753,6 +1774,7 @@ pub fn import_fqcn_for_symbol(
 fn well_known_import(symbol: &str) -> Option<&'static str> {
     WELL_KNOWN_JAVA_IMPORTS
         .iter()
+        .chain(WELL_KNOWN_TEST_IMPORTS.iter())
         .chain(WELL_KNOWN_JDK_IMPORTS.iter())
         .find_map(|(name, fqcn)| (*name == symbol).then_some(*fqcn))
 }
@@ -1791,22 +1813,208 @@ const WELL_KNOWN_LOMBOK_IMPORTS: &[(&str, &str)] = &[
     ("Jacksonized", "lombok.extern.jackson.Jacksonized"),
 ];
 
+fn lombok_navigation_intent(content: &str, symbol: &str, gradle_root: &Path, imports: &ImportMap) -> bool {
+    well_known_lombok_import(symbol).is_some()
+        && (imports
+            .explicit
+            .get(symbol)
+            .is_some_and(|fqcn| fqcn.starts_with("lombok."))
+            || lombok_annotation_used_in_source(content, symbol)
+            || project_uses_lombok(gradle_root)
+            || super::java_ecosystem::file_uses_lombok(content))
+}
+
 fn project_uses_lombok(gradle_root: &Path) -> bool {
     classpath_includes_lombok(&cached_classpath_jars(gradle_root))
 }
 
+fn lombok_annotation_used_in_source(content: &str, symbol: &str) -> bool {
+    content.contains(&format!("@{symbol}"))
+        || super::java_psi::annotation_simple_names(content)
+            .iter()
+            .any(|n| n == symbol)
+}
+
 /// Resolve Lombok annotation simple names when the file or project uses Lombok.
 fn infer_lombok_fqcn(content: &str, symbol: &str, gradle_root: &Path) -> Option<String> {
-    if !super::java_ecosystem::file_uses_lombok(content) && !project_uses_lombok(gradle_root) {
+    let fqcn = well_known_lombok_import(symbol)?;
+    if !lombok_annotation_used_in_source(content, symbol) {
         return None;
     }
-    if !content.contains(&format!("@{symbol}")) {
-        let names = super::java_psi::annotation_simple_names(content);
-        if !names.iter().any(|n| n == symbol) {
-            return None;
+    if super::java_ecosystem::file_uses_lombok(content)
+        || project_uses_lombok(gradle_root)
+        || lombok_annotation_used_in_source(content, symbol)
+    {
+        return Some(fqcn.to_string());
+    }
+    None
+}
+
+/// Import-aware FQCN candidates for go-to-definition (explicit import first, then context, wildcards, index).
+fn ordered_type_fqcn_candidates(
+    lookup: &IndexLookup,
+    symbol: &str,
+    imports: &ImportMap,
+    gradle_root: &Path,
+    content: &str,
+    line: u32,
+    column: u32,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut push = |fqcn: String| {
+        if seen.insert(fqcn.clone()) {
+            out.push(fqcn);
+        }
+    };
+
+    let at_annotation = is_annotation_context(content, line, column);
+    let used_as_annotation = at_annotation || lombok_annotation_used_in_source(content, symbol);
+
+    if let Some(fqcn) = imports.explicit.get(symbol) {
+        push(fqcn.clone());
+    }
+
+    if used_as_annotation {
+        if let Some(fqcn) = infer_lombok_fqcn(content, symbol, gradle_root) {
+            push(fqcn);
+        }
+        if let Some(fqcn) = well_known_import(symbol) {
+            push(fqcn.to_string());
         }
     }
-    well_known_lombok_import(symbol).map(str::to_string)
+
+    let skip_non_lombok_wildcards = used_as_annotation
+        && well_known_lombok_import(symbol).is_some()
+        && (project_uses_lombok(gradle_root) || super::java_ecosystem::file_uses_lombok(content));
+    for fqcn in import_fqcns(symbol, imports) {
+        if skip_non_lombok_wildcards && !fqcn.starts_with("lombok.") {
+            continue;
+        }
+        push(fqcn);
+    }
+
+    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    let lang = format!("java.lang.{symbol}");
+    if lookup.type_by_qualified(&lang).is_some()
+        || jdk_source_exists(&jdk, &lang)
+        || is_java_lang_simple_type(symbol)
+    {
+        push(lang);
+    }
+    let util = format!("java.util.{symbol}");
+    if lookup.type_by_qualified(&util).is_some()
+        || jdk_source_exists(&jdk, &util)
+        || is_java_util_simple_type(symbol)
+    {
+        push(util);
+    }
+
+    let lombok_annotation_intent = used_as_annotation
+        && well_known_lombok_import(symbol).is_some()
+        && (project_uses_lombok(gradle_root) || super::java_ecosystem::file_uses_lombok(content));
+    let mut indexed: Vec<String> = lookup
+        .types_named(symbol)
+        .map(|sym| sym.qualified.clone())
+        .collect();
+    indexed.sort_by(|a, b| {
+        import_match_priority(a, imports)
+            .cmp(&import_match_priority(b, imports))
+            .then_with(|| spring_priority(a).cmp(&spring_priority(b)))
+    });
+    for fqcn in indexed {
+        if lombok_annotation_intent
+            && imports.explicit.get(symbol).is_none()
+            && (fqcn.starts_with("javax.") || fqcn.starts_with("jakarta."))
+        {
+            continue;
+        }
+        push(fqcn);
+    }
+
+    if let Some(fqcn) = resolve_fqcn_from_jdk_files(gradle_root, symbol, imports) {
+        let skip_jdk_homonym = lombok_annotation_intent
+            && imports.explicit.get(symbol).is_none()
+            && (fqcn.starts_with("javax.") || fqcn.starts_with("jakarta."));
+        if !skip_jdk_homonym {
+            push(fqcn);
+        }
+    }
+    if let Some(fqcn) = well_known_lombok_import(symbol).filter(|_| used_as_annotation) {
+        push(fqcn.to_string());
+    }
+    if let Some(fqcn) = well_known_import(symbol) {
+        push(fqcn.to_string());
+    }
+
+    out
+}
+
+fn try_resolve_type_candidates(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    candidates: &[String],
+    symbol: &str,
+) -> Option<SymbolLocation> {
+    for fqcn in candidates {
+        if fqcn.starts_with("lombok.") {
+            let _ = ensure_lombok_navigation_stubs(root);
+        }
+        if let Some(loc) = resolve_type_by_fqcn(ws, root, lookup, fqcn, symbol) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn resolve_member_definition(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    type_fqcn: &str,
+    member: &str,
+) -> Option<SymbolLocation> {
+    if let Some(hit) = lookup.member_by_qualified(type_fqcn, member) {
+        if let Some(loc) = library_location_for_indexed_type(ws, root, hit, member) {
+            return Some(loc);
+        }
+        return Some(to_location(ws, root, hit));
+    }
+    find_member_location_in_type_source(ws, root, type_fqcn, member)
+}
+
+fn find_member_location_in_type_source(
+    ws: &Path,
+    gradle_root: &Path,
+    fqcn: &str,
+    member: &str,
+) -> Option<SymbolLocation> {
+    let dirs = member_source_dirs(gradle_root);
+    let source_path = find_java_source_for_fqcn(ws, gradle_root, &dirs, fqcn)?;
+    let content = std::fs::read_to_string(&source_path).ok()?;
+    let rel = rel_path_for(ws, &source_path)
+        .map(|p| normalize_index_path(ws, gradle_root, &p))
+        .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
+    for (idx, line) in content.lines().enumerate() {
+        if java_field_type_on_line(line, member).is_some()
+            || super::symbols::java_method_name_on_line(line).as_deref() == Some(member)
+        {
+            let col = line
+                .find(member)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(1);
+            let kind = if line.contains('(') { "method" } else { "field" };
+            return Some(SymbolLocation {
+                name: member.to_string(),
+                kind: kind.into(),
+                path: rel,
+                line: (idx + 1) as u32,
+                column: col,
+            });
+        }
+    }
+    None
 }
 
 fn library_location_for_indexed_type(
@@ -1848,6 +2056,116 @@ const WELL_KNOWN_JAVA_IMPORTS: &[(&str, &str)] = &[
     ("Pageable", "org.springframework.data.domain.Pageable"),
     ("PageRequest", "org.springframework.data.domain.PageRequest"),
     ("Sort", "org.springframework.data.domain.Sort"),
+    ("Bean", "org.springframework.context.annotation.Bean"),
+    ("Configuration", "org.springframework.context.annotation.Configuration"),
+    ("SpringApplication", "org.springframework.boot.SpringApplication"),
+    ("ApplicationContext", "org.springframework.context.ApplicationContext"),
+    ("Environment", "org.springframework.core.env.Environment"),
+    ("Model", "org.springframework.ui.Model"),
+    ("ModelAttribute", "org.springframework.web.bind.annotation.ModelAttribute"),
+    ("RequestHeader", "org.springframework.web.bind.annotation.RequestHeader"),
+    ("CookieValue", "org.springframework.web.bind.annotation.CookieValue"),
+    ("CrossOrigin", "org.springframework.web.bind.annotation.CrossOrigin"),
+    ("ExceptionHandler", "org.springframework.web.bind.annotation.ExceptionHandler"),
+    ("ResponseStatus", "org.springframework.web.bind.annotation.ResponseStatus"),
+    ("Valid", "jakarta.validation.Valid"),
+    ("Validated", "org.springframework.validation.annotation.Validated"),
+    ("Transactional", "org.springframework.transaction.annotation.Transactional"),
+    ("Qualifier", "org.springframework.beans.factory.annotation.Qualifier"),
+    ("Primary", "org.springframework.context.annotation.Primary"),
+    ("Lazy", "org.springframework.context.annotation.Lazy"),
+    ("ConditionalOnProperty", "org.springframework.boot.autoconfigure.condition.ConditionalOnProperty"),
+    ("EnableAutoConfiguration", "org.springframework.boot.autoconfigure.EnableAutoConfiguration"),
+    ("ConfigurationProperties", "org.springframework.boot.context.properties.ConfigurationProperties"),
+    ("EnableConfigurationProperties", "org.springframework.boot.context.properties.EnableConfigurationProperties"),
+    ("EnableScheduling", "org.springframework.scheduling.annotation.EnableScheduling"),
+    ("Scheduled", "org.springframework.scheduling.annotation.Scheduled"),
+    ("Async", "org.springframework.scheduling.annotation.Async"),
+    ("EnableAsync", "org.springframework.scheduling.annotation.EnableAsync"),
+    ("EnableWebMvc", "org.springframework.web.servlet.config.annotation.EnableWebMvc"),
+    ("EnableWebSecurity", "org.springframework.security.config.annotation.web.configuration.EnableWebSecurity"),
+    ("MediaType", "org.springframework.http.MediaType"),
+    ("HttpHeaders", "org.springframework.http.HttpHeaders"),
+    ("HttpMethod", "org.springframework.http.HttpMethod"),
+    ("HttpEntity", "org.springframework.http.HttpEntity"),
+    ("RestTemplate", "org.springframework.web.client.RestTemplate"),
+    ("WebClient", "org.springframework.web.reactive.function.client.WebClient"),
+    ("JdbcTemplate", "org.springframework.jdbc.core.JdbcTemplate"),
+    ("Entity", "jakarta.persistence.Entity"),
+    ("Table", "jakarta.persistence.Table"),
+    ("Id", "jakarta.persistence.Id"),
+    ("GeneratedValue", "jakarta.persistence.GeneratedValue"),
+    ("Column", "jakarta.persistence.Column"),
+    ("ManyToOne", "jakarta.persistence.ManyToOne"),
+    ("OneToMany", "jakarta.persistence.OneToMany"),
+    ("ManyToMany", "jakarta.persistence.ManyToMany"),
+    ("JoinColumn", "jakarta.persistence.JoinColumn"),
+    ("EnableJpaRepositories", "org.springframework.data.jpa.repository.config.EnableJpaRepositories"),
+    ("JpaRepository", "org.springframework.data.jpa.repository.JpaRepository"),
+    ("CrudRepository", "org.springframework.data.repository.CrudRepository"),
+    ("Query", "org.springframework.data.jpa.repository.Query"),
+    ("Param", "org.springframework.data.repository.query.Param"),
+    ("EnableCaching", "org.springframework.cache.annotation.EnableCaching"),
+    ("Cacheable", "org.springframework.cache.annotation.Cacheable"),
+    ("CacheEvict", "org.springframework.cache.annotation.CacheEvict"),
+    ("EnableDiscoveryClient", "org.springframework.cloud.client.discovery.EnableDiscoveryClient"),
+    ("LoadBalanced", "org.springframework.cloud.client.loadbalancer.LoadBalanced"),
+    ("FeignClient", "org.springframework.cloud.openfeign.FeignClient"),
+    ("EnableFeignClients", "org.springframework.cloud.openfeign.EnableFeignClients"),
+];
+
+const WELL_KNOWN_TEST_IMPORTS: &[(&str, &str)] = &[
+    // JUnit 5
+    ("Test", "org.junit.jupiter.api.Test"),
+    ("BeforeEach", "org.junit.jupiter.api.BeforeEach"),
+    ("AfterEach", "org.junit.jupiter.api.AfterEach"),
+    ("BeforeAll", "org.junit.jupiter.api.BeforeAll"),
+    ("AfterAll", "org.junit.jupiter.api.AfterAll"),
+    ("DisplayName", "org.junit.jupiter.api.DisplayName"),
+    ("Disabled", "org.junit.jupiter.api.Disabled"),
+    ("Tag", "org.junit.jupiter.api.Tag"),
+    ("Nested", "org.junit.jupiter.api.Nested"),
+    ("ExtendWith", "org.junit.jupiter.api.extension.ExtendWith"),
+    ("ParameterizedTest", "org.junit.jupiter.params.ParameterizedTest"),
+    ("ValueSource", "org.junit.jupiter.params.provider.ValueSource"),
+    ("CsvSource", "org.junit.jupiter.params.provider.CsvSource"),
+    ("MethodSource", "org.junit.jupiter.params.provider.MethodSource"),
+    ("SpringExtension", "org.springframework.test.context.junit.jupiter.SpringExtension"),
+    ("MockitoExtension", "org.mockito.junit.jupiter.MockitoExtension"),
+    ("Assertions", "org.junit.jupiter.api.Assertions"),
+    // JUnit 4
+    ("RunWith", "org.junit.runner.RunWith"),
+    ("Ignore", "org.junit.Ignore"),
+    ("Before", "org.junit.Before"),
+    ("After", "org.junit.After"),
+    ("BeforeClass", "org.junit.BeforeClass"),
+    ("AfterClass", "org.junit.AfterClass"),
+    ("Assert", "org.junit.Assert"),
+    // Mockito
+    ("Mock", "org.mockito.Mock"),
+    ("Spy", "org.mockito.Spy"),
+    ("InjectMocks", "org.mockito.InjectMocks"),
+    ("Captor", "org.mockito.Captor"),
+    ("Mockito", "org.mockito.Mockito"),
+    ("ArgumentMatchers", "org.mockito.ArgumentMatchers"),
+    ("MockitoAnnotations", "org.mockito.MockitoAnnotations"),
+    ("MockitoJUnitRunner", "org.mockito.junit.MockitoJUnitRunner"),
+    // Spring Boot test
+    ("SpringBootTest", "org.springframework.boot.test.context.SpringBootTest"),
+    ("WebMvcTest", "org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest"),
+    ("DataJpaTest", "org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest"),
+    ("JsonTest", "org.springframework.boot.test.autoconfigure.json.JsonTest"),
+    ("RestClientTest", "org.springframework.boot.test.autoconfigure.web.client.RestClientTest"),
+    ("AutoConfigureMockMvc", "org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc"),
+    ("MockBean", "org.springframework.boot.test.mock.mockito.MockBean"),
+    ("SpyBean", "org.springframework.boot.test.mock.mockito.SpyBean"),
+    ("TestConfiguration", "org.springframework.boot.test.context.TestConfiguration"),
+    ("ActiveProfiles", "org.springframework.test.context.ActiveProfiles"),
+    ("DirtiesContext", "org.springframework.test.annotation.DirtiesContext"),
+    ("TestPropertySource", "org.springframework.test.context.TestPropertySource"),
+    ("MockMvc", "org.springframework.test.web.servlet.MockMvc"),
+    ("MockMvcRequestBuilders", "org.springframework.test.web.servlet.request.MockMvcRequestBuilders"),
+    ("MockMvcResultMatchers", "org.springframework.test.web.servlet.result.MockMvcResultMatchers"),
 ];
 
 const WELL_KNOWN_JDK_IMPORTS: &[(&str, &str)] = &[
@@ -2426,7 +2744,6 @@ pub fn resolve_java_library_definition(
     let Some(root) = cached_gradle_root(ws, from_path)? else {
         return Ok(None);
     };
-    let _ = ensure_navigation_sources(ws, &root);
     let lookup = get_lookup(ws, &root)?;
     Ok(resolve_type_by_fqcn(ws, &root, &lookup, fqcn, symbol))
 }
@@ -2445,8 +2762,6 @@ pub fn find_external_definition(
     let Some(root) = cached_gradle_root(ws, from_path)? else {
         return Ok(None);
     };
-
-    let _ = ensure_navigation_sources(ws, &root);
 
     let cache_key = definition_cache_key(&root, from_path, line, column, content);
     if let Some(cached) = cached_definition(&cache_key) {
@@ -2474,90 +2789,95 @@ fn find_external_definition_inner(
 
     let imports = parse_imports_cached(root, from_path, content);
 
-    if let Some(type_name) =
-        super::symbols::java_member_qualifier(content, line, column, &symbol)
-    {
-        if let Some(fqcn) = resolve_type_fqcn(&lookup, &type_name, &imports, root) {
-            if let Some(hit) = find_method_in_index(&lookup, &fqcn, &symbol) {
-                return Ok(Some(to_location(ws, root, hit)));
+    // Qualified member: receiver.field / receiver.method — type from imports + class body.
+    if let Some(receiver) = super::symbols::java_member_qualifier(content, line, column, &symbol) {
+        if let Some(receiver_fqcn) =
+            resolve_receiver_type_fqcn(ws, root, &lookup, content, &receiver, &imports)
+        {
+            if let Some(loc) =
+                resolve_member_definition(ws, root, &lookup, &receiver_fqcn, &symbol)
+            {
+                return Ok(Some(loc));
             }
         }
     }
 
-    if let Some(fqcn) = super::symbols::java_class_from_source_path(from_path) {
-        if let Some(hit) = find_method_in_index(&lookup, &fqcn, &symbol) {
-            return Ok(Some(to_location(ws, root, hit)));
+    // Unqualified member on the current class (methods/fields — not type names).
+    if symbol.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+        if let Some(fqcn) = super::symbols::java_class_from_source_path(from_path) {
+            if let Some(loc) = resolve_member_definition(ws, root, &lookup, &fqcn, &symbol) {
+                return Ok(Some(loc));
+            }
         }
     }
 
-    if let Some(loc) = resolve_imported_type(ws, root, &lookup, &symbol, &imports) {
+    // Explicit single-type import wins over wildcard homonyms (e.g. lombok.Data vs javax.xml.crypto.Data).
+    if let Some(fqcn) = imports.explicit.get(&symbol) {
+        if fqcn.starts_with("lombok.") {
+            let _ = ensure_lombok_navigation_stubs(root);
+            invalidate_library_source_dirs_cache(root);
+        }
+        if let Some(loc) =
+            try_resolve_type_candidates(ws, root, &lookup, std::slice::from_ref(fqcn), &symbol)
+        {
+            return Ok(Some(loc));
+        }
+        if fqcn.starts_with("lombok.") {
+            if let Some(loc) = library_type_location_from_dirs(ws, root, fqcn, &symbol) {
+                return Ok(Some(loc));
+            }
+        }
+    }
+
+    // Local field, method, or type declared in this file.
+    if let Some(loc) = super::symbols::find_in_content(&symbol, from_path, content) {
         return Ok(Some(loc));
     }
 
-    if is_annotation_context(content, line, column)
-        || content.contains(&format!("@{symbol}"))
-    {
-        if let Some(fqcn) = infer_lombok_fqcn(content, &symbol, root) {
-            if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
-                return Ok(Some(loc));
-            }
-            if let Some(loc) = resolve_library_type_location(ws, root, &fqcn, &symbol) {
-                return Ok(Some(loc));
-            }
-        }
-    }
-
-    if let Some(fqcn) = resolve_type_fqcn(&lookup, &symbol, &imports, root) {
-        if is_library_fqcn(&fqcn) {
-            if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
-                return Ok(Some(loc));
-            }
-        }
+    // Type / annotation: usage context → wildcards → index.
+    let candidates =
+        ordered_type_fqcn_candidates(&lookup, &symbol, &imports, root, content, line, column);
+    if let Some(loc) = try_resolve_type_candidates(ws, root, &lookup, &candidates, &symbol) {
+        return Ok(Some(loc));
     }
 
     if symbol.chars().next().is_some_and(|c| c.is_uppercase()) {
         if let Some(loc) = fast_java_lang_location(ws, root, &symbol, &imports)? {
             return Ok(Some(loc));
         }
-        if let Some(loc) = resolve_jdk_type_location(ws, root, &symbol, &imports)? {
-            return Ok(Some(loc));
+        let lombok_intent = lombok_navigation_intent(content, &symbol, root, &imports);
+        if lombok_intent {
+            let _ = ensure_lombok_navigation_stubs(root);
+            invalidate_library_source_dirs_cache(root);
+            if let Some(fqcn) = well_known_lombok_import(&symbol) {
+                if let Some(loc) = library_type_location_from_dirs(ws, root, fqcn, &symbol) {
+                    return Ok(Some(loc));
+                }
+            }
         }
-    }
-
-    let mut candidates: Vec<&IndexedSymbol> = lookup.types_named(&symbol).collect();
-
-    if candidates.is_empty() {
-        if let Some(fqcn) = import_fqcn_for_symbol(ws, from_path, content, &symbol)? {
-            if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
+        if !lombok_intent {
+            if let Some(loc) = resolve_jdk_type_location(ws, root, &symbol, &imports)? {
                 return Ok(Some(loc));
             }
         }
-        let mut methods: Vec<&IndexedSymbol> = lookup.methods_named(&symbol).collect();
-        if methods.is_empty() {
-            return Ok(None);
-        }
-        methods.sort_by_key(|s| spring_priority(&s.qualified));
-        return Ok(Some(to_location(ws, root, methods[0])));
     }
 
-    if candidates.len() == 1 {
-        let hit = candidates[0];
-        if let Some(loc) = library_location_for_indexed_type(ws, root, hit, &symbol) {
+    if let Some(fqcn) = import_fqcn_for_symbol(ws, from_path, content, &symbol)? {
+        if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
             return Ok(Some(loc));
         }
-        return Ok(Some(to_location(ws, root, hit)));
     }
 
-    candidates.sort_by(|a, b| {
+    let mut methods: Vec<&IndexedSymbol> = lookup.methods_named(&symbol).collect();
+    if methods.is_empty() {
+        return Ok(None);
+    }
+    methods.sort_by(|a, b| {
         import_match_priority(&a.qualified, &imports)
             .cmp(&import_match_priority(&b.qualified, &imports))
             .then_with(|| spring_priority(&a.qualified).cmp(&spring_priority(&b.qualified)))
     });
-    let hit = candidates[0];
-    if let Some(loc) = library_location_for_indexed_type(ws, root, hit, &symbol) {
-        return Ok(Some(loc));
-    }
-    Ok(Some(to_location(ws, root, hit)))
+    Ok(Some(to_location(ws, root, methods[0])))
 }
 
 pub fn java_completions(
@@ -2600,6 +2920,7 @@ pub fn java_completions(
             &lookup,
             &imports,
             content,
+            line,
             &qualifier,
             &member_prefix,
             overlays,
@@ -2685,6 +3006,17 @@ pub fn java_completions(
 
     let type_preferred = prefix.chars().next().is_some_and(|c| c.is_uppercase())
         || super::symbols::is_java_type_reference_context(content, line, column);
+
+    if super::java_synthetic_members::should_offer_scope_completions(content, line, column)
+        && !type_preferred
+    {
+        let scope =
+            super::java_synthetic_members::scope_completion_items(content, from_path, line, &prefix);
+        if !scope.is_empty() && (prefix.is_empty() || prefix.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
+        {
+            return Ok(scope);
+        }
+    }
 
     if type_preferred && !prefix.is_empty() {
         let types = lookup.types_matching_name_prefix(&prefix, 80);
@@ -2904,6 +3236,7 @@ fn member_completions_for_qualifier(
     lookup: &IndexLookup,
     imports: &ImportMap,
     content: &str,
+    cursor_line: u32,
     qualifier: &str,
     member_prefix: &str,
     overlays: &[(String, String)],
@@ -2985,6 +3318,18 @@ fn member_completions_for_qualifier(
         }
     }
 
+    for synthetic in super::java_synthetic_members::synthetic_instance_members(
+        content,
+        cursor_line,
+        qualifier,
+        member_prefix,
+        from_path,
+    ) {
+        if seen.insert(synthetic.label.clone()) {
+            items.push(synthetic);
+        }
+    }
+
     push_known_jdk_static_members(&mut items, &mut seen, qualifier, member_prefix);
 
     enrich_completion_items_from_sources(ws, root, &mut items);
@@ -3008,9 +3353,12 @@ fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     }
     dirs.extend(library_source_dirs(gradle_root));
     dirs.extend(cached_project_source_dirs(gradle_root));
-    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
-    if jdk.is_dir() {
-        dirs.push(jdk);
+    for root in reaper_source_roots(gradle_root) {
+        let jdk = reaper_dir(&root).join("java-sources/jdk");
+        if jdk.is_dir() {
+            dirs.push(jdk);
+            break;
+        }
     }
     dirs
 }
@@ -3049,6 +3397,10 @@ pub fn patch_java_index_file(ws: &Path, rel_path: &str, content: &str) -> Result
     if !index_path.is_file() {
         return Ok(());
     }
+    let index_lock = index_file_lock(&index_path);
+    let _index_guard = index_lock
+        .lock()
+        .expect("java-index.json lock");
     let text = std::fs::read_to_string(&index_path)?;
     let mut index: JavaIndex = serde_json::from_str(&text)?;
     index
@@ -3147,6 +3499,9 @@ fn resolve_receiver_type_fqcn(
         let resolved = resolve_type_fqcn(lookup, &type_name, imports, root);
         if resolved.is_some() {
             return resolved;
+        }
+        if let Some(fqcn) = super::java_synthetic_members::resolve_synthetic_receiver_fqcn(&type_name) {
+            return Some(fqcn);
         }
         let base = type_name.trim_end_matches("[]").trim();
         if base != type_name.as_str() {
@@ -3699,12 +4054,88 @@ fn materialize_sources(
     Ok((dirs, jdk_sources))
 }
 
-/// Extract JDK + dependency *-sources.jar on demand for go-to-definition (no Maven/Gradle run).
-fn ensure_navigation_sources(ws: &Path, project_root: &Path) -> Result<()> {
+fn project_cache_key(project_root: &Path) -> String {
+    project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn current_classpath_stamp(project_root: &Path) -> String {
+    std::fs::read_to_string(reaper_dir(project_root).join("classpath.stamp")).unwrap_or_default()
+}
+
+fn navigation_sources_warmed(project_root: &Path) -> bool {
+    let key = project_cache_key(project_root);
+    if NAVIGATION_SOURCES_WARM
+        .lock()
+        .ok()
+        .is_some_and(|guard| guard.contains(&key))
+    {
+        return true;
+    }
+    let stamp = current_classpath_stamp(project_root);
+    let warm_path = reaper_dir(project_root).join("navigation-sources.stamp");
+    if warm_path.is_file()
+        && std::fs::read_to_string(&warm_path)
+            .ok()
+            .is_some_and(|stored| stored == stamp)
+    {
+        if let Ok(mut guard) = NAVIGATION_SOURCES_WARM.lock() {
+            guard.insert(key);
+        }
+        return true;
+    }
+    false
+}
+
+fn mark_navigation_sources_warmed(project_root: &Path) {
+    let key = project_cache_key(project_root);
+    if let Ok(mut guard) = NAVIGATION_SOURCES_WARM.lock() {
+        guard.insert(key);
+    }
+    let stamp = current_classpath_stamp(project_root);
+    let _ = std::fs::write(
+        reaper_dir(project_root).join("navigation-sources.stamp"),
+        stamp,
+    );
+}
+
+fn ensure_jdk_navigation_sources(project_root: &Path) -> Result<()> {
     let jdk_dest = reaper_dir(project_root).join("java-sources/jdk");
     if !jdk_dest.join(".extracted").is_file() {
         let _ = materialize_jdk_sources(&jdk_dest);
     }
+    Ok(())
+}
+
+fn ensure_lombok_navigation_stubs(project_root: &Path) -> Result<()> {
+    let base = reaper_dir(project_root).join("java-sources/deps/lombok");
+    for (simple, fqcn) in WELL_KNOWN_LOMBOK_IMPORTS {
+        let rel = format!("{}.java", fqcn.replace('.', "/"));
+        let path = base.join(&rel);
+        if path.is_file() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pkg = fqcn.rsplit_once('.').map(|(p, _)| p).unwrap_or("lombok");
+        let body = format!("package {pkg};\n\npublic @interface {simple} {{}}\n");
+        let _ = std::fs::write(&path, body);
+    }
+    Ok(())
+}
+
+/// Extract JDK + dependency *-sources.jar on demand for go-to-definition (no Maven/Gradle run).
+fn ensure_navigation_sources(ws: &Path, project_root: &Path) -> Result<()> {
+    if navigation_sources_warmed(project_root) {
+        return Ok(());
+    }
+
+    ensure_jdk_navigation_sources(project_root)?;
+    let _ = ensure_lombok_navigation_stubs(project_root);
 
     ensure_maven_dependency_sources_for_navigation(project_root)?;
 
@@ -3713,12 +4144,14 @@ fn ensure_navigation_sources(ws: &Path, project_root: &Path) -> Result<()> {
         jars = cached_classpath_jars(project_root);
     }
     if jars.is_empty() {
+        mark_navigation_sources_warmed(project_root);
         return Ok(());
     }
 
     let source_jars = discover_source_jars_for_jars(&jars);
     let _ = materialize_sources(ws, project_root, &jars, &source_jars, None);
     invalidate_library_source_dirs_cache(project_root);
+    mark_navigation_sources_warmed(project_root);
     Ok(())
 }
 
@@ -6144,8 +6577,11 @@ fn find_java_source_for_fqcn(
             }
         }
     }
-    let reaper_sources = reaper_dir(gradle_root).join("java-sources");
-    if reaper_sources.is_dir() {
+    for root in reaper_source_roots(gradle_root) {
+        let reaper_sources = reaper_dir(&root).join("java-sources");
+        if !reaper_sources.is_dir() {
+            continue;
+        }
         if let Some(found) = find_file_by_name(&reaper_sources, file_name) {
             if let Ok(content) = std::fs::read_to_string(&found) {
                 if source_matches_fqcn(&content, fqcn, &found) {
@@ -6186,7 +6622,11 @@ fn resolve_fqcn_from_jdk_files(
     let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
     let mut candidates = Vec::new();
     if let Some(fqcn) = imports.explicit.get(symbol) {
+        // Explicit single-type import wins; do not fall through to wildcard homonyms in the JDK.
         candidates.push(fqcn.clone());
+        return candidates
+            .into_iter()
+            .find(|fqcn| jdk_source_exists(&jdk, fqcn));
     }
     for prefix in &imports.wildcards {
         candidates.push(format!("{prefix}.{symbol}"));
@@ -6212,6 +6652,9 @@ fn resolve_jdk_type_location(
     }
 
     let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    if !jdk.join(".extracted").is_file() {
+        let _ = ensure_jdk_navigation_sources(gradle_root);
+    }
     let Some(source_path) = find_java_source_for_fqcn(ws, gradle_root, &[jdk], &fqcn) else {
         return Ok(None);
     };
@@ -6586,6 +7029,8 @@ fn is_library_fqcn(fqcn: &str) -> bool {
         || fqcn.starts_with("javax.")
         || fqcn.starts_with("jakarta.")
         || fqcn.starts_with("org.springframework.")
+        || fqcn.starts_with("org.junit.")
+        || fqcn.starts_with("org.mockito.")
         || fqcn.starts_with("lombok.")
         || fqcn.starts_with("kotlin.")
 }
@@ -6669,6 +7114,23 @@ fn import_match_priority(fqcn: &str, imports: &ImportMap) -> u8 {
     4
 }
 
+fn reaper_source_roots(gradle_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut cur = gradle_root
+        .canonicalize()
+        .unwrap_or_else(|_| gradle_root.to_path_buf());
+    for _ in 0..16 {
+        if roots.iter().all(|r| r != &cur) {
+            roots.push(cur.clone());
+        }
+        match cur.parent() {
+            Some(p) if p != cur => cur = p.to_path_buf(),
+            _ => break,
+        }
+    }
+    roots
+}
+
 fn library_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
     let key = gradle_root
         .canonicalize()
@@ -6677,23 +7139,30 @@ fn library_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
         .to_string();
     if let Ok(guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
         if let Some(dirs) = guard.get(&key) {
-            return dirs.clone();
+            if !dirs.is_empty() {
+                return dirs.clone();
+            }
         }
     }
 
-    let sources = reaper_dir(gradle_root).join("java-sources");
+    let mut seen = HashSet::new();
     let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&sources) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && entry.file_name() != "jdk" {
-                dirs.push(path);
+    for root in reaper_source_roots(gradle_root) {
+        let sources = reaper_dir(&root).join("java-sources");
+        if let Ok(entries) = std::fs::read_dir(&sources) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name() != "jdk" && seen.insert(path.clone()) {
+                    dirs.push(path);
+                }
             }
         }
     }
 
     if let Ok(mut guard) = LIBRARY_SOURCE_DIRS_CACHE.lock() {
-        guard.insert(key, dirs.clone());
+        if !dirs.is_empty() {
+            guard.insert(key, dirs.clone());
+        }
     }
     dirs
 }
@@ -6746,33 +7215,45 @@ fn resolve_type_by_fqcn(
     None
 }
 
-fn resolve_imported_type(
-    ws: &Path,
-    root: &Path,
-    lookup: &IndexLookup,
-    symbol: &str,
-    imports: &ImportMap,
-) -> Option<SymbolLocation> {
-    for fqcn in import_fqcns(symbol, imports) {
-        if let Some(loc) = resolve_type_by_fqcn(ws, root, lookup, &fqcn, symbol) {
-            return Some(loc);
-        }
-    }
-    None
-}
-
 fn resolve_library_type_location(
     ws: &Path,
     gradle_root: &Path,
     fqcn: &str,
     symbol: &str,
 ) -> Option<SymbolLocation> {
-    let _ = ensure_navigation_sources(ws, gradle_root);
-    let dirs = library_source_dirs(gradle_root);
-    if dirs.is_empty() {
-        return None;
+    if fqcn.starts_with("lombok.") {
+        let _ = ensure_lombok_navigation_stubs(gradle_root);
+        invalidate_library_source_dirs_cache(gradle_root);
+        if let Some(loc) = library_type_location_from_dirs(ws, gradle_root, fqcn, symbol) {
+            return Some(loc);
+        }
     }
-    let source_path = find_java_source_for_fqcn(ws, gradle_root, &dirs, fqcn)?;
+    let _ = ensure_navigation_sources(ws, gradle_root);
+    library_type_location_from_dirs(ws, gradle_root, fqcn, symbol)
+}
+
+fn library_type_location_from_dirs(
+    ws: &Path,
+    gradle_root: &Path,
+    fqcn: &str,
+    symbol: &str,
+) -> Option<SymbolLocation> {
+    let dirs = library_source_dirs(gradle_root);
+    let source_path = find_java_source_for_fqcn(ws, gradle_root, &dirs, fqcn).or_else(|| {
+        if !fqcn.starts_with("lombok.") {
+            return None;
+        }
+        for root in reaper_source_roots(gradle_root) {
+            let stub = reaper_dir(&root).join(format!(
+                "java-sources/deps/lombok/{}.java",
+                fqcn.replace('.', "/")
+            ));
+            if stub.is_file() {
+                return Some(stub);
+            }
+        }
+        None
+    })?;
     let rel = rel_path_for(ws, &source_path)
         .map(|p| normalize_index_path(ws, gradle_root, &p))
         .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
@@ -6842,14 +7323,6 @@ fn resolve_type_fqcn(
         .or_else(|| well_known_import(symbol).map(str::to_string))
 }
 
-fn find_method_in_index<'a>(
-    lookup: &'a IndexLookup,
-    fqcn: &str,
-    method: &str,
-) -> Option<&'a IndexedSymbol> {
-    lookup.method_by_qualified(&format!("{fqcn}.{method}"))
-}
-
 pub(crate) fn is_java_like(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.ends_with(".java") || lower.ends_with(".kt") || lower.ends_with(".kts")
@@ -6904,11 +7377,19 @@ fn normalize_index_path(ws: &Path, gradle_root: &Path, path: &str) -> String {
         }
     }
     if rel.starts_with(".reaper/") {
+        let ws_path = ws.join(rel.trim_start_matches('/'));
+        if ws_path.is_file() {
+            return rel;
+        }
         if let Ok(prefix) = rel_path_for(ws, gradle_root) {
             if !prefix.is_empty() {
-                return format!("{prefix}/{rel}");
+                let nested = format!("{prefix}/{rel}");
+                if ws.join(&nested).is_file() {
+                    return nested;
+                }
             }
         }
+        return rel;
     }
     rel
 }
@@ -7015,6 +7496,21 @@ mod tests {
         write_minimal_jdk_sources(&ws);
         warm_index(&ws).expect("warm_index");
         ws
+    }
+
+    #[test]
+    fn plain_java_instance_variable_dot_member_completions() {
+        let ws = plain_java_completion_workspace("reaper-plain-java-file-dot");
+        let path = "src/HelloWorld.java";
+        let content = "import java.io.File;\n\npublic class HelloWorld {\n  public static void main(String[] args) {\n    File file = new File(\"x\");\n    file.\n  }\n}\n";
+        let items = java_completions(&ws, path, 6, 10, content, "", &[]).expect("completions");
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| *l == "getName" || *l == "exists" || *l == "getPath"),
+            "expected File instance members from index type inference, got {:?}",
+            labels
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
@@ -7599,6 +8095,172 @@ dependencies {
             .expect("Slf4j location");
         assert!(hit.path.contains("Slf4j.java"), "path={}", hit.path);
         assert!(definition_path_is_openable(&ws, &hit.path));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_lombok_data_not_javax_xml_crypto_data() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-lombok-data-nav-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/deps/lombok/lombok")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/lombok/lombok/Data.java"),
+            "package lombok;\n\npublic @interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto"))
+            .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto/Data.java"),
+            "package javax.xml.crypto;\n\npublic interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/User.java"),
+            "package com.example;\n\nimport javax.xml.crypto.*;\n\n@Data\npublic class User {\n}\n",
+        )
+        .unwrap();
+
+        let content =
+            std::fs::read_to_string(ws.join("src/main/java/com/example/User.java")).unwrap();
+        let hit = find_external_definition(&ws, "src/main/java/com/example/User.java", 5, 2, &content)
+            .expect("lookup ok")
+            .expect("Data location");
+        assert!(
+            hit.path.contains("lombok/Data.java"),
+            "expected lombok.Data, got path={}",
+            hit.path
+        );
+        assert!(!hit.path.contains("javax/xml/crypto"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn explicit_lombok_import_wins_over_javax_wildcard_for_data() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-lombok-data-explicit-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/deps/lombok/lombok")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/lombok/lombok/Data.java"),
+            "package lombok;\n\npublic @interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto"))
+            .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto/Data.java"),
+            "package javax.xml.crypto;\n\npublic interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/User.java"),
+            "package com.example;\n\nimport lombok.Data;\nimport javax.xml.crypto.*;\n\n@Data\npublic class User {\n}\n",
+        )
+        .unwrap();
+
+        let content =
+            std::fs::read_to_string(ws.join("src/main/java/com/example/User.java")).unwrap();
+        let hit = find_external_definition(&ws, "src/main/java/com/example/User.java", 6, 2, &content)
+            .expect("lookup ok")
+            .expect("Data location");
+        assert!(hit.path.contains("lombok/Data.java"), "path={}", hit.path);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_lombok_data_from_maven_extracted_sources_dir() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-lombok-data-extracted-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/deps/lombok-1_18_40/lombok")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/lombok-1_18_40/lombok/Data.java"),
+            "package lombok;\n\npublic @interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto"))
+            .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.xml.crypto/javax/xml/crypto/Data.java"),
+            "package javax.xml.crypto;\n\npublic interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("src/main/java/com/example/User.java"),
+            "package com.example;\n\nimport javax.xml.crypto.*;\n\n@Data\npublic class User {\n}\n",
+        )
+        .unwrap();
+
+        let content =
+            std::fs::read_to_string(ws.join("src/main/java/com/example/User.java")).unwrap();
+        let hit = find_external_definition(&ws, "src/main/java/com/example/User.java", 5, 2, &content)
+            .expect("lookup ok")
+            .expect("Data location");
+        assert!(
+            hit.path.contains("lombok/Data.java"),
+            "expected extracted lombok sources, got path={}",
+            hit.path
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_lombok_data_from_parent_reaper_cache_in_submodule() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-lombok-parent-reaper-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/deps/lombok-1_18_40/lombok")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/lombok-1_18_40/lombok/Data.java"),
+            "package lombok;\n\npublic @interface Data {\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("order-service/src/main/java/com/example")).unwrap();
+        std::fs::write(ws.join("order-service/build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            ws.join("order-service/src/main/java/com/example/User.java"),
+            "package com.example;\n\n@Data\npublic class User {\n}\n",
+        )
+        .unwrap();
+
+        let content =
+            std::fs::read_to_string(ws.join("order-service/src/main/java/com/example/User.java"))
+                .unwrap();
+        let hit = find_external_definition(
+            &ws,
+            "order-service/src/main/java/com/example/User.java",
+            3,
+            2,
+            &content,
+        )
+        .expect("lookup ok")
+        .expect("Data location");
+        assert!(
+            hit.path.contains("lombok/Data.java"),
+            "path={}",
+            hit.path
+        );
+        assert!(
+            definition_path_is_openable(&ws, &hit.path),
+            "path not openable: {}",
+            hit.path
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

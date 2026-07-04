@@ -23,10 +23,22 @@ const AUTO_SAVE_KEY = 'reaper-auto-save';
 const AI_INLINE_COMPLETE_KEY = 'reaper-ai-inline-complete';
 const SHOW_DOTFILES_KEY = 'reaper-show-dotfiles';
 const NEW_WINDOW_ON_REPO_KEY = 'reaper-new-window-on-repo';
-const AUTO_SAVE_DELAY_MS = 800;
+const AUTO_SAVE_DELAY_MS = 2000;
+/** Java edits often pause mid-statement; wait longer before persisting. */
+const JAVA_AUTO_SAVE_DELAY_MS = 3500;
+/** Re-check soon when auto-save is deferred for incomplete syntax. */
+const AUTO_SAVE_INCOMPLETE_RETRY_MS = 600;
+const AUTO_SAVE_CODE_EXTS = new Set([
+  'java', 'kt', 'kts', 'scala', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+]);
+const SAVE_GATE_DRAIN_MS = 100;
+/** Coalesce queued javac before starting (typing + tab switch). */
+const JAVA_QUEUE_DIAG_DELAY_MS = 50;
+const JAVA_FULL_DIAG_MAX_RETRIES = 3;
 const DIAG_DELAY_MS = 200;
-const JAVA_DIAG_DELAY_MS = 800;
-const ALL_JAVA_DIAG_DELAY_MS = 2000;
+const JAVA_DIAG_DELAY_MS = 700;
+const ALL_JAVA_DIAG_DELAY_MS = 3000;
+const JAVA_DIAG_FULL_STAGGER_MS = 500;
 const CONFIG_DIAG_DELAY_MS = 900;
 const BUILD_DIAG_DELAY_MS = 1400;
 const TAB_RENDER_DELAY_MS = 200;
@@ -442,6 +454,7 @@ const state = {
   editorReady: false,
   suppressEditorChange: false,
   autoSaveTimer: null,
+  saveInFlight: false,
   projectReloadTimer: null,
   projectReloadPending: false,
   projectReloadBackground: false,
@@ -521,6 +534,19 @@ let diagSeq = 0;
 let diagRetryTimer = null;
 let diagRetryDelayMs = 2500;
 let allJavaDiagRefreshGen = 0;
+let javaFullDiagTimer = null;
+let javaFullDiagSeq = 0;
+let javaFullCompileRunning = false;
+/** @type {{ path: string, content: string, force: boolean } | null} */
+let javaFullCompilePending = null;
+/** Coalesced disk writes per path — one PUT at a time, latest buffer wins. */
+/** @type {Map<string, { pending: string | null, running: boolean, waiters: Array<{ resolve: (v: boolean) => void, reject: (e: Error) => void }> }>} */
+const saveWriteCoalesceByPath = new Map();
+let javaCompileFooterGen = 0;
+let compileFooterSafetyTimer = null;
+const COMPILE_FOOTER_SAFETY_MS = 20000;
+/** Last buffer snapshot we started full javac for (per path). */
+const javaFullDiagSnapshotByPath = new Map();
 /** @type {Map<string, { controller: AbortController, promise: Promise<unknown>, content: string }>} */
 const diagFetchByPath = new Map();
 let fileDiags = [];
@@ -545,10 +571,51 @@ function mountReaperIcons(root = document) {
   });
 }
 
+let saveGateActive = false;
+const saveGateWaiters = [];
+
+function enterSaveGate() {
+  saveGateActive = true;
+}
+
+function leaveSaveGate() {
+  saveGateActive = false;
+  for (const resolve of saveGateWaiters) resolve();
+  saveGateWaiters.length = 0;
+}
+
+function waitForSaveGate() {
+  if (!saveGateActive) return Promise.resolve();
+  return new Promise((resolve) => saveGateWaiters.push(resolve));
+}
+
+function usesInProcessApi() {
+  return typeof location !== 'undefined' && location.protocol === 'reaper:';
+}
+
+/** Free WebKit HTTP slots before save PUT; skip on reaper:// (in-process, no pool limit). */
+async function prepareForSave() {
+  const wasPolling = !!state.projectIndexPoll;
+  stopProjectIndexPolling({ keepUi: true });
+  if (usesInProcessApi()) {
+    return { wasPolling, lightweight: true };
+  }
+  abortAllDiagnosticFetches();
+  clearTimeout(javaFullDiagTimer);
+  javaFullDiagTimer = null;
+  javaFullCompilePending = null;
+  ++javaFullDiagSeq;
+  enterSaveGate();
+  await new Promise((r) => setTimeout(r, SAVE_GATE_DRAIN_MS));
+  return { wasPolling, lightweight: false };
+}
+
 async function api(path, opts = {}) {
+  if (!opts.allowDuringSave) await waitForSaveGate();
+  const { allowDuringSave: _allowDuringSave, ...fetchOpts } = opts;
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...opts.headers },
-    ...opts,
+    headers: { 'Content-Type': 'application/json', ...fetchOpts.headers },
+    ...fetchOpts,
   });
   const text = await res.text();
   let data = null;
@@ -2458,7 +2525,152 @@ function setStatusMessage(msg) {
   if (el) el.textContent = msg;
 }
 
-const NAV_BUSY_DELAY_MS = 1000;
+function defaultStatusLabel() {
+  return state.activeTab?.split('/').pop() || 'Ready';
+}
+
+function showCompileFooter({ resetSafety = true } = {}) {
+  const gen = ++javaCompileFooterGen;
+  if (resetSafety) {
+    clearTimeout(compileFooterSafetyTimer);
+    compileFooterSafetyTimer = setTimeout(() => finishCompileFooter(gen), COMPILE_FOOTER_SAFETY_MS);
+  }
+  const el = $('#status-message');
+  if (!el) return gen;
+  clearSaveFooterStatus();
+  el.textContent = 'Analyzing…';
+  return gen;
+}
+
+function finishCompileFooter(gen, msg) {
+  if (gen != null && gen !== javaCompileFooterGen) return;
+  clearTimeout(compileFooterSafetyTimer);
+  compileFooterSafetyTimer = null;
+  clearSaveFooterStatus();
+  setStatusMessage(msg ?? defaultStatusLabel());
+}
+
+const SAVE_FOOTER_MS = 2000;
+const AUTO_SAVE_FOOTER_MS = 1200;
+const SAVE_FAIL_FOOTER_MS = 3500;
+let saveFooterTimer = null;
+
+function clearSaveFooterStatus() {
+  if (saveFooterTimer) {
+    clearTimeout(saveFooterTimer);
+    saveFooterTimer = null;
+  }
+  const el = $('#status-message');
+  el?.classList.remove('is-save-hint', 'is-save-hint-auto', 'is-save-hint-error', 'is-save-hint-pending');
+}
+
+function showSavingFooterStatus() {
+  clearSaveFooterStatus();
+  const el = $('#status-message');
+  if (!el) return;
+  el.textContent = 'Saving…';
+  el.classList.add('is-save-hint', 'is-save-hint-pending');
+}
+
+/** Brief footer confirmation after a successful save (status-left #status-message). */
+function showSaveFooterStatus(message = 'Saved', { auto = false, error = false, ms } = {}) {
+  clearSaveFooterStatus();
+  const el = $('#status-message');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.add('is-save-hint');
+  if (auto) el.classList.add('is-save-hint-auto');
+  if (error) el.classList.add('is-save-hint-error');
+  const duration = ms ?? (error ? SAVE_FAIL_FOOTER_MS : (auto ? AUTO_SAVE_FOOTER_MS : SAVE_FOOTER_MS));
+  saveFooterTimer = setTimeout(() => {
+    el.classList.remove('is-save-hint', 'is-save-hint-auto', 'is-save-hint-error', 'is-save-hint-pending');
+    saveFooterTimer = null;
+    if (el.textContent !== message) return;
+    setStatusMessage(defaultStatusLabel());
+  }, duration);
+}
+
+function javaFullDiagRetryDelayMs(attempt) {
+  return Math.min(Math.round(diagRetryDelayMs * (attempt + 1)), 8000);
+}
+
+/** Java javac for one file (typing while editing, full on save / classpath refresh). */
+async function runJavaDiagnosticsForPath(path, content, {
+  scope = 'full',
+  attempt = 0,
+  force = false,
+  footerGen: existingFooterGen = null,
+} = {}) {
+  if (!state.repo || !path?.endsWith('.java')) return;
+  const seq = ++javaFullDiagSeq;
+  const snapshot = state.editor?.getValue() ?? content;
+  javaFullDiagSnapshotByPath.set(path, snapshot);
+  let footerGen = existingFooterGen;
+  if (path === state.activeTab && footerGen == null) {
+    footerGen = showCompileFooter({ resetSafety: true });
+  }
+  try {
+    const result = normalizeDiagnosticsResponse(
+      await fetchDiagnosticsForPath(path, snapshot, { scope, force }),
+    );
+    if (seq !== javaFullDiagSeq || path !== state.activeTab) return;
+
+    const latest = state.editor?.getValue();
+    if (latest != null && latest !== snapshot) {
+      javaFullDiagSnapshotByPath.delete(path);
+      finishCompileFooter(footerGen);
+      queueJavaDiagnostics(path, latest, { scope });
+      return;
+    }
+
+    if (result.cancelled && !result.diagnostics.length) {
+      if (attempt < JAVA_FULL_DIAG_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, javaFullDiagRetryDelayMs(attempt)));
+        if (seq !== javaFullDiagSeq || path !== state.activeTab) return;
+        const retryContent = state.editor?.getValue() ?? snapshot;
+        return runJavaDiagnosticsForPath(path, retryContent, {
+          scope,
+          attempt: attempt + 1,
+          force: false,
+          footerGen,
+        });
+      }
+      if (path === state.activeTab) {
+        finishCompileFooter(footerGen, 'Compile did not finish');
+        toast('Compile did not finish — try saving again', 'warning');
+      }
+      return;
+    }
+    applyDiagnostics(path, result.diagnostics);
+    if (seq === javaFullDiagSeq && path === state.activeTab) {
+      finishCompileFooter(footerGen);
+    }
+  } catch (err) {
+    if (seq !== javaFullDiagSeq || path !== state.activeTab) return;
+    if (attempt < JAVA_FULL_DIAG_MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, javaFullDiagRetryDelayMs(attempt)));
+      if (seq !== javaFullDiagSeq || path !== state.activeTab) return;
+      const retryContent = state.editor?.getValue() ?? content;
+      return runJavaDiagnosticsForPath(path, retryContent, {
+        scope,
+        attempt: attempt + 1,
+        force: false,
+        footerGen,
+      });
+    }
+    if (path === state.activeTab) {
+      const msg = isDiagFetchAbort(err) ? 'Compile timed out' : (err.message || 'Compile failed');
+      finishCompileFooter(footerGen, msg);
+      toast(`${msg} — try saving again`, 'warning');
+    }
+  }
+}
+
+/** @deprecated use runJavaDiagnosticsForPath */
+async function runFullDiagnosticsForPath(path, content, opts = {}) {
+  return runJavaDiagnosticsForPath(path, content, { scope: 'full', ...opts });
+}
+const NAV_BUSY_DELAY_MS = 250;
 const NAV_RESULT_MS = 4500;
 let navBusyDepth = 0;
 let navBusyTimer = null;
@@ -6074,11 +6286,17 @@ function applyTestRunDecorations() {
       clearTestRunWidgets();
       state.testRunWidgets = [];
       state.testCovWidgets = [];
+      const showCoverage = projectSupportsCoverage();
       for (const method of methods) {
         const runWidget = createTestRunWidget(method);
         state.editor.addGlyphMarginWidget(runWidget);
         state.testRunWidgets.push(runWidget);
         state.testMethodsByLine.set(method.glyphLine, method);
+        if (showCoverage) {
+          const covWidget = createTestCoverageWidget(method);
+          state.editor.addGlyphMarginWidget(covWidget);
+          state.testCovWidgets.push(covWidget);
+        }
       }
       return;
     }
@@ -8463,6 +8681,27 @@ function initEditor() {
       hideQuickFixMenu,
       isQuickFixMenuOpen,
       scheduleDiagnostics: () => scheduleDiagnostics(),
+      refreshDiagnosticsAfterFix: () => {
+        flushEditorContentSync();
+        const path = state.activeTab;
+        if (path?.endsWith('.java') && state.editor) {
+          setTimeout(() => {
+            if (state.activeTab !== path) return;
+            const latest = state.editor?.getValue();
+            if (latest == null) return;
+            void (async () => {
+              try {
+                await writeTabToDisk(path, latest);
+              } catch (err) {
+                console.warn('[Reaper] failed to persist after quick fix', err);
+              }
+              queueJavaFullDiagnostics(path, latest, { immediate: true, force: true });
+            })();
+          }, 0);
+          return;
+        }
+        scheduleDiagnostics();
+      },
       getDiagnosticsInRange: (model, range) => {
         if (!model || !range || !fileDiags.length) return [];
         return fileDiags.filter((d) => {
@@ -8613,6 +8852,11 @@ async function selectRepo(name) {
     await refreshTree({ resetExpanded: true });
     await refreshGitStatus();
     await refreshHistory();
+    if (opened?.jdtls?.warming) {
+      terminalLog('Starting Java language server…');
+    } else if (opened?.jdtls?.ready) {
+      terminalLog('Java language server ready');
+    }
     await openFile('README.md', { silent: true });
     terminalLog(`Opened workspace: ${name}`);
     if (state.activeTab) {
@@ -10394,47 +10638,88 @@ function scheduleCoverageClear() {
 
 function renderTabs() {
   const list = $('#tab-list');
-  if (!list || !state.tabs.length) return;
-  const tabsHtml = state.tabs.map((t) => {
+  if (!list) return;
+  if (!state.tabs.length) {
+    list.innerHTML = '';
+    return;
+  }
+  const tabsHtml = state.tabs.map((t, i) => {
     const name = t.split('/').pop();
     const active = state.activeTab === t ? ' active' : '';
     const external = isExternalEditorPath(t);
     const dirty = !external && state.dirty.has(t) ? ' dirty' : '';
     const externalCls = external ? ' external' : '';
     const title = external ? ` title="${escapeHtml(t)}"` : '';
-    return `<div class="ij-tab${active}${dirty}${externalCls}" data-tab="${t}"${title}><span class="ij-tab-label">${escapeHtml(name)}</span><button type="button" class="ij-tab-close" data-close="${t}" title="Close">×</button></div>`;
+    return `<div class="ij-tab${active}${dirty}${externalCls}" data-tab-idx="${i}" data-tab="${escapeHtml(t)}"${title}><span class="ij-tab-label">${escapeHtml(name)}</span><button type="button" class="ij-tab-close" title="Close" aria-label="Close tab">×</button></div>`;
   }).join('');
   list.innerHTML = tabsHtml;
-  $$('.ij-tab').forEach((tab) => {
-    tab.addEventListener('click', (e) => {
-      if (e.target.closest('.ij-tab-close')) return;
-      activateTab(tab.dataset.tab);
-    });
-  });
-  $$('.ij-tab-close').forEach((btn) => {
-    btn.addEventListener('click', (e) => closeTab(btn.dataset.close, e));
-  });
   updateRunButtons();
 }
 
+function resolveTabPath(path) {
+  if (!path) return null;
+  const idx = state.tabs.indexOf(path);
+  if (idx >= 0) return state.tabs[idx];
+  const norm = workspaceExplorerPath(path);
+  const alt = state.tabs.find((t) => workspaceExplorerPath(t) === norm);
+  return alt ?? null;
+}
+
 function closeTab(path, e) {
-  e?.stopPropagation();
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
+  path = resolveTabPath(path);
+  if (!path) return;
   const idx = state.tabs.indexOf(path);
   if (idx < 0) return;
-  if (state.dirty.has(path) && !confirm(`Discard changes to ${path.split('/').pop()}?`)) return;
+
+  const wasActive = state.activeTab === path;
   state.tabs.splice(idx, 1);
   state.tabContents.delete(path);
   state.dirty.delete(path);
-  if (state.activeTab === path) {
+
+  if (wasActive) {
     const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
-    if (next) activateTab(next);
+    if (next) activateTab(next, { skipFlush: true });
     else closeAllTabs();
   } else {
-    renderTabs();
+    scheduleRenderTabs({ immediate: true });
   }
+  updateMenuState();
+}
+
+function tabPathFromEl(tabEl) {
+  if (!tabEl) return null;
+  const idx = tabEl.dataset.tabIdx;
+  if (idx !== undefined && state.tabs[Number(idx)] !== undefined) {
+    return state.tabs[Number(idx)];
+  }
+  return resolveTabPath(tabEl.dataset.tab);
+}
+
+function bindEditorTabs() {
+  const list = $('#tab-list');
+  if (!list || list.dataset.tabsBound === '1') return;
+  list.dataset.tabsBound = '1';
+  list.addEventListener('click', (e) => {
+    const tabEl = e.target.closest('.ij-tab');
+    if (!tabEl) return;
+    const path = tabPathFromEl(tabEl);
+    if (!path) return;
+    if (e.target.closest('.ij-tab-close')) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTab(path, e);
+      return;
+    }
+    activateTab(path);
+  });
 }
 
 function activateTabShell(path) {
+  javaCompileFooterGen += 1;
+  clearTimeout(compileFooterSafetyTimer);
+  compileFooterSafetyTimer = null;
   state.activeTab = path;
   $('#editor-stage')?.classList.remove('hidden');
   $('#editor-toolbar')?.classList.remove('hidden');
@@ -10473,7 +10758,11 @@ function activateTabShell(path) {
   fileDiags = [];
   diagJumpIndex = 0;
   updateDiagnosticsStatusBar(path, []);
-  scheduleDiagnostics();
+  if (path?.endsWith('.java')) {
+    scheduleJavaFullDiagnostics();
+  } else {
+    scheduleDiagnostics();
+  }
   void revealFileInExplorer(path);
   updateTreeBackButton();
   updateConflictUi();
@@ -10487,8 +10776,8 @@ function flushEditorContentSync() {
   state.tabContents.set(state.activeTab, state.editor.getValue());
 }
 
-function activateTab(path) {
-  flushEditorContentSync();
+function activateTab(path, { skipFlush = false } = {}) {
+  if (!skipFlush) flushEditorContentSync();
   activateTabShell(path);
   if (state.tabContents.has(path)) {
     setEditorContent(path, state.tabContents.get(path));
@@ -10511,8 +10800,15 @@ function scheduleDiagnostics() {
   if (state.activeTab.endsWith('.java')) delay = JAVA_DIAG_DELAY_MS;
   else if (isProjectBuildFile(state.activeTab)) delay = BUILD_DIAG_DELAY_MS;
   else if (window.ReaperLang?.isMarkupOrConfigPath?.(state.activeTab)) delay = CONFIG_DIAG_DELAY_MS;
-  // Keep existing squiggles until the next compile finishes (no flicker while typing).
-  diagTimer = setTimeout(runDiagnostics, delay);
+  diagTimer = setTimeout(() => {
+    diagTimer = null;
+    if (!state.repo || !state.editor || !state.activeTab) return;
+    if (state.activeTab.endsWith('.java')) {
+      queueJavaDiagnostics(state.activeTab, state.editor.getValue(), { scope: 'typing', force: false });
+    } else {
+      void runDiagnostics();
+    }
+  }, delay);
 }
 
 function clearDiagDecorations() {
@@ -10929,12 +11225,13 @@ async function runDiagnostics() {
     clearDiagnostics();
     return;
   }
+  if (state.activeTab.endsWith('.java')) return;
   const path = state.activeTab;
   const content = state.editor.getValue();
   const seq = ++diagSeq;
   try {
     const result = normalizeDiagnosticsResponse(
-      await fetchDiagnosticsForPath(path, content),
+      await fetchDiagnosticsForPath(path, content, { scope: 'typing' }),
     );
     if (seq !== diagSeq || path !== state.activeTab) return;
     if (result.cancelled && !result.diagnostics.length) {
@@ -10970,6 +11267,16 @@ function isDiagFetchAbort(err) {
   return err?.name === 'AbortError';
 }
 
+/** Free browser HTTP slots before save — long javac POSTs must not starve PUT /workspace/file. */
+function abortAllDiagnosticFetches() {
+  for (const entry of diagFetchByPath.values()) {
+    entry.controller.abort();
+  }
+  diagFetchByPath.clear();
+  allJavaDiagRefreshGen += 1;
+  javaFullDiagSeq += 1;
+}
+
 function collectJavaDiagnosticOverlays(excludePath) {
   const overlays = [];
   for (const path of state.tabs) {
@@ -10993,14 +11300,31 @@ function normalizeDiagnosticsResponse(body) {
   };
 }
 
-async function fetchDiagnosticsForPath(path, content, { signal: outerSignal } = {}) {
+const JAVA_DIAG_FETCH_TIMEOUT_MS = 60000;
+const SAVE_FETCH_TIMEOUT_MS = 15000;
+const SAVE_MAX_RETRIES = 2;
+
+async function fetchDiagnosticsForPath(path, content, { scope = 'typing', signal: outerSignal, force = false } = {}) {
   const prev = diagFetchByPath.get(path);
-  // Same file + same buffer: share the in-flight compile (don't abort — javac can take 30s+).
-  if (prev && prev.content === content) {
+  // Same path+content+scope: share in-flight compile (force must not cancel duplicate saves).
+  if (prev && prev.content === content && prev.scope === scope) {
     if (outerSignal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
     return prev.promise;
+  }
+  // Full javac with stale buffer: chain after in-flight compile (never abort — matches save→javac integration).
+  if (prev && prev.scope === 'full' && scope === 'full' && prev.content !== content) {
+    if (outerSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    return prev.promise.then(
+      () => fetchDiagnosticsForPath(path, content, { scope: 'full', signal: outerSignal }),
+      (err) => {
+        if (err?.name === 'AbortError') throw err;
+        return fetchDiagnosticsForPath(path, content, { scope: 'full', signal: outerSignal });
+      },
+    );
   }
   if (prev) prev.controller.abort();
 
@@ -11011,25 +11335,33 @@ async function fetchDiagnosticsForPath(path, content, { signal: outerSignal } = 
   }
 
   const promise = (async () => {
+    const timeoutId = scope === 'full'
+      ? setTimeout(() => controller.abort(), JAVA_DIAG_FETCH_TIMEOUT_MS)
+      : null;
     try {
       return await api(repoApi(state.repo, '/workspace/diagnostics'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Connection: 'close',
+        },
         signal: controller.signal,
         body: JSON.stringify({
           path,
           content,
-          overlays: collectJavaDiagnosticOverlays(path),
+          scope,
+          overlays: scope === 'full' ? collectJavaDiagnosticOverlays(path) : [],
         }),
       });
     } finally {
+      if (timeoutId) clearTimeout(timeoutId);
       if (diagFetchByPath.get(path)?.controller === controller) {
         diagFetchByPath.delete(path);
       }
     }
   })();
 
-  diagFetchByPath.set(path, { controller, promise, content });
+  diagFetchByPath.set(path, { controller, promise, content, scope });
   return promise;
 }
 
@@ -11048,7 +11380,7 @@ async function refreshAllJavaTabDiagnostics() {
       : (state.tabContents.get(path) ?? '');
     try {
       const result = normalizeDiagnosticsResponse(
-        await fetchDiagnosticsForPath(path, content),
+        await fetchDiagnosticsForPath(path, content, { scope: 'full' }),
       );
       if (refreshGen !== allJavaDiagRefreshGen) return;
       if (result.cancelled && !result.diagnostics.length) continue;
@@ -11058,7 +11390,61 @@ async function refreshAllJavaTabDiagnostics() {
     } catch (err) {
       if (!isDiagFetchAbort(err)) { /* ignore transient errors */ }
     }
+    if (refreshGen !== allJavaDiagRefreshGen) return;
+    await new Promise((resolve) => setTimeout(resolve, JAVA_DIAG_FULL_STAGGER_MS));
   }
+}
+
+let javaFullDiagDeferTimer = null;
+
+/** Coalesce Java javac: one compile at a time, latest buffer wins. */
+function queueJavaDiagnostics(path, content, { scope = 'full', immediate = false, force = false } = {}) {
+  if (!state.repo || !path?.endsWith('.java')) return;
+  if (!usesInProcessApi() && (saveGateActive || state.saveInFlight || state.autoSaveInFlight)) {
+    clearTimeout(javaFullDiagDeferTimer);
+    javaFullDiagDeferTimer = setTimeout(() => {
+      javaFullDiagDeferTimer = null;
+      queueJavaDiagnostics(path, content, { scope, immediate, force });
+    }, 50);
+    return;
+  }
+  const snapshot = content ?? state.editor?.getValue();
+  if (snapshot == null) return;
+  javaFullCompilePending = { path, content: snapshot, force, scope };
+  clearTimeout(javaFullDiagTimer);
+  javaFullDiagTimer = setTimeout(() => {
+    void flushJavaDiagnosticQueue();
+  }, immediate ? 0 : JAVA_QUEUE_DIAG_DELAY_MS);
+}
+
+function queueJavaFullDiagnostics(path, content, opts = {}) {
+  return queueJavaDiagnostics(path, content, { scope: 'full', ...opts });
+}
+
+async function flushJavaDiagnosticQueue() {
+  javaFullDiagTimer = null;
+  if (javaFullCompileRunning) return;
+  while (javaFullCompilePending) {
+    const job = javaFullCompilePending;
+    javaFullCompilePending = null;
+    if (job.path !== state.activeTab) continue;
+    javaFullCompileRunning = true;
+    try {
+      const latest = state.editor?.getValue() ?? job.content;
+      await runJavaDiagnosticsForPath(job.path, latest, {
+        scope: job.scope ?? 'full',
+        force: job.force,
+      });
+    } finally {
+      javaFullCompileRunning = false;
+    }
+  }
+}
+
+/** Debounced full javac after auto-save or tab switch (auto-save is on by default). */
+function scheduleJavaFullDiagnostics() {
+  if (!state.repo || !state.activeTab?.endsWith('.java')) return;
+  queueJavaFullDiagnostics(state.activeTab, state.editor?.getValue(), { force: false });
 }
 
 function refreshProjectClasspathUi() {
@@ -11927,6 +12313,151 @@ function closeWorkspaceTabs() {
   closeAllTabs();
 }
 
+async function readTabFromDisk(path) {
+  const q = new URLSearchParams({ path, _t: String(Date.now()) });
+  const body = await api(repoApi(state.repo, `/workspace/file?${q}`), { allowDuringSave: true });
+  return body?.content ?? '';
+}
+
+function editorContentForPath(path) {
+  if (state.activeTab === path && state.editor) return state.editor.getValue();
+  return state.tabContents.get(path);
+}
+
+async function writeTabToDiskOnce(path, content, { attempt = 0 } = {}) {
+  if (!state.repo) throw new Error('No repository open — select a repo before saving');
+  if (!path) throw new Error('No file path to save');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SAVE_FETCH_TIMEOUT_MS);
+  try {
+    await api(repoApi(state.repo, '/workspace/file'), {
+      method: 'PUT',
+      body: JSON.stringify({ path, content }),
+      signal: controller.signal,
+      allowDuringSave: true,
+    });
+    if (!usesInProcessApi()) {
+      const disk = await readTabFromDisk(path);
+      if (disk !== content) {
+        throw new Error('Save did not persist to disk');
+      }
+    }
+  } catch (err) {
+    if (isDiagFetchAbort(err) && attempt < SAVE_MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      return writeTabToDiskOnce(path, content, { attempt: attempt + 1 });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  state.tabContents.set(path, content);
+  const current = editorContentForPath(path);
+  if (current === content) {
+    state.dirty.delete(path);
+  } else {
+    state.dirty.add(path);
+  }
+  updateSaveButton();
+  renderTabs();
+  return state.dirty.has(path);
+}
+
+async function flushSaveWriteCoalesce(path, entry, attempt) {
+  entry.running = true;
+  try {
+    let lastStillDirty = false;
+    while (entry.pending !== null) {
+      const batch = entry.pending;
+      entry.pending = null;
+      lastStillDirty = await writeTabToDiskOnce(path, batch, { attempt });
+    }
+    for (const w of entry.waiters) w.resolve(lastStillDirty);
+    entry.waiters.length = 0;
+    return lastStillDirty;
+  } catch (err) {
+    for (const w of entry.waiters) w.reject(err);
+    entry.waiters.length = 0;
+    throw err;
+  } finally {
+    entry.running = false;
+    if (entry.pending !== null) {
+      void flushSaveWriteCoalesce(path, entry, attempt);
+    } else if (entry.waiters.length === 0) {
+      saveWriteCoalesceByPath.delete(path);
+    }
+  }
+}
+
+async function writeTabToDisk(path, content, { attempt = 0 } = {}) {
+  let entry = saveWriteCoalesceByPath.get(path);
+  if (!entry) {
+    entry = { pending: null, running: false, waiters: [] };
+    saveWriteCoalesceByPath.set(path, entry);
+  }
+  entry.pending = content;
+  if (entry.running) {
+    return new Promise((resolve, reject) => {
+      entry.waiters.push({ resolve, reject });
+    });
+  }
+  return flushSaveWriteCoalesce(path, entry, attempt);
+}
+
+async function autoSaveToDisk() {
+  if (!getAutoSaveEnabled() || !state.repo || !state.activeTab || !state.editor) return;
+  if (state.activeTab.startsWith('.reaper/')) return;
+  if (isExternalEditorPath(state.activeTab)) return;
+  const path = state.activeTab;
+  if (!state.dirty.has(path)) return;
+  if (state.autoSaveInFlight) return;
+  const content = editorContentForPath(path);
+  if (shouldDeferAutoSave(content, path)) {
+    scheduleAutoSave(AUTO_SAVE_INCOMPLETE_RETRY_MS);
+    return;
+  }
+
+  state.autoSaveInFlight = true;
+  state.saveInFlight = true;
+  let saveContext = null;
+  let persisted = false;
+  try {
+    saveContext = await prepareForSave();
+    showSavingFooterStatus();
+    await writeTabToDisk(path, content);
+    persisted = true;
+  } catch (err) {
+    console.warn('[Reaper] auto-save failed', err);
+    showSaveFooterStatus('Auto-save failed', { error: true, auto: true });
+  } finally {
+    state.autoSaveInFlight = false;
+    state.saveInFlight = false;
+    if (!saveContext?.lightweight) leaveSaveGate();
+    if (saveContext?.wasPolling && state.repo) {
+      startProjectIndexPolling();
+    }
+  }
+
+  // Disk first — javac and git only after verified persist.
+  if (!persisted) return;
+  if (path.endsWith('.java')) {
+    window.ReaperLang?.clearCompletionCache?.();
+    clearSaveFooterStatus();
+    const el = $('#status-message');
+    if (el) {
+      el.textContent = 'Saved';
+      el.classList.add('is-save-hint', 'is-save-hint-auto');
+    }
+    clearTimeout(javaFullDiagTimer);
+    javaFullDiagTimer = null;
+    javaFullCompilePending = null;
+    queueJavaDiagnostics(path, content, { scope: 'typing', immediate: true, force: false });
+  } else {
+    showSaveFooterStatus('Saved', { auto: true });
+  }
+  void refreshGitStatus();
+}
+
 async function saveFile(options = {}) {
   const { silent = false, skipProjectReload = false } = options;
   if (!state.activeTab || !state.editor) return;
@@ -11936,25 +12467,36 @@ async function saveFile(options = {}) {
   }
   const savedPath = state.activeTab;
   const content = state.editor.getValue();
+  let saveContext = null;
+  state.saveInFlight = true;
   try {
-    await api(repoApi(state.repo, '/workspace/file'), {
-      method: 'PUT',
-      body: JSON.stringify({ path: savedPath, content }),
-    });
-    state.tabContents.set(savedPath, content);
-    state.dirty.delete(savedPath);
-    updateSaveButton();
-    renderTabs();
+    saveContext = await prepareForSave();
+    showSavingFooterStatus();
+    const stillDirty = await writeTabToDisk(savedPath, content);
+    if (stillDirty) {
+      if (!silent) showSaveFooterStatus('Saved · pending edits', { ms: 2500 });
+    } else if (!silent) {
+      showSaveFooterStatus('Saved');
+    }
+    if (savedPath.endsWith('.java')) {
+      window.ReaperLang?.clearCompletionCache?.();
+      clearTimeout(javaFullDiagTimer);
+      javaFullDiagTimer = null;
+      if (silent) {
+        scheduleJavaFullDiagnostics();
+      } else {
+        javaFullCompilePending = null;
+        queueJavaFullDiagnostics(savedPath, content, {
+          immediate: true,
+          force: true,
+        });
+      }
+    }
     if (!silent) {
-      await refreshTree();
-      await refreshGitStatus();
-      toast('Saved', 'success');
+      void refreshTree();
+      void refreshGitStatus();
     }
     if (!skipProjectReload && isProjectClasspathFile(savedPath) && hasAutoReloadProject()) {
-      if (isProjectSourceFile(savedPath)) {
-        window.ReaperLang?.clearCompletionCache?.();
-        scheduleAllJavaDiagnostics();
-      }
       scheduleProjectReload(0);
     }
     if (isDockerComposeFile(savedPath)) {
@@ -11964,22 +12506,67 @@ async function saveFile(options = {}) {
       scheduleDbViewerRefresh();
     }
   } catch (err) {
-    if (!silent) toast(err.message || 'Failed to save', 'error');
+    clearTimeout(javaFullDiagTimer);
+    javaFullDiagTimer = null;
+    javaFullCompilePending = null;
+    ++javaFullDiagSeq;
+    if (savedPath.endsWith('.java') && state.activeTab === savedPath) {
+      clearDiagnostics();
+    }
+    showSaveFooterStatus('Save failed', { error: true });
+    if (!silent) {
+      const msg = isDiagFetchAbort(err)
+        ? 'Save timed out — try ⌘S again'
+        : (err.message || 'Failed to save');
+      toast(msg, 'error');
+    }
+  } finally {
+    state.saveInFlight = false;
+    if (!saveContext?.lightweight) leaveSaveGate();
+    if (saveContext?.wasPolling && state.repo) {
+      startProjectIndexPolling();
+    }
   }
 }
 
-function scheduleAutoSave() {
+function lineLooksIncompleteForAutoSave(line) {
+  const trimmed = line.trimEnd();
+  if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) return false;
+  if (/=\s*$/.test(trimmed)) return true;
+  if (/\.\s*$/.test(trimmed)) return true;
+  if (/,\s*$/.test(trimmed)) return true;
+  if (/(\|\||&&|\?|:|\+\+|--)\s*$/.test(trimmed)) return true;
+  if (/\(\s*$/.test(trimmed) && !/\)/.test(trimmed)) return true;
+  return false;
+}
+
+function shouldDeferAutoSave(content, path) {
+  if (!content || !path || !AUTO_SAVE_CODE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '')) {
+    return false;
+  }
+  return content.split('\n').some((line) => lineLooksIncompleteForAutoSave(line));
+}
+
+function autoSaveDelayMsForPath(path) {
+  return path?.endsWith('.java') ? JAVA_AUTO_SAVE_DELAY_MS : AUTO_SAVE_DELAY_MS;
+}
+
+function scheduleAutoSave(retryMs) {
   if (!getAutoSaveEnabled() || !state.repo || !state.activeTab) return;
   if (state.activeTab.startsWith('.reaper/')) return;
   if (isExternalEditorPath(state.activeTab)) return;
   if (!state.dirty.has(state.activeTab)) return;
+  const path = state.activeTab;
   clearTimeout(state.autoSaveTimer);
   state.autoSaveTimer = setTimeout(async () => {
-    if (state.dirty.has(state.activeTab)) {
-      await saveFile({ silent: true });
-      await refreshGitStatus();
+    if (!state.dirty.has(path) || state.activeTab !== path) return;
+    const content = editorContentForPath(path);
+    if (shouldDeferAutoSave(content, path)) {
+      scheduleAutoSave(AUTO_SAVE_INCOMPLETE_RETRY_MS);
+      return;
     }
-  }, AUTO_SAVE_DELAY_MS);
+    await autoSaveToDisk();
+  }, retryMs ?? autoSaveDelayMsForPath(path));
 }
 
 async function createFile(e) {
@@ -12978,26 +13565,32 @@ async function checkoutBranch(branch) {
 let terminalNextNum = 1;
 
 const TERM_SOURCE_EXT = 'java|kt|kts|scala|groovy|gradle|xml|properties|json|yaml|yml|rs|py|js|ts|tsx|jsx|go|rb|cs|cpp|c|h|hpp|md|sql|html|css|vue|swift|php|sh|toml|proto';
-const TERM_FILE_PATH = `[A-Za-z0-9_.@\\[\\]-]+(?:[\\/][A-Za-z0-9_.@\\[\\]-]+)*\\.(?:${TERM_SOURCE_EXT})`;
+const TERM_PATH_SEGMENT = `[A-Za-z0-9_.@\\[\\]-]+`;
+const TERM_FILE_PATH = `(?:(?:[A-Za-z]:)?\\/)?${TERM_PATH_SEGMENT}(?:[\\/]${TERM_PATH_SEGMENT})*\\.(?:${TERM_SOURCE_EXT})`;
 
 function resolveTerminalFilePath(rawPath) {
-  let p = workspaceExplorerPath(String(rawPath || '').trim());
+  let p = workspaceExplorerPath(String(rawPath || '').trim().replace(/\\/g, '/'));
   if (!p || /^https?:\/\//i.test(p)) return null;
 
   const projectFolder = (state.projectFolder || '').replace(/\\/g, '/').replace(/\/$/, '');
   if (projectFolder && (p === projectFolder || p.startsWith(`${projectFolder}/`))) {
     p = p === projectFolder ? '' : p.slice(projectFolder.length + 1);
   } else if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
+    for (const tab of state.tabs || []) {
+      const rel = workspaceExplorerPath(tab);
+      if (!rel) continue;
+      if (p.endsWith(`/${rel}`) || p.endsWith(rel)) return rel;
+    }
     const markers = ['/src/', '/test/', '/main/', '/java/', '/kotlin/', '/resources/'];
     for (const mark of markers) {
-      const idx = p.indexOf(mark);
+      const idx = p.lastIndexOf(mark);
       if (idx >= 0) {
         p = p.slice(idx + 1);
         break;
       }
     }
     if (p.startsWith('/') || /^[A-Za-z]:\//.test(p)) {
-      const tail = p.match(/\/((?:src|test)\/.+)$/);
+      const tail = p.match(/\/((?:src|test|services)\/.+)$/);
       if (!tail) return null;
       p = tail[1];
     }
@@ -13008,11 +13601,16 @@ function resolveTerminalFilePath(rawPath) {
   return p;
 }
 
-function terminalLinkRange(match) {
+function terminalLinkRange(match, lineText = '') {
   const path = match[1];
-  const start = match.index + match[0].indexOf(path);
+  let start = match.index + match[0].indexOf(path);
   if (match[0].includes('[')) {
-    return { start, end: start + match[0].slice(match[0].indexOf(path)).length };
+    let slice = match[0].slice(match[0].indexOf(path));
+    if (lineText && start > 0 && lineText[start - 1] === '/' && path[0] !== '/') {
+      start -= 1;
+      slice = `/${slice}`;
+    }
+    return { start, end: start + slice.length };
   }
   let end = start + path.length + 1 + String(match[2]).length;
   if (match[3] && /:\d+(?::|\]|$)/.test(match[0])) {
@@ -13052,7 +13650,10 @@ function parseTerminalFileLocations(lineText) {
     let match;
     while ((match = re.exec(lineText)) !== null) {
       const hit = pick(match);
-      const { start, end } = terminalLinkRange(match);
+      if (match.index > 0 && lineText[match.index - 1] === '/' && !hit.path.startsWith('/')) {
+        hit.path = `/${hit.path}`;
+      }
+      const { start, end } = terminalLinkRange(match, lineText);
       const key = `${hit.path}:${hit.line}:${hit.column}:${start}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -13201,8 +13802,10 @@ function sendTerminalResize(term) {
 }
 
 function terminalWsUrl(term) {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  let url = `${proto}//${location.host}/api/repos/${encodeURIComponent(state.repo)}/workspace/terminal`;
+  const loopback = window.__REAPER_LOOPBACK_WS__;
+  const base = loopback
+    ?? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+  let url = `${base}/api/repos/${encodeURIComponent(state.repo)}/workspace/terminal`;
   if (term.cwd) url += `?cwd=${encodeURIComponent(term.cwd)}`;
   return url;
 }
@@ -15040,6 +15643,7 @@ function bindEvents() {
     btn.addEventListener('click', () => setTerminalDock(btn.dataset.terminalDock));
   });
   bindTerminalTabs();
+  bindEditorTabs();
   window.addEventListener('resize', () => {
     if (state.terminalOpen || state.activePanel === 'terminal') {
       fitActiveTerminal();

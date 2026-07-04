@@ -1,8 +1,14 @@
 mod api;
 mod agent;
 mod cursor;
+mod custom_protocol;
 mod gemini_chat;
 mod git_http;
+pub mod serve;
+pub use custom_protocol::{
+    loopback_ws_base, webview_init_script, GuiProtocolBridge, SharedGuiProtocolBridge, SCHEME,
+    WEBVIEW_ENTRY,
+};
 mod settings;
 mod ui_preferences;
 

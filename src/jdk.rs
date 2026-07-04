@@ -314,6 +314,15 @@ pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
     Ok(home.to_path_buf())
 }
 
+/// `javac` from the same JDK as [`effective_java_home`] (bundled JDK in Reaper.app).
+pub fn javac_path() -> Result<PathBuf> {
+    let javac = effective_java_home()?.join("bin/javac");
+    if !javac.is_file() {
+        bail!("JDK missing bin/javac at {}", javac.display());
+    }
+    Ok(javac)
+}
+
 fn detect_java_home_auto() -> Result<PathBuf> {
     // Use 1.8 for legacy JDK 8; macOS `java_home -v 8` often resolves to a newer JDK.
     detect_java_home_for_versions(&["21", "17", "11", "25", "23", "24", "26", "1.8"])

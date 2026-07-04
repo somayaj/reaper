@@ -275,72 +275,6 @@
   --c-gray-900: #0f172a;
 }
 
-[data-theme="softgray"] {
-  --ij-bg: #f1f5f9;
-  --ij-editor: #f1f5f9;
-  --ij-panel: #f8fafc;
-  --ij-panel-header: #f8fafc;
-  --ij-border: #cbd5e1;
-  --ij-border-light: #e2e8f0;
-  --ij-splitter: #64748b;
-  --ij-text: #334155;
-  --ij-text-bright: #0f172a;
-  --ij-text-dim: #64748b;
-  --ij-text-heading: #0f172a;
-  --ij-accent: #475569;
-  --ij-accent-hover: #334155;
-  --ij-accent-muted: rgba(71, 85, 105, 0.1);
-  --ij-accent-fg: #ffffff;
-  --ij-selection: #cbd5e1;
-  --ij-tab-active: #ffffff;
-  --ij-tab-inactive: #f1f5f9;
-  --ij-tab-border-active: #dc2626;
-  --ij-toolbar: #f8fafc;
-  --ij-status: #e2e8f0;
-  --ij-gutter: #f1f5f9;
-  --ij-run: #475569;
-  --ij-run-hover: #334155;
-  --ij-modified: #ca8a04;
-  --ij-added: #15803d;
-  --ij-deleted: #dc2626;
-  --ij-untracked: #64748b;
-  --ij-toolwindow-active: #e2e8f0;
-  --ij-overlay: rgba(15, 23, 42, 0.32);
-  --ij-welcome-glow: rgba(220, 38, 38, 0.05);
-  --ij-agent-user-bg: #e2e8f0;
-  --ij-agent-assistant-bg: #f8fafc;
-  --ij-diff-hunk: #475569;
-  --ij-tree-folder: #334155;
-  --ij-tree-file: #64748b;
-  --ij-tree-source-main: #047857;
-  --ij-tree-source-test: #6d28d9;
-  --ij-tree-source-generated: #b45309;
-  --ij-shadow: 0 8px 32px rgba(15, 23, 42, 0.1);
-  --c-surface-950: #f1f5f9;
-  --c-surface-900: #f8fafc;
-  --c-surface-850: #e2e8f0;
-  --c-surface-800: #cbd5e1;
-  --c-surface-700: #94a3b8;
-  --c-surface-600: #64748b;
-  --c-accent: #475569;
-  --c-accent-hover: #334155;
-  --c-accent-muted: #47556918;
-  --c-accent-ring: #47556944;
-  --c-git-added: #15803d;
-  --c-git-modified: #ca8a04;
-  --c-git-deleted: #dc2626;
-  --c-git-untracked: #64748b;
-  --c-gray-100: #f8fafc;
-  --c-gray-200: #f1f5f9;
-  --c-gray-300: #334155;
-  --c-gray-400: #475569;
-  --c-gray-500: #64748b;
-  --c-gray-600: #94a3b8;
-  --c-gray-700: #cbd5e1;
-  --c-gray-800: #e2e8f0;
-  --c-gray-900: #0f172a;
-}
-
 [data-theme="blueblack"] {
   --ij-bg: #000000;
   --ij-editor: #000000;
@@ -1882,6 +1816,7 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   opacity: 0;
   flex-shrink: 0;
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .ij-tab:hover .ij-tab-close,
@@ -4182,6 +4117,28 @@ main { background: var(--ij-bg); }
 #status-message.is-nav-warn {
   color: var(--ij-modified);
   font-weight: 500;
+}
+
+#status-message.is-save-hint {
+  color: var(--ij-added);
+  font-weight: 600;
+}
+
+#status-message.is-save-hint-auto {
+  color: var(--ij-added);
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+#status-message.is-save-hint-pending {
+  color: var(--ij-text-dim);
+  font-weight: 500;
+  font-style: italic;
+}
+
+#status-message.is-save-hint-error {
+  color: #ff5555;
+  font-weight: 600;
 }
 
 @keyframes ij-busy-spin {

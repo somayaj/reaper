@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -23,8 +25,53 @@ use crate::repos::{
 use crate::agent as git_agent;
 use crate::state::AppState;
 use crate::workspace;
+use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
+use tokio::time::timeout;
 
 use super::agent;
+
+static JAVA_FULL_DIAG_SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+const JAVA_DIAG_API_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// When the HTTP client disconnects (save abort, tab close), abort the diag job and kill javac.
+struct DiagRequestGuard {
+    ws: PathBuf,
+    rel_path: String,
+    job_abort: Option<AbortHandle>,
+    cancel_on_drop: bool,
+}
+
+impl DiagRequestGuard {
+    fn disable(&mut self) {
+        self.cancel_on_drop = false;
+        self.job_abort = None;
+    }
+}
+
+impl Drop for DiagRequestGuard {
+    fn drop(&mut self) {
+        if self.cancel_on_drop {
+            if let Some(abort) = self.job_abort.take() {
+                abort.abort();
+            }
+            workspace::cancel_inflight_diagnostics(&self.ws, &self.rel_path);
+        }
+    }
+}
+
+fn diagnostics_http_response(body: impl IntoResponse) -> Response {
+    let mut res = body.into_response();
+    res.headers_mut().insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("close"),
+    );
+    res
+}
+
+fn cancelled_diagnostics_response() -> Response {
+    diagnostics_http_response(Json(workspace::FileDiagnosticsResult::cancelled()))
+}
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -369,10 +416,18 @@ async fn open_workspace(
             let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
             state.project_index_jobs.on_open(&name, &ws);
             let index_status = state.project_index_jobs.status(&name);
+            let uses_jdtls = workspace::workspace_uses_jdtls(&ws, &profile);
+            let jdtls_ready = workspace::jdtls_workspace_ready(&ws);
             Json(serde_json::json!({
                 "path": ws.display().to_string(),
                 "profile": profile,
                 "indexing": index_status.state == "running",
+                "jdtls": {
+                    "enabled": workspace::jdtls_enabled(),
+                    "uses": uses_jdtls,
+                    "ready": jdtls_ready,
+                    "warming": workspace::jdtls_enabled() && uses_jdtls && !jdtls_ready,
+                },
             }))
             .into_response()
         }
@@ -434,11 +489,16 @@ async fn read_workspace_file(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::read_file(&ws, &q.path) {
-        Ok(content) => {
+    let path = q.path.clone();
+    match tokio::task::spawn_blocking(move || workspace::read_file(&ws, &path)).await {
+        Ok(Ok(content)) => {
             Json(serde_json::json!({ "path": q.path, "content": content })).into_response()
         }
-        Err(e) => api_error(StatusCode::NOT_FOUND, e),
+        Ok(Err(e)) => api_error(StatusCode::NOT_FOUND, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("read file task"),
+        ),
     }
 }
 
@@ -464,8 +524,14 @@ async fn create_workspace_file(
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
     let content = body.content.unwrap_or_default();
-    match workspace::create_file(&ws, &body.path, &content) {
-        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({ "path": body.path }))).into_response(),
+    let rel_path = body.path.clone();
+    match workspace::create_file(&ws, &rel_path, &content) {
+        Ok(()) => {
+            if rel_path.ends_with(".java") {
+                workspace::patch_java_index_after_save(&ws, &rel_path, &content);
+            }
+            (StatusCode::CREATED, Json(serde_json::json!({ "path": body.path }))).into_response()
+        }
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -479,9 +545,31 @@ async fn save_workspace_file(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::write_file(&ws, &body.path, &body.content) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let rel_path = body.path.clone();
+    let content = body.content.clone();
+    let file_path = match workspace::safe_join(&ws, &rel_path) {
+        Ok(p) => p,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    if let Some(parent) = file_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                anyhow::Error::from(e).context("create parent dirs"),
+            );
+        }
+    }
+    match tokio::fs::write(&file_path, content.as_bytes()).await {
+        Ok(()) => {
+            if rel_path.ends_with(".java") {
+                workspace::patch_java_index_after_save(&ws, &rel_path, &content);
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("write file"),
+        ),
     }
 }
 
@@ -543,9 +631,13 @@ async fn workspace_status(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::workspace_status(&ws) {
-        Ok(status) => Json(status).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    match tokio::task::spawn_blocking(move || workspace::workspace_status(&ws)).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("workspace status task"),
+        ),
     }
 }
 
@@ -1867,12 +1959,29 @@ struct DiagnosticsOverlay {
     content: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum DiagnosticsScope {
+    #[default]
+    Typing,
+    Full,
+}
+
 #[derive(Deserialize)]
 struct DiagnosticsRequest {
     path: String,
     content: String,
     #[serde(default)]
     overlays: Vec<DiagnosticsOverlay>,
+    #[serde(default)]
+    scope: DiagnosticsScope,
+}
+
+fn java_diag_scope(scope: DiagnosticsScope) -> workspace::JavaDiagScope {
+    match scope {
+        DiagnosticsScope::Typing => workspace::JavaDiagScope::Typing,
+        DiagnosticsScope::Full => workspace::JavaDiagScope::Full,
+    }
 }
 
 async fn java_index_status(
@@ -1905,8 +2014,10 @@ async fn project_index_status(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let mut status = state.project_index_jobs.status(&name);
-    if let Ok(ws) = workspace::ensure_workspace(&state.config, &name) {
-        status.needs_refresh = workspace::java_index_needs_refresh(&ws);
+    if status.state != "running" {
+        if let Ok(ws) = workspace::ensure_workspace(&state.config, &name) {
+            status.needs_refresh = workspace::java_index_needs_refresh(&ws);
+        }
     }
     Json(status).into_response()
 }
@@ -1943,27 +2054,68 @@ async fn workspace_diagnostics(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(body): Json<DiagnosticsRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let ws = match workspace::ensure_workspace(&state.config, &name) {
         Ok(ws) => ws,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => return diagnostics_http_response(api_error(StatusCode::BAD_REQUEST, e)),
     };
     let path = body.path.trim().to_string();
+    let rel_path = path.clone();
     let content = body.content;
+    let scope = java_diag_scope(body.scope);
+    let scope_is_full = scope == workspace::JavaDiagScope::Full;
     let overlays: Vec<(String, String)> = body
         .overlays
         .into_iter()
         .map(|o| (o.path.trim().to_string(), o.content))
         .filter(|(p, _)| !p.is_empty())
         .collect();
-    match tokio::task::spawn_blocking(move || {
-        workspace::file_diagnostics(&ws, &path, &content, &overlays)
-    })
-    .await
-    {
-        Ok(Ok(result)) => Json(result).into_response(),
-        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("diagnostics task failed: {e:#}")),
+
+    let (tx, rx) = oneshot::channel();
+    let ws_job = ws.clone();
+    let path_job = path.clone();
+    let content_job = content.clone();
+    let overlays_job = overlays.clone();
+    let job = tokio::spawn(async move {
+        let _full_permit = if scope_is_full {
+            let sem = JAVA_FULL_DIAG_SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)));
+            Some(sem.acquire().await.ok())
+        } else {
+            None
+        };
+        let result = timeout(
+            JAVA_DIAG_API_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                workspace::file_diagnostics(&ws_job, &path_job, &content_job, &overlays_job, scope)
+            }),
+        )
+        .await;
+        let _ = tx.send(result);
+    });
+
+    let mut guard = DiagRequestGuard {
+        ws: ws.clone(),
+        rel_path: rel_path.clone(),
+        job_abort: Some(job.abort_handle()),
+        cancel_on_drop: true,
+    };
+
+    // Await the detached job via oneshot — if the client disconnects (fetch abort), hyper drops
+    // this handler, the guard aborts javac, and the HTTP connection slot frees immediately.
+    match rx.await {
+        Ok(Ok(Ok(Ok(result)))) => {
+            guard.disable();
+            diagnostics_http_response(Json(result))
+        }
+        Ok(Ok(Ok(Err(e)))) => {
+            guard.disable();
+            diagnostics_http_response(api_error(StatusCode::BAD_REQUEST, e))
+        }
+        Ok(Ok(Err(e))) => diagnostics_http_response(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("diagnostics task failed: {e:#}"),
+        )),
+        Ok(Err(_)) | Err(_) => cancelled_diagnostics_response(),
     }
 }
 
@@ -2017,7 +2169,17 @@ async fn workspace_quick_fixes(
     )
     .await
     {
-        Ok(ai) => workspace::merge_quick_fixes(&mut fixes, ai),
+        Ok(ai) => {
+            let ai = workspace::filter_ai_import_fixes(
+                &ws,
+                path,
+                &body.content,
+                &fixes,
+                ai,
+                &body.diagnostics,
+            );
+            workspace::merge_quick_fixes(&mut fixes, ai);
+        }
         Err(e) => {
             if fixes.is_empty() {
                 return api_error(StatusCode::BAD_REQUEST, e);
