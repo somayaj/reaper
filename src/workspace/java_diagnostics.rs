@@ -18,6 +18,15 @@ const DIAG_OUT: &str = ".reaper/java-diagnostics-out";
 const TEST_COMPILE_CACHE: &str = "test-compile-cache.json";
 const TEST_COMPILE_TTL: Duration = Duration::from_secs(120);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JavaDiagScope {
+    /// Active-file keystroke path: single-file javac, no Gradle test compile, no tab overlays.
+    #[default]
+    Typing,
+    /// Save / classpath refresh: companions, Gradle test compile, all open-tab overlays.
+    Full,
+}
+
 pub type JavaDiagnostic = Diagnostic;
 
 fn run_cancellable_javac(
@@ -46,6 +55,7 @@ pub fn check_java(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: JavaDiagScope,
 ) -> Result<(Vec<Diagnostic>, bool)> {
     if !rel_path.ends_with(".java") {
         return Ok((Vec::new(), false));
@@ -54,9 +64,8 @@ pub fn check_java(
     let _ = safe_join(ws, rel_path)?;
 
     let project_root = find_gradle_root(ws, rel_path)?.or(find_maven_root(ws, rel_path)?);
-
     if let Some(root) = project_root.as_deref() {
-        check_project_java(ws, root, rel_path, content, overlays)
+        check_project_java(ws, root, rel_path, content, overlays, scope)
     } else {
         check_plain_java(ws, rel_path, content)
     }
@@ -68,17 +77,22 @@ fn check_project_java(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: JavaDiagScope,
 ) -> Result<(Vec<Diagnostic>, bool)> {
-    let _ = classpath::ensure_test_classpath_for_file(project_root, rel_path, content);
+    if scope == JavaDiagScope::Full {
+        let _ = classpath::ensure_test_classpath_for_file(project_root, rel_path, content);
 
-    if classpath::file_needs_test_classpath(rel_path, content)
-        && workspace_file_matches_disk(ws, rel_path, content)
-        && gradle::find_gradle_wrapper_root(project_root).join("gradlew").is_file()
-    {
-        if let Some(diags) =
-            gradle_test_compile_diagnostics(ws, project_root, rel_path, content)?
+        if classpath::file_needs_test_classpath(rel_path, content)
+            && workspace_file_matches_disk(ws, rel_path, content)
+            && gradle::find_gradle_wrapper_root(project_root).join("gradlew").is_file()
         {
-            return Ok((diags, false));
+            if let Some(diags) =
+                gradle_test_compile_diagnostics(ws, project_root, rel_path, content)?
+            {
+                if !diags.is_empty() {
+                    return Ok((diags, false));
+                }
+            }
         }
     }
 
@@ -96,9 +110,14 @@ fn check_project_java(
         );
     }
 
-    let overlay_root = sync_java_diagnostics_overlays(ws, project_root, rel_path, content, overlays)?;
+    let overlay_root =
+        sync_java_diagnostics_overlays(ws, project_root, rel_path, content, overlays, scope)?;
 
-    let sourcepath = classpath::project_java_sourcepath(ws, project_root, &overlay_root);
+    let sourcepath = if scope == JavaDiagScope::Full {
+        classpath::project_java_sourcepath(ws, project_root, &overlay_root)
+    } else {
+        Vec::new()
+    };
 
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
@@ -131,30 +150,15 @@ fn check_project_java(
         );
     }
     append_javac_release_args(&mut args, project_root);
-    for companion in collect_imported_project_source_files(
-        ws,
-        project_root,
-        content,
-        overlays,
-    ) {
-        let rel = companion
-            .strip_prefix(ws)
-            .or_else(|_| companion.strip_prefix(project_root))
-            .unwrap_or(&companion)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let overlay_path = overlay_root.join(&rel);
-        if overlay_path.is_file() {
-            args.push(overlay_path.to_string_lossy().into_owned());
-        } else if companion.is_file() {
-            args.push(companion.to_string_lossy().into_owned());
-        }
-    }
+    // Compile only the active overlay file; -sourcepath resolves cross-file types without
+    // spawning a multi-file javac that can stall the server on large multi-module projects.
     args.push(overlay_root.join(rel_path).to_string_lossy().into_owned());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let content_fp = fingerprint(content);
-    let out = run_cancellable_javac(ws, rel_path, content, &arg_refs)?;
+    let out = java_javac_inflight::with_workspace_java_lock(ws, || {
+        run_cancellable_javac(ws, rel_path, content, &arg_refs)
+    })?;
     let out = if out.cancelled {
         java_javac_inflight::peek_cached(ws, rel_path, content_fp).unwrap_or(out)
     } else {
@@ -222,6 +226,14 @@ fn filter_project_javac_diags(
     );
     enrich_missing_dependency_diags(&mut diags, project_root, content);
     enrich_static_import_diags(&mut diags, content);
+    diags.extend(local_missing_import_type_diags(
+        ws,
+        Some(project_root),
+        rel_path,
+        content,
+        overlays,
+        &diags,
+    ));
     diags
 }
 
@@ -231,6 +243,7 @@ fn sync_java_diagnostics_overlays(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: JavaDiagScope,
 ) -> Result<PathBuf> {
     let overlay_root = ws.join(DIAG_ROOT).join("overlay");
     let mut seen = std::collections::HashSet::new();
@@ -251,22 +264,24 @@ fn sync_java_diagnostics_overlays(
         std::fs::write(&overlay_file, text)?;
     }
 
-    for disk_path in collect_imported_project_source_files(ws, project_root, content, overlays) {
-        let rel = disk_path
-            .strip_prefix(ws)
-            .or_else(|_| disk_path.strip_prefix(project_root))
-            .unwrap_or(&disk_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !rel.ends_with(".java") || !seen.insert(rel.clone()) {
-            continue;
-        }
-        if let Ok(text) = std::fs::read_to_string(&disk_path) {
-            let overlay_file = overlay_root.join(&rel);
-            if let Some(parent) = overlay_file.parent() {
-                let _ = std::fs::create_dir_all(parent);
+    if scope == JavaDiagScope::Full {
+        for disk_path in collect_imported_project_source_files(ws, project_root, content, overlays) {
+            let rel = disk_path
+                .strip_prefix(ws)
+                .or_else(|_| disk_path.strip_prefix(project_root))
+                .unwrap_or(&disk_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !rel.ends_with(".java") || !seen.insert(rel.clone()) {
+                continue;
             }
-            let _ = std::fs::write(overlay_file, text);
+            if let Ok(text) = std::fs::read_to_string(&disk_path) {
+                let overlay_file = overlay_root.join(&rel);
+                if let Some(parent) = overlay_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(overlay_file, text);
+            }
         }
     }
 
@@ -1312,18 +1327,16 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<(Vec<Dia
         .replace('\\', "/");
 
     let content_fp = fingerprint(content);
-    let out = run_cancellable_javac(
-        ws,
-        rel_path,
-        content,
-        &[
-            "-encoding",
-            "UTF-8",
-            "-d",
-            out_dir.to_str().context("invalid out dir")?,
-            &rel,
-        ],
-    )?;
+    let javac_args = [
+        "-encoding",
+        "UTF-8",
+        "-d",
+        out_dir.to_str().context("invalid out dir")?,
+        &rel,
+    ];
+    let out = java_javac_inflight::with_workspace_java_lock(ws, || {
+        run_cancellable_javac(ws, rel_path, content, &javac_args)
+    })?;
     let out = if out.cancelled {
         java_javac_inflight::peek_cached(ws, rel_path, content_fp).unwrap_or(out)
     } else {
@@ -1782,7 +1795,13 @@ fn local_missing_import_type_diags(
         if code.trim().starts_with("import ") || code.trim().starts_with("package ") {
             continue;
         }
-        for simple in extract_used_type_names(code) {
+        let mut candidates: Vec<String> = extract_used_type_names(code);
+        for ann in super::java_psi::annotation_simple_names(code) {
+            if !candidates.iter().any(|c| c == &ann) {
+                candidates.push(ann);
+            }
+        }
+        for simple in candidates {
             if simple.len() < 2 || imported.contains(&simple) || declared.contains(&simple) {
                 continue;
             }
@@ -2064,6 +2083,30 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     fn ignores_inner_public_class_for_file_name() {
         let content = "public class Outer {\n    public static class Inner {\n    }\n}\n";
         assert!(local_file_class_name_diags("Outer.java", content).is_empty());
+    }
+
+    #[test]
+    fn local_missing_import_flags_slf4j_annotation_without_import() {
+        let content = r#"package com.example;
+
+@SpringBootApplication
+@Slf4j
+public class App {
+    public static void main(String[] args) {}
+}
+"#;
+        let diags = local_missing_import_type_diags(
+            Path::new("/repo"),
+            None,
+            "App.java",
+            content,
+            &[],
+            &[],
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("Slf4j")),
+            "expected Slf4j missing-import diagnostic, got {diags:?}"
+        );
     }
 
     #[test]
@@ -2592,11 +2635,30 @@ public class App {
             return;
         }
         let rel = "services/analytics-service/src/main/java/com/enterprise/analytics/AnalyticsServiceApplication.java";
-        let content = std::fs::read_to_string(ws.join(rel)).unwrap_or_default();
-        if content.is_empty() {
-            return;
-        }
-        let (diags, cancelled) = check_java(ws, rel, &content, &[]).unwrap();
+        // Intentional bugs — do not read from disk; workspace copy may be edited while editing.
+        let content = r#"package com.enterprise.analytics;
+
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.boot.SpringApplication;
+
+@SpringBootApplication(
+    scanBasePackages = {"com.enterprise.analytics", "com.enterprise.data", "com.enterprise.web"})
+@EnableDiscoveryClient
+public class AnalyticsServiceApplication {
+  public static void main(String[] args) throws Exception {
+    File file = new File("file");
+    File.createTempFile("file", null);
+    if (file.exists()) {
+      System.out.println("file exists: " + fike.exists());
+    }
+    exists();
+    SpringApplication.run(AnalyticsServiceApplication.class, args);
+  }
+}
+"#;
+        let (diags, cancelled) =
+            check_java(ws, rel, content, &[], JavaDiagScope::Full).unwrap();
         eprintln!("cancelled={cancelled} count={}", diags.len());
         for d in &diags {
             eprintln!("L{}: {}", d.line, d.message.lines().next().unwrap_or(""));
@@ -2614,6 +2676,33 @@ public class App {
             joined.contains("fike") || joined.contains("exists()") || joined.contains("null"),
             "expected javac errors for fike/exists/null, got: {joined}"
         );
+    }
+
+    fn javac_finds_missing_files_class() {
+        let ws = std::env::temp_dir().join("reaper-diag-files-class");
+        let _ = std::fs::remove_dir_all(&ws);
+        let rel = "src/main/java/com/example/App.java";
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        let content = r#"package com.example;
+public class App {
+  void m() {
+    var files = new Files();
+  }
+}
+"#;
+        std::fs::write(ws.join(rel), content).unwrap();
+        let (diags, cancelled) = check_java(&ws, rel, content, &[], JavaDiagScope::Full).unwrap();
+        assert!(!cancelled, "single-file javac should complete");
+        let joined = diags
+            .iter()
+            .map(|d| d.message.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("files") && joined.contains("cannot find symbol"),
+            "expected missing Files class diagnostic, got: {joined}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

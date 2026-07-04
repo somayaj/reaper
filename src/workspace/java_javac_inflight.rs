@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -118,6 +119,26 @@ pub fn peek_cached(
     }
 }
 
+/// Serialize Java diagnostic work (classpath resolution + javac) per workspace.
+pub fn with_workspace_java_lock<T>(
+    ws: &Path,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let ws_key = workspace_key(ws);
+    let ws_lock = workspace_lock_for(&ws_key);
+    let _guard = ws_lock
+        .lock()
+        .expect("java javac inflight workspace lock");
+    f()
+}
+
+/// Client disconnected or save aborted diagnostics — kill javac and supersede this file slot.
+pub fn cancel_inflight_diagnostics(ws: &Path, rel_path: &str) {
+    let slot = slot_for(&diag_key(ws, rel_path));
+    kill_previous(&slot);
+    slot.generation.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Run java/javac for diagnostics, cancelling any stale compile for the same workspace file.
 pub fn run_cancellable_java_command(
     ws: &Path,
@@ -177,19 +198,14 @@ pub fn run_cancellable_java_command(
 
     kill_previous(&slot);
 
-    let ws_key = workspace_key(ws);
-    let ws_lock = workspace_lock_for(&ws_key);
-    let _ws_guard = ws_lock
-        .lock()
-        .expect("java javac inflight workspace lock");
-
-    if slot.generation.load(Ordering::SeqCst) != my_gen {
-        return Ok(cancelled_output());
-    }
-
-    kill_previous(&slot);
-
-    let mut cmd = Command::new(program);
+    let executable = if program == "javac" {
+        crate::jdk::javac_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| program.to_string())
+    } else {
+        program.to_string()
+    };
+    let mut cmd = Command::new(&executable);
     cmd.args(args)
         .current_dir(ws)
         .stdout(Stdio::piped())
@@ -203,9 +219,16 @@ pub fn run_cancellable_java_command(
     let child_pid = child.id();
     *slot.pid.lock().expect("java javac inflight pid lock") = Some(child_pid);
 
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait on {program}"))?;
+    let output = match wait_child_output(child, child_pid, &slot, my_gen, program) {
+        Ok(output) => output,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("cancelled") || msg.contains("timed out") {
+                return Ok(cancelled_output());
+            }
+            return Err(e);
+        }
+    };
 
     {
         let mut pid_guard = slot.pid.lock().expect("java javac inflight pid lock");
@@ -241,6 +264,42 @@ fn cancelled_output() -> CancellableOutput {
     }
 }
 
+const JAVAC_DIAG_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn wait_child_output(
+    child: Child,
+    child_pid: u32,
+    slot: &Slot,
+    my_gen: u64,
+    program: &str,
+) -> Result<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let deadline = Instant::now() + JAVAC_DIAG_TIMEOUT;
+    loop {
+        if slot.generation.load(Ordering::SeqCst) != my_gen {
+            kill_pid(child_pid);
+            return Err(anyhow::anyhow!("{program} cancelled (superseded)"));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            kill_pid(child_pid);
+            tracing::warn!("{program} diagnostics timed out after {:?}", JAVAC_DIAG_TIMEOUT);
+            return Err(anyhow::anyhow!("{program} timed out"));
+        }
+        match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
+            Ok(Ok(output)) => return Ok(output),
+            Ok(Err(e)) => return Err(e).with_context(|| format!("failed to wait on {program}")),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow::anyhow!("{program} worker exited without result"));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +321,18 @@ mod tests {
         let a = diag_key(&dir, "src/App.java");
         let b = diag_key(&dir, "src/Main.java");
         assert_ne!(a, b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_inflight_bumps_generation() {
+        let dir = std::env::temp_dir().join(format!("reaper-javac-cancel-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let key = diag_key(&dir, "src/App.java");
+        let slot = slot_for(&key);
+        let before = slot.generation.load(Ordering::SeqCst);
+        cancel_inflight_diagnostics(&dir, "src/App.java");
+        assert!(slot.generation.load(Ordering::SeqCst) > before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -11,6 +11,8 @@ pub struct Config {
     pub metadata_dir: PathBuf,
     pub settings_path: PathBuf,
     pub ui_preferences_path: PathBuf,
+    /// App bundle GUI uses plain HTTP; headless `--server` uses TLS + HTTP/2.
+    pub uses_tls: bool,
 }
 
 impl Config {
@@ -29,6 +31,7 @@ impl Config {
             metadata_dir: data_dir.join("metadata"),
             settings_path: data_dir.join("settings.json"),
             ui_preferences_path: data_dir.join("ui-preferences.json"),
+            uses_tls: !running_in_app_bundle(),
             data_dir,
             static_dir,
         }
@@ -53,8 +56,13 @@ impl Config {
         Ok(())
     }
 
+    pub fn base_url(&self) -> String {
+        let scheme = if self.uses_tls { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.port)
+    }
+
     pub fn clone_url(&self, name: &str) -> String {
-        format!("http://{}:{}/git/{}.git", self.host, self.port, name)
+        format!("{}/git/{}.git", self.base_url(), name)
     }
 
     /// Accepts `repo` or `org/repo` (GitHub-style).

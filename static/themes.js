@@ -8,9 +8,15 @@
     { id: 'navy', label: 'Deep Navy', dark: true, monaco: 'reaper-navy' },
     { id: 'blueblack', label: 'Blue & Black', dark: true, monaco: 'reaper-blueblack' },
     { id: 'offwhite', label: 'Off-White Light', dark: false, monaco: 'reaper-offwhite' },
-    { id: 'softgray', label: 'Soft Gray Light', dark: false, monaco: 'reaper-softgray' },
     { id: 'mono', label: 'Black & White', dark: true, monaco: 'reaper-mono' },
   ];
+
+  const LEGACY_THEME_IDS = {
+    softgray: 'offwhite',
+    solarized: 'offwhite',
+    paper: 'offwhite',
+    highcontrast: 'offwhite',
+  };
 
   // Diagnostic squiggles: visible underline colors; no gutter wash-out or scrollbar stripes.
   const DIAG_EDITOR_COLORS = {
@@ -215,41 +221,6 @@
         'editorWidget.border': '#E2E8F0',
       },
     },
-    'reaper-softgray': {
-      base: 'vs',
-      inherit: true,
-      rules: [
-        { token: 'comment', foreground: '64748B', fontStyle: 'italic' },
-        { token: 'keyword', foreground: '475569' },
-        { token: 'string', foreground: '0F172A' },
-        { token: 'number', foreground: 'DC2626' },
-        { token: 'type', foreground: '334155' },
-        { token: 'type.identifier', foreground: '2563EB' },
-        { token: 'identifier', foreground: '334155' },
-        { token: 'delimiter', foreground: '64748B' },
-        { token: 'operator', foreground: '475569' },
-        { token: 'variable', foreground: '7C3AED' },
-        { token: 'variable.name', foreground: '7C3AED' },
-        { token: 'annotation', foreground: 'DC2626' },
-      ],
-      colors: {
-        'editor.background': '#F1F5F9',
-        'editor.foreground': '#334155',
-        'editorLineNumber.foreground': '#94A3B8',
-        'editorLineNumber.activeForeground': '#0F172A',
-        'editor.lineHighlightBackground': '#E2E8F0',
-        'editor.selectionBackground': '#CBD5E1',
-        'editor.inactiveSelectionBackground': '#E2E8F088',
-        'editorCursor.foreground': '#475569',
-        'editorWhitespace.foreground': '#CBD5E1',
-        'editorIndentGuide.background': '#CBD5E1',
-        'editorIndentGuide.activeBackground': '#94A3B8',
-        'editorGutter.background': '#F1F5F9',
-        'minimap.background': '#F1F5F9',
-        'editorWidget.background': '#F8FAFC',
-        'editorWidget.border': '#CBD5E1',
-      },
-    },
     'reaper-blueblack': {
       base: 'vs-dark',
       inherit: true,
@@ -318,9 +289,54 @@
     },
   };
 
+  let cachedThemeId = DEFAULT_THEME;
+
+  function normalizeThemeId(id) {
+    const mapped = LEGACY_THEME_IDS[id] || id;
+    return THEMES.some((t) => t.id === mapped) ? mapped : DEFAULT_THEME;
+  }
+
+  async function persistThemePref(id) {
+    try {
+      await fetch('/api/ui-preferences', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme_id: id }),
+      });
+    } catch (err) {
+      console.warn('[Reaper] Failed to save theme to ui-preferences.json:', err);
+    }
+  }
+
+  async function loadThemePref() {
+    let id = DEFAULT_THEME;
+    try {
+      const res = await fetch('/api/ui-preferences');
+      if (res.ok) {
+        const prefs = await res.json();
+        if (prefs?.theme_id) id = normalizeThemeId(prefs.theme_id);
+      }
+    } catch {
+      /* use default until API is up */
+    }
+
+    const legacy = localStorage.getItem(THEME_KEY);
+    if (legacy && THEMES.some((t) => t.id === legacy)) {
+      if (legacy !== id) {
+        id = legacy;
+        void persistThemePref(id);
+      }
+      localStorage.removeItem(THEME_KEY);
+    } else if (legacy) {
+      localStorage.removeItem(THEME_KEY);
+    }
+
+    cachedThemeId = id;
+    return id;
+  }
+
   function getStoredTheme() {
-    const saved = localStorage.getItem(THEME_KEY);
-    return THEMES.some((t) => t.id === saved) ? saved : DEFAULT_THEME;
+    return normalizeThemeId(cachedThemeId);
   }
 
   function getTheme(id) {
@@ -334,13 +350,14 @@
     });
   }
 
-  function applyTheme(id) {
-    const theme = getTheme(id);
+  function applyTheme(id, { persist = true } = {}) {
+    const theme = getTheme(normalizeThemeId(id));
+    cachedThemeId = theme.id;
     const root = document.documentElement;
     root.dataset.theme = theme.id;
     root.classList.toggle('dark', theme.dark);
     root.classList.toggle('theme-light', !theme.dark);
-    localStorage.setItem(THEME_KEY, theme.id);
+    if (persist) void persistThemePref(theme.id);
     syncThemeSelects(theme.id);
     syncMonacoOverflowWidgetTheme(theme.dark);
 
@@ -456,9 +473,9 @@
     });
   }
 
-  function initThemes() {
-    const id = getStoredTheme();
-    applyTheme(id);
+  async function initThemes() {
+    await loadThemePref();
+    applyTheme(getStoredTheme(), { persist: false });
     populateThemeSelect();
   }
 
@@ -468,6 +485,7 @@
     getStoredTheme,
     getTheme,
     applyTheme,
+    loadThemePref,
     defineMonacoThemes,
     syncMonacoEditorTheme,
     getMonacoThemeId,
@@ -476,8 +494,8 @@
   };
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initThemes);
+    document.addEventListener('DOMContentLoaded', () => { void initThemes(); });
   } else {
-    initThemes();
+    void initThemes();
   }
 })();

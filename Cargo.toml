@@ -20,6 +20,13 @@ anyhow = "1"
 thiserror = "2"
 bytes = "1"
 http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
+rcgen = "0.14"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+tower-service = "0.3"
+tower = { version = "0.5", features = ["util"] }
 mime = "0.3"
 url = "2"
 futures-util = "0.3"

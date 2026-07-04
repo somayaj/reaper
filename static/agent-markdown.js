@@ -7,7 +7,7 @@
   let mermaidCounter = 0;
   let markedConfigured = false;
 
-  const LIGHT_THEMES = new Set(['offwhite', 'softgray']);
+  const LIGHT_THEMES = new Set(['offwhite']);
   const MERMAID_SRC = '/vendor/mermaid.min.js';
 
   function escapeHtml(str) {

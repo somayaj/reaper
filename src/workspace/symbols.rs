@@ -276,6 +276,26 @@ pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+pub(crate) fn java_field_name_column_on_line(line: &str, symbol: &str) -> Option<u32> {
+    let trimmed = line.split("//").next()?.trim();
+    if trimmed.is_empty()
+        || !trimmed.ends_with(';')
+        || trimmed.contains('(')
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with('@')
+    {
+        return None;
+    }
+    let before_assign = trimmed.trim_end_matches(';').split('=').next()?.trim();
+    let parts: Vec<&str> = before_assign.split_whitespace().collect();
+    let name = parts.last()?;
+    if *name != symbol || is_keyword(name) {
+        return None;
+    }
+    line.find(symbol).map(|i| i as u32 + 1)
+}
+
 /// Javadoc comment immediately above `line` (1-based), if any.
 pub(crate) fn java_javadoc_before_line(content: &str, line: u32) -> Option<String> {
     if line == 0 {
@@ -938,6 +958,11 @@ pub(crate) fn collect_java_scope_variables(content: &str, through_line: u32) -> 
             }
         }
     }
+    for (name, ty) in super::java_synthetic_members::synthetic_scope_variables(content, through_line) {
+        if seen.insert(name.clone()) {
+            out.push((name, ty));
+        }
+    }
     out
 }
 
@@ -1111,6 +1136,15 @@ fn definition_on_line(line: &str, symbol: &str, path: &str, line_no: u32) -> Opt
                     column: col,
                 });
             }
+        }
+        if let Some(col) = java_field_name_column_on_line(line, symbol) {
+            return Some(SymbolLocation {
+                name: symbol.to_string(),
+                kind: "field".into(),
+                path: path.to_string(),
+                line: line_no,
+                column: col,
+            });
         }
     }
 

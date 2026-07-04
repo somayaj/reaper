@@ -22,12 +22,19 @@ mod language_compiler_context;
 mod index_jobs;
 mod java;
 mod java_diagnostics;
+pub use java_diagnostics::JavaDiagScope;
+pub use diagnostics::FileDiagnosticsResult;
+pub use java_javac_inflight::cancel_inflight_diagnostics;
 mod java_javac_inflight;
+mod java_index_patch;
+#[cfg(test)]
+mod java_save_javac_loop;
 mod java_classpath;
 mod java_psi;
 mod java_sources;
 mod java_ecosystem;
 mod java_format;
+mod java_synthetic_members;
 mod languages;
 mod project_jobs;
 mod project_profile;
@@ -67,6 +74,46 @@ pub fn project_folder(config: &Config, name: &str) -> Option<PathBuf> {
         return ws.canonicalize().ok().or(Some(ws));
     }
     None
+}
+
+/// True when this workspace should use jdtls (Maven/Gradle, plain `.java` trees, etc.).
+pub fn workspace_uses_jdtls(ws: &Path, profile: &project_profile::ProjectProfile) -> bool {
+    profile.languages.iter().any(|l| l == "java")
+        || profile.indexers.iter().any(|i| i == "java")
+        || classpath::is_java_indexable_workspace(ws)
+}
+
+pub fn jdtls_enabled() -> bool {
+    jdtls::is_enabled()
+}
+
+pub fn jdtls_workspace_ready(ws: &Path) -> bool {
+    jdtls::workspace_ready(ws)
+}
+
+/// Start jdtls when a Java workspace opens (blocks until initialized).
+pub fn warm_jdtls_workspace(ws: &Path) -> Result<()> {
+    jdtls::warm_workspace(ws)
+}
+
+/// Kick off jdtls warm in the background (no-op when disabled or already ready).
+pub fn spawn_jdtls_warm(ws: &Path) {
+    if !jdtls::is_enabled() {
+        return;
+    }
+    let Ok(ws) = ws.canonicalize() else {
+        return;
+    };
+    if jdtls::workspace_ready(&ws) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Err(e) = warm_jdtls_workspace(&ws) {
+            tracing::debug!("jdtls warm on workspace open: {e:#}");
+        } else {
+            tracing::info!("jdtls ready for {}", ws.display());
+        }
+    });
 }
 
 pub fn ensure_workspace(config: &Config, name: &str) -> Result<PathBuf> {
@@ -274,10 +321,12 @@ pub fn write_file(ws: &Path, rel_path: &str, content: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-    if rel_path.ends_with(".java") {
-        let _ = classpath::patch_java_index_file(ws, rel_path, content);
-    }
     Ok(())
+}
+
+/// Queue a coalesced background patch of the on-disk Java symbol index after a save.
+pub fn patch_java_index_after_save(ws: &Path, rel_path: &str, content: &str) {
+    java_index_patch::queue_java_index_patch_after_save(ws, rel_path, content);
 }
 
 pub fn create_file(ws: &Path, rel_path: &str, content: &str) -> Result<()> {
@@ -992,7 +1041,8 @@ pub fn detect_project_profile(ws: &Path) -> Result<project_profile::ProjectProfi
 pub use index_jobs::JavaIndexJobs;
 pub use project_jobs::ProjectIndexJobs;
 pub use quick_fix::{
-    QuickFix, QuickFixDiagnostic, QuickFixEdit, merge_quick_fixes, suggest_local_quick_fixes,
+    QuickFix, QuickFixDiagnostic, QuickFixEdit, filter_ai_import_fixes, merge_quick_fixes,
+    suggest_local_quick_fixes,
 };
 pub use jdtls::JdtlsCodeAction;
 pub use lsp::{FileTextEdits, ReferenceLocation, RenameRange, SignatureHelp};
@@ -1655,6 +1705,8 @@ pub fn java_completions(
         return spring_props::completions(ws, from_path, line, column, &content, prefix);
     }
 
+    // Always run the Java index (type inference → FQCN → members). jdtls merges on top when
+    // available — never skip the index when jdtls is ready (empty jdtls would hide all members).
     let mut items = if classpath::is_java_like(from_path) {
         classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)?
     } else {
@@ -1723,8 +1775,9 @@ pub fn file_diagnostics(
     rel_path: &str,
     content: &str,
     overlays: &[(String, String)],
+    scope: java_diagnostics::JavaDiagScope,
 ) -> Result<diagnostics::FileDiagnosticsResult> {
-    diagnostics::diagnose_file(ws, rel_path, content, overlays)
+    diagnostics::diagnose_file(ws, rel_path, content, overlays, scope)
 }
 
 pub fn language_compiler_context(ws: &Path, rel_path: &str) -> language_compiler_context::LanguageCompilerContext {
@@ -1794,6 +1847,48 @@ pub fn is_import_typing_line(path: &str, content: &str, line: u32, line_prefix: 
 mod path_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn merge_completion_items_prefers_primary_then_fills_from_fallback() {
+        let primary = vec![
+            classpath::CompletionItem {
+                label: "println".into(),
+                kind: "method".into(),
+                detail: None,
+                insert: None,
+                path: None,
+                line: None,
+                column: None,
+                documentation: None,
+            },
+        ];
+        let fallback = vec![
+            classpath::CompletionItem {
+                label: "print".into(),
+                kind: "method".into(),
+                detail: None,
+                insert: None,
+                path: None,
+                line: None,
+                column: None,
+                documentation: None,
+            },
+            classpath::CompletionItem {
+                label: "println".into(),
+                kind: "method".into(),
+                detail: None,
+                insert: None,
+                path: None,
+                line: None,
+                column: None,
+                documentation: None,
+            },
+        ];
+        let merged = merge_completion_items(primary, fallback, 80);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].label, "println");
+        assert_eq!(merged[1].label, "print");
+    }
 
     #[test]
     fn reference_scan_root_uses_gradle_wrapper_root_for_submodules() {

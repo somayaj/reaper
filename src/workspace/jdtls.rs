@@ -30,6 +30,9 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 const REFERENCE_TIMEOUT: Duration = Duration::from_secs(25);
 const SESSION_IDLE: Duration = Duration::from_secs(300);
+/// Debounce before pushing didChange to jdtls.
+const SYNC_DEBOUNCE: Duration = Duration::from_millis(300);
+const COMPLETION_CACHE_TTL: Duration = Duration::from_secs(2);
 
 static SESSIONS: LazyLock<Mutex<HashMap<PathBuf, JdtlsSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -37,6 +40,18 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(10);
 
 struct OpenDoc {
     version: i64,
+    content_hash: u64,
+    pending_hash: Option<u64>,
+    pending_content: Option<String>,
+    last_change_at: Option<Instant>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct CompletionCacheKey {
+    uri: String,
+    line: u32,
+    column: u32,
+    prefix: String,
     content_hash: u64,
 }
 
@@ -46,6 +61,31 @@ struct JdtlsSession {
     open_docs: HashMap<String, OpenDoc>,
     service_ready: bool,
     ready_at: Instant,
+    /// Latest publishDiagnostics per file URI (typing path).
+    diagnostics: HashMap<String, Vec<super::diagnostics::Diagnostic>>,
+    completion_cache: HashMap<CompletionCacheKey, (Vec<super::classpath::CompletionItem>, Instant)>,
+}
+
+fn new_open_doc(version: i64, content_hash: u64) -> OpenDoc {
+    OpenDoc {
+        version,
+        content_hash,
+        pending_hash: None,
+        pending_content: None,
+        last_change_at: None,
+    }
+}
+
+fn new_jdtls_session(child: Child, now: Instant) -> JdtlsSession {
+    JdtlsSession {
+        child,
+        last_used: now,
+        open_docs: HashMap::new(),
+        service_ready: true,
+        ready_at: now,
+        diagnostics: HashMap::new(),
+        completion_cache: HashMap::new(),
+    }
 }
 
 fn content_fingerprint(content: &str) -> u64 {
@@ -60,6 +100,66 @@ pub fn is_enabled() -> bool {
         Ok("1") | Ok("true") | Ok("yes") => true,
         _ => crate::toolchain::resolve_program("jdtls").is_some(),
     }
+}
+
+/// Start jdtls when a Java workspace opens.
+pub fn warm_workspace(ws: &Path) -> Result<()> {
+    if !is_enabled() {
+        return Ok(());
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let mut map = SESSIONS.lock().expect("jdtls sessions");
+    purge_stale_sessions(&mut map);
+    if session_alive(map.get_mut(&ws)) {
+        return Ok(());
+    }
+    map.remove(&ws);
+    let mut child = spawn_jdtls(&ws)?;
+    let root_uri = file_uri(&ws)?;
+    initialize_session(&mut child, &root_uri, &ws)?;
+    let now = Instant::now();
+    map.insert(ws, new_jdtls_session(child, now));
+    Ok(())
+}
+
+/// True when a warm jdtls session is alive for this workspace.
+pub fn workspace_ready(ws: &Path) -> bool {
+    let Ok(ws) = ws.canonicalize() else {
+        return false;
+    };
+    let Ok(mut map) = SESSIONS.lock() else {
+        return false;
+    };
+    map.get_mut(&ws)
+        .is_some_and(|s| s.service_ready && session_alive(Some(s)))
+}
+
+/// jdtls publishDiagnostics for the typing path (no javac while editing).
+pub fn typing_diagnostics(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Result<Vec<super::diagnostics::Diagnostic>> {
+    if !is_enabled() || !is_jdtls_path(rel_path) {
+        return Ok(Vec::new());
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    let abs_file = ws.join(rel_path);
+    if !abs_file.is_file() {
+        return Ok(Vec::new());
+    }
+    let uri = file_uri(&abs_file)?;
+    // Sync + drain notifications via a cheap hover at the file start.
+    let _ = find_hover(&ws, rel_path, 1, 1, content);
+    let map = SESSIONS.lock().expect("jdtls sessions");
+    Ok(map
+        .get(&ws)
+        .and_then(|s| s.diagnostics.get(&uri).cloned())
+        .unwrap_or_default())
 }
 
 /// Drop a cached jdtls process (project reload, branch switch, classpath invalidation).
@@ -428,6 +528,24 @@ pub fn find_completions(
     let uri = file_uri(&abs_file)?;
     let deadline = Instant::now() + QUERY_TIMEOUT;
     let trigger = completion_trigger_character(content, line, column);
+    let content_hash = content_fingerprint(content);
+    let cache_key = CompletionCacheKey {
+        uri: uri.clone(),
+        line,
+        column,
+        prefix: String::new(), // prefix filtering happens client-side on cached jdtls items
+        content_hash,
+    };
+    {
+        let map = SESSIONS.lock().expect("jdtls sessions");
+        if let Some(session) = map.get(&ws) {
+            if let Some((items, at)) = session.completion_cache.get(&cache_key) {
+                if at.elapsed() < COMPLETION_CACHE_TTL {
+                    return Ok(items.clone());
+                }
+            }
+        }
+    }
     let result = match query_completion(
         &ws, rel_path, &uri, line, column, content, trigger, deadline,
     ) {
@@ -437,7 +555,15 @@ pub fn find_completions(
             return Ok(Vec::new());
         }
     };
-    Ok(parse_jdtls_completion_items(&result, rel_path))
+    let items = parse_jdtls_completion_items(&result, rel_path);
+    if let Ok(mut map) = SESSIONS.lock() {
+        if let Some(session) = map.get_mut(&ws) {
+            session
+                .completion_cache
+                .insert(cache_key, (items.clone(), Instant::now()));
+        }
+    }
+    Ok(items)
 }
 
 fn is_jdtls_path(path: &str) -> bool {
@@ -791,28 +917,19 @@ fn lsp_request(
         let root_uri = file_uri(ws)?;
         initialize_session(&mut child, &root_uri, ws)?;
         let now = Instant::now();
-        map.insert(
-            ws.to_path_buf(),
-            JdtlsSession {
-                child,
-                last_used: now,
-                open_docs: HashMap::new(),
-                service_ready: true,
-                ready_at: now,
-            },
-        );
+        map.insert(ws.to_path_buf(), new_jdtls_session(child, now));
     }
 
     let session = map.get_mut(ws).context("jdtls session")?;
     session.last_used = Instant::now();
 
     let stdin = session.child.stdin.as_mut().context("jdtls stdin")?;
-    sync_document(stdin, &mut session.open_docs, uri, content)?;
+    sync_document(stdin, &mut session.open_docs, uri, content, true)?;
     let stdout = session.child.stdout.as_mut().context("jdtls stdout")?;
 
     write_message(stdin, &request)?;
     let query_deadline = Instant::now() + QUERY_TIMEOUT;
-    wait_for_id(stdout, id, query_deadline)
+    wait_for_id(stdout, id, query_deadline, Some(ws))
 }
 
 fn sync_document(
@@ -820,18 +937,38 @@ fn sync_document(
     open_docs: &mut HashMap<String, OpenDoc>,
     uri: &str,
     content: &str,
+    force: bool,
 ) -> Result<()> {
     let hash = content_fingerprint(content);
-    if let Some(doc) = open_docs.get(uri) {
+    if let Some(doc) = open_docs.get_mut(uri) {
         if doc.content_hash == hash {
+            doc.pending_hash = None;
+            doc.pending_content = None;
+            doc.last_change_at = None;
+            return Ok(());
+        }
+        doc.pending_hash = Some(hash);
+        doc.pending_content = Some(content.to_string());
+        if doc.last_change_at.is_none() {
+            doc.last_change_at = Some(Instant::now());
+        }
+        if !force && doc.last_change_at.is_some_and(|t| t.elapsed() < SYNC_DEBOUNCE) {
             return Ok(());
         }
         let ver = doc.version + 1;
+        let text = doc
+            .pending_content
+            .take()
+            .unwrap_or_else(|| content.to_string());
+        let flushed_hash = doc.pending_hash.take().unwrap_or(hash);
         open_docs.insert(
             uri.to_string(),
             OpenDoc {
                 version: ver,
-                content_hash: hash,
+                content_hash: flushed_hash,
+                pending_hash: None,
+                pending_content: None,
+                last_change_at: None,
             },
         );
         write_message(
@@ -841,19 +978,13 @@ fn sync_document(
                 "method": "textDocument/didChange",
                 "params": {
                     "textDocument": { "uri": uri, "version": ver },
-                    "contentChanges": [{ "text": content }]
+                    "contentChanges": [{ "text": text }]
                 }
             }),
         )
     } else {
         let version = NEXT_ID.fetch_add(1, Ordering::Relaxed) as i64;
-        open_docs.insert(
-            uri.to_string(),
-            OpenDoc {
-                version,
-                content_hash: hash,
-            },
-        );
+        open_docs.insert(uri.to_string(), new_open_doc(version, hash));
         write_message(
             stdin,
             &json!({
@@ -955,7 +1086,7 @@ fn initialize_session(child: &mut Child, root_uri: &str, ws: &Path) -> Result<()
         }),
     )?;
 
-    wait_for_id(stdout, 1, deadline)?;
+    wait_for_id(stdout, 1, deadline, Some(ws))?;
 
     write_message(
         stdin,
@@ -968,7 +1099,7 @@ fn initialize_session(child: &mut Child, root_uri: &str, ws: &Path) -> Result<()
 
     configure_workspace(stdin, ws)?;
 
-    wait_for_service_ready(stdout, deadline)?;
+    wait_for_service_ready(stdout, deadline, ws)?;
 
     Ok(())
 }
@@ -1089,12 +1220,13 @@ fn configure_workspace(stdin: &mut impl Write, ws: &Path) -> Result<()> {
     )
 }
 
-fn wait_for_service_ready(r: &mut impl Read, deadline: Instant) -> Result<()> {
+fn wait_for_service_ready(r: &mut impl Read, deadline: Instant, ws: &Path) -> Result<()> {
     while Instant::now() < deadline {
         let msg = read_message(r)?;
         if is_service_ready_notification(&msg) {
             return Ok(());
         }
+        ingest_notification(ws, &msg);
         if msg.get("id").is_some() {
             tracing::debug!("unexpected jdtls response during warm-up: {msg}");
         }
@@ -1391,7 +1523,7 @@ fn write_message(w: &mut impl Write, body: &Value) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_id(r: &mut impl Read, id: u64, deadline: Instant) -> Result<Value> {
+fn wait_for_id(r: &mut impl Read, id: u64, deadline: Instant, ws: Option<&Path>) -> Result<Value> {
     loop {
         if Instant::now() >= deadline {
             bail!("jdtls timed out");
@@ -1399,6 +1531,9 @@ fn wait_for_id(r: &mut impl Read, id: u64, deadline: Instant) -> Result<Value> {
         let msg = read_message(r)?;
         if is_service_ready_notification(&msg) {
             continue;
+        }
+        if let Some(ws) = ws {
+            ingest_notification(ws, &msg);
         }
         if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
             if let Some(err) = msg.get("error") {
@@ -1410,6 +1545,91 @@ fn wait_for_id(r: &mut impl Read, id: u64, deadline: Instant) -> Result<Value> {
             tracing::debug!("unexpected jdtls response while waiting for id {id}: {msg}");
         }
     }
+}
+
+fn ingest_notification(ws: &Path, msg: &Value) {
+    if msg.get("method").and_then(|v| v.as_str()) != Some("textDocument/publishDiagnostics") {
+        return;
+    }
+    let Some(params) = msg.get("params") else {
+        return;
+    };
+    let uri = params
+        .get("uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if uri.is_empty() {
+        return;
+    }
+    let diags = params
+        .get("diagnostics")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|d| parse_lsp_diagnostic(ws, &uri, d))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let Ok(ws_canon) = ws.canonicalize() else {
+        return;
+    };
+    let Ok(mut map) = SESSIONS.lock() else {
+        return;
+    };
+    if let Some(session) = map.get_mut(&ws_canon) {
+        session.diagnostics.insert(uri, diags);
+    }
+}
+
+fn parse_lsp_diagnostic(
+    ws: &Path,
+    uri: &str,
+    diag: &Value,
+) -> Option<super::diagnostics::Diagnostic> {
+    let path = lsp::uri_to_workspace_path(ws, uri).ok()?;
+    let range = diag.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let line = start
+        .get("line")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
+        + 1;
+    let column = start
+        .get("character")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
+        + 1;
+    let end_line = end
+        .get("line")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32 + 1);
+    let end_column = end
+        .get("character")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32 + 1);
+    let message = diag
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let severity = match diag.get("severity").and_then(|v| v.as_u64()) {
+        Some(2) => "warning",
+        Some(3) | Some(4) => "warning",
+        _ => "error",
+    }
+    .to_string();
+    Some(super::diagnostics::Diagnostic {
+        path,
+        line: line.max(1),
+        column: column.max(1),
+        end_line,
+        end_column,
+        message,
+        severity,
+    })
 }
 
 fn read_message(r: &mut impl Read) -> Result<Value> {

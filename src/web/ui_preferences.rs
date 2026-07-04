@@ -25,23 +25,34 @@ async fn get_ui_preferences(State(state): State<Arc<AppState>>) -> impl IntoResp
 #[derive(Deserialize)]
 struct SetUiPreferencesRequest {
     coverage_inline_enabled: Option<bool>,
+    theme_id: Option<String>,
 }
 
 async fn set_ui_preferences(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SetUiPreferencesRequest>,
 ) -> impl IntoResponse {
+    if body.coverage_inline_enabled.is_none() && body.theme_id.is_none() {
+        return Json(state.ui_preferences.view()).into_response();
+    }
+
+    let mut last_err = None;
     if let Some(enabled) = body.coverage_inline_enabled {
-        match state.ui_preferences.set_coverage_inline_enabled(enabled) {
-            Ok(prefs) => return Json(prefs).into_response(),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
+        if let Err(e) = state.ui_preferences.set_coverage_inline_enabled(enabled) {
+            last_err = Some(e);
         }
+    }
+    if let Some(theme_id) = body.theme_id {
+        if let Err(e) = state.ui_preferences.set_theme_id(&theme_id) {
+            last_err = Some(e);
+        }
+    }
+    if let Some(e) = last_err {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     Json(state.ui_preferences.view()).into_response()
 }

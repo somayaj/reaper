@@ -68,6 +68,9 @@ impl ProjectIndexJobs {
         if profile.indexers.iter().any(|i| i == "java") {
             self.java.init_on_demand(repo, ws);
         }
+        if super::workspace_uses_jdtls(ws, &profile) {
+            super::spawn_jdtls_warm(ws);
+        }
         self.start(repo, ws, profile, false);
     }
 
@@ -96,13 +99,16 @@ impl ProjectIndexJobs {
     /// Invalidate Maven/Gradle caches and rebuild indexes (build file save, manual reload).
     pub fn reload(&self, repo: &str, ws: &Path) {
         super::jdtls::drop_workspace_session(ws);
+        let profile = project_profile::detect(ws).unwrap_or_default();
+        if super::workspace_uses_jdtls(ws, &profile) {
+            super::spawn_jdtls_warm(ws);
+        }
         let _ = classpath::invalidate_caches(ws);
         symbols::invalidate_symbol_cache(ws);
         self.java.clear_repo(repo);
         if let Ok(mut guard) = self.inner.lock() {
             guard.remove(repo);
         }
-        let profile = project_profile::detect(ws).unwrap_or_default();
         self.start(repo, ws, profile, true);
     }
 

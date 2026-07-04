@@ -9,6 +9,7 @@ mod auth;
 mod gradle;
 mod gui;
 mod jdk;
+mod local_https;
 mod repos;
 mod settings;
 mod state;
@@ -181,9 +182,25 @@ async fn bind_listener(host: &str, preferred: u16) -> anyhow::Result<(tokio::net
 
 fn persist_server_port(data_dir: &std::path::Path, port: u16) {
     let path = data_dir.join("reaper.port");
-    if let Err(e) = std::fs::write(&path, port.to_string()) {
+    if let Err(e) = std::fs::write(&path, format!("{port}\n")) {
         tracing::warn!("Could not write {}: {e}", path.display());
     }
+}
+
+fn persist_server_url(data_dir: &std::path::Path, url: &str) {
+    let path = data_dir.join("reaper.url");
+    if let Err(e) = std::fs::write(&path, format!("{url}\n")) {
+        tracing::warn!("Could not write {}: {e}", path.display());
+    }
+}
+
+async fn serve_app(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    tls: local_https::LocalTls,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    web::serve::serve_tls(listener, app, tls.acceptor, shutdown).await
 }
 
 async fn run_server_mode() -> anyhow::Result<()> {
@@ -195,11 +212,15 @@ async fn run_server_mode() -> anyhow::Result<()> {
     let (listener, addr) = bind_listener(&config.host, config.port).await?;
     persist_server_port(&config.data_dir, addr.port());
 
+    let tls = local_https::ensure_local_tls(&config.data_dir, &config.host)?;
+
     let state = prepare_state(addr.port()).await?;
     prefetch_startup_index(&state);
     let config = state.config.clone();
+    let url = config.base_url();
+    persist_server_url(&config.data_dir, &url);
 
-    tracing::info!("Reaper listening on http://{addr}");
+    tracing::info!("Reaper listening on {url} (HTTP/2 over TLS)");
     tracing::info!("Data directory: {}", config.data_dir.display());
     tracing::info!("Log file: {}", Config::resolve_log_path().display());
     tracing::info!("Repositories stored in {}", config.repos_dir.display());
@@ -207,9 +228,13 @@ async fn run_server_mode() -> anyhow::Result<()> {
 
     tokio::spawn(process_registry::shutdown_watchdog());
 
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(process_registry::wait_for_shutdown_signal())
-        .await?;
+    serve_app(
+        listener,
+        web::router(state),
+        tls,
+        process_registry::wait_for_shutdown_signal(),
+    )
+    .await?;
 
     cursor::stop_bridge().await;
     process_registry::shutdown_all();
@@ -219,7 +244,14 @@ async fn run_server_mode() -> anyhow::Result<()> {
 fn run_gui_mode() -> anyhow::Result<()> {
     init_tracing();
 
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    use std::sync::Arc;
+
+    use gui::GuiLaunch;
+    use web::{loopback_ws_base, webview_init_script, GuiProtocolBridge, WEBVIEW_ENTRY};
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<GuiLaunch, String>>(1);
+    let (bridge_tx, bridge_rx) =
+        std::sync::mpsc::sync_channel::<Arc<GuiProtocolBridge>>(1);
     let shutdown_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let server_shutdown = std::sync::Arc::clone(&shutdown_notify);
     std::thread::spawn(move || {
@@ -237,16 +269,30 @@ fn run_gui_mode() -> anyhow::Result<()> {
             let state = prepare_state(addr.port()).await?;
             prefetch_startup_index(&state);
             let config = state.config.clone();
-            let url = format!("http://{addr}");
+            let loopback_url = config.base_url();
+            persist_server_url(&config.data_dir, &loopback_url);
 
-            tracing::info!("Reaper listening on {url}");
+            let handle = tokio::runtime::Handle::current();
+            let app = web::router(state);
+            let bridge = Arc::new(GuiProtocolBridge::new(app.clone(), handle));
+            let loopback_ws = loopback_ws_base(&config.host, addr.port());
+
+            bridge_tx
+                .send(bridge)
+                .map_err(|_| anyhow::anyhow!("GUI exited before protocol bridge ready"))?;
+
+            tracing::info!("Reaper loopback on {loopback_url} (terminal WS, git CLI)");
+            tracing::info!("Reaper WebView on {WEBVIEW_ENTRY} (custom protocol)");
             tracing::info!("Data directory: {}", config.data_dir.display());
             tracing::info!("Log file: {}", Config::resolve_log_path().display());
             tracing::info!("Repositories stored in {}", config.repos_dir.display());
             tracing::info!("Static assets from {}", config.static_dir.display());
 
-            tx.send(Ok(url.clone()))
-                .map_err(|_| anyhow::anyhow!("GUI exited before server started"))?;
+            tx.send(Ok(GuiLaunch {
+                webview_url: WEBVIEW_ENTRY.to_string(),
+                init_script: webview_init_script(&loopback_ws),
+            }))
+            .map_err(|_| anyhow::anyhow!("GUI exited before server started"))?;
 
             tokio::spawn(process_registry::shutdown_watchdog());
 
@@ -256,11 +302,11 @@ fn run_gui_mode() -> anyhow::Result<()> {
                 process_registry::initiate_shutdown();
             };
 
-            axum::serve(listener, web::router(state))
+            axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     tokio::select! {
-                        _ = process_registry::wait_for_shutdown_signal() => {}
-                        _ = gui_shutdown => {}
+                        () = process_registry::wait_for_shutdown_signal() => {}
+                        () = gui_shutdown => {}
                     }
                 })
                 .await?;
@@ -273,8 +319,8 @@ fn run_gui_mode() -> anyhow::Result<()> {
         }
     });
 
-    let url = match rx.recv() {
-        Ok(Ok(url)) => url,
+    let launch = match rx.recv() {
+        Ok(Ok(launch)) => launch,
         Ok(Err(msg)) => {
             gui::show_error(&format!("Reaper failed to start:\n\n{msg}"));
             anyhow::bail!(msg);
@@ -285,7 +331,12 @@ fn run_gui_mode() -> anyhow::Result<()> {
         }
     };
 
-    let gui_result = gui::run(&url);
+    let protocol_bridge = bridge_rx.recv().map_err(|_| {
+        gui::show_error("Reaper failed to start:\n\nprotocol bridge not ready");
+        anyhow::anyhow!("protocol bridge not ready")
+    })?;
+
+    let gui_result = gui::run(&launch, protocol_bridge);
     shutdown_notify.notify_one();
     process_registry::initiate_shutdown();
     gui_result
