@@ -4308,6 +4308,21 @@ async function pollProjectIndexStatus() {
   }
 }
 
+function welcomeShowcaseHtml() {
+  const shots = [
+    { file: 'welcome-home', label: 'Home', alt: 'Reaper welcome screen with quick actions' },
+    { file: 'editor-java', label: 'Editor', alt: 'Monaco editor with project tree and syntax highlighting' },
+    { file: 'git-commit', label: 'Git', alt: 'Git commit panel with staged changes' },
+  ];
+  return `<aside class="ij-welcome-showcase" aria-label="Reaper in action">
+    ${shots.map(({ file, label, alt }) => `
+      <figure class="ij-welcome-frame">
+        <img src="/screenshots/${file}.png" alt="${escapeHtml(alt)}" loading="lazy" decoding="async" data-shot="${file}" />
+        <figcaption>${escapeHtml(label)}</figcaption>
+      </figure>`).join('')}
+  </aside>`;
+}
+
 function welcomeScreenHtml() {
   const recent = state.repos.slice(0, 5);
   const recentHtml = recent.length
@@ -4319,41 +4334,45 @@ function welcomeScreenHtml() {
       </div>`
     : '';
   const icons = window.ReaperIcons || {};
-  return `
-    ${(window.ReaperLogo && window.ReaperLogo.reaperLogoHtml('welcome', { extraClass: 'ij-welcome-logo logo-mark' })) || ''}
-    <h2>Welcome to Reaper</h2>
-    <p class="ij-welcome-tagline">A local git host and developer studio — edit with syntax highlighting, commit, run Gradle & Java, and sync with GitHub.</p>
-    <div class="ij-welcome-actions">
-      <button type="button" class="ij-action-card" data-welcome="new">
-        <span class="ij-action-icon ij-action-icon--new">${icons.newRepo || ''}</span>
-        <strong>New repository</strong>
-        <span>Create a repo hosted on this machine</span>
-      </button>
-      <button type="button" class="ij-action-card" data-welcome="import-repo">
-        <span class="ij-action-icon ij-action-icon--clone">${icons.clone || ''}</span>
-        <strong>Import repository</strong>
-        <span>From a remote URL or a local git folder on this Mac</span>
-      </button>
-      <button type="button" class="ij-action-card" data-welcome="agent">
-        <span class="ij-action-icon ij-action-icon--agent">${icons.agent || ''}</span>
-        <strong>Open Agent</strong>
-        <span>Chat with Cursor to edit your code</span>
-      </button>
+  return `<div class="ij-welcome-layout">
+    <div class="ij-welcome-main">
+      ${(window.ReaperLogo && window.ReaperLogo.reaperLogoHtml('welcome', { extraClass: 'ij-welcome-logo logo-mark' })) || ''}
+      <h2>Welcome to Reaper</h2>
+      <p class="ij-welcome-tagline">A local git host and developer studio — edit with syntax highlighting, commit, run Gradle & Java, and sync with GitHub.</p>
+      <div class="ij-welcome-actions">
+        <button type="button" class="ij-action-card" data-welcome="new">
+          <span class="ij-action-icon ij-action-icon--new">${icons.newRepo || ''}</span>
+          <strong>New repository</strong>
+          <span>Create a repo hosted on this machine</span>
+        </button>
+        <button type="button" class="ij-action-card" data-welcome="import-repo">
+          <span class="ij-action-icon ij-action-icon--clone">${icons.clone || ''}</span>
+          <strong>Import repository</strong>
+          <span>From a remote URL or a local git folder on this Mac</span>
+        </button>
+        <button type="button" class="ij-action-card" data-welcome="agent">
+          <span class="ij-action-icon ij-action-icon--agent">${icons.agent || ''}</span>
+          <strong>Open Agent</strong>
+          <span>Chat with Cursor to edit your code</span>
+        </button>
+      </div>
+      ${recentHtml}
+      <dl class="ij-shortcuts">
+        <div class="ij-shortcut"><dt>⌘⇧N</dt><dd>New repository</dd></div>
+        <div class="ij-shortcut"><dt>File</dt><dd>Import repository…</dd></div>
+        <div class="ij-shortcut"><dt>⌘P</dt><dd>Search class, file, or text</dd></div>
+        <div class="ij-shortcut"><dt>⌘O</dt><dd>Go to Class</dd></div>
+        <div class="ij-shortcut"><dt>⌘G</dt><dd>Go to Line</dd></div>
+        <div class="ij-shortcut"><dt>⌘K</dt><dd>Command palette</dd></div>
+        <div class="ij-shortcut"><dt>⌘S</dt><dd>Save file</dd></div>
+        <div class="ij-shortcut"><dt>F5</dt><dd>Run / Gradle</dd></div>
+        <div class="ij-shortcut"><dt>⌘N</dt><dd>New file</dd></div>
+        <div class="ij-shortcut"><dt>⌘W</dt><dd>Close tab</dd></div>
+        <div class="ij-shortcut"><dt>Alt+1</dt><dd>Project tool window</dd></div>
+      </dl>
     </div>
-    ${recentHtml}
-    <dl class="ij-shortcuts">
-      <div class="ij-shortcut"><dt>⌘⇧N</dt><dd>New repository</dd></div>
-      <div class="ij-shortcut"><dt>File</dt><dd>Import repository…</dd></div>
-      <div class="ij-shortcut"><dt>⌘P</dt><dd>Search class, file, or text</dd></div>
-      <div class="ij-shortcut"><dt>⌘O</dt><dd>Go to Class</dd></div>
-      <div class="ij-shortcut"><dt>⌘G</dt><dd>Go to Line</dd></div>
-      <div class="ij-shortcut"><dt>⌘K</dt><dd>Command palette</dd></div>
-      <div class="ij-shortcut"><dt>⌘S</dt><dd>Save file</dd></div>
-      <div class="ij-shortcut"><dt>F5</dt><dd>Run / Gradle</dd></div>
-      <div class="ij-shortcut"><dt>⌘N</dt><dd>New file</dd></div>
-      <div class="ij-shortcut"><dt>⌘W</dt><dd>Close tab</dd></div>
-      <div class="ij-shortcut"><dt>Alt+1</dt><dd>Project tool window</dd></div>
-    </dl>`;
+    ${welcomeShowcaseHtml()}
+  </div>`;
 }
 
 function bindWelcomeActions(root = document) {
