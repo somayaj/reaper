@@ -387,6 +387,7 @@ pub struct PushPreview {
     pub files: Vec<String>,
     pub can_push: bool,
     pub note: Option<String>,
+    pub secret_warnings: Vec<workspace::secret_scan::SecretFinding>,
 }
 
 pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Result<PushPreview> {
@@ -404,6 +405,7 @@ pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Re
             files: vec![],
             can_push: false,
             note: Some("No remote linked — publish or link a remote first".into()),
+            secret_warnings: vec![],
         });
     }
 
@@ -440,6 +442,8 @@ pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Re
     };
 
     let ahead = commits.len();
+    let secret_warnings =
+        workspace::secret_scan::scan_push_files(&ws, &files, range.as_deref(), &branch);
     Ok(PushPreview {
         branch,
         remote: "origin".into(),
@@ -450,6 +454,7 @@ pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Re
         commits,
         files,
         note,
+        secret_warnings,
     })
 }
 

@@ -92,6 +92,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/git", post(run_bare_git_command))
         .route("/api/repos/{name}/workspace/open", post(open_workspace))
         .route("/api/repos/{name}/workspace/sync", post(sync_workspace))
+        .route("/api/repos/{name}/workspace/fetch", post(fetch_workspace))
         .route("/api/repos/{name}/workspace/tree", get(workspace_tree))
         .route(
             "/api/repos/{name}/workspace/file",
@@ -109,6 +110,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/conflict/continue", post(conflict_continue_handler))
         .route("/api/repos/{name}/workspace/commit/{hash}/diff", get(commit_diff_handler))
         .route("/api/repos/{name}/workspace/commit/suggest", post(suggest_commit_message_handler))
+        .route("/api/repos/{name}/workspace/secrets/scan", post(scan_secrets_handler))
         .route("/api/repos/{name}/workspace/commit", post(workspace_commit))
         .route("/api/repos/{name}/workspace/checkout", post(workspace_checkout))
         .route("/api/repos/{name}/workspace/git", post(run_workspace_git))
@@ -449,6 +451,20 @@ async fn sync_workspace(
     }
 }
 
+async fn fetch_workspace(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::fetch_workspace_remotes(&ws) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 async fn workspace_tree(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -767,6 +783,29 @@ async fn suggest_commit_message_handler(
         Ok(message) => Json(SuggestCommitResponse { message }).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
+}
+
+#[derive(Deserialize)]
+struct SecretScanRequest {
+    paths: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SecretScanResponse {
+    findings: Vec<workspace::secret_scan::SecretFinding>,
+}
+
+async fn scan_secrets_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<SecretScanRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let findings = workspace::secret_scan::scan_commit_paths(&ws, &body.paths);
+    Json(SecretScanResponse { findings }).into_response()
 }
 
 async fn workspace_commit(

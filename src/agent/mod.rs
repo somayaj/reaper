@@ -62,6 +62,8 @@ pub async fn run_git_agent(
         },
         conflict_count: 0,
         ahead: 0,
+        behind: 0,
+        tracking: None,
     });
 
     let context = format!(
@@ -162,7 +164,7 @@ pub async fn suggest_commit_message(
         bail!("nothing to commit");
     }
 
-    let diff = workspace::diff_for_commit(ws)?;
+    let diff = workspace::secret_scan::redact_text(&workspace::diff_for_commit(ws)?);
     let files_summary = status
         .files
         .iter()

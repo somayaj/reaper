@@ -447,7 +447,9 @@ const state = {
   cloneBusy: false,
   publishBusy: false,
   pushBusy: false,
+  pushPreview: null,
   commitBusy: false,
+  gitBackgroundFetch: false,
   cloneSource: 'remote',
   currentBranch: '',
   defaultBranch: '',
@@ -1691,6 +1693,7 @@ function loadAppearanceSettingsSection() {
   }
   syncDotfilesControls(getShowDotfiles());
   void populateDefaultRepoSelect();
+  void syncGitBackgroundFetchSetting();
   const newWindowOnRepo = $('#settings-new-window-on-repo');
   if (newWindowOnRepo) {
     newWindowOnRepo.checked = getNewWindowOnRepoChange();
@@ -1698,6 +1701,35 @@ function loadAppearanceSettingsSection() {
       newWindowOnRepo.dataset.bound = '1';
       newWindowOnRepo.addEventListener('change', (e) => setNewWindowOnRepoChange(e.target.checked));
     }
+  }
+}
+
+async function syncGitBackgroundFetchSetting() {
+  const checkbox = $('#settings-git-background-fetch');
+  try {
+    const general = await api('/api/settings/general');
+    state.gitBackgroundFetch = !!general?.git_background_fetch;
+  } catch {
+    state.gitBackgroundFetch = false;
+  }
+  if (checkbox) checkbox.checked = state.gitBackgroundFetch;
+  if (checkbox && !checkbox.dataset.bound) {
+    checkbox.dataset.bound = '1';
+    checkbox.addEventListener('change', async (e) => {
+      const enabled = !!e.target.checked;
+      try {
+        await api('/api/settings/general', {
+          method: 'PATCH',
+          body: JSON.stringify({ git_background_fetch: enabled }),
+        });
+        state.gitBackgroundFetch = enabled;
+        if (enabled) lastRemoteFetchMs = 0;
+        toast(enabled ? 'Background fetch enabled' : 'Background fetch disabled', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+        checkbox.checked = state.gitBackgroundFetch;
+      }
+    });
   }
 }
 
@@ -4471,7 +4503,18 @@ function updateStatusBar(status = null) {
   const branchEl = $('#status-branch');
   const changesEl = $('#status-changes');
   const branch = status?.branch || state.currentBranch || '';
-  if (branchEl) branchEl.textContent = branch ? `⎇ ${branch}` : '';
+  if (branchEl) {
+    let label = branch ? `⎇ ${withoutMasterBranch(branch)}` : '';
+    const ahead = status?.ahead || 0;
+    const behind = status?.behind || 0;
+    if (ahead > 0) label += ` ↑${ahead}`;
+    if (behind > 0) label += ` ↓${behind}`;
+    branchEl.textContent = label;
+    const tracking = status?.tracking || '';
+    branchEl.title = tracking
+      ? `${tracking}${ahead || behind ? ` · ${ahead} ahead, ${behind} behind` : ''}`
+      : '';
+  }
   if (changesEl) {
     if (!status || status.clean) {
       changesEl.textContent = '';
@@ -4516,12 +4559,21 @@ function updateMenuState() {
 
 function updateGitNavUi(status = {}) {
   const ahead = status.ahead || 0;
+  const behind = status.behind || 0;
+  const tracking = status.tracking || '';
   const navPush = $('#btn-nav-push');
   if (navPush) {
     navPush.classList.toggle('ij-header-btn-pending', ahead > 0);
     navPush.title = ahead > 0
-      ? `Push ${ahead} commit${ahead === 1 ? '' : 's'} to remote`
+      ? `Push ${ahead} commit${ahead === 1 ? '' : 's'}${tracking ? ` (${tracking})` : ''}`
       : 'Push to remote';
+  }
+  const navPull = $('#btn-sync');
+  if (navPull) {
+    navPull.classList.toggle('ij-header-btn-pending', behind > 0);
+    navPull.title = behind > 0
+      ? `Pull ${behind} commit${behind === 1 ? '' : 's'}${tracking ? ` from ${tracking}` : ''}`
+      : 'Pull latest';
   }
 }
 
@@ -6966,7 +7018,8 @@ async function refreshGitViewerSubtitle() {
     const branch = status?.branch || 'unknown';
     const dirty = status?.clean === false ? ' · modified' : '';
     const ahead = status?.ahead > 0 ? ` · ↑${status.ahead}` : '';
-    subtitle.textContent = `${branch}${dirty}${ahead}`;
+    const behind = status?.behind > 0 ? ` · ↓${status.behind}` : '';
+    subtitle.textContent = `${branch}${dirty}${ahead}${behind}`;
   } catch {
     subtitle.textContent = '';
   }
@@ -8989,6 +9042,7 @@ async function hydrateRepoWorkspace(name, opened, token) {
       state.branches,
     );
     updateBranchSelect();
+    updateBranchPickerState();
     updateDefaultBranchUi();
     updateRepoInfo(detail);
     updateAgentUi();
@@ -9027,6 +9081,7 @@ async function hydrateRepoWorkspace(name, opened, token) {
 async function selectRepoOnce(name, token) {
   if (!name) {
     state.repo = null;
+    lastRemoteFetchMs = 0;
     state.projectFolder = null;
     resetUI();
     updateWindowTitle();
@@ -9038,6 +9093,7 @@ async function selectRepoOnce(name, token) {
   const switching = previousRepo !== name;
   const showLoader = switching || !previousRepo;
   if (switching) {
+    lastRemoteFetchMs = 0;
     leaveSaveGate();
     closeWorkspaceTabs();
     hideBuildTasksPanel();
@@ -9158,8 +9214,13 @@ function resetUI() {
   updateHeaderBrand();
 }
 
+function updateBranchPickerState() {
+  const btn = $('#branch-picker-btn');
+  if (btn) btn.disabled = !state.repo || !state.branches.length;
+}
+
 function enableControls() {
-  $('#branch-picker-btn').disabled = false;
+  updateBranchPickerState();
   const btnRepoInfo = $('#btn-repo-info');
   if (btnRepoInfo) btnRepoInfo.disabled = false;
   ['#btn-sync', '#btn-nav-commit', '#btn-nav-push', '#btn-save', '#tb-save', '#tb-format', '#tb-run', '#btn-commit-only', '#btn-commit-push', '#btn-suggest-commit', '#btn-new-file', '#gradle-task'].forEach((s) => { const el = $(s); if (el) el.disabled = false; });
@@ -9523,6 +9584,44 @@ function hidePushModal() {
   overlay?.classList.remove('flex');
 }
 
+function formatSecretWarnings(findings) {
+  return (findings || []).map((f) => {
+    const line = f.line ? ` (line ${f.line})` : '';
+    return `• ${f.path}${line}: ${f.reason}`;
+  }).join('\n');
+}
+
+function renderSecretWarningsHtml(findings) {
+  if (!findings?.length) return '';
+  const items = findings.map((f) => {
+    const line = f.line ? `<span class="ij-secret-warning-line">line ${f.line}</span>` : '';
+    return `<li><code>${escapeHtml(f.path)}</code>${line} — ${escapeHtml(f.reason)}</li>`;
+  }).join('');
+  return `
+    <div class="ij-secret-warning" role="alert">
+      <strong>Possible secrets detected</strong>
+      <p class="ij-secret-warning-desc">Review before continuing. These may include credentials, keys, or env files.</p>
+      <ul class="ij-secret-warning-list">${items}</ul>
+    </div>
+  `;
+}
+
+async function scanSelectedPathsForSecrets(paths) {
+  if (!paths?.length) return [];
+  const res = await api(repoApi(state.repo, '/workspace/secrets/scan'), {
+    method: 'POST',
+    body: JSON.stringify({ paths }),
+  });
+  return res.findings || [];
+}
+
+async function confirmSecretsOrProceed(findings, action) {
+  if (!findings?.length) return true;
+  return confirm(
+    `Possible secrets detected in files you are about to ${action}:\n\n${formatSecretWarnings(findings)}\n\nContinue anyway?`,
+  );
+}
+
 function renderPushPreview(preview) {
   const subtitle = $('#push-modal-subtitle');
   const aheadBadge = $('#push-modal-ahead');
@@ -9548,7 +9647,12 @@ function renderPushPreview(preview) {
   }
 
   confirm.disabled = !preview.can_push;
-  confirm.textContent = preview.can_push ? 'Push' : 'Nothing to push';
+  const hasSecrets = (preview.secret_warnings || []).length > 0;
+  confirm.textContent = !preview.can_push
+    ? 'Nothing to push'
+    : hasSecrets
+      ? 'Push anyway'
+      : 'Push';
 
   if (!preview.can_push) {
     body.innerHTML = `
@@ -9565,8 +9669,10 @@ function renderPushPreview(preview) {
     return `<li><code class="ij-push-commit-hash">${escapeHtml(hash)}</code><span class="ij-push-commit-subject">${escapeHtml(c.subject || '')}</span></li>`;
   }).join('');
   const files = (preview.files || []).map((f) => `<li title="${escapeHtml(f)}">${escapeHtml(f)}</li>`).join('');
+  const secretBanner = renderSecretWarningsHtml(preview.secret_warnings);
 
   body.innerHTML = `
+    ${secretBanner}
     ${note}
     <div>
       <h4 class="ij-push-section-title">Commits</h4>
@@ -9598,6 +9704,7 @@ async function showPushModal() {
   $('#push-modal-ahead')?.classList.add('hidden');
   try {
     const preview = await api(repoApi(state.repo, '/remote/push/preview'));
+    state.pushPreview = preview;
     renderPushPreview(preview);
   } catch (err) {
     hidePushModal();
@@ -9607,6 +9714,11 @@ async function showPushModal() {
 
 async function executePush() {
   if (!state.repo || state.pushBusy) return;
+  const warnings = state.pushPreview?.secret_warnings || [];
+  if (warnings.length) {
+    const ok = await confirmSecretsOrProceed(warnings, 'push');
+    if (!ok) return;
+  }
   const confirm = $('#push-modal-confirm');
   setPushModalBusy({ busy: true, text: 'Pushing to remote…' });
   try {
@@ -13358,11 +13470,27 @@ function updateCommitSelectionUi(files, { mergeBlocked = false } = {}) {
   if (suggestBtn) suggestBtn.disabled = commitDisabled;
 }
 
+let lastRemoteFetchMs = 0;
+const REMOTE_FETCH_INTERVAL_MS = 60_000;
+
+async function maybeFetchRemotes() {
+  if (!state.repo || !state.gitBackgroundFetch) return;
+  const now = Date.now();
+  if (now - lastRemoteFetchMs < REMOTE_FETCH_INTERVAL_MS) return;
+  lastRemoteFetchMs = now;
+  try {
+    await api(repoApi(state.repo, '/workspace/fetch'), { method: 'POST' });
+  } catch {
+    /* no remote configured */
+  }
+}
+
 async function refreshGitStatus() {
   if (!state.repo) {
-    updateGitNavUi({ ahead: 0 });
-    return { clean: true, files: [], branch: '', ahead: 0 };
+    updateGitNavUi({ ahead: 0, behind: 0 });
+    return { clean: true, files: [], branch: '', ahead: 0, behind: 0 };
   }
+  await maybeFetchRemotes();
   const status = await api(repoApi(state.repo, '/workspace/status'));
   const displayFiles = filterStatusFilesForDisplay(status.files);
   state.conflictFiles = new Set(
@@ -13639,6 +13767,15 @@ async function runCommit({ push = false } = {}) {
   const paths = getSelectedCommitPaths();
   if (!paths.length) { toast('Select at least one file to commit', 'error'); return; }
   if (state.commitBusy) return;
+  let findings = [];
+  try {
+    findings = await scanSelectedPathsForSecrets(paths);
+  } catch (err) {
+    toast(err.message, 'error');
+    return;
+  }
+  const action = push ? 'commit and push' : 'commit';
+  if (!(await confirmSecretsOrProceed(findings, action))) return;
   state.commitBusy = true;
   updateCommitSelectionUi(state.lastGitStatusFiles, { mergeBlocked: state.mergeBlockedCommit });
   const useGlobalLoading = push;
@@ -13767,17 +13904,39 @@ async function syncPull() {
 }
 
 async function checkoutBranch(branch) {
+  if (!state.repo || !branch || branch === state.currentBranch) return;
   setGlobalLoading(true, `Switching to ${branch}…`);
   try {
+    leaveSaveGate();
     const out = await api(repoApi(state.repo, '/workspace/checkout'), {
       method: 'POST',
       body: JSON.stringify({ branch }),
     });
-    terminalLog(out.stdout || out.stderr || `Switched to ${branch}`);
-    await refreshTree();
+    if ((out.exit_code ?? 0) !== 0) {
+      const msg = (out.stderr || out.stdout || '').trim() || `Could not switch to ${branch}`;
+      terminalLog(msg);
+      toast(msg, 'error');
+      return;
+    }
+    terminalLog((out.stdout || out.stderr || '').trim() || `Switched to ${branch}`);
+    closeWorkspaceTabs();
+    try {
+      const detail = await api(repoApi(state.repo));
+      state.branches = normalizeBranchList(detail.branches);
+      state.defaultBranch = resolveDefaultBranch(
+        detail.default_branch || detail.summary?.default_branch || '',
+        state.branches,
+      );
+      updateBranchPickerState();
+    } catch {
+      /* branch list refresh is best-effort */
+    }
+    await refreshTree({ resetExpanded: true });
     await refreshGitStatus();
     await refreshHistory();
     startProjectIndexPolling();
+    await openFile('README.md', { silent: true });
+    toast(`Switched to ${branch}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
   } finally {
@@ -16131,14 +16290,16 @@ async function init() {
   }
   hideLaunchSplash();
   let repoToOpen = shouldSkipAutoRepoOpen() ? null : getInitialRepoFromUrl();
-  if (!repoToOpen && !shouldSkipAutoRepoOpen()) {
-    try {
-      const general = await api('/api/settings/general');
+  try {
+    const general = await api('/api/settings/general');
+    state.gitBackgroundFetch = !!general?.git_background_fetch;
+    if (!repoToOpen && !shouldSkipAutoRepoOpen()) {
       repoToOpen = general?.default_repo || general?.last_repo || null;
-    } catch {
-      /* settings unavailable */
     }
+  } catch {
+    state.gitBackgroundFetch = false;
   }
+  void syncGitBackgroundFetchSetting();
   if (repoToOpen && state.repos.some((r) => r.name === repoToOpen)) {
     await selectRepo(repoToOpen);
   } else if (!state.repo) {

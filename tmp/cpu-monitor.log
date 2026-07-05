@@ -1,0 +1,401 @@
+=== Reaper CPU monitor Sat Jul  4 10:08:04 CDT 2026 ===
+SPIKE [10:08:04] reaper=25.9 111216 | webcontent=cpu=30.1% rss=336448KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:05] reaper=23.5 120704 | child pid=88423 cpu=9.3% rss=370608KB cmd=/Users/sunny/dev/reaper_org/reaper/dist/Reaper.app/Contents/Resources/jdk-21-arm64/Contents/Home/bin/java | webcontent=cpu=11.7% rss=315936KB | javac_count=0 | jdtls: pid=88423 cpu=5.6%
+SPIKE [10:08:06] reaper=20.4 121008 | webcontent=cpu=19.2% rss=325568KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:07] reaper=24.8 121184 | webcontent=cpu=11.8% rss=334112KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:08] reaper=25.9 121696 | webcontent=cpu=12.9% rss=334480KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:10] reaper=26.1 121984 | webcontent=cpu=14.8% rss=335088KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:11] reaper=21.9 122288 | webcontent=cpu=29.5% rss=346336KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:12] reaper=22.8 122656 | webcontent=cpu=18.5% rss=349360KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:13] reaper=22.3 118704 | webcontent=cpu=10.4% rss=334928KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:14] reaper=22.5 118448 | webcontent=cpu=10.9% rss=323568KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:16] reaper=25.1 118496 | webcontent=cpu=10.1% rss=323632KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:17] reaper=25.6 118672 | webcontent=cpu=9.9% rss=323856KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:18] reaper=25.1 118848 | webcontent=cpu=9.6% rss=323872KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:19] reaper=25.0 118960 | webcontent=cpu=10.0% rss=325584KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:20] reaper=23.5 118976 | webcontent=cpu=9.1% rss=325584KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:21] reaper=2.9 137696 | webcontent=cpu=8.9% rss=325600KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:23] reaper=4.8 137696 | webcontent=cpu=13.4% rss=325584KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:24] reaper=3.5 137760 | webcontent=cpu=12.8% rss=326528KB | javac_count=0 | jdtls: pid=88423 cpu=0.8%
+[10:08:25] reaper=3.7 137824 | webcontent=cpu=20.0% rss=334720KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:26] reaper=4.4 137824 | webcontent=cpu=13.2% rss=337616KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:27] reaper=2.9 137824 | webcontent=cpu=12.9% rss=338240KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:29] reaper=3.4 137824 | webcontent=cpu=12.8% rss=338256KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:30] reaper=4.7 137888 | webcontent=cpu=14.3% rss=338464KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+SPIKE [10:08:31] reaper=5.0 137936 | webcontent=cpu=40.9% rss=360912KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:32] reaper=3.7 137968 | webcontent=cpu=14.0% rss=369552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:33] reaper=5.0 137968 | webcontent=cpu=13.7% rss=371136KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:34] reaper=3.6 137968 | webcontent=cpu=15.4% rss=372448KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:36] reaper=2.9 137968 | webcontent=cpu=11.4% rss=372448KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:37] reaper=5.2 137968 | webcontent=cpu=13.0% rss=372960KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:38] reaper=3.6 134000 | webcontent=cpu=16.7% rss=393744KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:39] reaper=4.2 134000 | webcontent=cpu=15.1% rss=393776KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:40] reaper=3.1 125296 | webcontent=cpu=15.3% rss=393824KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:42] reaper=3.1 125312 | webcontent=cpu=11.0% rss=394240KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:43] reaper=5.1 125328 | webcontent=cpu=15.6% rss=394288KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:44] reaper=4.1 125712 | webcontent=cpu=14.8% rss=395472KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:45] reaper=3.2 121680 | webcontent=cpu=12.3% rss=395472KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:46] reaper=5.2 121680 | webcontent=cpu=14.3% rss=395568KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:47] reaper=4.1 121696 | webcontent=cpu=15.5% rss=396048KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:49] reaper=3.3 121696 | webcontent=cpu=16.2% rss=397216KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:50] reaper=3.5 121728 | webcontent=cpu=15.5% rss=398032KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:51] reaper=5.0 121728 | webcontent=cpu=22.5% rss=398160KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:52] reaper=7.7 121680 | webcontent=cpu=33.2% rss=406496KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:53] reaper=6.2 121840 | webcontent=cpu=15.8% rss=403344KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:55] reaper=4.7 121824 | webcontent=cpu=15.0% rss=403424KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:56] reaper=2.9 121824 | webcontent=cpu=12.4% rss=403520KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:57] reaper=3.2 121824 | webcontent=cpu=10.7% rss=403536KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:58] reaper=3.1 121856 | webcontent=cpu=12.3% rss=403520KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:08:59] reaper=3.2 121808 | webcontent=cpu=11.5% rss=403472KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:00] reaper=3.4 121808 | webcontent=cpu=12.2% rss=403824KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:02] reaper=0.5 119488 | webcontent=cpu=13.6% rss=362832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:03] reaper=0.0 119440 | webcontent=cpu=9.1% rss=363312KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:04] reaper=0.0 119440 | webcontent=cpu=0.3% rss=363328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:05] reaper=0.0 119440 | webcontent=cpu=0.0% rss=363328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:06] reaper=0.0 119440 | webcontent=cpu=0.0% rss=363328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:08] reaper=0.0 119440 | webcontent=cpu=0.0% rss=363328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:09] reaper=0.0 119360 | webcontent=cpu=0.0% rss=363232KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:10] reaper=0.0 119264 | webcontent=cpu=0.0% rss=346688KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:11] reaper=0.0 119136 | webcontent=cpu=0.0% rss=345744KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:12] reaper=0.0 112272 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:13] reaper=0.0 110944 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:15] reaper=0.0 110944 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:16] reaper=0.0 110944 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:17] reaper=0.0 110944 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:18] reaper=0.0 110800 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:19] reaper=0.0 110720 | webcontent=cpu=0.0% rss=317296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:21] reaper=0.0 109824 | webcontent=cpu=0.0% rss=297232KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:22] reaper=0.0 107648 | webcontent=cpu=0.0% rss=294336KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:23] reaper=0.0 106608 | webcontent=cpu=0.0% rss=264656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:24] reaper=0.0 106544 | webcontent=cpu=0.0% rss=263952KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:25] reaper=0.0 106192 | webcontent=cpu=0.0% rss=251408KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:26] reaper=0.0 102976 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:28] reaper=0.0 102976 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:29] reaper=0.0 102976 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:30] reaper=0.0 102976 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:31] reaper=0.0 102944 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:32] reaper=0.0 102944 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:33] reaper=0.0 102944 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:35] reaper=0.0 102944 | webcontent=cpu=0.0% rss=238944KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:36] reaper=0.0 102480 | webcontent=cpu=0.0% rss=235328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:37] reaper=3.8 103280 | webcontent=cpu=11.9% rss=213120KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:38] reaper=3.4 103440 | webcontent=cpu=11.9% rss=214144KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:39] reaper=4.0 103488 | webcontent=cpu=14.9% rss=216720KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:41] reaper=3.8 103792 | webcontent=cpu=14.4% rss=219968KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:42] reaper=0.1 103936 | webcontent=cpu=0.3% rss=220000KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:43] reaper=0.0 103936 | webcontent=cpu=0.0% rss=220000KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:44] reaper=0.0 103936 | webcontent=cpu=0.0% rss=220000KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:45] reaper=0.0 103936 | webcontent=cpu=0.0% rss=220000KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:46] reaper=0.0 103840 | webcontent=cpu=0.0% rss=219968KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:48] reaper=0.0 103840 | webcontent=cpu=0.0% rss=219936KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:49] reaper=4.0 104000 | webcontent=cpu=10.8% rss=220496KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:50] reaper=1.6 104064 | webcontent=cpu=2.7% rss=220832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:51] reaper=0.0 104064 | webcontent=cpu=0.1% rss=220832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:52] reaper=0.0 104064 | webcontent=cpu=0.0% rss=220832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:53] reaper=0.0 104064 | webcontent=cpu=0.0% rss=220832KB | javac_count=0 | jdtls: pid=88423 cpu=0.1%
+[10:09:55] reaper=0.0 104064 | webcontent=cpu=0.0% rss=220832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:56] reaper=0.0 104016 | webcontent=cpu=0.0% rss=220800KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:57] reaper=0.0 104016 | webcontent=cpu=0.0% rss=220800KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:58] reaper=0.0 104016 | webcontent=cpu=0.0% rss=220800KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:09:59] reaper=0.0 103952 | webcontent=cpu=0.0% rss=220704KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:01] reaper=0.0 103952 | webcontent=cpu=0.0% rss=220704KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:02] reaper=0.0 103952 | webcontent=cpu=0.0% rss=220720KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:03] reaper=0.0 103952 | webcontent=cpu=0.0% rss=220720KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:04] reaper=0.0 103920 | webcontent=cpu=0.0% rss=220720KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:05] reaper=0.0 103744 | webcontent=cpu=0.0% rss=217280KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:06] reaper=2.9 103552 | webcontent=cpu=16.6% rss=209280KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:08] reaper=5.3 103696 | webcontent=cpu=15.1% rss=220768KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:09] reaper=4.0 103840 | webcontent=cpu=16.5% rss=234656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:10] reaper=3.7 103680 | webcontent=cpu=16.3% rss=234976KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:11] reaper=3.4 103456 | webcontent=cpu=15.7% rss=219136KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:12] reaper=4.1 104304 | webcontent=cpu=13.2% rss=183776KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:14] reaper=3.8 104656 | webcontent=cpu=12.7% rss=184080KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:15] reaper=2.8 104848 | webcontent=cpu=12.2% rss=198816KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:16] reaper=3.3 104768 | webcontent=cpu=15.7% rss=196864KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:17] reaper=4.2 104800 | webcontent=cpu=16.4% rss=202304KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:18] reaper=6.3 104832 | webcontent=cpu=21.5% rss=206400KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:19] reaper=4.4 104960 | webcontent=cpu=22.2% rss=212560KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:21] reaper=4.6 105056 | webcontent=cpu=13.5% rss=214928KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:22] reaper=3.9 105232 | webcontent=cpu=21.5% rss=239024KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:23] reaper=3.3 105248 | webcontent=cpu=16.8% rss=247200KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:24] reaper=3.5 105264 | webcontent=cpu=27.7% rss=302608KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:25] reaper=3.8 105312 | webcontent=cpu=15.6% rss=309232KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:27] reaper=3.8 105312 | webcontent=cpu=14.4% rss=309904KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:28] reaper=5.3 105328 | webcontent=cpu=17.7% rss=311808KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:29] reaper=3.3 105328 | webcontent=cpu=17.4% rss=312080KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:30] reaper=6.1 105232 | webcontent=cpu=17.2% rss=312224KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:31] reaper=5.1 105328 | webcontent=cpu=19.3% rss=318416KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:32] reaper=5.5 105392 | webcontent=cpu=19.4% rss=321184KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:34] reaper=3.8 105312 | webcontent=cpu=15.4% rss=322640KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:35] reaper=2.9 105328 | webcontent=cpu=17.7% rss=324080KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:36] reaper=4.2 104736 | webcontent=cpu=18.1% rss=323888KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:37] reaper=4.0 104736 | webcontent=cpu=14.6% rss=326256KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:38] reaper=3.5 104816 | webcontent=cpu=17.1% rss=322752KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:39] reaper=2.9 104784 | webcontent=cpu=17.1% rss=323344KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:41] reaper=2.9 104752 | webcontent=cpu=17.8% rss=309888KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:42] reaper=2.9 104784 | webcontent=cpu=17.0% rss=309328KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:43] reaper=3.2 104448 | webcontent=cpu=17.0% rss=297184KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:44] reaper=4.5 105296 | webcontent=cpu=10.5% rss=291072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:45] reaper=0.0 105152 | webcontent=cpu=0.1% rss=291264KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:46] reaper=0.0 102912 | webcontent=cpu=0.0% rss=259296KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:48] reaper=0.0 102224 | webcontent=cpu=0.0% rss=259184KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:49] reaper=0.0 102224 | webcontent=cpu=0.0% rss=259088KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:50] reaper=0.0 102352 | webcontent=cpu=0.0% rss=259040KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:51] reaper=0.0 102352 | webcontent=cpu=0.0% rss=259040KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:52] reaper=0.0 102352 | webcontent=cpu=0.0% rss=259040KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:54] reaper=0.0 102352 | webcontent=cpu=0.0% rss=259152KB | javac_count=0 | jdtls: pid=88423 cpu=0.1%
+[10:10:55] reaper=0.0 102400 | webcontent=cpu=0.0% rss=259072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:56] reaper=0.0 102400 | webcontent=cpu=0.0% rss=259072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:57] reaper=0.0 102400 | webcontent=cpu=0.0% rss=259072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:10:58] reaper=0.0 102400 | webcontent=cpu=0.0% rss=259072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:00] reaper=0.0 102384 | webcontent=cpu=0.0% rss=259072KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:01] reaper=0.0 102384 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:02] reaper=0.0 102384 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:03] reaper=0.0 102384 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:04] reaper=0.0 102384 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.1%
+[10:11:05] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:07] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:08] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:09] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:10] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:11] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:13] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:14] reaper=0.0 102368 | webcontent=cpu=0.0% rss=258880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:15] reaper=2.8 103792 | webcontent=cpu=12.2% rss=238352KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:16] reaper=3.8 103984 | webcontent=cpu=17.0% rss=204560KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:17] reaper=4.1 104112 | webcontent=cpu=14.9% rss=206832KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:19] reaper=0.4 104224 | webcontent=cpu=1.0% rss=202656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:20] reaper=0.0 104224 | webcontent=cpu=0.0% rss=202656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:21] reaper=0.0 104160 | webcontent=cpu=0.0% rss=202656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:22] reaper=0.0 104160 | webcontent=cpu=0.0% rss=202656KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:23] reaper=0.0 104112 | webcontent=cpu=0.0% rss=202592KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:24] reaper=0.0 104112 | webcontent=cpu=0.0% rss=203184KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:26] reaper=0.0 104064 | webcontent=cpu=0.0% rss=203168KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:27] reaper=0.0 104064 | webcontent=cpu=0.0% rss=203088KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:28] reaper=0.0 104064 | webcontent=cpu=36.9% rss=311344KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:29] reaper=6.4 103024 | webcontent=cpu=17.5% rss=312880KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:30] reaper=0.3 103696 | webcontent=cpu=0.7% rss=313552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:32] reaper=0.0 103696 | webcontent=cpu=0.0% rss=313552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:33] reaper=0.0 103696 | webcontent=cpu=0.0% rss=313552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:34] reaper=0.0 103696 | webcontent=cpu=0.0% rss=313552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:35] reaper=0.0 103600 | webcontent=cpu=0.0% rss=313552KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:36] reaper=0.0 103600 | webcontent=cpu=0.0% rss=313520KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:37] reaper=4.3 103520 | webcontent=cpu=15.5% rss=316080KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:39] reaper=5.0 104880 | webcontent=cpu=15.7% rss=318400KB | javac_count=0 | jdtls: pid=88423 cpu=0.0%
+[10:11:40] reaper=not running
+[10:11:41] reaper=not running
+[10:11:42] reaper=not running
+[10:11:43] reaper=not running
+[10:11:44] reaper=not running
+[10:11:45] reaper=not running
+[10:11:46] reaper=not running
+[10:11:47] reaper=not running
+[10:11:48] reaper=not running
+[10:11:49] reaper=not running
+[10:11:50] reaper=not running
+[10:11:51] reaper=not running
+[10:11:52] reaper=not running
+[10:11:53] reaper=not running
+[10:11:54] reaper=not running
+[10:11:56] reaper=not running
+[10:11:57] reaper=not running
+[10:11:58] reaper=not running
+[10:11:59] reaper=not running
+[10:12:00] reaper=not running
+[10:12:01] reaper=not running
+[10:12:02] reaper=not running
+[10:12:03] reaper=not running
+[10:12:04] reaper=not running
+[10:12:05] reaper=not running
+[10:12:06] reaper=not running
+[10:12:07] reaper=not running
+[10:12:08] reaper=not running
+[10:12:09] reaper=not running
+[10:12:10] reaper=not running
+[10:12:11] reaper=not running
+[10:12:12] reaper=not running
+[10:12:13] reaper=not running
+[10:12:14] reaper=not running
+[10:12:15] reaper=not running
+[10:12:16] reaper=not running
+[10:12:18] reaper=not running
+[10:12:19] reaper=not running
+[10:12:20] reaper=not running
+[10:12:21] reaper=not running
+[10:12:22] reaper=not running
+[10:12:23] reaper=not running
+[10:12:24] reaper=not running
+[10:12:25] reaper=not running
+[10:12:26] reaper=not running
+[10:12:27] reaper=not running
+[10:12:28] reaper=not running
+[10:12:29] reaper=not running
+[10:12:30] reaper=not running
+[10:12:31] reaper=not running
+[10:12:32] reaper=not running
+[10:12:33] reaper=not running
+[10:12:34] reaper=not running
+[10:12:35] reaper=not running
+[10:12:36] reaper=not running
+[10:12:37] reaper=not running
+[10:12:39] reaper=not running
+[10:12:40] reaper=not running
+[10:12:41] reaper=not running
+[10:12:42] reaper=not running
+[10:12:43] reaper=not running
+[10:12:44] reaper=not running
+[10:12:45] reaper=not running
+[10:12:46] reaper=not running
+[10:12:47] reaper=not running
+[10:12:48] reaper=not running
+[10:12:49] reaper=not running
+[10:12:50] reaper=not running
+[10:12:51] reaper=not running
+[10:12:52] reaper=not running
+[10:12:53] reaper=not running
+[10:12:54] reaper=not running
+[10:12:55] reaper=not running
+[10:12:56] reaper=not running
+[10:12:58] reaper=not running
+[10:12:59] reaper=not running
+[10:13:00] reaper=not running
+[10:13:01] reaper=not running
+[10:13:02] reaper=not running
+[10:13:03] reaper=not running
+[10:13:04] reaper=not running
+[10:13:05] reaper=not running
+[10:13:06] reaper=not running
+[10:13:07] reaper=not running
+[10:13:08] reaper=not running
+[10:13:09] reaper=not running
+[10:13:10] reaper=not running
+[10:13:11] reaper=not running
+[10:13:12] reaper=not running
+[10:13:13] reaper=not running
+[10:13:14] reaper=not running
+[10:13:16] reaper=not running
+[10:13:17] reaper=not running
+[10:13:18] reaper=not running
+[10:13:19] reaper=not running
+[10:13:20] reaper=not running
+[10:13:21] reaper=not running
+[10:13:22] reaper=not running
+[10:13:23] reaper=not running
+[10:13:24] reaper=not running
+[10:13:25] reaper=not running
+[10:13:26] reaper=not running
+[10:13:27] reaper=not running
+[10:13:28] reaper=not running
+[10:13:29] reaper=not running
+[10:13:30] reaper=not running
+[10:13:31] reaper=not running
+[10:13:32] reaper=not running
+[10:13:34] reaper=not running
+[10:13:35] reaper=not running
+[10:13:36] reaper=not running
+[10:13:37] reaper=not running
+[10:13:38] reaper=not running
+[10:13:39] reaper=not running
+[10:13:40] reaper=not running
+[10:13:41] reaper=not running
+[10:13:42] reaper=not running
+[10:13:43] reaper=not running
+[10:13:44] reaper=not running
+[10:13:45] reaper=not running
+[10:13:46] reaper=not running
+[10:13:47] reaper=not running
+[10:13:48] reaper=not running
+[10:13:49] reaper=not running
+[10:13:50] reaper=not running
+[10:13:52] reaper=not running
+[10:13:53] reaper=not running
+[10:13:54] reaper=not running
+[10:13:55] reaper=not running
+[10:13:56] reaper=not running
+[10:13:57] reaper=not running
+[10:13:58] reaper=not running
+[10:13:59] reaper=not running
+[10:14:00] reaper=not running
+[10:14:01] reaper=not running
+[10:14:02] reaper=not running
+[10:14:03] reaper=not running
+[10:14:04] reaper=not running
+[10:14:05] reaper=not running
+[10:14:06] reaper=not running
+[10:14:07] reaper=not running
+[10:14:08] reaper=not running
+[10:14:10] reaper=not running
+[10:14:11] reaper=not running
+[10:14:12] reaper=not running
+[10:14:13] reaper=not running
+[10:14:14] reaper=not running
+[10:14:15] reaper=not running
+[10:14:16] reaper=not running
+[10:14:17] reaper=not running
+[10:14:18] reaper=not running
+[10:14:19] reaper=not running
+[10:14:20] reaper=not running
+[10:14:21] reaper=not running
+[10:14:22] reaper=not running
+[10:14:23] reaper=not running
+[10:14:24] reaper=not running
+[10:14:25] reaper=not running
+[10:14:27] reaper=not running
+[10:14:28] reaper=not running
+[10:14:29] reaper=not running
+[10:14:30] reaper=not running
+[10:14:31] reaper=not running
+[10:14:32] reaper=not running
+[10:14:33] reaper=not running
+[10:14:34] reaper=not running
+[10:14:35] reaper=not running
+[10:14:36] reaper=not running
+[10:14:37] reaper=not running
+[10:14:38] reaper=not running
+[10:14:39] reaper=not running
+[10:14:40] reaper=not running
+[10:14:41] reaper=not running
+[10:14:42] reaper=not running
+[10:14:43] reaper=not running
+[10:14:45] reaper=not running
+[10:14:46] reaper=not running
+[10:14:47] reaper=not running
+[10:14:48] reaper=not running
+[10:14:49] reaper=not running
+[10:14:50] reaper=not running
+[10:20:45] reaper=not running
+[10:20:46] reaper=not running
+[10:20:47] reaper=not running
+[10:20:48] reaper=not running
+[10:20:49] reaper=not running
+[10:20:50] reaper=not running
+[10:20:51] reaper=not running
+[10:20:52] reaper=not running
+[10:20:53] reaper=not running
+[10:20:54] reaper=not running
+[10:20:56] reaper=not running
+[10:20:57] reaper=not running
+[10:20:58] reaper=not running
+[10:20:59] reaper=not running
+[10:21:00] reaper=not running
+[10:21:01] reaper=not running
+[10:21:02] reaper=not running
+[10:21:03] reaper=not running
+[10:21:04] reaper=not running
+[10:21:05] reaper=not running
+[10:21:06] reaper=not running
+[10:21:07] reaper=not running
+[10:21:08] reaper=not running
+[10:21:09] reaper=not running
+[10:21:11] reaper=not running
+[10:21:12] reaper=not running
+[10:21:13] reaper=not running
+[10:21:14] reaper=not running
+[10:21:15] reaper=not running
+[10:21:16] reaper=not running
+[10:21:17] reaper=not running
+[10:21:18] reaper=not running
+[10:21:19] reaper=not running
+[10:21:20] reaper=not running
+[10:21:21] reaper=not running
+[10:21:22] reaper=0.1 32 | webcontent=n/a | javac_count=0
