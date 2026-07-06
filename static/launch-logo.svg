@@ -1,138 +1,51 @@
-<svg class="ij-launch-logo reaper-logo-anim" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-hidden="true">
-  <defs>
-    <clipPath id="pc-r0c0"><rect x="0" y="0" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r0c1"><rect x="21" y="0" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r0c2"><rect x="42" y="0" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r1c0"><rect x="0" y="21" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r1c1"><rect x="21" y="21" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r1c2"><rect x="42" y="21" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r2c0"><rect x="0" y="42" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r2c1"><rect x="21" y="42" width="22" height="22"/></clipPath>
-    <clipPath id="pc-r2c2"><rect x="42" y="42" width="22" height="22"/></clipPath>
-    <g id="logo-static">
-      <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
-      <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
-      <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-      <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
-        <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
-        <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
-        <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
-        <text x="38" y="51" fill="#589df6" font-size="6">1</text><text x="38" y="47" fill="#589df6" font-size="6">1</text><text x="38" y="43" fill="#589df6" font-size="6">1</text>
-        <text x="44" y="51" fill="#c9a227" font-size="5.5">0</text><text x="44" y="47" fill="#c9a227" font-size="5.5">1</text><text x="44" y="43" fill="#c9a227" font-size="5.5">0</text><text x="44" y="39" fill="#c9a227" font-size="5.5">1</text>
-        <text x="50" y="51" fill="#629755" font-size="6">0</text><text x="50" y="47" fill="#629755" font-size="6">0</text><text x="50" y="43" fill="#629755" font-size="6">0</text><text x="50" y="39" fill="#629755" font-size="6">0</text>
-        <text x="56" y="51" fill="#589df6" font-size="6">1</text><text x="56" y="47" fill="#589df6" font-size="6">1</text><text x="56" y="43" fill="#589df6" font-size="6">1</text><text x="56" y="39" fill="#589df6" font-size="6">1</text><text x="56" y="35" fill="#589df6" font-size="6">1</text>
-        <text x="12" y="48" fill="#ffc66d" font-size="5" opacity="0.7">01</text>
-      </g>
-      <text class="console-line line-1" x="10" y="12" fill="#629755" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">$ git</text>
-      <text class="console-line line-2" x="10" y="19" fill="#589df6" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; build</text>
-      <text class="console-line line-3" x="10" y="26" fill="#888888" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; run</text>
-      <text class="console-line line-4" x="10" y="33" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan></text>
-      <text class="console-line line-5" x="10" y="40" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan></text>
-      <line x1="6" y1="58" x2="58" y2="58" stroke="#2a2218" stroke-width="1.2" opacity="0.6"/>
-      <g class="conduit">
-        <path d="M32 10 L32 22" stroke="#444" stroke-width="1" stroke-dasharray="2 2"/>
-        <polygon points="32,24 30,21 34,21" fill="#444"/>
-      </g>
-      <text class="reap-slash" x="12" y="56" fill="#589df6" font-size="12" font-weight="400">/</text>
-      <g font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" font-size="7">
-        <g class="stalk stalk-1"><line x1="14" y1="58" x2="14" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="14" y="57" fill="#629755">0</text></g>
-        <g class="stalk stalk-2"><line x1="20" y1="58" x2="20" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="20" y="57" fill="#589df6">1</text></g>
-        <g class="stalk stalk-3"><line x1="26" y1="58" x2="26" y2="50" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="26" y="57" fill="#c9a227" font-size="6.5">0</text><text x="26" y="52" fill="#c9a227" font-size="6.5">1</text></g>
-        <g class="stalk stalk-4"><line x1="32" y1="58" x2="32" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="32" y="57" fill="#629755">0</text><text x="32" y="52" fill="#629755">0</text><text x="32" y="47" fill="#629755">0</text></g>
-        <g class="stalk stalk-5"><line x1="38" y1="58" x2="38" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="38" y="57" fill="#589df6">1</text><text x="38" y="52" fill="#589df6">1</text><text x="38" y="47" fill="#589df6">1</text></g>
-        <g class="stalk stalk-6"><line x1="44" y1="58" x2="44" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="44" y="57" fill="#c9a227" font-size="6.5">0</text><text x="44" y="52" fill="#c9a227" font-size="6.5">1</text><text x="44" y="47" fill="#c9a227" font-size="6.5">0</text><text x="44" y="42" fill="#c9a227" font-size="6.5">1</text></g>
-        <g class="stalk stalk-7"><line x1="50" y1="58" x2="50" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="50" y="57" fill="#629755">0</text><text x="50" y="52" fill="#629755">0</text><text x="50" y="47" fill="#629755">0</text><text x="50" y="42" fill="#629755">0</text></g>
-        <g class="stalk stalk-8"><line x1="56" y1="58" x2="56" y2="36" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="56" y="57" fill="#589df6">1</text><text x="56" y="52" fill="#589df6">1</text><text x="56" y="47" fill="#589df6">1</text><text x="56" y="42" fill="#589df6">1</text><text x="56" y="37" fill="#589df6">1</text></g>
-      </g>
-      <g class="harvest-pile" font-family="Consolas,Menlo,Monaco,monospace">
-        <text class="harvest-bit harvest-bit-1" x="10" y="50" fill="#ffc66d" font-size="6" style="--ox:-6px">01</text>
-        <text class="harvest-bit harvest-bit-2" x="10" y="44" fill="#ffc66d" font-size="6" opacity="0.85" style="--ox:-4px">01</text>
-        <text class="harvest-bit harvest-bit-3" x="14" y="47" fill="#c9a227" font-size="5.5" opacity="0.7" style="--ox:4px">01</text>
-      </g>
-    </g>
-  </defs>
-
-  <!-- Full logo — revealed after puzzle merges -->
-  <g class="logo-unified">
-    <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
-    <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
-    <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-    <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
-      <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
-      <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
-      <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
-      <text x="38" y="51" fill="#589df6" font-size="6">1</text><text x="38" y="47" fill="#589df6" font-size="6">1</text><text x="38" y="43" fill="#589df6" font-size="6">1</text>
-      <text x="44" y="51" fill="#c9a227" font-size="5.5">0</text><text x="44" y="47" fill="#c9a227" font-size="5.5">1</text><text x="44" y="43" fill="#c9a227" font-size="5.5">0</text><text x="44" y="39" fill="#c9a227" font-size="5.5">1</text>
-      <text x="50" y="51" fill="#629755" font-size="6">0</text><text x="50" y="47" fill="#629755" font-size="6">0</text><text x="50" y="43" fill="#629755" font-size="6">0</text><text x="50" y="39" fill="#629755" font-size="6">0</text>
-      <text x="56" y="51" fill="#589df6" font-size="6">1</text><text x="56" y="47" fill="#589df6" font-size="6">1</text><text x="56" y="43" fill="#589df6" font-size="6">1</text><text x="56" y="39" fill="#589df6" font-size="6">1</text><text x="56" y="35" fill="#589df6" font-size="6">1</text>
-      <text x="12" y="48" fill="#ffc66d" font-size="5" opacity="0.7">01</text>
-    </g>
-    <text class="console-line line-1" x="10" y="12" fill="#629755" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">$ git</text>
-    <text class="console-line line-2" x="10" y="19" fill="#589df6" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; build</text>
-    <text class="console-line line-3" x="10" y="26" fill="#888888" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; run</text>
-    <text class="console-line line-4" x="10" y="33" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan></text>
-    <text class="console-line line-5" x="10" y="40" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan></text>
-    <g class="anim-layer">
-      <line x1="6" y1="58" x2="58" y2="58" stroke="#2a2218" stroke-width="1.2" opacity="0.6"/>
-      <g class="conduit">
-        <path d="M32 10 L32 22" stroke="#444" stroke-width="1" stroke-dasharray="2 2"/>
-        <polygon points="32,24 30,21 34,21" fill="#444"/>
-      </g>
-      <g font-family="Consolas,Menlo,Monaco,monospace" font-size="6" font-weight="400">
-        <text class="code-drop code-drop-1" x="28" y="12" fill="#ed8b00" style="--dx:-4px">.java</text>
-        <text class="code-drop code-drop-2" x="34" y="12" fill="#dea584" style="--dx:2px">.rs</text>
-        <text class="code-drop code-drop-3" x="24" y="14" fill="#3776ab" style="--dx:-10px">.py</text>
-        <text class="code-drop code-drop-4" x="38" y="14" fill="#3178c6" style="--dx:8px">.ts</text>
-        <text class="code-drop code-drop-5" x="32" y="13" fill="#629755" style="--dx:0px">0</text>
-        <text class="code-drop code-drop-6" x="40" y="13" fill="#589df6" style="--dx:12px">1</text>
-      </g>
-      <text class="reap-slash" x="12" y="56" fill="#589df6" font-size="12" font-weight="400">/</text>
-      <g font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" font-size="7">
-        <g class="stalk stalk-1"><line x1="14" y1="58" x2="14" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="14" y="57" fill="#629755">0</text></g>
-        <g class="stalk stalk-2"><line x1="20" y1="58" x2="20" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="20" y="57" fill="#589df6">1</text></g>
-        <g class="stalk stalk-3"><line x1="26" y1="58" x2="26" y2="50" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="26" y="57" fill="#c9a227" font-size="6.5">0</text><text x="26" y="52" fill="#c9a227" font-size="6.5">1</text></g>
-        <g class="stalk stalk-4"><line x1="32" y1="58" x2="32" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="32" y="57" fill="#629755">0</text><text x="32" y="52" fill="#629755">0</text><text x="32" y="47" fill="#629755">0</text></g>
-        <g class="stalk stalk-5"><line x1="38" y1="58" x2="38" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="38" y="57" fill="#589df6">1</text><text x="38" y="52" fill="#589df6">1</text><text x="38" y="47" fill="#589df6">1</text></g>
-        <g class="stalk stalk-6"><line x1="44" y1="58" x2="44" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="44" y="57" fill="#c9a227" font-size="6.5">0</text><text x="44" y="52" fill="#c9a227" font-size="6.5">1</text><text x="44" y="47" fill="#c9a227" font-size="6.5">0</text><text x="44" y="42" fill="#c9a227" font-size="6.5">1</text></g>
-        <g class="stalk stalk-7"><line x1="50" y1="58" x2="50" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="50" y="57" fill="#629755">0</text><text x="50" y="52" fill="#629755">0</text><text x="50" y="47" fill="#629755">0</text><text x="50" y="42" fill="#629755">0</text></g>
-        <g class="stalk stalk-8"><line x1="56" y1="58" x2="56" y2="36" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="56" y="57" fill="#589df6">1</text><text x="56" y="52" fill="#589df6">1</text><text x="56" y="47" fill="#589df6">1</text><text x="56" y="42" fill="#589df6">1</text><text x="56" y="37" fill="#589df6">1</text></g>
-      </g>
-      <g class="harvest-pile" font-family="Consolas,Menlo,Monaco,monospace">
-        <text class="harvest-bit harvest-bit-1" x="10" y="50" fill="#ffc66d" font-size="6" style="--ox:-6px">01</text>
-        <text class="harvest-bit harvest-bit-2" x="10" y="44" fill="#ffc66d" font-size="6" opacity="0.85" style="--ox:-4px">01</text>
-        <text class="harvest-bit harvest-bit-3" x="14" y="47" fill="#c9a227" font-size="5.5" opacity="0.7" style="--ox:4px">01</text>
-      </g>
-    </g>
+<svg class="ij-launch-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-hidden="true">
+  <rect class="panel-bg" width="64" height="64" rx="12" fill="#0a0a0a"/>
+  <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
+  <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
+  <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+    <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
+    <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
+    <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
+    <text x="38" y="51" fill="#589df6" font-size="6">1</text><text x="38" y="47" fill="#589df6" font-size="6">1</text><text x="38" y="43" fill="#589df6" font-size="6">1</text>
+    <text x="44" y="51" fill="#c9a227" font-size="5.5">0</text><text x="44" y="47" fill="#c9a227" font-size="5.5">1</text><text x="44" y="43" fill="#c9a227" font-size="5.5">0</text><text x="44" y="39" fill="#c9a227" font-size="5.5">1</text>
+    <text x="50" y="51" fill="#629755" font-size="6">0</text><text x="50" y="47" fill="#629755" font-size="6">0</text><text x="50" y="43" fill="#629755" font-size="6">0</text><text x="50" y="39" fill="#629755" font-size="6">0</text>
+    <text x="56" y="51" fill="#589df6" font-size="6">1</text><text x="56" y="47" fill="#589df6" font-size="6">1</text><text x="56" y="43" fill="#589df6" font-size="6">1</text><text x="56" y="39" fill="#589df6" font-size="6">1</text><text x="56" y="35" fill="#589df6" font-size="6">1</text>
+    <text x="12" y="48" fill="#ffc66d" font-size="5" opacity="0.7">01</text>
   </g>
-
-  <!-- Rubik 3×3 face — logo fragment on each cell -->
-  <g class="puzzle-stage">
-    <g class="splash-piece splash-piece-r0c0" clip-path="url(#pc-r0c0)">
-      <use href="#logo-static"/>
+  <text class="console-line line-1" x="10" y="12" fill="#629755" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">$ git</text>
+  <text class="console-line line-2" x="10" y="19" fill="#589df6" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; build</text>
+  <text class="console-line line-3" x="10" y="26" fill="#888888" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5">&gt; run</text>
+  <text class="console-line line-4" x="10" y="33" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#ed8b00">.java</tspan><tspan fill="#555555"> </tspan><tspan fill="#dea584">.rs</tspan><tspan fill="#555555"> </tspan><tspan fill="#3776ab">.py</tspan></text>
+  <text class="console-line line-5" x="10" y="40" font-family="Consolas,Menlo,Monaco,monospace" font-size="6.5"><tspan fill="#3178c6">.ts</tspan><tspan fill="#555555"> </tspan><tspan fill="#00add8">.go</tspan><tspan fill="#555555"> </tspan><tspan fill="#cc342d">.rb</tspan></text>
+  <g class="anim-layer">
+    <line x1="6" y1="58" x2="58" y2="58" stroke="#2a2218" stroke-width="1.2" opacity="0.6"/>
+    <g class="conduit">
+      <path d="M32 10 L32 22" stroke="#444" stroke-width="1" stroke-dasharray="2 2"/>
+      <polygon points="32,24 30,21 34,21" fill="#444"/>
     </g>
-    <g class="splash-piece splash-piece-r0c1" clip-path="url(#pc-r0c1)">
-      <use href="#logo-static"/>
+    <g font-family="Consolas,Menlo,Monaco,monospace" font-size="6" font-weight="400">
+      <text class="code-drop code-drop-1" x="28" y="12" fill="#ed8b00" style="--dx:-4px">.java</text>
+      <text class="code-drop code-drop-2" x="34" y="12" fill="#dea584" style="--dx:2px">.rs</text>
+      <text class="code-drop code-drop-3" x="24" y="14" fill="#3776ab" style="--dx:-10px">.py</text>
+      <text class="code-drop code-drop-4" x="38" y="14" fill="#3178c6" style="--dx:8px">.ts</text>
+      <text class="code-drop code-drop-5" x="32" y="13" fill="#629755" style="--dx:0px">0</text>
+      <text class="code-drop code-drop-6" x="40" y="13" fill="#589df6" style="--dx:12px">1</text>
     </g>
-    <g class="splash-piece splash-piece-r0c2" clip-path="url(#pc-r0c2)">
-      <use href="#logo-static"/>
+    <text class="reap-slash" x="12" y="56" fill="#589df6" font-size="12" font-weight="400">/</text>
+    <g font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" font-size="7">
+      <g class="stalk stalk-1"><line x1="14" y1="58" x2="14" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="14" y="57" fill="#629755">0</text></g>
+      <g class="stalk stalk-2"><line x1="20" y1="58" x2="20" y2="54" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="20" y="57" fill="#589df6">1</text></g>
+      <g class="stalk stalk-3"><line x1="26" y1="58" x2="26" y2="50" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="26" y="57" fill="#c9a227" font-size="6.5">0</text><text x="26" y="52" fill="#c9a227" font-size="6.5">1</text></g>
+      <g class="stalk stalk-4"><line x1="32" y1="58" x2="32" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="32" y="57" fill="#629755">0</text><text x="32" y="52" fill="#629755">0</text><text x="32" y="47" fill="#629755">0</text></g>
+      <g class="stalk stalk-5"><line x1="38" y1="58" x2="38" y2="46" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="38" y="57" fill="#589df6">1</text><text x="38" y="52" fill="#589df6">1</text><text x="38" y="47" fill="#589df6">1</text></g>
+      <g class="stalk stalk-6"><line x1="44" y1="58" x2="44" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="44" y="57" fill="#c9a227" font-size="6.5">0</text><text x="44" y="52" fill="#c9a227" font-size="6.5">1</text><text x="44" y="47" fill="#c9a227" font-size="6.5">0</text><text x="44" y="42" fill="#c9a227" font-size="6.5">1</text></g>
+      <g class="stalk stalk-7"><line x1="50" y1="58" x2="50" y2="42" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="50" y="57" fill="#629755">0</text><text x="50" y="52" fill="#629755">0</text><text x="50" y="47" fill="#629755">0</text><text x="50" y="42" fill="#629755">0</text></g>
+      <g class="stalk stalk-8"><line x1="56" y1="58" x2="56" y2="36" stroke="#4a8f55" stroke-width="1" opacity="0.45"/><text x="56" y="57" fill="#589df6">1</text><text x="56" y="52" fill="#589df6">1</text><text x="56" y="47" fill="#589df6">1</text><text x="56" y="42" fill="#589df6">1</text><text x="56" y="37" fill="#589df6">1</text></g>
     </g>
-    <g class="splash-piece splash-piece-r1c0" clip-path="url(#pc-r1c0)">
-      <use href="#logo-static"/>
-    </g>
-    <g class="splash-piece splash-piece-r1c1" clip-path="url(#pc-r1c1)">
-      <use href="#logo-static"/>
-    </g>
-    <g class="splash-piece splash-piece-r1c2" clip-path="url(#pc-r1c2)">
-      <use href="#logo-static"/>
-    </g>
-    <g class="splash-piece splash-piece-r2c0" clip-path="url(#pc-r2c0)">
-      <use href="#logo-static"/>
-    </g>
-    <g class="splash-piece splash-piece-r2c1" clip-path="url(#pc-r2c1)">
-      <use href="#logo-static"/>
-    </g>
-    <g class="splash-piece splash-piece-r2c2" clip-path="url(#pc-r2c2)">
-      <use href="#logo-static"/>
+    <g class="harvest-pile" font-family="Consolas,Menlo,Monaco,monospace">
+      <text class="harvest-bit harvest-bit-1" x="10" y="50" fill="#ffc66d" font-size="6" style="--ox:-6px">01</text>
+      <text class="harvest-bit harvest-bit-2" x="10" y="44" fill="#ffc66d" font-size="6" opacity="0.85" style="--ox:-4px">01</text>
+      <text class="harvest-bit harvest-bit-3" x="14" y="47" fill="#c9a227" font-size="5.5" opacity="0.7" style="--ox:4px">01</text>
     </g>
   </g>
 </svg>

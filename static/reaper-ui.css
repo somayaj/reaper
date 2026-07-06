@@ -2108,9 +2108,9 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 
 .ij-welcome-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(320px, 520px);
-  gap: 2rem 2.5rem;
-  width: min(100%, 1180px);
+  grid-template-columns: minmax(300px, 1fr) minmax(260px, 360px);
+  gap: 2rem 2rem;
+  width: min(100%, 1080px);
   margin: 0 auto;
   align-items: start;
 }
@@ -2123,37 +2123,62 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
 }
 
 .ij-welcome-showcase {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
   position: sticky;
   top: 0.5rem;
-  max-height: calc(100vh - 4rem);
-  overflow: auto;
-  padding-right: 2px;
+  width: 100%;
+  max-width: 360px;
+  justify-self: end;
 }
 
-.ij-welcome-frame {
-  margin: 0;
-  padding: 8px;
+.ij-welcome-carousel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ij-welcome-carousel-viewport {
+  overflow: hidden;
+  border-radius: 8px;
   background: #0a0a0a;
   border: 1px solid #141414;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  aspect-ratio: 16 / 10;
+  max-height: 210px;
 }
 
-.ij-welcome-frame img {
+.ij-welcome-carousel-track {
+  display: flex;
+  height: 100%;
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.ij-welcome-slide {
+  flex: 0 0 100%;
+  margin: 0;
+  padding: 8px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ij-welcome-slide.is-missing {
+  display: none;
+}
+
+.ij-welcome-slide img {
   display: block;
   width: 100%;
-  min-height: 72px;
-  height: auto;
+  flex: 1;
+  min-height: 0;
   border-radius: 3px;
   background: var(--ij-bg);
   object-fit: cover;
   object-position: top left;
 }
 
-.ij-welcome-frame figcaption {
+.ij-welcome-slide figcaption {
   margin: 6px 0 0;
   font-size: 9px;
   font-weight: 600;
@@ -2161,13 +2186,64 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   text-transform: uppercase;
   color: var(--ij-text-dim);
   text-align: center;
+  flex-shrink: 0;
 }
 
-.ij-welcome-frame.is-missing {
+.ij-welcome-carousel-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ij-welcome-carousel-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--ij-border-light);
+  border-radius: 6px;
+  background: var(--ij-gutter);
+  color: var(--ij-text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ij-welcome-carousel-btn:hover {
+  color: var(--ij-accent);
+  border-color: var(--ij-accent);
+  background: var(--ij-selection);
+}
+
+.ij-welcome-carousel-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 220px;
+}
+
+.ij-welcome-carousel-dot {
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--ij-border-light);
+  cursor: pointer;
+}
+
+.ij-welcome-carousel-dot.is-active {
+  background: var(--ij-accent);
+  transform: scale(1.15);
+}
+
+.ij-welcome-carousel-dot[hidden] {
   display: none;
 }
 
-.ij-welcome-layout:not(:has(.ij-welcome-showcase .ij-welcome-frame)) .ij-welcome-showcase {
+.ij-welcome-layout:not(:has(.ij-welcome-slide)) .ij-welcome-showcase {
   display: none;
 }
 
@@ -2179,14 +2255,18 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   .ij-welcome-showcase {
     position: static;
     order: 2;
-    max-height: none;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: none;
+    justify-self: stretch;
+  }
+
+  .ij-welcome-carousel-viewport {
+    max-height: min(52vw, 240px);
   }
 }
 
 @media (max-width: 560px) {
-  .ij-welcome-showcase {
-    grid-template-columns: 1fr;
+  .ij-welcome-carousel-dots {
+    max-width: 180px;
   }
 }
 
@@ -2194,7 +2274,55 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   width: 72px;
   height: 72px;
   margin-bottom: 1.25rem;
-  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.3));
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #0a0a0a;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  filter: none;
+}
+
+/* Welcome logo animation — same fixes as launch splash (no white flash on light themes) */
+.ij-welcome .reaper-logo-anim .panel-bg {
+  animation: none !important;
+  opacity: 1 !important;
+  fill: #0a0a0a !important;
+}
+
+.ij-welcome .reaper-logo-anim .field-bg {
+  fill: #14110e !important;
+}
+
+.ij-welcome .reaper-logo-anim .field-earth {
+  fill: #2a2218 !important;
+}
+
+.ij-welcome .reaper-logo-anim .field-bg,
+.ij-welcome .reaper-logo-anim .field-earth,
+.ij-welcome .reaper-logo-anim .intro-field {
+  animation: ij-welcome-field 7s ease-in-out infinite !important;
+}
+
+@keyframes ij-welcome-field {
+  0%, 20% { opacity: 1; }
+  24%, 100% { opacity: 0; }
+}
+
+.ij-welcome .reaper-logo-anim .anim-layer {
+  animation: ij-welcome-show-anim 7s ease-in-out infinite !important;
+}
+
+@keyframes ij-welcome-show-anim {
+  0%, 18%   { opacity: 0; transform: scale(0.72) translateY(10px); }
+  26%, 100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.ij-welcome .reaper-logo-anim .harvest-pile {
+  animation: ij-welcome-harvest-pile 7s ease-out infinite !important;
+}
+
+@keyframes ij-welcome-harvest-pile {
+  0%, 58%   { opacity: 0; transform: translateY(6px) scale(0.7); }
+  64%, 100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .ij-welcome h2 {
@@ -8541,6 +8669,14 @@ main { background: var(--ij-bg); }
   box-shadow:
     0 0 0 1px rgba(15, 23, 42, 0.1),
     0 2px 6px rgba(15, 23, 42, 0.14);
+}
+
+html[data-theme="offwhite"] .ij-welcome .ij-welcome-logo.logo-mark,
+.theme-light .ij-welcome .ij-welcome-logo.logo-mark {
+  background-color: #0a0a0a !important;
+  border-radius: 12px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  filter: none !important;
 }
 
 .ij-menu-theme {

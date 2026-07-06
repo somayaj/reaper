@@ -4,26 +4,23 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Reaper — splash preview</title>
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=11" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=42" />
   <link rel="stylesheet" href="/logo-animated.css?v=8" />
+  <script>
+    window.__reaperSplashAt = Date.now();
+  </script>
 </head>
-<body class="splash-preview-loop" style="background:#0a0a0a; margin:0">
+<body style="background:#0a0a0a; margin:0">
   <div id="launch-splash" role="status" aria-live="polite" aria-label="Starting IDE">
     <div class="ij-launch-brand">
-      <div class="ij-launch-logo-wrap" id="splash-logo"></div>
+      <div class="ij-launch-logo-wrap"></div>
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
   <p style="position:fixed;bottom:12px;left:0;right:0;text-align:center;font:12px system-ui;color:#555;margin:0">
-    Puzzle → harvest loop (repeats). Close tab when done.
+    Animated logo splash preview. Close tab when done.
   </p>
-  <script>
-    fetch('/launch-logo.svg')
-      .then(function (r) { return r.text(); })
-      .then(function (svg) {
-        document.getElementById('splash-logo').innerHTML = svg;
-      });
-  </script>
-  <script src="/launch-splash.js?v=4"></script>
+  <script src="/logo.js?v=44"></script>
+  <script src="/launch-splash.js?v=23"></script>
 </body>
 </html>

@@ -2,10 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use serde_yaml::Value as YamlValue;
 use toml::Value;
 
 use super::native_build_tasks::{
     detect_python_package_manager, go_program_shell, is_runnable_make_target,
+    pubspec_is_flutter_project,
     python_install_command,
     python_interpreter_for_project, python_pip_command, python_pytest_all_command,
     python_requirements_install_command, python_ruff_command,
@@ -57,6 +59,7 @@ pub struct ManifestAction {
 
 const MANIFEST_NAMES: &[(&str, &str)] = &[
     ("Cargo.toml", "cargo"),
+    ("pubspec.yaml", "dart"),
     ("pyproject.toml", "python"),
     ("requirements.txt", "python-reqs"),
     ("Pipfile", "pipfile"),
@@ -89,6 +92,7 @@ fn manifest_kind_for_path(path: &str) -> Option<&'static str> {
     let name = base.rsplit('/').next()?.to_ascii_lowercase();
     match name.as_str() {
         "cargo.toml" => Some("cargo"),
+        "pubspec.yaml" => Some("dart"),
         "pyproject.toml" => Some("python"),
         "requirements.txt" => Some("python-reqs"),
         "pipfile" => Some("pipfile"),
@@ -167,6 +171,7 @@ fn parse_manifest(
 ) -> Result<PackageManifestView> {
     match kind {
         "cargo" => parse_cargo(manifest_rel, package_root, text),
+        "dart" => parse_pubspec(manifest_rel, package_root, text),
         "python" => parse_pyproject(ws, manifest_rel, package_root, text),
         "python-reqs" => parse_requirements(ws, manifest_rel, package_root, text),
         "pipfile" => parse_pipfile(ws, manifest_rel, package_root, text),
@@ -288,6 +293,78 @@ fn parse_cargo(manifest_rel: &str, package_root: &str, text: &str) -> Result<Pac
         manifest_path: manifest_rel.to_string(),
         package_root: package_root.to_string(),
         ecosystem: "cargo".into(),
+        title,
+        subtitle,
+        fields,
+        sections,
+        actions,
+    })
+}
+
+fn parse_pubspec(manifest_rel: &str, package_root: &str, text: &str) -> Result<PackageManifestView> {
+    let root: YamlValue = serde_yaml::from_str(text).context("parse pubspec.yaml")?;
+    let flutter = pubspec_is_flutter_project(text);
+    let mut fields = Vec::new();
+    let mut sections = Vec::new();
+    let mut title = if flutter {
+        "Flutter package".into()
+    } else {
+        "Dart package".into()
+    };
+    let subtitle = if flutter {
+        Some("Flutter".into())
+    } else {
+        None
+    };
+
+    if let Some(name) = root.get("name").and_then(|v| v.as_str()) {
+        title = name.to_string();
+        fields.push(field("Name", name));
+    }
+    push_yaml_opt_field(&mut fields, "Description", root.get("description"));
+    push_yaml_opt_field(&mut fields, "Version", root.get("version"));
+    push_yaml_opt_field(&mut fields, "Publish to", root.get("publish_to"));
+    if let Some(env) = root.get("environment").and_then(|v| v.as_mapping()) {
+        if let Some(sdk) = env.get(YamlValue::String("sdk".into())).and_then(|v| v.as_str()) {
+            fields.push(field("SDK", sdk));
+        }
+    }
+
+    push_yaml_dep_section(&mut sections, "dependencies", "Dependencies", root.get("dependencies"));
+    push_yaml_dep_section(
+        &mut sections,
+        "dev_dependencies",
+        "Dev dependencies",
+        root.get("dev_dependencies"),
+    );
+    push_yaml_dep_section(
+        &mut sections,
+        "dependency_overrides",
+        "Dependency overrides",
+        root.get("dependency_overrides"),
+    );
+
+    let actions = if flutter {
+        vec![
+            action("pub-get", "Pub get", "flutter pub get"),
+            action("analyze", "Analyze", "flutter analyze"),
+            action("test", "Test", "flutter test"),
+            action("run", "Run", "flutter run"),
+            action("build", "Build", "flutter build"),
+        ]
+    } else {
+        vec![
+            action("pub-get", "Pub get", "dart pub get"),
+            action("analyze", "Analyze", "dart analyze"),
+            action("test", "Test", "dart test"),
+            action("run", "Run", "dart run"),
+        ]
+    };
+
+    Ok(PackageManifestView {
+        manifest_path: manifest_rel.to_string(),
+        package_root: package_root.to_string(),
+        ecosystem: if flutter { "flutter".into() } else { "dart".into() },
         title,
         subtitle,
         fields,
@@ -994,6 +1071,71 @@ fn push_dep_section(
     }
 }
 
+fn push_yaml_opt_field(fields: &mut Vec<ManifestField>, label: &str, value: Option<&YamlValue>) {
+    if let Some(v) = value.and_then(|v| v.as_str()) {
+        fields.push(field(label, v));
+    }
+}
+
+fn push_yaml_dep_section(
+    sections: &mut Vec<ManifestSection>,
+    id: &str,
+    title: &str,
+    value: Option<&YamlValue>,
+) {
+    let Some(table) = value.and_then(|v| v.as_mapping()) else {
+        return;
+    };
+    let mut items: Vec<_> = table
+        .iter()
+        .filter_map(|(name, spec)| {
+            let key = name.as_str()?;
+            Some(item(key, Some(format_yaml_dep_spec(spec))))
+        })
+        .collect();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    if !items.is_empty() {
+        sections.push(section(id, title, items));
+    }
+}
+
+fn format_yaml_dep_spec(spec: &YamlValue) -> String {
+    match spec {
+        YamlValue::String(s) => s.clone(),
+        YamlValue::Number(n) => n.to_string(),
+        YamlValue::Bool(b) => b.to_string(),
+        YamlValue::Mapping(map) => {
+            if map
+                .get(YamlValue::String("sdk".into()))
+                .and_then(|v| v.as_str())
+                .is_some()
+            {
+                return "sdk".into();
+            }
+            if let Some(version) = map
+                .get(YamlValue::String("version".into()))
+                .and_then(|v| v.as_str())
+            {
+                return version.to_string();
+            }
+            if let Some(path) = map
+                .get(YamlValue::String("path".into()))
+                .and_then(|v| v.as_str())
+            {
+                return format!("path: {path}");
+            }
+            if let Some(git) = map
+                .get(YamlValue::String("git".into()))
+                .and_then(|v| v.as_str())
+            {
+                return format!("git: {git}");
+            }
+            "{ … }".into()
+        }
+        _ => "{ … }".into(),
+    }
+}
+
 fn format_dep_spec(spec: &Value) -> String {
     match spec {
         Value::String(s) => s.clone(),
@@ -1057,6 +1199,28 @@ impl SectionExt for Vec<ManifestSection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_pubspec() {
+        let text = r#"
+name: demo_app
+description: A demo Flutter app
+version: 1.0.0+1
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+"#;
+        let v = parse_pubspec("pubspec.yaml", "", text).unwrap();
+        assert_eq!(v.title, "demo_app");
+        assert_eq!(v.ecosystem, "flutter");
+        assert!(v.sections.iter().any(|s| s.id == "dependencies"));
+    }
 
     #[test]
     fn parses_cargo() {

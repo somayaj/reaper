@@ -1,46 +1,42 @@
-/** Rubik-style 3×3 face snaps in 3D, then reveals the full animated logo. */
+/** Launch splash — animated welcome logo while the IDE loads. */
 (function () {
   var splash = document.getElementById('launch-splash');
   if (!splash) return;
 
   var wrap = splash.querySelector('.ij-launch-logo-wrap');
-  var logo = splash.querySelector('.reaper-logo-anim');
-  if (!logo) return;
+  if (!wrap) return;
 
-  var mergeMs = 3400;
-  var loopPreview = document.body.classList.contains('splash-preview-loop');
+  var makeLogo = window.ReaperLogo && window.ReaperLogo.reaperLogoHtml;
+  if (typeof makeLogo !== 'function') return;
 
-  function resetPieces() {
-    splash.querySelectorAll('.splash-piece').forEach(function (el) {
+  wrap.innerHTML = makeLogo('welcome', { extraClass: 'ij-welcome-logo logo-mark' });
+
+  function restartAnimations(root) {
+    if (!root) return;
+    root.querySelectorAll('*').forEach(function (el) {
+      var name = getComputedStyle(el).animationName;
+      if (!name || name === 'none') return;
       el.style.animation = 'none';
       void el.offsetWidth;
-      el.style.animation = '';
+      el.style.removeProperty('animation');
     });
-    var stage = splash.querySelector('.puzzle-stage');
-    if (stage) {
-      stage.style.animation = 'none';
-      void stage.offsetWidth;
-      stage.style.animation = '';
-    }
   }
 
-  function merge() {
-    logo.classList.add('is-merged', 'is-assembled');
-    if (wrap) wrap.classList.add('is-assembled');
-  }
+  requestAnimationFrame(function () {
+    restartAnimations(wrap.querySelector('.reaper-logo-anim'));
+  });
 
-  function split() {
-    logo.classList.remove('is-merged', 'is-assembled');
-    if (wrap) wrap.classList.remove('is-assembled');
-    resetPieces();
-  }
+  window.addEventListener('reaper-logo-svg-ready', function () {
+    if (!makeLogo) return;
+    wrap.innerHTML = makeLogo('welcome', { extraClass: 'ij-welcome-logo logo-mark' });
+    requestAnimationFrame(function () {
+      restartAnimations(wrap.querySelector('.reaper-logo-anim'));
+    });
+  }, { once: true });
 
-  setTimeout(merge, mergeMs);
+  window.__reaperSplashTiming = { totalMs: 0 };
 
-  if (loopPreview) {
-    setInterval(function () {
-      split();
-      setTimeout(merge, mergeMs);
-    }, 9000);
-  }
+  window.waitForLaunchSplashHarvest = function () {
+    return Promise.resolve();
+  };
 })();

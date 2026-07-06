@@ -20,6 +20,12 @@ pub fn try_native_tree(
     if let Some(tree) = try_composer_tree(ws, rel_path)? {
         return Ok(Some(tree));
     }
+    if let Some(tree) = try_cargo_tree(ws, rel_path)? {
+        return Ok(Some(tree));
+    }
+    if let Some(tree) = try_pubspec_tree(ws, rel_path)? {
+        return Ok(Some(tree));
+    }
     if let Some(tree) = try_pyproject_tree(ws, rel_path)? {
         return Ok(Some(tree));
     }
@@ -129,6 +135,7 @@ fn is_manifest_file_name(name: &str) -> bool {
             | "compose.yaml"
             | "dockerfile"
             | "composer.json"
+            | "pubspec.yaml"
     )
 }
 
@@ -713,6 +720,61 @@ fn parse_cargo_package_name(text: &str) -> Option<String> {
         .get("name")?
         .as_str()
         .map(String::from)
+}
+
+pub fn parse_pubspec_package_name(text: &str) -> Option<String> {
+    let value: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+    value.get("name")?.as_str().map(String::from)
+}
+
+pub fn pubspec_is_flutter_project(text: &str) -> bool {
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
+        return false;
+    };
+    if value.get("flutter").is_some() {
+        return true;
+    }
+    value
+        .get("dependencies")
+        .and_then(|d| d.get("flutter"))
+        .is_some()
+}
+
+fn try_pubspec_tree(ws: &Path, rel_path: &str) -> Result<Option<BuildTasksTree>> {
+    let Some((dir, manifest_path)) = find_nearest_manifest(ws, rel_path, &["pubspec.yaml"])? else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(dir.join("pubspec.yaml"))
+        .with_context(|| format!("read {manifest_path}"))?;
+    let name = parse_pubspec_package_name(&text).unwrap_or_else(|| "project".into());
+    let flutter = pubspec_is_flutter_project(&text);
+    let tasks = if flutter {
+        let flutter = flutter_program_shell();
+        vec![
+            task("pub-get", &format!("{flutter} pub get"), "lifecycle"),
+            task("analyze", &format!("{flutter} analyze"), "verification"),
+            task("test", &format!("{flutter} test"), "verification"),
+            task("run", &format!("{flutter} run"), "application"),
+            task("build", &format!("{flutter} build"), "lifecycle"),
+        ]
+    } else {
+        let dart = dart_program_shell();
+        vec![
+            task("pub-get", &format!("{dart} pub get"), "lifecycle"),
+            task("analyze", &format!("{dart} analyze"), "verification"),
+            task("test", &format!("{dart} test"), "verification"),
+            task("run", &format!("{dart} run"), "application"),
+        ]
+    };
+    let tool = if flutter { "flutter" } else { "dart" };
+    Ok(Some(leaf_tree(
+        ws,
+        rel_path,
+        tool,
+        &name,
+        &manifest_path,
+        tasks,
+    )?))
 }
 
 fn parse_cargo_bins(text: &str) -> Vec<String> {
@@ -1499,6 +1561,13 @@ pub fn dart_program_shell() -> String {
     }
 }
 
+pub fn flutter_program_shell() -> String {
+    match crate::toolchain::resolve_program("flutter") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "flutter".into(),
+    }
+}
+
 pub fn dart_pubspec_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
     Ok(find_nearest_manifest(ws, rel_path, &["pubspec.yaml"])?.map(|(dir, _)| dir))
 }
@@ -2216,6 +2285,29 @@ mod tests {
         assert_eq!(tree.root_name, "php-pro/project");
         assert!(tree.tree.tasks.iter().any(|t| t.command == "composer run-script test"));
         assert!(tree.tree.tasks.iter().any(|t| t.command == "composer run-script lint"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pubspec_tree_has_pub_get() {
+        let tmp = std::env::temp_dir().join(format!("reaper-pubspec-tasks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("pubspec.yaml"),
+            r#"name: demo_app
+version: 1.0.0
+dependencies:
+  flutter:
+    sdk: flutter
+"#,
+        )
+        .unwrap();
+        let tree = try_pubspec_tree(&tmp, "pubspec.yaml").unwrap().expect("tree");
+        assert_eq!(tree.build_tool, "flutter");
+        assert_eq!(tree.root_name, "demo_app");
+        assert!(tree.tree.tasks.iter().any(|t| t.id == "pub-get"));
+        assert!(tree.tree.tasks.iter().any(|t| t.id == "test"));
         let _ = fs::remove_dir_all(&tmp);
     }
 
