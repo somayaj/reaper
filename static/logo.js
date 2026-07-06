@@ -65,7 +65,7 @@
 </svg>`;
     // REAPER-LOGO-SVG:END
 
-  const LOGO_SVG_URL = '/reaper-logo.svg?v=1';
+  const LOGO_SVG_URL = '/reaper-logo.svg?v=416';
   let logoSvgMarkup = SVG;
 
   function reaperLogoHtml(size = 'md', { pulse = false, chrome = false, extraClass = '', opacity = '' } = {}) {

@@ -2274,11 +2274,11 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   width: 72px;
   height: 72px;
   margin-bottom: 1.25rem;
-  border-radius: 12px;
-  overflow: hidden;
-  background-color: #0a0a0a;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  filter: none;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+  filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.4));
 }
 
 /* Welcome logo animation — same fixes as launch splash (no white flash on light themes) */
@@ -8673,10 +8673,10 @@ main { background: var(--ij-bg); }
 
 html[data-theme="offwhite"] .ij-welcome .ij-welcome-logo.logo-mark,
 .theme-light .ij-welcome .ij-welcome-logo.logo-mark {
-  background-color: #0a0a0a !important;
-  border-radius: 12px !important;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
-  filter: none !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.4)) !important;
 }
 
 .ij-menu-theme {
