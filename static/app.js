@@ -14325,7 +14325,7 @@ async function runCommit({ push = false } = {}) {
     await refreshGitStatus();
     await refreshHistory();
     await refreshTree();
-    toast(push ? 'Committed & pushed' : 'Committed locally — use Push when ready', push ? 'success' : 'success');
+    toast(push ? 'Committed & pushed' : 'Committed locally — use Push when ready', 'success');
   } catch (err) {
     toast(err.message, 'error');
   } finally {

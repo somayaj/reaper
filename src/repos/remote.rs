@@ -354,20 +354,99 @@ pub fn push_to_remote(
     settings: &SettingsStore,
     name: &str,
 ) -> Result<git::GitOutput> {
-    let meta = metadata::load(config, name)?;
-    let clean = meta
-        .remote_url
-        .ok_or_else(|| anyhow::anyhow!("no remote linked"))?;
-    let auth_url = auth::authenticated_url(&clean, settings)?;
+    push_workspace(config, settings, name)
+}
+
+fn push_workspace(
+    config: &Config,
+    settings: &SettingsStore,
+    name: &str,
+) -> Result<git::GitOutput> {
+    if !config.repo_exists(name) {
+        bail!("repository not found");
+    }
+
     let ws = workspace::ensure_workspace(config, name)?;
-    let branch = git::run_git(Some(&ws), &["branch", "--show-current"])?
+    let branch = current_branch(&ws)?;
+    let meta = metadata::load(config, name).unwrap_or_default();
+
+    let mut steps: Vec<(&str, git::GitOutput)> = Vec::new();
+
+    let bare = config
+        .repo_path(name)
+        .canonicalize()
+        .with_context(|| format!("resolve bare repo {}", name))?;
+    let bare_url = bare
+        .to_str()
+        .context("invalid bare repo path")?
+        .to_string();
+    let local = git::push_url(&ws, &bare_url, &branch)?;
+    sync_remote_tracking_ref(&ws, "origin", &branch)?;
+    steps.push(("local", local));
+
+    if let Some(clean) = meta.remote_url.filter(|u| !u.trim().is_empty()) {
+        let auth_url = auth::authenticated_url(&clean, settings)?;
+        if auth_url != bare_url {
+            let remote = git::push_url(&ws, &auth_url, &branch)?;
+            sync_remote_tracking_ref(&ws, "upstream", &branch)?;
+            steps.push(("remote", remote));
+        }
+    }
+
+    Ok(merge_git_outputs(steps))
+}
+
+fn current_branch(ws: &std::path::Path) -> Result<String> {
+    let branch = git::run_git(Some(ws), &["branch", "--show-current"])?
         .stdout
         .trim()
         .to_string();
     if branch.is_empty() {
         bail!("could not determine current branch");
     }
-    git::push_url(&ws, &auth_url, &branch)
+    Ok(branch)
+}
+
+fn sync_remote_tracking_ref(ws: &std::path::Path, remote: &str, branch: &str) -> Result<()> {
+    let head = git::run_git(Some(ws), &["rev-parse", "HEAD"])?
+        .stdout
+        .trim()
+        .to_string();
+    if head.is_empty() {
+        return Ok(());
+    }
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let _ = git::run_git(Some(ws), &["update-ref", &tracking, &head]);
+    Ok(())
+}
+
+fn merge_git_outputs(steps: Vec<(&str, git::GitOutput)>) -> git::GitOutput {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for (label, out) in steps {
+        append_labeled_output(&mut stdout, label, &out.stdout);
+        append_labeled_output(&mut stderr, label, &out.stderr);
+        if !out.success() {
+            exit_code = out.exit_code;
+        }
+    }
+    git::GitOutput {
+        stdout,
+        stderr,
+        exit_code,
+    }
+}
+
+fn append_labeled_output(dest: &mut String, label: &str, chunk: &str) {
+    let chunk = chunk.trim();
+    if chunk.is_empty() {
+        return;
+    }
+    if !dest.is_empty() {
+        dest.push('\n');
+    }
+    dest.push_str(&format!("[{label}]\n{chunk}"));
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -392,34 +471,22 @@ pub struct PushPreview {
 
 pub fn push_preview(config: &Config, settings: &SettingsStore, name: &str) -> Result<PushPreview> {
     let _ = settings;
-    let meta = metadata::load(config, name)?;
-    let remote_url = meta.remote_url.clone();
-    if remote_url.is_none() {
-        return Ok(PushPreview {
-            branch: String::new(),
-            remote: "origin".into(),
-            remote_url: None,
-            upstream: None,
-            ahead: 0,
-            commits: vec![],
-            files: vec![],
-            can_push: false,
-            note: Some("No remote linked — publish or link a remote first".into()),
-            secret_warnings: vec![],
-        });
+    if !config.repo_exists(name) {
+        bail!("repository not found");
     }
+
+    let meta = metadata::load(config, name).unwrap_or_default();
+    let remote_url = meta
+        .remote_url
+        .clone()
+        .or_else(|| Some(config.clone_url(name)));
 
     let ws = workspace::ensure_workspace(config, name)?;
-    let branch = git::run_git(Some(&ws), &["branch", "--show-current"])?
-        .stdout
-        .trim()
-        .to_string();
-    if branch.is_empty() {
-        bail!("could not determine current branch");
-    }
+    let branch = current_branch(&ws)?;
 
     let upstream = upstream_label(&ws);
-    let range = unpushed_commit_range(&ws, &branch)?;
+    let prefer_upstream = meta.remote_url.is_some();
+    let range = unpushed_commit_range(&ws, &branch, prefer_upstream)?;
     let (commits, files, note) = match range.as_deref() {
         Some(r) => {
             let commits = commits_in_range(&ws, r)?;
@@ -475,7 +542,19 @@ fn upstream_label(ws: &std::path::Path) -> Option<String> {
     }
 }
 
-fn unpushed_commit_range(ws: &std::path::Path, branch: &str) -> Result<Option<String>> {
+fn unpushed_commit_range(
+    ws: &std::path::Path,
+    branch: &str,
+    prefer_upstream: bool,
+) -> Result<Option<String>> {
+    if prefer_upstream {
+        let upstream_branch = format!("upstream/{branch}");
+        if let Ok(verify) = git::run_git(Some(ws), &["rev-parse", "--verify", &upstream_branch]) {
+            if verify.success() {
+                return Ok(Some(format!("{upstream_branch}..HEAD")));
+            }
+        }
+    }
     if let Some(up) = upstream_label(ws) {
         return Ok(Some(format!("{up}..HEAD")));
     }
