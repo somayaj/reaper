@@ -7813,28 +7813,42 @@ main { background: var(--ij-bg); }
   font-family: var(--ij-ui-font-family, var(--ij-mono));
   font-size: var(--ij-ui-font-size, 11px);
   line-height: var(--ij-ui-line-height, 1.538);
+  border-radius: 10px;
+  transition: all 0.2s ease;
 }
 
 .agent-msg-user {
-  background: linear-gradient(135deg, var(--ij-agent-user-bg) 0%, color-mix(in srgb, #4a90e2 3%, var(--ij-agent-user-bg)) 100%);
-  border: 1px solid var(--ij-border);
+  background: linear-gradient(135deg, #2d3e6f 0%, #1e2a4a 100%);
+  border: 1px solid #4a90e2;
   padding: 12px !important;
+  box-shadow: 0 2px 8px rgba(74, 144, 226, 0.15);
+}
+
+.agent-msg-user:hover {
+  box-shadow: 0 4px 12px rgba(74, 144, 226, 0.25);
 }
 
 .agent-msg-assistant {
-  background: linear-gradient(135deg, var(--ij-agent-assistant-bg) 0%, color-mix(in srgb, #333 2%, var(--ij-agent-assistant-bg)) 100%);
-  border: 1px solid var(--ij-border);
+  background: linear-gradient(135deg, #2a2a2a 0%, #1f1f1f 100%);
+  border: 1px solid #3a3a3a;
   padding: 12px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.agent-msg-assistant:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
 .agent-msg-assistant.agent-provider-gemini {
-  background: color-mix(in srgb, #4285f4 6%, var(--ij-agent-assistant-bg));
-  border-color: color-mix(in srgb, #4285f4 22%, var(--ij-border));
+  background: linear-gradient(135deg, #1f2d5a 0%, #1a2242 100%);
+  border-color: #5a9ff5;
+  box-shadow: 0 2px 8px rgba(90, 159, 245, 0.2);
 }
 
 .agent-msg-assistant.agent-provider-anthropic {
-  background: color-mix(in srgb, #d97757 6%, var(--ij-agent-assistant-bg));
-  border-color: color-mix(in srgb, #d97757 22%, var(--ij-border));
+  background: linear-gradient(135deg, #3a2a20 0%, #2a1f15 100%);
+  border-color: #d97757;
+  box-shadow: 0 2px 8px rgba(217, 119, 87, 0.15);
 }
 
 .agent-msg-label-anthropic {
@@ -7860,14 +7874,19 @@ main { background: var(--ij-bg); }
 
 .agent-msg-system {
   background: transparent;
-  color: var(--ij-text-dim);
+  color: #999;
+  border: none !important;
+  padding: 0 !important;
+}
   font-size: calc(var(--ij-ui-font-size, 11px) * 0.85);
 }
 
 .agent-text {
   font-family: inherit;
   font-size: inherit;
-  line-height: inherit;
+  line-height: 1.6;
+  color: inherit;
+  word-wrap: break-word;
 }
 
 #agent-input {
