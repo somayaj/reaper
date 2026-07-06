@@ -2519,12 +2519,14 @@ fn exec_stream_response(rx: tokio::sync::mpsc::Receiver<workspace::ExecStreamEve
 struct AppVersionResponse {
     version: &'static str,
     build: &'static str,
+    loopback_ws: String,
 }
 
-async fn app_version() -> Json<AppVersionResponse> {
+async fn app_version(State(state): State<Arc<AppState>>) -> Json<AppVersionResponse> {
     Json(AppVersionResponse {
         version: env!("CARGO_PKG_VERSION"),
         build: env!("REAPER_UI_BUILD"),
+        loopback_ws: super::loopback_ws_base(&state.config.host, state.config.port),
     })
 }
 

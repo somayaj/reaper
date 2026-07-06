@@ -20,6 +20,9 @@ fn main() {
     println!("cargo:rerun-if-changed=scripts/test-java-editor-integration.mjs");
     println!("cargo:rerun-if-changed=scripts/test-java-editor-integration.sh");
     println!("cargo:rerun-if-changed=scripts/lib/javac-edit-loop.mjs");
+    println!("cargo:rerun-if-changed=scripts/lib/terminal-harness.mjs");
+    println!("cargo:rerun-if-changed=scripts/test-terminal-integration.mjs");
+    println!("cargo:rerun-if-changed=scripts/test-terminal-integration.sh");
 
     if std::env::var("REAPER_SKIP_EDITOR_TESTS").is_ok() {
         return;

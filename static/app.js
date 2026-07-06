@@ -1176,6 +1176,7 @@ async function initStatusFooter() {
   try {
     const info = await api('/api/version');
     if (info) {
+      cacheLoopbackWs(info.loopback_ws);
       // Prefer meta tag (loaded static bundle) over compile-time API build.
       apply(info.version || version, metaBuild || info.build);
     }
@@ -9253,6 +9254,7 @@ async function selectRepoOnce(name, token) {
 
     state.repo = name;
     resetTerminalCwds();
+    if (isTerminalPanelVisible()) mountActiveTerminal();
     state.projectProfile = opened?.profile || null;
     state.projectFolder = opened?.path || null;
     startProjectIndexPolling();
@@ -14614,11 +14616,78 @@ function registerTerminalFileLinkProvider(term, xterm) {
   });
 }
 
+function resolveFitAddonCtor() {
+  const raw = globalThis.FitAddon ?? window.FitAddon;
+  if (typeof raw === 'function') return raw;
+  if (raw && typeof raw.FitAddon === 'function') return raw.FitAddon;
+  if (raw?.default && typeof raw.default === 'function') return raw.default;
+  if (raw?.default && typeof raw.default.FitAddon === 'function') return raw.default.FitAddon;
+  return null;
+}
+
 function xtermApi() {
-  const Terminal = globalThis.Terminal;
-  const FitAddon = globalThis.FitAddon?.FitAddon ?? globalThis.FitAddon;
-  if (!Terminal || typeof FitAddon !== 'function') return null;
-  return { Terminal, FitAddon };
+  const Terminal = globalThis.Terminal || window.Terminal;
+  if (typeof Terminal !== 'function') return null;
+  return { Terminal, FitAddon: resolveFitAddonCtor() };
+}
+
+let loopbackWsPromise = null;
+
+function cacheLoopbackWs(value) {
+  if (typeof value !== 'string' || !value.trim()) return;
+  window.__REAPER_LOOPBACK_WS__ = value.trim().replace(/\/$/, '');
+}
+
+function resolveLoopbackWsBase() {
+  const injected = window.__REAPER_LOOPBACK_WS__;
+  if (typeof injected === 'string' && injected.trim()) {
+    return injected.trim().replace(/\/$/, '');
+  }
+  const proto = location.protocol;
+  if (proto === 'http:' || proto === 'https:') {
+    return `${proto === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+  }
+  return null;
+}
+
+function ensureLoopbackWsBase() {
+  const existing = resolveLoopbackWsBase();
+  if (existing) return Promise.resolve(existing);
+  if (!loopbackWsPromise) {
+    loopbackWsPromise = api('/api/version')
+      .then((info) => {
+        cacheLoopbackWs(info?.loopback_ws);
+        return resolveLoopbackWsBase();
+      })
+      .catch(() => resolveLoopbackWsBase());
+  }
+  return loopbackWsPromise;
+}
+
+function isTerminalCommandActive(term) {
+  return term?.streamLine != null && term.execAbortController != null;
+}
+
+function restoreTerminalShellIfIdle(term) {
+  if (!term || isTerminalCommandActive(term)) return;
+  if (term.streamLine != null) {
+    term.streamLine = null;
+    term.streamColorPartial = '';
+    stopCommandStatus(term);
+  }
+  term.shellSuspended = false;
+  if (!term.ws || term.ws.readyState !== WebSocket.OPEN) {
+    void connectTerminalWs(term);
+  }
+}
+
+function isTerminalPanelVisible() {
+  if (state.terminalDock === 'left') return state.activePanel === 'terminal';
+  return state.terminalOpen;
+}
+
+function defaultTerminalSize() {
+  return { cols: 120, rows: 32 };
 }
 
 function createTerminalSession(name) {
@@ -14671,6 +14740,7 @@ function destroyTerminalInstance(term) {
     term.container = null;
   }
   term.streamLine = null;
+  term.shellSuspended = false;
 }
 
 function spawnTerminalInstance(term, host) {
@@ -14681,9 +14751,11 @@ function spawnTerminalInstance(term, host) {
 
 function resetTerminalCwds() {
   const host = $('#terminal-xterm-host');
+  const mountNow = isTerminalPanelVisible();
   state.terminals.forEach((t) => {
     t.cwd = '';
-    if (host) spawnTerminalInstance(t, host);
+    disconnectTerminalWs(t, { silent: true });
+    if (mountNow && host) spawnTerminalInstance(t, host);
     else destroyTerminalInstance(t);
   });
 }
@@ -14693,13 +14765,18 @@ function fitActiveTerminal() {
 }
 
 function fitTerminal(term) {
-  if (!term?.fitAddon || !term.xterm) return;
-  try {
-    term.fitAddon.fit();
-    sendTerminalResize(term);
-  } catch {
-    /* host may be hidden */
+  if (!term?.xterm) return;
+  if (term.fitAddon) {
+    try {
+      term.fitAddon.fit();
+    } catch {
+      /* host may be hidden */
+    }
+  } else {
+    const size = defaultTerminalSize();
+    try { term.xterm.resize(size.cols, size.rows); } catch { /* ignore */ }
   }
+  sendTerminalResize(term);
 }
 
 function sendTerminalResize(term) {
@@ -14711,10 +14788,8 @@ function sendTerminalResize(term) {
   }));
 }
 
-function terminalWsUrl(term) {
-  const loopback = window.__REAPER_LOOPBACK_WS__;
-  const base = loopback
-    ?? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+function terminalWsUrl(term, base) {
+  if (!base || !state.repo) return null;
   let url = `${base}/api/repos/${encodeURIComponent(state.repo)}/workspace/terminal`;
   if (term.cwd) url += `?cwd=${encodeURIComponent(term.cwd)}`;
   return url;
@@ -14727,19 +14802,40 @@ function disconnectTerminalWs(term, { silent = false } = {}) {
   term.ws = null;
 }
 
-function connectTerminalWs(term) {
+async function connectTerminalWs(term) {
   if (!state.repo || !term) return;
+  const base = await ensureLoopbackWsBase();
+  const url = terminalWsUrl(term, base);
+  if (!url) {
+    toast('Terminal shell unavailable (loopback WebSocket not configured). Restart Reaper.', 'error');
+    return;
+  }
   disconnectTerminalWs(term, { silent: true });
-  const ws = new WebSocket(terminalWsUrl(term));
+  const ws = new WebSocket(url);
   term.ws = ws;
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => fitTerminal(term);
+  ws.onopen = () => {
+    term.shellSuspended = false;
+    fitTerminal(term);
+  };
+  ws.onerror = () => {
+    if (term.wsSilentClose) return;
+    toast('Terminal shell connection failed. Try Restart Shell.', 'error');
+  };
   ws.onmessage = (ev) => {
-    if (!term.xterm || term.streamLine != null) return;
+    if (!term.xterm || term.shellSuspended || isTerminalCommandActive(term)) return;
+    const writeChunk = (chunk) => {
+      if (!chunk) return;
+      term.xterm.write(typeof chunk === 'string' ? chunk : new Uint8Array(chunk));
+    };
     if (ev.data instanceof ArrayBuffer) {
-      term.xterm.write(new Uint8Array(ev.data));
+      writeChunk(ev.data);
+    } else if (ArrayBuffer.isView(ev.data)) {
+      writeChunk(ev.data.buffer.slice(ev.data.byteOffset, ev.data.byteOffset + ev.data.byteLength));
     } else if (typeof ev.data === 'string') {
-      term.xterm.write(ev.data);
+      writeChunk(ev.data);
+    } else if (typeof Blob !== 'undefined' && ev.data instanceof Blob) {
+      ev.data.arrayBuffer().then(writeChunk).catch(() => {});
     }
   };
   ws.onclose = () => {
@@ -14747,7 +14843,7 @@ function connectTerminalWs(term) {
       term.wsSilentClose = false;
       return;
     }
-    if (term.streamLine != null) return;
+    if (term.shellSuspended || isTerminalCommandActive(term)) return;
     if (term.xterm) {
       term.xterm.write('\r\n\x1b[90m[session ended]\x1b[0m\r\n');
     }
@@ -14757,7 +14853,7 @@ function connectTerminalWs(term) {
 function ensureTerminalPane(term, host) {
   if (term.container?.isConnected) return term.container;
   const pane = document.createElement('div');
-  pane.className = 'ij-terminal-xterm-pane hidden';
+  pane.className = 'ij-terminal-xterm-pane';
   pane.dataset.terminalId = term.id;
   host.appendChild(pane);
   term.container = pane;
@@ -14766,9 +14862,15 @@ function ensureTerminalPane(term, host) {
 
 function initTerminalXterm(term, host) {
   const api = xtermApi();
-  if (!api || !host || !term) return;
+  if (!api || !host || !term) {
+    if (!api) {
+      toast('Terminal failed to load (xterm scripts missing). Reload the app.', 'error');
+    }
+    return;
+  }
 
   const pane = ensureTerminalPane(term, host);
+  pane.classList.remove('hidden');
   const xterm = new api.Terminal({
     cursorBlink: true,
     convertEol: true,
@@ -14777,9 +14879,13 @@ function initTerminalXterm(term, host) {
     fontFamily: getEditorFontSpec().family,
     theme: terminalThemeFromApp(),
     scrollback: 8000,
+    ...defaultTerminalSize(),
   });
-  const fitAddon = new api.FitAddon();
-  xterm.loadAddon(fitAddon);
+  let fitAddon = null;
+  if (api.FitAddon) {
+    fitAddon = new api.FitAddon();
+    xterm.loadAddon(fitAddon);
+  }
   xterm.open(pane);
   registerTerminalFileLinkProvider(term, xterm);
   xterm.onData((data) => {
@@ -14806,7 +14912,7 @@ function initTerminalXterm(term, host) {
   term.xterm = xterm;
   term.fitAddon = fitAddon;
   fitTerminal(term);
-  connectTerminalWs(term);
+  void connectTerminalWs(term);
 }
 
 function mountActiveTerminal({ fresh = false } = {}) {
@@ -14819,29 +14925,37 @@ function mountActiveTerminal({ fresh = false } = {}) {
     if (t.container) t.container.classList.add('hidden');
   });
 
-  const commandActive = term.streamLine != null;
-  if (commandActive && term.xterm) {
+  if (isTerminalCommandActive(term) && term.xterm) {
     ensureTerminalPane(term, host);
     term.container.classList.remove('hidden');
     term.xterm.focus();
     return;
   }
 
-  if (fresh || !term.xterm) {
-    spawnTerminalInstance(term, host);
-  } else if (term.streamLine == null && (!term.ws || term.ws.readyState !== WebSocket.OPEN)) {
-    ensureTerminalPane(term, host);
-    term.container.classList.remove('hidden');
-    if (term.shellSuspended) term.shellSuspended = false;
-    connectTerminalWs(term);
-    fitTerminal(term);
-  } else {
-    ensureTerminalPane(term, host);
-    term.container.classList.remove('hidden');
-    fitTerminal(term);
-  }
-  term.container?.classList.remove('hidden');
-  term.xterm?.focus();
+  const xtermMissing = !term.xterm || !term.xterm.element?.isConnected;
+  const spawn = () => {
+    if (fresh || xtermMissing) {
+      spawnTerminalInstance(term, host);
+    } else if (!term.ws || term.ws.readyState !== WebSocket.OPEN) {
+      ensureTerminalPane(term, host);
+      term.container.classList.remove('hidden');
+      restoreTerminalShellIfIdle(term);
+      fitTerminal(term);
+    } else {
+      ensureTerminalPane(term, host);
+      term.container.classList.remove('hidden');
+      fitTerminal(term);
+    }
+    term.container?.classList.remove('hidden');
+    requestAnimationFrame(() => {
+      fitActiveTerminal();
+      requestAnimationFrame(() => {
+        fitActiveTerminal();
+        term.xterm?.focus();
+      });
+    });
+  };
+  requestAnimationFrame(() => requestAnimationFrame(spawn));
 }
 
 function renderTerminalTabs() {
@@ -14921,7 +15035,7 @@ function suspendTerminalShell(term) {
 function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
-  connectTerminalWs(term);
+  void connectTerminalWs(term);
 }
 
 function terminalWrite(term, text) {
@@ -15064,6 +15178,9 @@ function finalizeTerminalStream(terminalId) {
   stopCommandStatus(term);
   term.streamLine = null;
   term.streamColorPartial = '';
+  if (term.shellSuspended && !term.execAbortController) {
+    resumeTerminalShell(term);
+  }
 }
 
 function clearActiveTerminal() {
@@ -15866,6 +15983,10 @@ function applyTerminalDock() {
   panel.classList.toggle('hidden', !showTerminal);
   panel.classList.toggle('flex', showTerminal);
 
+  if (!showTerminal) {
+    state.terminals.forEach((t) => destroyTerminalInstance(t));
+  }
+
   $$('[data-terminal-dock]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.terminalDock === dock);
   });
@@ -15874,10 +15995,16 @@ function applyTerminalDock() {
   syncActivityButtons();
   updateStatusBar();
   if (showTerminal) {
-    requestAnimationFrame(() => {
-      fitActiveTerminal();
-      requestAnimationFrame(() => fitActiveTerminal());
-    });
+    const term = getActiveTerminal();
+    const xtermMissing = !term?.xterm || !term.xterm.element?.isConnected;
+    if (xtermMissing) {
+      mountActiveTerminal();
+    } else {
+      requestAnimationFrame(() => {
+        fitActiveTerminal();
+        requestAnimationFrame(() => fitActiveTerminal());
+      });
+    }
   }
 }
 
@@ -15897,7 +16024,7 @@ function openTerminal() {
   const wasOpen = state.terminalOpen;
   state.terminalOpen = true;
   applyTerminalDock();
-  mountActiveTerminal({ fresh: !wasOpen && !getActiveTerminal()?.xterm });
+  mountActiveTerminal({ fresh: true });
 }
 
 function toggleTerminal() {
@@ -15909,7 +16036,7 @@ function toggleTerminal() {
   state.terminalOpen = !state.terminalOpen;
   applyTerminalDock();
   if (state.terminalOpen) {
-    mountActiveTerminal({ fresh: !wasOpen && !getActiveTerminal()?.xterm });
+    mountActiveTerminal({ fresh: true });
   }
 }
 
