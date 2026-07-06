@@ -39,5 +39,5 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.30"
-wry = "0.49"
+wry = { version = "0.49", features = ["transparent"] }
 muda = "0.19"

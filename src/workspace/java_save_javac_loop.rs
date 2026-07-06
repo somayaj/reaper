@@ -9,7 +9,7 @@ use super::diagnostics::FileDiagnosticsResult;
 use super::java_diagnostics::JavaDiagScope;
 use super::{file_diagnostics, read_file, write_file};
 
-const EDIT_COUNT: usize = 25;
+const EDIT_COUNT: usize = 10;
 const MAX_JAVAC_RETRIES: u32 = 3;
 
 fn edit_loop_java_content(marker: usize) -> String {

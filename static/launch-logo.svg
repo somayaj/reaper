@@ -1,9 +1,14 @@
 <svg class="ij-launch-logo reaper-logo-anim" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-hidden="true">
   <defs>
-    <clipPath id="pc-tl"><rect x="0" y="0" width="34" height="34"/></clipPath>
-    <clipPath id="pc-tr"><rect x="30" y="0" width="34" height="34"/></clipPath>
-    <clipPath id="pc-bl"><rect x="0" y="30" width="34" height="34"/></clipPath>
-    <clipPath id="pc-br"><rect x="30" y="30" width="34" height="34"/></clipPath>
+    <clipPath id="pc-r0c0"><rect x="0" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r0c1"><rect x="21" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r0c2"><rect x="42" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c0"><rect x="0" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c1"><rect x="21" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c2"><rect x="42" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c0"><rect x="0" y="42" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c1"><rect x="21" y="42" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c2"><rect x="42" y="42" width="22" height="22"/></clipPath>
     <g id="logo-static">
       <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
       <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
@@ -100,18 +105,33 @@
     </g>
   </g>
 
-  <!-- Logo split into four pieces — each slice is the same artwork, no jigsaw knobs -->
+  <!-- Rubik 3×3 face — logo fragment on each cell -->
   <g class="puzzle-stage">
-    <g class="splash-piece splash-piece-tl" clip-path="url(#pc-tl)">
+    <g class="splash-piece splash-piece-r0c0" clip-path="url(#pc-r0c0)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-tr" clip-path="url(#pc-tr)">
+    <g class="splash-piece splash-piece-r0c1" clip-path="url(#pc-r0c1)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-bl" clip-path="url(#pc-bl)">
+    <g class="splash-piece splash-piece-r0c2" clip-path="url(#pc-r0c2)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-br" clip-path="url(#pc-br)">
+    <g class="splash-piece splash-piece-r1c0" clip-path="url(#pc-r1c0)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r1c1" clip-path="url(#pc-r1c1)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r1c2" clip-path="url(#pc-r1c2)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c0" clip-path="url(#pc-r2c0)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c1" clip-path="url(#pc-r2c1)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c2" clip-path="url(#pc-r2c2)">
       <use href="#logo-static"/>
     </g>
   </g>

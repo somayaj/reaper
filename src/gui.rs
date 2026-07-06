@@ -119,7 +119,7 @@ fn create_window(
         .with_title(title)
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
         .with_visible(false)
-        .with_background_color((10, 10, 10, 255))
+        .with_background_color((0, 0, 0, 0))
         .with_titlebar_transparent(true)
         .with_title_hidden(true)
         .with_fullsize_content_view(true)
@@ -131,12 +131,14 @@ fn create_window(
     let popup_proxy = proxy.clone();
     let init_script = format!(
         "document.documentElement.classList.add('ij-native-titlebar');\n\
-         document.documentElement.style.backgroundColor='#0a0a0a';\n{}",
+         document.documentElement.style.backgroundColor='transparent';\n\
+         document.body.style.backgroundColor='transparent';\n{}",
         launch.init_script
     );
     let webview = WebViewBuilder::new()
         .with_url(&launch.webview_url)
-        .with_background_color((10, 10, 10, 255))
+        .with_transparent(true)
+        .with_background_color((0, 0, 0, 0))
         .with_initialization_script(&init_script)
         .with_asynchronous_custom_protocol(
             crate::web::SCHEME.into(),

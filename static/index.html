@@ -1,17 +1,18 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full dark" style="background:#0a0a0a">
+<html lang="en" class="h-full dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="400" />
+  <meta name="reaper-ui-build" content="413" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <style id="reaper-boot">
-    html,body{background:#0a0a0a!important;margin:0;height:100%}
+    html,body{margin:0;height:100%;background:transparent}
+    html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=7" />
-  <link rel="stylesheet" href="/logo-animated.css?v=6" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=11" />
+  <link rel="stylesheet" href="/logo-animated.css?v=8" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,8 +72,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=400" />
-  <link rel="stylesheet" href="/logo-animated.css?v=6" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=413" />
+  <link rel="stylesheet" href="/logo-animated.css?v=8" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -84,7 +85,7 @@
     #terminal-dock-right { width: var(--ij-terminal-right-w, 22rem); }
   </style>
 </head>
-<body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden ij-shell" style="background:#0a0a0a">
+<body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden ij-shell">
 
   <!-- Launch splash — preview: /launch-splash-preview.html -->
   <div id="launch-splash" role="status" aria-live="polite" aria-label="Starting IDE">
@@ -93,10 +94,15 @@
       <div class="ij-launch-logo-wrap">
 <svg class="ij-launch-logo reaper-logo-anim" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-hidden="true">
   <defs>
-    <clipPath id="pc-tl"><rect x="0" y="0" width="34" height="34"/></clipPath>
-    <clipPath id="pc-tr"><rect x="30" y="0" width="34" height="34"/></clipPath>
-    <clipPath id="pc-bl"><rect x="0" y="30" width="34" height="34"/></clipPath>
-    <clipPath id="pc-br"><rect x="30" y="30" width="34" height="34"/></clipPath>
+    <clipPath id="pc-r0c0"><rect x="0" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r0c1"><rect x="21" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r0c2"><rect x="42" y="0" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c0"><rect x="0" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c1"><rect x="21" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r1c2"><rect x="42" y="21" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c0"><rect x="0" y="42" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c1"><rect x="21" y="42" width="22" height="22"/></clipPath>
+    <clipPath id="pc-r2c2"><rect x="42" y="42" width="22" height="22"/></clipPath>
     <g id="logo-static">
       <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
       <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
@@ -141,7 +147,7 @@
   </defs>
 
   <!-- Full logo — revealed after puzzle merges -->
-  <g class="logo-unified logo-anim">
+  <g class="logo-unified">
     <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
     <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
     <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
@@ -193,18 +199,33 @@
     </g>
   </g>
 
-  <!-- Logo split into four pieces — each slice is the same artwork, no jigsaw knobs -->
+  <!-- Rubik 3×3 face — logo fragment on each cell -->
   <g class="puzzle-stage">
-    <g class="splash-piece splash-piece-tl" clip-path="url(#pc-tl)">
+    <g class="splash-piece splash-piece-r0c0" clip-path="url(#pc-r0c0)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-tr" clip-path="url(#pc-tr)">
+    <g class="splash-piece splash-piece-r0c1" clip-path="url(#pc-r0c1)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-bl" clip-path="url(#pc-bl)">
+    <g class="splash-piece splash-piece-r0c2" clip-path="url(#pc-r0c2)">
       <use href="#logo-static"/>
     </g>
-    <g class="splash-piece splash-piece-br" clip-path="url(#pc-br)">
+    <g class="splash-piece splash-piece-r1c0" clip-path="url(#pc-r1c0)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r1c1" clip-path="url(#pc-r1c1)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r1c2" clip-path="url(#pc-r1c2)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c0" clip-path="url(#pc-r2c0)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c1" clip-path="url(#pc-r2c1)">
+      <use href="#logo-static"/>
+    </g>
+    <g class="splash-piece splash-piece-r2c2" clip-path="url(#pc-r2c2)">
       <use href="#logo-static"/>
     </g>
   </g>
@@ -214,7 +235,7 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/launch-splash.js?v=2"></script>
+  <script src="/launch-splash.js?v=4"></script>
   <script>
     (function () {
       function prefetchStartupIndex() {
@@ -268,7 +289,7 @@
       <div id="header-brand" class="ij-header-brand shrink-0 flex items-center gap-2 min-w-0 max-w-[min(100%,26rem)]">
         <div class="ij-menu-root ij-header-logo-root" data-menu="logo">
           <button type="button" id="header-logo-btn" class="ij-header-logo-btn" title="Reaper menu" aria-label="Reaper menu" aria-haspopup="menu">
-            <span data-reaper-logo="sm" class="logo-mark"></span>
+            <span data-reaper-logo="sm" data-reaper-logo-chrome="true" class="logo-mark"></span>
           </button>
           <div class="ij-menu-dropdown ij-header-logo-dropdown">
             <button type="button" class="ij-menu-item" data-action="header-open-repo">Open repository…</button>
@@ -622,8 +643,8 @@
       </div>
 
       <div id="panel-agent" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden h-full">
-        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2">
-          <div id="agent-status" class="text-[10px] text-gray-500 truncate min-w-0">Checking…</div>
+        <div class="px-2 py-1.5 border-b border-surface-700/60 flex items-center justify-between shrink-0 bg-surface-850/50 gap-2 ij-agent-toolbar">
+          <div id="agent-status" class="text-[10px] truncate min-w-0">Checking…</div>
           <div class="flex items-center gap-0.5 shrink-0">
             <div class="flex items-center border border-surface-700 rounded-md overflow-hidden mr-0.5" title="Agent position">
               <button type="button" data-agent-dock="left" class="agent-dock-btn px-1.5 py-0.5 text-[10px] text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors" title="Dock left">Left</button>
@@ -653,8 +674,8 @@
         <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-4 space-y-3 min-h-0 flex flex-col">
           <div id="agent-welcome-msg" class="agent-msg-system text-center py-8 px-4 flex flex-col items-center justify-center gap-3">
             <div class="agent-welcome-logo">🚀</div>
-            <div class="text-sm font-semibold text-gray-200">Cursor Agent</div>
-            <p class="text-xs text-gray-500 max-w-xs leading-relaxed">
+            <div class="agent-welcome-title">Cursor Agent</div>
+            <p class="agent-welcome-desc">
               Edit files, run commands, explore code, and ask questions about your project.
             </p>
           </div>
@@ -667,7 +688,7 @@
         <div class="p-2 border-t border-surface-700/80 bg-surface-900 shrink-0 space-y-1.5">
           <div id="agent-provider-picker" class="agent-provider-picker" role="tablist" aria-label="AI agent"></div>
           <div id="agent-provider-controls" class="agent-provider-controls flex items-center gap-2 flex-wrap"></div>
-          <textarea id="agent-input" rows="3" placeholder="Ask the agent… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
+          <textarea id="agent-input" rows="3" placeholder="Ask the agent… (Enter to send)" disabled class="w-full bg-surface-950 border border-surface-700 rounded-lg px-2.5 py-2 text-[color:var(--ij-text)] placeholder-[color:var(--ij-text-dim)] focus:outline-none focus:ring-2 focus:ring-accent-ring resize-none disabled:opacity-40"></textarea>
           <div class="flex items-center justify-between gap-2">
             <span id="agent-hint" class="text-[10px] text-gray-600 truncate">Select a repo to chat</span>
             <div class="flex items-center gap-1.5 shrink-0">
@@ -1071,7 +1092,7 @@
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
         <div class="flex items-center gap-3 mb-1">
-          <span data-reaper-logo="md" class="logo-mark"></span>
+          <span data-reaper-logo="md" data-reaper-logo-chrome="true" class="logo-mark"></span>
           <div>
             <h3 class="text-lg font-semibold text-white">Import repository</h3>
             <p class="text-xs text-gray-500">Clone from a remote URL or import a local git folder</p>
@@ -1186,7 +1207,7 @@
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
         <div class="flex items-center gap-3 mb-1">
-          <span data-reaper-logo="md" class="logo-mark"></span>
+          <span data-reaper-logo="md" data-reaper-logo-chrome="true" class="logo-mark"></span>
           <div>
             <h3 class="text-lg font-semibold text-white">New repository</h3>
             <p class="text-xs text-gray-500">Hosted locally · HTTP git remote</p>
@@ -1533,9 +1554,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=400"></script>
-  <script src="/monaco-languages.js?v=400" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=413"></script>
+  <script src="/monaco-languages.js?v=413" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=400"></script>
+  <script src="/app.js?v=413"></script>
 </body>
 </html>

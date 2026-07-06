@@ -62,12 +62,13 @@
   </g>
 </svg>`;
 
-  function reaperLogoHtml(size = 'md', { pulse = false, extraClass = '', opacity = '' } = {}) {
+  function reaperLogoHtml(size = 'md', { pulse = false, chrome = false, extraClass = '', opacity = '' } = {}) {
     const dim = SIZES[size] || SIZES.md;
     const pulseCls = pulse ? ' loading-dot' : '';
     const opacityCls = opacity ? ` ${opacity}` : '';
+    const chromeCls = chrome ? ' reaper-logo-chrome' : '';
     const alt = extraClass.includes('ij-welcome-logo') ? 'Reaper' : '';
-    const classes = `logo-mark reaper-logo-anim ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
+    const classes = `logo-mark reaper-logo-anim${chromeCls} ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
     return `<span class="${classes}" role="img" aria-label="${alt || 'Reaper'}">${SVG}</span>`;
   }
 
@@ -75,9 +76,10 @@
     root.querySelectorAll('[data-reaper-logo]').forEach((el) => {
       const size = el.dataset.reaperLogo || 'md';
       const pulse = el.dataset.reaperLogoPulse === 'true';
+      const chrome = el.dataset.reaperLogoChrome === 'true' || size === 'sm';
       const extra = el.className.replace(/\blogo-mark\b/g, '').trim();
       const opacity = el.dataset.reaperLogoOpacity || '';
-      el.outerHTML = reaperLogoHtml(size, { pulse, extraClass: extra ? `${extra} logo-mark` : 'logo-mark', opacity });
+      el.outerHTML = reaperLogoHtml(size, { pulse, chrome, extraClass: extra ? `${extra} logo-mark` : 'logo-mark', opacity });
     });
   }
 

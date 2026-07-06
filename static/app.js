@@ -300,13 +300,25 @@ const GEMINI_MODELS = [
 ];
 
 const CURSOR_MODELS_FALLBACK = [
-  { id: 'composer-2.5-fast', label: 'Composer 2.5 Fast' },
   { id: 'composer-2.5', label: 'Composer 2.5' },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { id: 'claude-fable-5', label: 'Claude Fable 5' },
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
   { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-  { id: 'gpt-5.5-medium', label: 'GPT-5.5 Medium' },
-  { id: 'claude-4.6-sonnet-medium-thinking', label: 'Claude 4.6 Sonnet' },
-  { id: 'claude-opus-4-8-thinking-high', label: 'Claude Opus 4.8' },
 ];
+const CURSOR_MODEL_DEFAULT = 'composer-2.5';
+
+function cursorModelsForSelect() {
+  return state.cursorModels?.length ? state.cursorModels : CURSOR_MODELS_FALLBACK;
+}
+
+function normalizeCursorModel(modelId) {
+  const list = cursorModelsForSelect();
+  if (modelId && list.some((m) => m.id === modelId)) return modelId;
+  return list[0]?.id || CURSOR_MODEL_DEFAULT;
+}
 
 /** Registered chat agents — add providers here as backends land. */
 const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic'];
@@ -339,16 +351,16 @@ const AGENT_PROVIDERS = {
     hintWhenReady: 'Enter to send · Shift+Enter for newline',
     messageLabel: 'Cursor agent',
     labelClass: 'agent-msg-label-cursor',
-    models: () => (state.cursorModels?.length ? state.cursorModels : CURSOR_MODELS_FALLBACK),
-    currentModel: () => state.cursorModel,
+    models: () => cursorModelsForSelect(),
+    currentModel: () => normalizeCursorModel(state.cursorModel),
     setModel: (id) => setCursorAgentModel(id),
     statusText: () => {
       const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
-      return `Cursor ${modeLabel} · ${state.cursorModel || 'composer-2.5'}`;
+      return `Cursor ${modeLabel} · ${normalizeCursorModel(state.cursorModel)}`;
     },
     chatPath: '/cursor/chat',
     stopPath: '/cursor/stop',
-    chatBody: (prompt) => ({ prompt, model: state.cursorModel, mode: state.cursorMode }),
+    chatBody: (prompt) => ({ prompt, model: normalizeCursorModel(state.cursorModel), mode: state.cursorMode }),
     notConfiguredHint: 'Configure Cursor in Settings (⌘,)',
     notReadyHint: () => state.cursorBridgeError || 'Bridge starting… click Retry or restart Reaper',
   },
@@ -430,7 +442,7 @@ const state = {
   cursorBridgeError: null,
   cursorKeyMasked: null,
   cursorKeySource: null,
-  cursorModel: 'composer-2.5',
+  cursorModel: CURSOR_MODEL_DEFAULT,
   agentProvider: localStorage.getItem(AGENT_PROVIDER_KEY) || 'cursor',
   cursorMode: 'agent',
   cursorModels: [],
@@ -745,12 +757,21 @@ function setGlobalLoading(on, text = 'Loading…') {
   overlay?.classList.toggle('flex', on);
 }
 
+/** Apply theme backdrop once the IDE shell is ready to show. */
+function markUiReady() {
+  document.documentElement?.classList.add('reaper-ui-ready');
+  document.body?.classList.add('reaper-ui-ready');
+  const bg = getComputedStyle(document.documentElement).getPropertyValue('--ij-bg').trim() || '#2b2b2b';
+  document.documentElement.style.backgroundColor = bg;
+  document.body.style.backgroundColor = bg;
+}
+
 /** Remove launch splash immediately so repo-open spinner is visible and dismisses cleanly. */
 function dismissLaunchSplashNow() {
   const splash = $('#launch-splash');
   if (!splash) return;
   splash.dataset.dismissing = '1';
-  document.body?.classList.add('reaper-ui-ready');
+  markUiReady();
   splash.remove();
 }
 
@@ -767,7 +788,7 @@ function hideLaunchSplash(options = {}) {
   const minVisible = 4500;
   const wait = Math.max(0, minVisible - (Date.now() - started));
   setTimeout(() => {
-    document.body?.classList.add('reaper-ui-ready');
+    markUiReady();
     splash.remove();
   }, wait);
 }
@@ -3375,6 +3396,14 @@ function isProjectBuildFile(path) {
   if (base === 'docker-compose.yml' || base === 'docker-compose.yaml') return true;
   if (base === 'compose.yml' || base === 'compose.yaml') return true;
   if (base === 'dockerfile' || base.startsWith('dockerfile.')) return true;
+  // PHP / Composer
+  if (base === 'composer.json') return true;
+  // Rust / Cargo
+  if (base === 'cargo.toml') return true;
+  // Generic Gradle/Kotlin files
+  if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
+  // Generic TOML (project manifests)
+  if (normalized.includes('/gradle/') && base.endsWith('.toml')) return true;
   return false;
 }
 
@@ -3475,42 +3504,24 @@ function projectProfileSupportsManifest(kind) {
 function projectProfileSupportsBuildTasks(path) {
   const profile = state.projectProfile;
   if (!profile) return true;
-  const langs = new Set(profile.languages || []);
-  const frameworks = new Set(profile.frameworks || []);
   const base = String(path || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
-  if (base === 'pom.xml') {
-    return frameworks.has('maven') || langs.has('java') || langs.has('kotlin');
-  }
-  if (base === 'build.gradle' || base === 'build.gradle.kts' || base === 'settings.gradle' || base === 'settings.gradle.kts' || base === 'gradle.properties') {
-    return frameworks.has('gradle') || frameworks.has('grails') || langs.has('java') || langs.has('kotlin') || langs.has('groovy');
-  }
-  if (base === 'package.json') {
-    return langs.has('javascript') || langs.has('typescript') || frameworks.has('nextjs');
-  }
-  if (base === 'rakefile') {
-    return langs.has('ruby') || frameworks.has('rails');
-  }
-  if (base === 'pyproject.toml' || base === 'manage.py') {
-    return langs.has('python') || frameworks.has('django');
-  }
-  if (base === 'go.mod') {
-    return langs.has('go');
-  }
-  if (base === 'cmakelists.txt' || base === 'meson.build' || base === 'makefile' || base === 'gnumakefile') {
-    return langs.has('cpp') || langs.has('c')
-      || frameworks.has('cmake') || frameworks.has('meson') || frameworks.has('make');
-  }
-  if (base === 'vcpkg.json') {
-    return langs.has('cpp') || langs.has('c') || frameworks.has('vcpkg') || frameworks.has('cmake');
-  }
-  if (base === 'conanfile.txt' || base === 'conanfile.py') {
-    return langs.has('cpp') || langs.has('c') || frameworks.has('conan') || frameworks.has('cmake');
-  }
-  if (base === 'docker-compose.yml' || base === 'docker-compose.yaml'
-    || base === 'compose.yml' || base === 'compose.yaml'
-    || base === 'dockerfile' || base.startsWith('dockerfile.')) {
-    return true;
-  }
+  const normalized = String(path || '').replace(/\\/g, '/').toLowerCase();
+  
+  // Build files always support build tasks
+  if (base === 'pom.xml') return true;
+  if (base === 'build.gradle' || base === 'build.gradle.kts' || base === 'settings.gradle' || base === 'settings.gradle.kts' || base === 'gradle.properties') return true;
+  if (base === 'package.json') return true;
+  if (base === 'rakefile') return true;
+  if (base === 'pyproject.toml' || base === 'manage.py') return true;
+  if (base === 'go.mod') return true;
+  if (base === 'cmakelists.txt' || base === 'meson.build' || base === 'makefile' || base === 'gnumakefile') return true;
+  if (base === 'vcpkg.json') return true;
+  if (base === 'conanfile.txt' || base === 'conanfile.py') return true;
+  if (base === 'docker-compose.yml' || base === 'docker-compose.yaml' || base === 'compose.yml' || base === 'compose.yaml' || base === 'dockerfile' || base.startsWith('dockerfile.')) return true;
+  if (normalized.endsWith('/gradle/libs.versions.toml')) return true;
+  if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
+  if (base === 'cargo.toml') return true;
+  
   return true;
 }
 
@@ -10372,6 +10383,20 @@ function treeFileMenuProfile(path, kind) {
     return { type: 'ruby', label: 'Ruby' };
   }
   if (ext === 'rb') return { type: 'ruby', label: 'Ruby' };
+  if (ext === 'kt') {
+    if (rel.includes('/test/') || rel.includes('/tests/')) return { type: 'kotlin-test', label: 'Kotlin Test' };
+    return { type: 'kotlin', label: 'Kotlin' };
+  }
+  if (ext === 'kts') return { type: 'kotlin', label: 'Kotlin Script' };
+  if (ext === 'php') {
+    if (isPhpTestPath(rel)) return { type: 'php-test', label: 'PHP Test' };
+    return { type: 'php', label: 'PHP' };
+  }
+  if (ext === 'dart') {
+    if (isDartTestPath(rel)) return { type: 'dart-test', label: 'Dart Test' };
+    return { type: 'dart', label: 'Dart' };
+  }
+  if (isShellScriptPath(rel)) return { type: 'shell', label: 'Shell Script' };
   if (ext === 'sql') return { type: 'sql', label: 'SQL' };
   if (ext === 'html' || ext === 'htm') return { type: 'html', label: 'HTML' };
   if (ext === 'css' || ext === 'scss') return { type: 'css', label: 'CSS' };
@@ -10497,6 +10522,42 @@ function renderTreeContextMenu(target) {
       if (treeContextCanFormat(target.path)) {
         rows.push(treeContextMenuItem('format', 'Reformat Code'));
       }
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'rust':
+      rows.push(treeContextMenuItem('run', 'Run'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'rust-test':
+      rows.push(treeContextMenuItem('run-tests', 'Run Tests'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'kotlin':
+      rows.push(treeContextMenuItem('run', 'Run'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'kotlin-test':
+      rows.push(treeContextMenuItem('run-tests', 'Run Tests'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'php':
+      rows.push(treeContextMenuItem('run', 'Run'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'php-test':
+      rows.push(treeContextMenuItem('run-tests', 'Run Tests'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'dart':
+      rows.push(treeContextMenuItem('run', 'Run'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'dart-test':
+      rows.push(treeContextMenuItem('run-tests', 'Run Tests'));
+      rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
+      break;
+    case 'shell':
+      rows.push(treeContextMenuItem('run', 'Run'));
       rows.push(treeContextMenuItem('new-file', 'New File in Folder…'));
       break;
     case 'markdown':
@@ -11915,6 +11976,21 @@ function detectJavaRunTarget(path, content, runInfo, cursorLine) {
     if (path?.endsWith('.go')) {
       return detectGoRunTargetFallback(path);
     }
+    if (path?.endsWith('.rs')) {
+      return detectRustRunTargetFallback(path, content);
+    }
+    if (isJsOrTsSourcePath(path)) {
+      return detectJsRunTargetFallback(path);
+    }
+    if (path?.endsWith('.kt') || path?.endsWith('.kts')) {
+      return detectKotlinRunTargetFallback(path);
+    }
+    if (path?.endsWith('.php')) {
+      return detectPhpRunTargetFallback(path);
+    }
+    if (path?.endsWith('.dart')) {
+      return detectDartRunTargetFallback(path);
+    }
     if (isNativeSourcePath(path)) {
       return detectNativeRunTargetFallback(path, content);
     }
@@ -12042,6 +12118,115 @@ function detectGoRunTargetFallback(path) {
     task: `go run ${shellQuotePath(path)}`,
     runnable: true,
   };
+}
+
+function detectRustRunTargetFallback(path, content = '') {
+  if (!path?.endsWith('.rs')) return { mode: 'none' };
+  const normalized = path.replace(/\\/g, '/');
+  const text = content || state.tabContents.get(path) || '';
+  const hasMain = /\bfn\s+main\s*\(/.test(text);
+  const hasTests = /#\[\s*(?:tokio::)?test\s*\]|#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(text);
+  const isIntegrationTest = normalized.includes('/tests/');
+  if (isIntegrationTest || (hasTests && !hasMain)) {
+    return {
+      mode: 'rust-test',
+      classType: 'cargo-test',
+      task: 'cargo test',
+      frameworks: ['cargo'],
+      runnable: true,
+    };
+  }
+  if (hasMain) {
+    return {
+      mode: 'rust',
+      classType: 'cargo-run',
+      task: 'cargo run',
+      frameworks: ['cargo'],
+      runnable: true,
+    };
+  }
+  if (hasTests) {
+    return {
+      mode: 'rust-test',
+      classType: 'cargo-test',
+      task: 'cargo test',
+      frameworks: ['cargo'],
+      runnable: true,
+    };
+  }
+  return {
+    mode: 'rust',
+    classType: 'rust-source',
+    frameworks: ['rust'],
+    runnable: false,
+    reason: 'No `fn main` or #[test] found in this file',
+  };
+}
+
+function isJsOrTsTestPath(path) {
+  const normalized = String(path || '').replace(/\\/g, '/').toLowerCase();
+  const base = normalized.split('/').pop() || '';
+  return base.includes('.test.') || base.includes('.spec.')
+    || normalized.includes('/__tests__/') || normalized.includes('/tests/');
+}
+
+function detectJsRunTargetFallback(path) {
+  if (!isJsOrTsSourcePath(path)) return { mode: 'none' };
+  const isTs = /\.tsx?$/i.test(path);
+  const isTest = isJsOrTsTestPath(path);
+  const frameworks = [isTs ? 'typescript' : 'javascript'];
+  if (isTest) {
+    frameworks.push('test');
+    return {
+      mode: 'js-test',
+      classType: 'js-test',
+      task: `npx vitest run ${shellQuotePath(path)}`,
+      frameworks,
+      runnable: true,
+    };
+  }
+  return {
+    mode: 'js',
+    classType: isTs ? 'ts-script' : 'js-script',
+    task: isTs ? `npx tsx ${shellQuotePath(path)}` : `node ${shellQuotePath(path)}`,
+    frameworks,
+    runnable: true,
+  };
+}
+
+function detectKotlinRunTargetFallback(path) {
+  if (!path?.endsWith('.kt') && !path?.endsWith('.kts')) return { mode: 'none' };
+  const norm = String(path).replace(/\\/g, '/');
+  const isTest = norm.includes('/test/') || norm.includes('/tests/');
+  if (isTest) {
+    return { mode: 'kotlin-test', classType: 'kotlin-test', task: 'gradle test', frameworks: ['kotlin'], runnable: true };
+  }
+  if (path.endsWith('.kts')) {
+    return { mode: 'kotlin', classType: 'kotlin-script', task: `kotlinc -script ${shellQuotePath(path)}`, frameworks: ['kotlin'], runnable: true };
+  }
+  return { mode: 'kotlin', classType: 'kotlin-script', task: `kotlinc ${shellQuotePath(path)} -include-runtime -d .reaper/kotlin-out.jar && java -jar .reaper/kotlin-out.jar`, frameworks: ['kotlin'], runnable: true };
+}
+
+function detectPhpRunTargetFallback(path) {
+  if (!path?.endsWith('.php')) return { mode: 'none' };
+  const norm = String(path).replace(/\\/g, '/').toLowerCase();
+  const base = norm.split('/').pop() || '';
+  const isTest = base.includes('test') || norm.includes('/test/') || norm.includes('/tests/');
+  if (isTest) {
+    return { mode: 'php-test', classType: 'phpunit', task: `php vendor/bin/phpunit ${shellQuotePath(path)}`, frameworks: ['php'], runnable: true };
+  }
+  return { mode: 'php', classType: 'php-script', task: `php ${shellQuotePath(path)}`, frameworks: ['php'], runnable: true };
+}
+
+function detectDartRunTargetFallback(path) {
+  if (!path?.endsWith('.dart')) return { mode: 'none' };
+  const norm = String(path).replace(/\\/g, '/');
+  const base = (norm.split('/').pop() || '').toLowerCase();
+  const isTest = base.endsWith('_test.dart') || norm.includes('/test/') || norm.includes('/tests/');
+  if (isTest) {
+    return { mode: 'dart-test', classType: 'dart-test', task: `dart test ${shellQuotePath(path)}`, frameworks: ['dart'], runnable: true };
+  }
+  return { mode: 'dart', classType: 'dart-script', task: `dart run ${shellQuotePath(path)}`, frameworks: ['dart'], runnable: true };
 }
 
 function cmakeExecutableForSource(cmakeText, sourcePath) {
@@ -12173,6 +12358,34 @@ function runTargetLabel(target, content, path) {
     }
     return `Go · ${base}${fw}`;
   }
+  if (target.mode === 'rust' || target.mode === 'rust-test') {
+    const base = path?.split('/').pop()?.replace(/\.rs$/, '') || 'main';
+    if (target.mode === 'rust-test') {
+      return `Rust test · ${base}${fw}`;
+    }
+    return `Rust · ${base}${fw}`;
+  }
+  if (target.mode === 'js' || target.mode === 'js-test') {
+    const base = path?.split('/').pop()?.replace(/\.(m|c)?[jt]sx?$/i, '') || 'script';
+    const lang = target.frameworks?.includes('typescript') ? 'TypeScript' : 'JavaScript';
+    if (target.mode === 'js-test') return `${lang} test · ${base}${fw}`;
+    return `${lang} · ${base}${fw}`;
+  }
+  if (target.mode === 'kotlin' || target.mode === 'kotlin-test') {
+    const base = path?.split('/').pop()?.replace(/\.kts?$/i, '') || 'script';
+    if (target.mode === 'kotlin-test') return `Kotlin test · ${base}${fw}`;
+    return `Kotlin · ${base}${fw}`;
+  }
+  if (target.mode === 'php' || target.mode === 'php-test') {
+    const base = path?.split('/').pop()?.replace(/\.php$/i, '') || 'script';
+    if (target.mode === 'php-test') return `PHPUnit · ${base}${fw}`;
+    return `PHP · ${base}${fw}`;
+  }
+  if (target.mode === 'dart' || target.mode === 'dart-test') {
+    const base = path?.split('/').pop()?.replace(/\.dart$/i, '') || 'script';
+    if (target.mode === 'dart-test') return `Dart test · ${base}${fw}`;
+    return `Dart · ${base}${fw}`;
+  }
   if (target.mode === 'native' || target.mode === 'native-test') {
     const base = path?.split('/').pop()?.replace(/\.(c|cpp|cc|cxx)$/i, '') || 'program';
     if (target.mode === 'native-test') {
@@ -12231,6 +12444,26 @@ function runTargetTitle(target) {
     base = `Run Go program (F5)`;
   } else if (target.mode === 'go-test') {
     base = `Run Go tests (F5)`;
+  } else if (target.mode === 'rust') {
+    base = `Run Rust program (F5)`;
+  } else if (target.mode === 'rust-test') {
+    base = `Run Rust tests (F5)`;
+  } else if (target.mode === 'js') {
+    base = target.frameworks?.includes('typescript') ? `Run TypeScript file (F5)` : `Run JavaScript file (F5)`;
+  } else if (target.mode === 'js-test') {
+    base = target.frameworks?.includes('typescript') ? `Run TypeScript tests (F5)` : `Run JavaScript tests (F5)`;
+  } else if (target.mode === 'kotlin') {
+    base = `Run Kotlin (F5)`;
+  } else if (target.mode === 'kotlin-test') {
+    base = `Run Kotlin tests (F5)`;
+  } else if (target.mode === 'php') {
+    base = `Run PHP script (F5)`;
+  } else if (target.mode === 'php-test') {
+    base = `Run PHPUnit tests (F5)`;
+  } else if (target.mode === 'dart') {
+    base = `Run Dart program (F5)`;
+  } else if (target.mode === 'dart-test') {
+    base = `Run Dart tests (F5)`;
   } else if (target.mode === 'native') {
     base = `Compile and run (F5)`;
   } else if (target.mode === 'native-test') {
@@ -12266,12 +12499,41 @@ function isShellScriptPath(path) {
   return lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh');
 }
 
+function isPhpTestPath(path) {
+  if (!path) return false;
+  const norm = path.replace(/\\/g, '/').toLowerCase();
+  const base = norm.split('/').pop() || '';
+  return base.includes('test') || norm.includes('/test/') || norm.includes('/tests/');
+}
+
+function isDartTestPath(path) {
+  if (!path) return false;
+  const norm = path.replace(/\\/g, '/').toLowerCase();
+  const base = norm.split('/').pop() || '';
+  return base.endsWith('_test.dart') || norm.includes('/test/') || norm.includes('/tests/');
+}
+
+function isScalaSourcePath(path) {
+  return path?.toLowerCase().endsWith('.scala') || false;
+}
+
+function isClojureSourcePath(path) {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return lower.endsWith('.clj') || lower.endsWith('.cljs') || lower.endsWith('.cljc');
+}
+
 function isRunToolbarPath(path) {
   if (!path) return false;
   if (isGradleFilePath(path) || isMavenFilePath(path)) return true;
   if (path.endsWith('.rb')) return true;
   if (path.endsWith('.py') || path.endsWith('.pyw')) return true;
   if (path.endsWith('.go')) return true;
+  if (path.endsWith('.rs')) return true;
+  if (isJsOrTsSourcePath(path)) return true;
+  if (path.endsWith('.kt') || path.endsWith('.kts')) return true;
+  if (path.endsWith('.php')) return true;
+  if (path.endsWith('.dart')) return true;
   if (path.endsWith('.sql')) return true;
   if (isShellScriptPath(path)) return true;
   if (isNativeSourcePath(path)) return true;
@@ -12462,10 +12724,16 @@ function updateRunButtons() {
   const showPythonRun = (path?.endsWith('.py') || path?.endsWith('.pyw'))
     && (target.mode === 'python' || target.mode === 'python-test');
   const showGoRun = path?.endsWith('.go') && (target.mode === 'go' || target.mode === 'go-test');
+  const showRustRun = path?.endsWith('.rs') && (target.mode === 'rust' || target.mode === 'rust-test');
+  const showJsRun = isJsOrTsSourcePath(path) && (target.mode === 'js' || target.mode === 'js-test');
+  const showKotlinRun = (path?.endsWith('.kt') || path?.endsWith('.kts')) && (target.mode === 'kotlin' || target.mode === 'kotlin-test');
+  const showPhpRun = path?.endsWith('.php') && (target.mode === 'php' || target.mode === 'php-test');
+  const showDartRun = path?.endsWith('.dart') && (target.mode === 'dart' || target.mode === 'dart-test');
+  const showShellRun = isShellScriptPath(path) && target.mode === 'shell';
   const showNativeRun = isNativeSourcePath(path)
     && (target.mode === 'native' || target.mode === 'native-test');
   const showSqlRun = path?.endsWith('.sql');
-  const showRunToolbar = showTaskPicker || showJavaRun || showRubyRun || showPythonRun || showGoRun || showNativeRun || showSqlRun;
+  const showRunToolbar = showTaskPicker || showJavaRun || showRubyRun || showPythonRun || showGoRun || showRustRun || showJsRun || showKotlinRun || showPhpRun || showDartRun || showShellRun || showNativeRun || showSqlRun;
   const canRun = target.runnable || showTaskPicker;
 
   if (showRunToolbar && canRun) {
@@ -13187,6 +13455,29 @@ async function runActive() {
     case 'go-test':
       await runGoFile();
       break;
+    case 'rust':
+    case 'rust-test':
+      await runRustFile();
+      break;
+    case 'js':
+    case 'js-test':
+      await runJsFile();
+      break;
+    case 'kotlin':
+    case 'kotlin-test':
+      await runKotlinFile();
+      break;
+    case 'php':
+    case 'php-test':
+      await runPhpFile();
+      break;
+    case 'dart':
+    case 'dart-test':
+      await runDartFile();
+      break;
+    case 'shell':
+      await runShellFile();
+      break;
     case 'native':
     case 'native-test':
       await runNativeFile();
@@ -13255,6 +13546,118 @@ async function runGoFile() {
       { command, cwd },
       { label: command, terminalId: term.id },
     );
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+async function runRustFile() {
+  if (!state.repo || !state.activeTab?.endsWith('.rs')) return;
+  const target = state.runTarget;
+  const command = target?.task;
+  if (!command) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream(
+      '/workspace/shell',
+      { command, cwd },
+      { label: command, terminalId: term.id },
+    );
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+function isJsOrTsSourcePath(path) {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.d.ts')) return false;
+  return lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs')
+    || lower.endsWith('.jsx') || lower.endsWith('.ts') || lower.endsWith('.tsx');
+}
+
+async function runJsFile() {
+  if (!state.repo || !isJsOrTsSourcePath(state.activeTab)) return;
+  const target = state.runTarget;
+  const command = target?.task;
+  if (!command) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream(
+      '/workspace/shell',
+      { command, cwd },
+      { label: command, terminalId: term.id },
+    );
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+async function runKotlinFile() {
+  if (!state.repo || !state.activeTab) return;
+  const tab = state.activeTab;
+  if (!tab.endsWith('.kt') && !tab.endsWith('.kts')) return;
+  const command = state.runTarget?.task;
+  if (!command) return;
+  if (state.dirty.has(tab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream('/workspace/shell', { command, cwd }, { label: command, terminalId: term.id });
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+async function runPhpFile() {
+  if (!state.repo || !state.activeTab?.endsWith('.php')) return;
+  const command = state.runTarget?.task;
+  if (!command) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream('/workspace/shell', { command, cwd }, { label: command, terminalId: term.id });
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+async function runDartFile() {
+  if (!state.repo || !state.activeTab?.endsWith('.dart')) return;
+  const command = state.runTarget?.task;
+  if (!command) return;
+  if (state.dirty.has(state.activeTab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream('/workspace/shell', { command, cwd }, { label: command, terminalId: term.id });
+  } catch (e) {
+    if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
+  }
+}
+
+async function runShellFile() {
+  if (!state.repo || !state.activeTab) return;
+  const tab = state.activeTab;
+  if (!isShellScriptPath(tab)) return;
+  const command = state.runTarget?.task;
+  if (!command) return;
+  if (state.dirty.has(tab)) await saveFile();
+  showTerminal();
+  const term = getActiveTerminal();
+  const cwd = state.runInfo?.project_root || undefined;
+  try {
+    await runWorkspaceCommandStream('/workspace/shell', { command, cwd }, { label: command, terminalId: term.id });
   } catch (e) {
     if (e?.name !== 'AbortError') terminalLog(`error: ${e.message}`);
   }
@@ -14720,9 +15123,9 @@ function appendAgentMessage(role, text, opts = {}) {
   const providerDef = getAgentProvider(provider);
   const wrap = document.createElement('div');
   wrap.className = `rounded-lg px-3 py-2 ${
-    role === 'user' ? 'agent-msg-user text-gray-200' :
+    role === 'user' ? 'agent-msg-user' :
     role === 'assistant'
-      ? `agent-msg-assistant text-gray-300 agent-provider-${provider}`
+      ? `agent-msg-assistant agent-provider-${provider}`
       : 'agent-msg-system'
   }`;
   if (role === 'assistant') {
@@ -14731,7 +15134,7 @@ function appendAgentMessage(role, text, opts = {}) {
 
   if (role !== 'system') {
     const label = document.createElement('div');
-    label.className = `agent-msg-label text-[10px] uppercase tracking-wide mb-1 ${providerDef.labelClass}`;
+    label.className = `agent-msg-label ${role === 'user' ? '' : providerDef.labelClass}`;
     label.textContent = role === 'user' ? 'You' : providerDef.messageLabel;
     wrap.appendChild(label);
   }
@@ -14871,13 +15274,8 @@ function fillAgentModelSelect(select, models, currentId) {
     if (m.description) opt.title = m.description;
     select.appendChild(opt);
   }
-  if (currentId && !ids.has(currentId)) {
-    const opt = document.createElement('option');
-    opt.value = currentId;
-    opt.textContent = currentId;
-    select.appendChild(opt);
-  }
-  select.value = currentId;
+  const resolved = ids.has(currentId) ? currentId : (models[0]?.id || currentId);
+  select.value = resolved;
 }
 
 function agentProviderChipStatus(def) {
@@ -15208,7 +15606,7 @@ async function loadCursorStatus() {
     state.cursorBridgeError = cfg.bridge_error || null;
     state.cursorKeyMasked = cfg.masked || null;
     state.cursorKeySource = cfg.source || null;
-    state.cursorModel = cfg.model || 'composer-2.5';
+    state.cursorModel = normalizeCursorModel(cfg.model || CURSOR_MODEL_DEFAULT);
     state.cursorMode = cfg.mode || 'agent';
     $$('[data-agent-mode]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
@@ -15606,7 +16004,7 @@ async function runAgentChat(prompt, opts = {}) {
     clearTimeout(agentRefreshTimer);
     clearTimeout(agentMarkdownTimer);
     if (cancelled || state.agentStopRequested) {
-      assistantWrap.classList.add('text-gray-500');
+      assistantWrap.classList.add('agent-msg-muted');
       window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer || 'Stopped.');
     } else {
       await finalizeAgentMessage(assistantEl, { textBuffer, buffer, summary: doneSummary });
@@ -15626,7 +16024,7 @@ async function runAgentChat(prompt, opts = {}) {
     });
   } catch (e) {
     if (e.name === 'AbortError' || state.agentStopRequested) {
-      assistantWrap.classList.add('text-gray-500');
+      assistantWrap.classList.add('agent-msg-muted');
       window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer || 'Stopped.');
     } else {
       const msg = e.message || String(e);
