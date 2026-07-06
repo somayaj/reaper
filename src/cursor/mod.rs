@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
@@ -106,6 +107,19 @@ pub struct CursorBridge {
     client: Client,
 }
 
+struct HealthCache {
+    ok: bool,
+    checked_at: Instant,
+}
+
+static HEALTH_CACHE: Mutex<Option<HealthCache>> = Mutex::new(None);
+
+pub fn invalidate_health_cache() {
+    if let Ok(mut guard) = HEALTH_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 impl CursorBridge {
     pub fn new() -> Self {
         Self {
@@ -118,12 +132,31 @@ impl CursorBridge {
     }
 
     pub async fn health(&self) -> bool {
-        self.client
+        let ok = self
+            .client
             .get(format!("{}/health", self.base()))
             .send()
             .await
             .map(|r| r.status().is_success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if let Ok(mut guard) = HEALTH_CACHE.lock() {
+            *guard = Some(HealthCache {
+                ok,
+                checked_at: Instant::now(),
+            });
+        }
+        ok
+    }
+
+    pub async fn health_cached(&self, max_age: Duration) -> bool {
+        if let Ok(guard) = HEALTH_CACHE.lock() {
+            if let Some(ref cache) = *guard {
+                if cache.checked_at.elapsed() < max_age {
+                    return cache.ok;
+                }
+            }
+        }
+        self.health().await
     }
 
     pub async fn create_session(

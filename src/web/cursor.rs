@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -10,9 +12,11 @@ use axum::{
 use futures_util::StreamExt;
 use serde::Deserialize;
 
-use crate::cursor::{self, ensure_bridge_running, last_bridge_error};
+use crate::cursor::{self, ensure_bridge_running, invalidate_health_cache, last_bridge_error};
 use crate::state::AppState;
 use crate::workspace;
+
+const BRIDGE_HEALTH_TTL: Duration = Duration::from_secs(8);
 
 #[derive(Deserialize)]
 pub struct ChatBody {
@@ -27,6 +31,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/cursor/models", axum::routing::get(cursor_models))
         .route("/api/cursor/bridge/restart", axum::routing::post(restart_bridge))
         .route("/api/repos/{name}/cursor/chat", axum::routing::post(cursor_chat))
+        .route(
+            "/api/repos/{name}/cursor/session/warm",
+            axum::routing::post(warm_cursor_session),
+        )
         .route("/api/repos/{name}/cursor/stop", axum::routing::post(cursor_stop))
         .route(
             "/api/repos/{name}/cursor/session",
@@ -41,6 +49,7 @@ async fn cursor_status(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 async fn restart_bridge(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     cursor::stop_bridge().await;
     cursor::reclaim_bridge_port().await;
+    invalidate_health_cache();
     if let Err(e) = ensure_bridge_running().await {
         tracing::warn!("Cursor bridge restart failed: {e:#}");
     }
@@ -57,27 +66,84 @@ async fn cursor_status_json(state: &AppState) -> serde_json::Value {
     serde_json::to_value(state.settings.cursor_view(bridge_ok, bridge_error)).unwrap_or_default()
 }
 
-async fn cursor_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let api_key = match state.settings.cursor_api_key() {
-        Some(k) => k,
-        None => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Cursor API key not configured",
-            );
-        }
-    };
-
-    if !state.cursor_bridge.health().await {
+async fn ensure_bridge_ready(state: &AppState) -> Result<(), Response> {
+    if !state.cursor_bridge.health_cached(BRIDGE_HEALTH_TTL).await {
         if let Err(e) = ensure_bridge_running().await {
             tracing::warn!("Cursor bridge auto-retry failed: {e:#}");
         }
     }
-    if !state.cursor_bridge.health().await {
+    if !state.cursor_bridge.health_cached(BRIDGE_HEALTH_TTL).await {
         let detail = last_bridge_error().await.unwrap_or_else(|| {
             "Bridge offline — click Retry in Settings or restart Reaper".into()
         });
-        return api_error(StatusCode::SERVICE_UNAVAILABLE, detail);
+        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, detail));
+    }
+    Ok(())
+}
+
+fn cursor_api_key(state: &AppState) -> Result<String, Response> {
+    state.settings.cursor_api_key().ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Cursor API key not configured; open Settings → Cursor agent or set REAPER_CURSOR_API_KEY",
+        )
+    })
+}
+
+async fn workspace_cwd(state: &AppState, name: &str) -> Result<PathBuf, Response> {
+    let ws = workspace::ensure_workspace(&state.config, name).map_err(|e| {
+        api_error(StatusCode::BAD_REQUEST, e)
+    })?;
+    ws.canonicalize()
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn ensure_cursor_session(
+    state: &AppState,
+    name: &str,
+    cwd: &PathBuf,
+    api_key: &str,
+    model: &str,
+    mode: &str,
+) -> Result<String, Response> {
+    if let Some(id) = state.cursor_sessions.get(name) {
+        return Ok(id);
+    }
+
+    match state
+        .cursor_bridge
+        .create_session(
+            &cwd.display().to_string(),
+            api_key,
+            model,
+            mode,
+        )
+        .await
+    {
+        Ok(id) => {
+            state.cursor_sessions.set(name, id.clone());
+            Ok(id)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
+                state.cursor_sessions.remove(name);
+                Err(api_error(StatusCode::UNAUTHORIZED, hint))
+            } else {
+                Err(api_error(StatusCode::BAD_REQUEST, msg))
+            }
+        }
+    }
+}
+
+async fn cursor_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let api_key = match cursor_api_key(&state) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = ensure_bridge_ready(&state).await {
+        return resp;
     }
 
     match state.cursor_bridge.list_models(&api_key).await {
@@ -92,6 +158,38 @@ async fn cursor_models(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 }
 
+async fn warm_cursor_session(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let api_key = match cursor_api_key(&state) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = ensure_bridge_ready(&state).await {
+        return resp;
+    }
+
+    let cwd = match workspace_cwd(&state, &name).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+
+    let model = state.settings.cursor_model();
+    let mode = state.settings.cursor_mode();
+
+    match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await {
+        Ok(session_id) => Json(serde_json::json!({
+            "ok": true,
+            "warmed": true,
+            "session_id": session_id,
+        }))
+        .into_response(),
+        Err(resp) => resp,
+    }
+}
+
 async fn cursor_chat(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -102,36 +200,18 @@ async fn cursor_chat(
         return api_error(StatusCode::BAD_REQUEST, "prompt required");
     }
 
-    let api_key = match state.settings.cursor_api_key() {
-        Some(k) => k,
-        None => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Cursor API key not configured; open Settings → Cursor agent or set REAPER_CURSOR_API_KEY",
-            );
-        }
+    let api_key = match cursor_api_key(&state) {
+        Ok(k) => k,
+        Err(resp) => return resp,
     };
 
-    if !state.cursor_bridge.health().await {
-        if let Err(e) = ensure_bridge_running().await {
-            tracing::warn!("Cursor bridge auto-retry failed: {e:#}");
-        }
-    }
-    if !state.cursor_bridge.health().await {
-        let detail = last_bridge_error().await.unwrap_or_else(|| {
-            "Bridge offline — click Retry in Settings or restart Reaper".into()
-        });
-        return api_error(StatusCode::SERVICE_UNAVAILABLE, detail);
+    if let Err(resp) = ensure_bridge_ready(&state).await {
+        return resp;
     }
 
-    let ws = match workspace::ensure_workspace(&state.config, &name) {
-        Ok(ws) => ws,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
-    };
-
-    let cwd = match ws.canonicalize() {
+    let cwd = match workspace_cwd(&state, &name).await {
         Ok(p) => p,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(resp) => return resp,
     };
 
     let model = body
@@ -143,33 +223,10 @@ async fn cursor_chat(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| state.settings.cursor_mode());
 
-    let session_id = match state.cursor_sessions.get(&name) {
-        Some(id) => id,
-        None => {
-            match state
-                .cursor_bridge
-                .create_session(
-                    &cwd.display().to_string(),
-                    &api_key,
-                    &model,
-                    &mode,
-                )
-                .await
-            {
-                Ok(id) => {
-                    state.cursor_sessions.set(&name, id.clone());
-                    id
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
-                        state.cursor_sessions.remove(&name);
-                        return api_error(StatusCode::UNAUTHORIZED, hint);
-                    }
-                    return api_error(StatusCode::BAD_REQUEST, msg);
-                }
-            }
-        }
+    let session_id = match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await
+    {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
 
     let resp = match state

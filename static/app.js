@@ -9204,6 +9204,7 @@ async function hydrateRepoWorkspace(name, opened, token) {
     }
     syncWelcomeLayout();
     updateMenuState();
+    void warmCursorSession(name);
   } catch (err) {
     if (token !== repoSelectToken) return;
     console.warn('[Reaper] repo hydrate failed', err);
@@ -10073,6 +10074,19 @@ async function reloadOpenTabsFromDisk() {
   if (!state.repo || !state.tabs.length) return;
   for (const path of state.tabs) {
     if (state.dirty.has(path)) continue;
+    try {
+      const data = await api(`${repoApi(state.repo, '/workspace/file')}?path=${encodeURIComponent(path)}`);
+      state.tabContents.set(path, data.content);
+      if (path === state.activeTab) setEditorContent(path, data.content);
+    } catch { /* ignore missing files */ }
+  }
+  renderTabs();
+}
+
+async function reloadAgentTouchedTabsFromDisk() {
+  if (!state.repo || !state.agentSeenPaths?.size) return;
+  for (const path of state.agentSeenPaths) {
+    if (!state.tabs.includes(path) || state.dirty.has(path)) continue;
     try {
       const data = await api(`${repoApi(state.repo, '/workspace/file')}?path=${encodeURIComponent(path)}`);
       state.tabContents.set(path, data.content);
@@ -14240,21 +14254,28 @@ async function refreshAgentLiveDiff(hintPath) {
   if (hintPath) state.agentLastToolPath = hintPath;
   if (!state.repo || !state.agentBusy || state.cursorMode !== 'agent') return;
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    if (attempt) await new Promise((r) => setTimeout(r, 180 * attempt));
-    const status = await refreshGitStatus();
-    if (status.files?.length) {
-      await followAgentFileChanges(status);
-      await reloadOpenTabsFromDisk();
-      return;
-    }
+  let status = await refreshGitStatus();
+  if (!status.files?.length) {
+    await new Promise((r) => setTimeout(r, 200));
+    status = await refreshGitStatus();
   }
+  if (!status.files?.length) return;
+  await followAgentFileChanges(status);
+  await reloadAgentTouchedTabsFromDisk();
 }
 
-async function refreshAfterAgent({ fromAgent = false, final = false } = {}) {
+async function refreshAfterAgent({ fromAgent = false, final = false, light = false } = {}) {
+  if (light) {
+    await refreshGitStatus();
+    return false;
+  }
   await refreshTree();
   const status = await refreshGitStatus();
-  await reloadOpenTabsFromDisk();
+  if (fromAgent && state.agentHadFileChanges) {
+    await reloadAgentTouchedTabsFromDisk();
+  } else {
+    await reloadOpenTabsFromDisk();
+  }
   if (fromAgent && state.agentBusy && !status.clean) {
     await followAgentFileChanges(status);
   }
@@ -14273,6 +14294,24 @@ async function refreshAfterAgent({ fromAgent = false, final = false } = {}) {
 
 let agentRefreshTimer = null;
 let agentMarkdownTimer = null;
+let cursorWarmInflight = null;
+let cursorWarmRepo = null;
+
+async function warmCursorSession(repo = state.repo) {
+  if (!repo || state.agentProvider !== 'cursor' || !state.cursorConfigured) return;
+  if (cursorWarmRepo === repo && cursorWarmInflight) return cursorWarmInflight;
+  cursorWarmRepo = repo;
+  cursorWarmInflight = api(repoApi(repo, '/cursor/session/warm'), { method: 'POST', body: '{}' })
+    .then(() => {
+      state.cursorBridgeOk = true;
+      state.cursorBridgeError = null;
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (cursorWarmRepo === repo) cursorWarmInflight = null;
+    });
+  return cursorWarmInflight;
+}
 
 function scheduleAgentMarkdownPreview(el, text) {
   if (!el || !window.ReaperAgentMarkdown?.libsReady?.()) return;
@@ -15855,6 +15894,7 @@ async function loadCursorStatus() {
     });
     await loadCursorModels();
     refreshAgentProviderUi();
+    if (state.repo && cfg.configured && cfg.bridge_ok) void warmCursorSession();
   } catch {
     state.cursorConfigured = false;
     state.cursorBridgeOk = false;
@@ -16268,19 +16308,23 @@ async function runAgentChat(prompt, opts = {}) {
     } else {
       await finalizeAgentMessage(assistantEl, { textBuffer, buffer, summary: doneSummary });
     }
-    const postStatus = await api(repoApi(state.repo, '/workspace/status'));
-    const pathsBefore = await pathsBeforePromise;
-    const revertPaths = await collectAgentRevertPaths(pathsBefore, postStatus, state.agentSeenPaths);
-    if (revertPaths.length || userWrap || assistantWrap) {
-      state.agentLastRevertibleTurn = {
-        userWrap,
-        assistantWrap,
-        paths: revertPaths,
-      };
+    if (needsRevertSnapshot) {
+      const postStatus = await api(repoApi(state.repo, '/workspace/status'));
+      const pathsBefore = await pathsBeforePromise;
+      const revertPaths = await collectAgentRevertPaths(pathsBefore, postStatus, state.agentSeenPaths);
+      if (revertPaths.length || userWrap || assistantWrap) {
+        state.agentLastRevertibleTurn = {
+          userWrap,
+          assistantWrap,
+          paths: revertPaths,
+        };
+      }
     }
+    const lightRefresh = state.cursorMode === 'ask' || !state.agentHadFileChanges;
     await refreshAfterAgent({
       fromAgent: true,
       final: !cancelled && !state.agentStopRequested,
+      light: lightRefresh,
     });
   } catch (e) {
     if (e.name === 'AbortError' || state.agentStopRequested) {
