@@ -13,9 +13,18 @@
 
 /* ─── Logo reveal with scale and rotation ─── */
 .reaper-logo-anim .logo-anim {
-  animation: logoAssemble 7s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+  animation: logoAssemble 7s cubic-bezier(0.34, 1.56, 0.64, 1) infinite !important;
   transform-origin: 32px 32px;
   transform-box: view-box;
+}
+
+/* Override the panel backgrounds to not hide during logo reveal */
+.reaper-logo-anim .logo-anim .panel-bg,
+.reaper-logo-anim .logo-anim .field-bg,
+.reaper-logo-anim .logo-anim .field-earth,
+.reaper-logo-anim .logo-anim .intro-field {
+  animation: none !important;
+  opacity: 1 !important;
 }
 
 @keyframes logoAssemble {
