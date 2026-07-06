@@ -8524,8 +8524,7 @@ main { background: var(--ij-bg); }
 }
 
 .ij-terminal-xterm-pane {
-  position: absolute;
-  inset: 6px 8px 8px;
+  flex: 1 1 auto;
   min-height: 0;
   border-radius: 8px;
   overflow: hidden;
