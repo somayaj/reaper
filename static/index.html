@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="391" />
+  <meta name="reaper-ui-build" content="394" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -71,7 +71,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=391" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=394" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -142,10 +142,10 @@
 
   <!-- Full logo — revealed after puzzle merges -->
   <g class="logo-unified">
-    <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
-    <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
-    <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-    <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+    <rect class="panel-bg puzzle-piece" width="64" height="64" rx="14" fill="#0a0a0a" style="--px:-12px; --py:-12px; --pr:5deg"/>
+    <rect class="field-bg puzzle-piece" x="8" y="43" width="48" height="13" rx="2" fill="#14110e" style="--px:12px; --py:-8px; --pr:-3deg"/>
+    <rect class="field-earth puzzle-piece" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218" style="--px:-8px; --py:10px; --pr:2deg"/>
+    <g class="intro-field puzzle-piece" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle" style="--px:10px; --py:8px; --pr:-4deg">
       <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
       <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
       <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
@@ -1533,9 +1533,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=391"></script>
-  <script src="/monaco-languages.js?v=391" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=394"></script>
+  <script src="/monaco-languages.js?v=394" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=391"></script>
+  <script src="/app.js?v=394"></script>
 </body>
 </html>
