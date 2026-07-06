@@ -2504,6 +2504,7 @@ async function testJavaEditorUiBackendIntegration(appSrc) {
   const mainRs = fs.readFileSync(path.join(ROOT, 'src/main.rs'), 'utf8');
   const guiRs = fs.readFileSync(path.join(ROOT, 'src/gui.rs'), 'utf8');
   const customProtocolRs = fs.readFileSync(path.join(ROOT, 'src/web/custom_protocol.rs'), 'utf8');
+  const webModRs = fs.readFileSync(path.join(ROOT, 'src/web/mod.rs'), 'utf8');
   const configRs = fs.readFileSync(path.join(ROOT, 'src/config.rs'), 'utf8');
   ok(
     mainRs.includes('GuiProtocolBridge')
@@ -2516,8 +2517,16 @@ async function testJavaEditorUiBackendIntegration(appSrc) {
     'gui: custom protocol dispatches in-process to axum router',
   );
   ok(
-    appSrc.includes('__REAPER_LOOPBACK_WS__'),
+    appSrc.includes('ensureLoopbackWsBase()') || appSrc.includes('__REAPER_LOOPBACK_WS__'),
     'terminal: uses loopback WebSocket base when WebView is on reaper://',
+  );
+  ok(
+    webModRs.includes('inject_loopback_ws_script') || customProtocolRs.includes('__REAPER_LOOPBACK_WS__'),
+    'backend: injects loopback WebSocket URL into served index.html',
+  );
+  ok(
+    appSrc.includes('loopback_ws'),
+    'terminal: caches loopback WebSocket URL from /api/version',
   );
   ok(
     mainRs.includes('local_https::ensure_local_tls')
@@ -3177,6 +3186,16 @@ async function main() {
 
   section('Terminal compile link regression');
   testTerminalCompileLinkRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
+
+  section('Terminal xterm load + input regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const terminalHarness = await import(path.join(ROOT, 'scripts/lib/terminal-harness.mjs'));
+    terminalHarness.testTerminalStaticRegression(appSrc, indexHtml, ok);
+    terminalHarness.testTerminalVendorLoadRegression(ok);
+    terminalHarness.testTerminalLifecycleRegression(appSrc, ok);
+  }
 
   section('Java member completion + tab close regression');
   testJavaMemberCompletionPipelineRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));

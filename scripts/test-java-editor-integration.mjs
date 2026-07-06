@@ -30,6 +30,7 @@ import {
   runCoalescedClientBurst,
   testCoalescerUnit,
 } from './lib/java-coalesce-harness.mjs';
+import { runTerminalEchoIntegration } from './lib/terminal-harness.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_NAME = 'javac-loop-integration';
@@ -246,6 +247,9 @@ async function runSpawnedIntegration() {
       fail,
     });
     ok(coalescedFailures === 0, `coalesced client burst: ${EDIT_COUNT} saves → one-at-a-time javac, latest wins`);
+
+    console.log('\n  terminal websocket echo');
+    await runTerminalEchoIntegration({ baseUrl, repo: REPO_NAME, ok, fail });
   } finally {
     proc.kill('SIGTERM');
     await sleep(200);
