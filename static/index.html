@@ -147,22 +147,31 @@
     </g>
   </defs>
 
-  <!-- Full logo — revealed after puzzle merges -->
-  <g class="logo-unified">
-    <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
-    <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
-    <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-    <!-- Puzzle piece glows (behind) -->
-    <g class="puzzle-glow puzzle-glow-1" style="--delay:0.05s"></g>
-    <g class="puzzle-glow puzzle-glow-2" style="--delay:0.1s"></g>
-    <g class="puzzle-glow puzzle-glow-3" style="--delay:0.15s"></g>
-    <g class="puzzle-glow puzzle-glow-4" style="--delay:0.2s"></g>
-    <!-- Puzzle pieces -->
-    <path class="puzzle-piece" d="M 0 0 L 35 0 Q 36 0 36 1.5 Q 36 3 35 3 L 35 32 Q 36 33 36 34.5 Q 36 35 35 35 L 0 35 Z" fill="#1a1a1a" filter="url(#puzzle-glow)" style="--px:-16px; --py:-16px; --pr:8deg" opacity="0"/>
-    <path class="puzzle-piece" d="M 29 0 Q 28 0 28 1.5 Q 28 3 29 3 L 29 32 Q 28 33 28 34.5 Q 28 35 29 35 L 64 35 L 64 0 Z" fill="#2a2a2a" filter="url(#puzzle-glow)" style="--px:16px; --py:-12px; --pr:-4deg" opacity="0"/>
-    <path class="puzzle-piece" d="M 0 35 L 35 35 Q 36 35 36 36.5 Q 36 38 35 38 L 35 64 L 0 64 Z" fill="#333333" filter="url(#puzzle-glow)" style="--px:-12px; --py:16px; --pr:3deg" opacity="0"/>
-    <path class="puzzle-piece" d="M 29 35 Q 28 35 28 36.5 Q 28 38 29 38 L 29 64 L 64 64 L 64 35 Z" fill="#242424" filter="url(#puzzle-glow)" style="--px:14px; --py:12px; --pr:-5deg" opacity="0"/>
-    <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+  <!-- Full logo — revealed after cube rotates -->
+  <g class="logo-unified logo-cube-wrapper" style="perspective: 1200px;">
+    <g class="logo-cube">
+      <!-- Cube Front Face (Logo) -->
+      <rect class="cube-face cube-front" width="64" height="64" rx="14" fill="#0a0a0a"/>
+      <rect class="cube-face cube-front" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
+      <rect class="cube-face cube-front" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
+      
+      <!-- Cube Back Face (Dark) -->
+      <rect class="cube-face cube-back" width="64" height="64" rx="14" fill="#1a1a1a"/>
+      
+      <!-- Cube Right Face (Accent) -->
+      <rect class="cube-face cube-right" width="64" height="64" rx="14" fill="#2a2a2a"/>
+      
+      <!-- Cube Left Face (Accent) -->
+      <rect class="cube-face cube-left" width="64" height="64" rx="14" fill="#333333"/>
+      
+      <!-- Cube Top Face -->
+      <rect class="cube-face cube-top" width="64" height="64" rx="14" fill="#1f1f1f"/>
+      
+      <!-- Cube Bottom Face -->
+      <rect class="cube-face cube-bottom" width="64" height="64" rx="14" fill="#242424"/>
+    </g>
+  </g>
+  <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
       <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
       <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
       <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
