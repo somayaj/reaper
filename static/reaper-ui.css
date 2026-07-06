@@ -7816,13 +7816,15 @@ main { background: var(--ij-bg); }
 }
 
 .agent-msg-user {
-  background: var(--ij-agent-user-bg);
+  background: linear-gradient(135deg, var(--ij-agent-user-bg) 0%, color-mix(in srgb, #4a90e2 3%, var(--ij-agent-user-bg)) 100%);
   border: 1px solid var(--ij-border);
+  padding: 12px !important;
 }
 
 .agent-msg-assistant {
-  background: var(--ij-agent-assistant-bg);
+  background: linear-gradient(135deg, var(--ij-agent-assistant-bg) 0%, color-mix(in srgb, #333 2%, var(--ij-agent-assistant-bg)) 100%);
   border: 1px solid var(--ij-border);
+  padding: 12px !important;
 }
 
 .agent-msg-assistant.agent-provider-gemini {
@@ -7836,19 +7838,24 @@ main { background: var(--ij-bg); }
 }
 
 .agent-msg-label-anthropic {
-  color: color-mix(in srgb, #e8a88a 88%, var(--ij-text-dim));
+  color: #e8a88a;
+  font-weight: 600;
 }
 
 .agent-msg-label {
-  color: var(--ij-text-dim);
+  color: var(--ij-text-muted, #b0b0b0);
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .agent-msg-label-cursor {
-  color: var(--ij-text-dim);
+  color: #4a90e2;
+  font-weight: 600;
 }
 
 .agent-msg-label-gemini {
-  color: color-mix(in srgb, #8ab4f8 88%, var(--ij-text-dim));
+  color: #8ab4f8;
+  font-weight: 600;
 }
 
 .agent-msg-system {
@@ -7867,6 +7874,11 @@ main { background: var(--ij-bg); }
   font-family: var(--ij-ui-font-family, var(--ij-mono));
   font-size: var(--ij-ui-font-size, 11px);
   line-height: var(--ij-ui-line-height, 1.538);
+  color: var(--ij-text);
+}
+
+#agent-input::placeholder {
+  color: var(--ij-text-muted, #999);
 }
 
 .agent-work-status {
