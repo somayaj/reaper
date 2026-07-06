@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="396" />
+  <meta name="reaper-ui-build" content="400" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -71,7 +71,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=396" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=400" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -97,13 +97,6 @@
     <clipPath id="pc-tr"><rect x="30" y="0" width="34" height="34"/></clipPath>
     <clipPath id="pc-bl"><rect x="0" y="30" width="34" height="34"/></clipPath>
     <clipPath id="pc-br"><rect x="30" y="30" width="34" height="34"/></clipPath>
-    <filter id="puzzle-glow">
-      <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
-      <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
     <g id="logo-static">
       <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
       <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
@@ -147,31 +140,12 @@
     </g>
   </defs>
 
-  <!-- Full logo — revealed after cube rotates -->
-  <g class="logo-unified logo-cube-wrapper" style="perspective: 1200px;">
-    <g class="logo-cube">
-      <!-- Cube Front Face (Logo) -->
-      <rect class="cube-face cube-front" width="64" height="64" rx="14" fill="#0a0a0a"/>
-      <rect class="cube-face cube-front" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
-      <rect class="cube-face cube-front" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
-      
-      <!-- Cube Back Face (Dark) -->
-      <rect class="cube-face cube-back" width="64" height="64" rx="14" fill="#1a1a1a"/>
-      
-      <!-- Cube Right Face (Accent) -->
-      <rect class="cube-face cube-right" width="64" height="64" rx="14" fill="#2a2a2a"/>
-      
-      <!-- Cube Left Face (Accent) -->
-      <rect class="cube-face cube-left" width="64" height="64" rx="14" fill="#333333"/>
-      
-      <!-- Cube Top Face -->
-      <rect class="cube-face cube-top" width="64" height="64" rx="14" fill="#1f1f1f"/>
-      
-      <!-- Cube Bottom Face -->
-      <rect class="cube-face cube-bottom" width="64" height="64" rx="14" fill="#242424"/>
-    </g>
-  </g>
-  <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
+  <!-- Full logo — revealed after puzzle merges -->
+  <g class="logo-unified logo-anim">
+    <rect class="panel-bg" width="64" height="64" rx="14" fill="#0a0a0a"/>
+    <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
+    <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
+    <g class="intro-field" font-family="Consolas,Menlo,Monaco,monospace" font-weight="400" text-anchor="middle">
       <text x="14" y="51" fill="#629755" font-size="6">0</text><text x="20" y="51" fill="#589df6" font-size="6">1</text>
       <text x="26" y="51" fill="#c9a227" font-size="5.5">0</text><text x="26" y="47" fill="#c9a227" font-size="5.5">1</text>
       <text x="32" y="51" fill="#629755" font-size="6">0</text><text x="32" y="47" fill="#629755" font-size="6">0</text><text x="32" y="43" fill="#629755" font-size="6">0</text>
@@ -1559,9 +1533,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=396"></script>
-  <script src="/monaco-languages.js?v=396" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=400"></script>
+  <script src="/monaco-languages.js?v=400" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=396"></script>
+  <script src="/app.js?v=400"></script>
 </body>
 </html>
