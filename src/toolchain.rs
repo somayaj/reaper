@@ -184,6 +184,20 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_DART"),
     },
     ToolDef {
+        id: "scala",
+        label: "Scala",
+        kind: ToolKind::Binary,
+        defaults: &["scala"],
+        env_key: Some("REAPER_SCALA"),
+    },
+    ToolDef {
+        id: "clojure",
+        label: "Clojure",
+        kind: ToolKind::Binary,
+        defaults: &["clojure"],
+        env_key: Some("REAPER_CLOJURE"),
+    },
+    ToolDef {
         id: "bash",
         label: "Shell (bash)",
         kind: ToolKind::Binary,

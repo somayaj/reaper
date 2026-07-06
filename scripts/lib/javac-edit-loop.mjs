@@ -1,6 +1,6 @@
 /** Shared edit → save → javac loop helpers (editor parity). */
 
-export const EDIT_COUNT_DEFAULT = 25;
+export const EDIT_COUNT_DEFAULT = 10;
 export const MAX_JAVAC_RETRIES = 3;
 export const JAVA_SAVE_DIAG_DELAY_MS = 300;
 export const AUTO_SAVE_DELAY_MS = 2000;

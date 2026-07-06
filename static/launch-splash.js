@@ -1,4 +1,4 @@
-/** Puzzle pieces snap in 3D, then reveal the full animated logo. */
+/** Rubik-style 3×3 face snaps in 3D, then reveals the full animated logo. */
 (function () {
   var splash = document.getElementById('launch-splash');
   if (!splash) return;
@@ -7,7 +7,7 @@
   var logo = splash.querySelector('.reaper-logo-anim');
   if (!logo) return;
 
-  var mergeMs = 1550;
+  var mergeMs = 3400;
   var loopPreview = document.body.classList.contains('splash-preview-loop');
 
   function resetPieces() {
@@ -16,6 +16,12 @@
       void el.offsetWidth;
       el.style.animation = '';
     });
+    var stage = splash.querySelector('.puzzle-stage');
+    if (stage) {
+      stage.style.animation = 'none';
+      void stage.offsetWidth;
+      stage.style.animation = '';
+    }
   }
 
   function merge() {
@@ -35,6 +41,6 @@
     setInterval(function () {
       split();
       setTimeout(merge, mergeMs);
-    }, 7500);
+    }, 9000);
   }
 })();

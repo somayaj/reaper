@@ -130,3 +130,28 @@
   66%, 80%  { opacity: 0.9; transform: translate(0, 0); }
   88%, 100% { opacity: 0; transform: translate(0, -3px); }
 }
+
+/* In-app chrome logos — harvest loop with panel always visible */
+.reaper-logo-chrome .panel-bg,
+.reaper-logo-chrome .field-bg,
+.reaper-logo-chrome .field-earth,
+.reaper-logo-chrome .intro-field {
+  animation: none !important;
+  opacity: 1 !important;
+}
+
+.reaper-logo-chrome .console-line {
+  animation: none !important;
+  opacity: 0 !important;
+}
+
+/* Start harvest sooner in the menubar-sized mark */
+.reaper-logo-chrome .anim-layer {
+  animation: reaperShowAnimChrome 7s ease-in-out infinite;
+}
+
+@keyframes reaperShowAnimChrome {
+  0%, 8%   { opacity: 0; transform: scale(0.88) translateY(6px); }
+  16%, 88% { opacity: 1; transform: scale(1) translateY(0); }
+  96%, 100% { opacity: 0; transform: scale(0.88) translateY(6px); }
+}

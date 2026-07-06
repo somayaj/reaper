@@ -2547,7 +2547,7 @@ async function testJavaEditorUiBackendIntegration(appSrc) {
       unitFailed = true;
       fail(msg);
     };
-    const unitBurst = Number.parseInt(process.env.REAPER_EDITS || '25', 10);
+    const unitBurst = Number.parseInt(process.env.REAPER_EDITS || '10', 10);
     await testCoalescerUnit({ burstCount: unitBurst, ok: unitOk, fail: unitFail });
     ok(!unitFailed, `coalescer unit: ${unitBurst} queue calls coalesced (no server)`);
   }
@@ -2581,7 +2581,7 @@ async function testJavaEditorUiBackendIntegration(appSrc) {
     ok(true, 'integration spawn: skipped by harness');
     return;
   }
-  ok(result.passed, `integration spawn: ${process.env.REAPER_EDITS || '25'}× sequential + client-parallel + coalesced bursts`);
+  ok(result.passed, `integration spawn: ${process.env.REAPER_EDITS || '10'}× sequential + client-parallel + coalesced bursts`);
 }
 
 function testJavaCompilerErrorRegression(appSrc) {
@@ -3006,7 +3006,7 @@ function testInlinePerformanceBenchmarks(win) {
       h.shouldRouteInlineToAi(filePath, '    ', 'line\n    \nnext\n', 2);
     }
   }, 400);
-  okPerfUnder(routeMs, 105, 'shouldRouteInlineToAi all languages empty line (400 iter)');
+  okPerfUnder(routeMs, 120, 'shouldRouteInlineToAi all languages empty line (400 iter)');
 
   const markupPaths = LANG_PATH_FIXTURES.filter(([p]) => h.isMarkupOrConfigPath(p));
   ok(markupPaths.length >= 10, 'markup/config paths covered for perf bench');

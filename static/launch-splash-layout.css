@@ -1,9 +1,27 @@
-/* Launch splash — logo puzzle pieces snap together, then full logo + harvest. See static/LAUNCH-SPLASH.md */
+/* Launch splash — 3×3 pieces assemble, then harvest. See static/LAUNCH-SPLASH.md */
+:root {
+  --ij-splash-logo-size: min(44vw, 220px);
+}
+
 html,
 body {
-  background: #0a0a0a !important;
   margin: 0;
   height: 100%;
+}
+
+/* Splash — logo only, no full-screen backdrop (native app window stays transparent) */
+body.ij-shell:not(.reaper-ui-ready) {
+  background: transparent !important;
+}
+
+html.ij-native-titlebar:not(.reaper-ui-ready),
+html.ij-native-titlebar:not(.reaper-ui-ready) body {
+  background: transparent !important;
+}
+
+/* Browser / dev server — keep dark backdrop behind logo */
+html:not(.ij-native-titlebar) body.ij-shell:not(.reaper-ui-ready) {
+  background: #0a0a0a !important;
 }
 
 #launch-splash {
@@ -13,7 +31,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #0a0a0a;
+  background: transparent;
+  pointer-events: none;
 }
 
 .ij-launch-brand {
@@ -22,12 +41,13 @@ body {
   align-items: center;
   gap: 20px;
   text-align: center;
+  pointer-events: auto;
 }
 
 .ij-launch-logo-wrap {
-  width: 96px;
-  height: 96px;
-  perspective: 520px;
+  width: var(--ij-splash-logo-size);
+  height: var(--ij-splash-logo-size);
+  perspective: 900px;
   perspective-origin: 50% 50%;
 }
 
@@ -36,18 +56,17 @@ body {
 }
 
 .ij-launch-logo {
-  width: 96px;
-  height: 96px;
+  width: 100%;
+  height: 100%;
   display: block;
   overflow: visible;
   transform-style: preserve-3d;
 }
 
-/* Unified full logo — hidden until puzzle merges */
 .logo-unified {
   opacity: 0;
   transform: scale(0.96);
-  transition: opacity 0.45s ease, transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
 }
 
@@ -57,92 +76,106 @@ body {
   pointer-events: auto;
 }
 
-/* Puzzle stage fades out on merge (pieces → unified logo) */
 .puzzle-stage {
   opacity: 1;
-  transition: opacity 0.35s ease;
+  transform-style: preserve-3d;
+  animation: rubik-cube-turn 3.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  transition: opacity 0.4s ease;
 }
 
 .reaper-logo-anim.is-merged .puzzle-stage {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+  animation: none;
 }
 
-/* 3D logo puzzle pieces snap in */
+@keyframes rubik-cube-turn {
+  0% {
+    transform: rotateX(28deg) rotateY(-42deg) rotateZ(-6deg);
+  }
+  35% {
+    transform: rotateX(14deg) rotateY(18deg) rotateZ(3deg);
+  }
+  70% {
+    transform: rotateX(4deg) rotateY(-8deg) rotateZ(0deg);
+  }
+  100% {
+    transform: rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+  }
+}
+
 .splash-piece {
   transform-box: view-box;
-  transform-origin: 32px 32px;
   opacity: 0;
-  animation-duration: 1.05s;
-  animation-timing-function: cubic-bezier(0.34, 1.2, 0.64, 1);
+  animation-duration: 2.4s;
+  animation-timing-function: cubic-bezier(0.34, 1.15, 0.64, 1);
   animation-fill-mode: forwards;
-  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.55));
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.45));
 }
 
-.splash-piece-tl { animation-name: puzzle-3d-tl; animation-delay: 0s; }
-.splash-piece-tr { animation-name: puzzle-3d-tr; animation-delay: 0.08s; }
-.splash-piece-bl { animation-name: puzzle-3d-bl; animation-delay: 0.16s; }
-.splash-piece-br { animation-name: puzzle-3d-br; animation-delay: 0.24s; }
+.splash-piece-r0c0 { transform-origin: 10px 10px; animation-name: rubik-r0c0; animation-delay: 0s; }
+.splash-piece-r0c1 { transform-origin: 32px 10px; animation-name: rubik-r0c1; animation-delay: 0.06s; }
+.splash-piece-r0c2 { transform-origin: 54px 10px; animation-name: rubik-r0c2; animation-delay: 0.12s; }
+.splash-piece-r1c0 { transform-origin: 10px 32px; animation-name: rubik-r1c0; animation-delay: 0.08s; }
+.splash-piece-r1c1 { transform-origin: 32px 32px; animation-name: rubik-r1c1; animation-delay: 0.18s; }
+.splash-piece-r1c2 { transform-origin: 54px 32px; animation-name: rubik-r1c2; animation-delay: 0.14s; }
+.splash-piece-r2c0 { transform-origin: 10px 54px; animation-name: rubik-r2c0; animation-delay: 0.16s; }
+.splash-piece-r2c1 { transform-origin: 32px 54px; animation-name: rubik-r2c1; animation-delay: 0.22s; }
+.splash-piece-r2c2 { transform-origin: 54px 54px; animation-name: rubik-r2c2; animation-delay: 0.28s; }
 
-@keyframes puzzle-3d-tl {
-  0% {
-    opacity: 0;
-    transform: translate3d(-48px, -44px, -90px) rotateX(52deg) rotateY(-38deg) rotateZ(-12deg) scale(0.65);
-  }
-  65% {
-    opacity: 1;
-    transform: translate3d(2px, 1px, 8px) rotateX(-4deg) rotateY(3deg) rotateZ(1deg) scale(1.03);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1);
-  }
+@keyframes rubik-r0c0 {
+  0% { opacity: 0; transform: translate3d(-36px, -48px, -110px) rotateX(62deg) rotateY(-48deg) rotateZ(-18deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(2px, 1px, 6px) rotateX(-6deg) rotateY(4deg) rotateZ(2deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
 }
 
-@keyframes puzzle-3d-tr {
-  0% {
-    opacity: 0;
-    transform: translate3d(50px, -46px, -85px) rotateX(48deg) rotateY(42deg) rotateZ(14deg) scale(0.65);
-  }
-  65% {
-    opacity: 1;
-    transform: translate3d(-2px, 1px, 8px) rotateX(-3deg) rotateY(-4deg) rotateZ(-1deg) scale(1.03);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1);
-  }
+@keyframes rubik-r0c1 {
+  0% { opacity: 0; transform: translate3d(0, -56px, -130px) rotateX(72deg) rotateY(8deg) rotateZ(8deg) scale(0.5); }
+  55% { opacity: 1; transform: translate3d(0, 2px, 6px) rotateX(-4deg) rotateY(-2deg) rotateZ(-1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
 }
 
-@keyframes puzzle-3d-bl {
-  0% {
-    opacity: 0;
-    transform: translate3d(-46px, 48px, -88px) rotateX(-46deg) rotateY(-36deg) rotateZ(10deg) scale(0.65);
-  }
-  65% {
-    opacity: 1;
-    transform: translate3d(1px, -2px, 8px) rotateX(4deg) rotateY(3deg) rotateZ(-1deg) scale(1.03);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1);
-  }
+@keyframes rubik-r0c2 {
+  0% { opacity: 0; transform: translate3d(38px, -46px, -108px) rotateX(58deg) rotateY(46deg) rotateZ(16deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(-2px, 1px, 6px) rotateX(-5deg) rotateY(-5deg) rotateZ(-2deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
 }
 
-@keyframes puzzle-3d-br {
-  0% {
-    opacity: 0;
-    transform: translate3d(48px, 50px, -92px) rotateX(-50deg) rotateY(40deg) rotateZ(-11deg) scale(0.65);
-  }
-  65% {
-    opacity: 1;
-    transform: translate3d(-1px, -2px, 8px) rotateX(3deg) rotateY(-3deg) rotateZ(1deg) scale(1.03);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1);
-  }
+@keyframes rubik-r1c0 {
+  0% { opacity: 0; transform: translate3d(-52px, 0, -100px) rotateX(12deg) rotateY(-68deg) rotateZ(-12deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(2px, 0, 6px) rotateX(3deg) rotateY(5deg) rotateZ(1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
+}
+
+@keyframes rubik-r1c1 {
+  0% { opacity: 0; transform: translate3d(0, 0, -150px) rotateX(24deg) rotateY(32deg) rotateZ(12deg) scale(0.4); }
+  55% { opacity: 1; transform: translate3d(0, 0, 8px) rotateX(-2deg) rotateY(-3deg) rotateZ(-1deg) scale(1.05); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
+}
+
+@keyframes rubik-r1c2 {
+  0% { opacity: 0; transform: translate3d(50px, 0, -102px) rotateX(-10deg) rotateY(64deg) rotateZ(14deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(-2px, 0, 6px) rotateX(2deg) rotateY(-4deg) rotateZ(-1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
+}
+
+@keyframes rubik-r2c0 {
+  0% { opacity: 0; transform: translate3d(-34px, 50px, -112px) rotateX(-58deg) rotateY(-44deg) rotateZ(14deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(1px, -2px, 6px) rotateX(5deg) rotateY(4deg) rotateZ(-1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
+}
+
+@keyframes rubik-r2c1 {
+  0% { opacity: 0; transform: translate3d(0, 54px, -128px) rotateX(-70deg) rotateY(-6deg) rotateZ(-6deg) scale(0.5); }
+  55% { opacity: 1; transform: translate3d(0, -2px, 6px) rotateX(4deg) rotateY(2deg) rotateZ(1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
+}
+
+@keyframes rubik-r2c2 {
+  0% { opacity: 0; transform: translate3d(36px, 48px, -110px) rotateX(-60deg) rotateY(42deg) rotateZ(-16deg) scale(0.55); }
+  55% { opacity: 1; transform: translate3d(-1px, -2px, 6px) rotateX(5deg) rotateY(-3deg) rotateZ(1deg) scale(1.04); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) rotateX(0) rotateY(0) rotateZ(0) scale(1); }
 }
 
 @keyframes reaper-splash-settle {
@@ -150,7 +183,6 @@ body {
   50% { transform: translateY(-3px); }
 }
 
-/* Harvest only on unified logo after merge */
 #launch-splash .reaper-logo-anim:not(.is-merged) .logo-unified * {
   animation: none !important;
 }
@@ -171,10 +203,7 @@ body {
 }
 
 .ij-launch-status {
-  font: 500 13px/1.4 system-ui, sans-serif;
-  color: #94a3b8;
-  letter-spacing: 0.04em;
-  margin: 0;
+  display: none;
 }
 
 .ij-launch-dots {
@@ -201,4 +230,12 @@ body.ij-shell > :not(#launch-splash) {
 
 body.ij-shell.reaper-ui-ready > :not(#launch-splash) {
   visibility: visible;
+}
+
+body.reaper-ui-ready {
+  background: var(--ij-bg, #2b2b2b) !important;
+}
+
+html.reaper-ui-ready.ij-native-titlebar {
+  background: var(--ij-bg, #2b2b2b) !important;
 }

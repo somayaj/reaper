@@ -102,6 +102,59 @@ pub fn run_context(
             target: Some(target),
         });
     }
+    if native_build_tasks::is_rust_source_path(&rel_path) {
+        let content = match content {
+            Some(c) => c.to_string(),
+            None => super::read_file(ws, &rel_path).unwrap_or_default(),
+        };
+        let (project, target) = rust_run_context(ws, &rel_path, &content)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_js_or_ts_source_path(&rel_path) {
+        let (project, target) = js_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_kotlin_source_path(&rel_path) {
+        let (project, target) = kotlin_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_php_source_path(&rel_path) {
+        let (project, target) = php_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_dart_source_path(&rel_path) {
+        let (project, target) = dart_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_scala_source_path(&rel_path) {
+        let (project, target) = scala_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
+    if native_build_tasks::is_clojure_source_path(&rel_path) {
+        let (project, target) = clojure_run_context(ws, &rel_path)?;
+        return Ok(RunContext {
+            project,
+            target: Some(target),
+        });
+    }
     if native_build_tasks::is_native_source_path(&rel_path) {
         let content = match content {
             Some(c) => c.to_string(),
@@ -404,8 +457,14 @@ fn detect_shell_run_target(ws: &Path, rel_path: &str) -> Result<JavaRunTarget> {
     })
 }
 
-fn shell_interpreter_for_content(content: &str) -> &'static str {
-    content
+fn resolve_shell_program(name: &str) -> String {
+    crate::toolchain::resolve_program(name)
+        .map(|p| shell_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn shell_interpreter_for_content(content: &str) -> String {
+    let from_shebang = content
         .lines()
         .find(|l| !l.trim().is_empty())
         .and_then(|line| {
@@ -414,15 +473,24 @@ fn shell_interpreter_for_content(content: &str) -> &'static str {
                 return None;
             }
             let shebang = trimmed.trim_start_matches("#!").trim();
+            // Use the shebang path directly if it's an absolute path (e.g. #!/usr/bin/env bash)
+            if shebang.starts_with("/usr/bin/env ") {
+                let prog = shebang.trim_start_matches("/usr/bin/env ").trim();
+                return Some(resolve_shell_program(prog));
+            }
+            if shebang.starts_with('/') {
+                // Absolute shebang like #!/bin/bash — use it verbatim
+                return Some(shebang.split_whitespace().next().unwrap_or(shebang).to_string());
+            }
             if shebang.contains("zsh") {
-                Some("zsh")
+                Some(resolve_shell_program("zsh"))
             } else if shebang.contains("bash") || shebang.contains("/sh") {
-                Some("bash")
+                Some(resolve_shell_program("bash"))
             } else {
                 None
             }
-        })
-        .unwrap_or("bash")
+        });
+    from_shebang.unwrap_or_else(|| resolve_shell_program("bash"))
 }
 
 fn sql_run_context(
@@ -526,6 +594,364 @@ fn detect_go_run_target(ws: &Path, rel_path: &str) -> Result<JavaRunTarget> {
         },
         task: Some(command),
         frameworks: vec!["go".into()],
+        ..Default::default()
+    })
+}
+
+fn kotlin_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let is_test = native_build_tasks::is_kotlin_test_path(rel_path);
+    let project_dir = find_gradle_or_maven_root(ws, rel_path)?;
+    let mut project = RunProjectInfo::default();
+    if let Some(ref dir) = project_dir {
+        project.has_project = true;
+        project.build_tool = if dir.join("pom.xml").is_file() {
+            "maven".into()
+        } else {
+            "gradle".into()
+        };
+        project.project_root = gradle::rel_path_for(ws, dir)?;
+        project.frameworks = vec!["kotlin".into()];
+    }
+    let (mode, class_type, task) = if is_test {
+        (
+            "kotlin-test",
+            "kotlin-test",
+            native_build_tasks::kotlin_test_command(project_dir.as_deref()),
+        )
+    } else {
+        (
+            "kotlin",
+            "kotlin-script",
+            native_build_tasks::kotlin_run_command(project_dir.as_deref(), rel_path),
+        )
+    };
+    let target = JavaRunTarget {
+        runnable: true,
+        mode: mode.into(),
+        class_type: class_type.into(),
+        task: Some(task),
+        frameworks: vec!["kotlin".into()],
+        ..Default::default()
+    };
+    Ok((project, target))
+}
+
+fn find_gradle_or_maven_root(ws: &Path, rel_path: &str) -> Result<Option<std::path::PathBuf>> {
+    if let Some((dir, _)) =
+        native_build_tasks::find_nearest_manifest(ws, rel_path, &["build.gradle", "build.gradle.kts"])?
+    {
+        return Ok(Some(dir));
+    }
+    if let Some((dir, _)) = native_build_tasks::find_nearest_manifest(ws, rel_path, &["pom.xml"])? {
+        return Ok(Some(dir));
+    }
+    Ok(None)
+}
+
+fn php_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let is_test = native_build_tasks::is_php_test_path(rel_path);
+    let mut project = RunProjectInfo::default();
+    if let Some((dir, _)) =
+        native_build_tasks::find_nearest_manifest(ws, rel_path, &["composer.json"])?
+    {
+        project.has_project = true;
+        project.build_tool = "composer".into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = vec!["php".into()];
+    }
+    let (mode, class_type, task) = if is_test {
+        (
+            "php-test",
+            "phpunit",
+            native_build_tasks::php_test_command(ws, rel_path),
+        )
+    } else {
+        (
+            "php",
+            "php-script",
+            native_build_tasks::php_run_command(ws, rel_path),
+        )
+    };
+    let target = JavaRunTarget {
+        runnable: true,
+        mode: mode.into(),
+        class_type: class_type.into(),
+        task: Some(task),
+        frameworks: vec!["php".into()],
+        ..Default::default()
+    };
+    Ok((project, target))
+}
+
+fn dart_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let is_test = native_build_tasks::is_dart_test_path(rel_path);
+    let mut project = RunProjectInfo::default();
+    if let Some(dir) = native_build_tasks::dart_pubspec_root(ws, rel_path)? {
+        project.has_project = true;
+        project.build_tool = "dart".into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = vec!["dart".into()];
+    }
+    let (mode, class_type, task) = if is_test {
+        (
+            "dart-test",
+            "dart-test",
+            native_build_tasks::dart_test_command(ws, rel_path),
+        )
+    } else {
+        (
+            "dart",
+            "dart-script",
+            native_build_tasks::dart_run_command(ws, rel_path),
+        )
+    };
+    let target = JavaRunTarget {
+        runnable: true,
+        mode: mode.into(),
+        class_type: class_type.into(),
+        task: Some(task),
+        frameworks: vec!["dart".into()],
+        ..Default::default()
+    };
+    Ok((project, target))
+}
+
+fn scala_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let is_test = native_build_tasks::is_scala_test_path(rel_path);
+    let mut project = RunProjectInfo::default();
+    if let Some((dir, _)) =
+        native_build_tasks::find_nearest_manifest(ws, rel_path, &["build.sbt", "pom.xml"])?
+    {
+        project.has_project = true;
+        project.build_tool = if dir.join("build.sbt").is_file() {
+            "sbt"
+        } else {
+            "maven"
+        }
+        .into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = vec!["scala".into()];
+    }
+    let (mode, class_type, task) = if is_test {
+        (
+            "scala-test",
+            "scala-test",
+            native_build_tasks::scala_test_command(),
+        )
+    } else {
+        ("scala", "scala-script", native_build_tasks::scala_run_command(rel_path))
+    };
+    let target = JavaRunTarget {
+        runnable: true,
+        mode: mode.into(),
+        class_type: class_type.into(),
+        task: Some(task),
+        frameworks: vec!["scala".into()],
+        ..Default::default()
+    };
+    Ok((project, target))
+}
+
+fn clojure_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let is_test = native_build_tasks::is_clojure_test_path(rel_path);
+    let mut project = RunProjectInfo::default();
+    if let Some((dir, _)) =
+        native_build_tasks::find_nearest_manifest(ws, rel_path, &["project.clj"])?
+    {
+        project.has_project = true;
+        project.build_tool = "lein".into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = vec!["clojure".into()];
+    }
+    let (mode, class_type, task) = if is_test {
+        (
+            "clojure-test",
+            "clojure-test",
+            native_build_tasks::clojure_test_command(),
+        )
+    } else {
+        (
+            "clojure",
+            "clojure-script",
+            native_build_tasks::clojure_run_command(rel_path),
+        )
+    };
+    let target = JavaRunTarget {
+        runnable: true,
+        mode: mode.into(),
+        class_type: class_type.into(),
+        task: Some(task),
+        frameworks: vec!["clojure".into()],
+        ..Default::default()
+    };
+    Ok((project, target))
+}
+
+fn js_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let target = detect_js_run_target(ws, rel_path)?;
+    let mut project = RunProjectInfo::default();
+    if let Some(dir) = native_build_tasks::node_project_root(ws, rel_path)? {
+        project.has_project = true;
+        project.build_tool = "npm".into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = target.frameworks.clone();
+    }
+    Ok((project, target))
+}
+
+fn detect_js_run_target(ws: &Path, rel_path: &str) -> Result<JavaRunTarget> {
+    let project_dir = native_build_tasks::node_project_root(ws, rel_path)?;
+    let is_test = native_build_tasks::is_js_or_ts_test_path(rel_path);
+    let is_ts = native_build_tasks::is_ts_source_path(rel_path);
+
+    let mut frameworks = vec![if is_ts { "typescript" } else { "javascript" }.to_string()];
+
+    if is_test {
+        frameworks.push("test".into());
+        return Ok(JavaRunTarget {
+            runnable: true,
+            mode: "js-test".into(),
+            class_type: "js-test".into(),
+            task: Some(native_build_tasks::js_test_file_command(
+                project_dir.as_deref(),
+                rel_path,
+            )),
+            frameworks,
+            ..Default::default()
+        });
+    }
+
+    Ok(JavaRunTarget {
+        runnable: true,
+        mode: "js".into(),
+        class_type: if is_ts { "ts-script" } else { "js-script" }.into(),
+        task: Some(native_build_tasks::js_run_file_command(
+            project_dir.as_deref(),
+            rel_path,
+        )),
+        frameworks,
+        ..Default::default()
+    })
+}
+
+fn rust_run_context(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+) -> Result<(RunProjectInfo, JavaRunTarget)> {
+    let target = detect_rust_run_target(ws, rel_path, content)?;
+    let mut project = RunProjectInfo::default();
+    if let Some(dir) = native_build_tasks::cargo_manifest_root(ws, rel_path)? {
+        project.has_project = true;
+        project.build_tool = "cargo".into();
+        project.project_root = gradle::rel_path_for(ws, &dir)?;
+        project.frameworks = target.frameworks.clone();
+    }
+    Ok((project, target))
+}
+
+fn rust_has_main(content: &str) -> bool {
+    content.contains("fn main(") || content.contains("fn main (")
+}
+
+fn rust_has_tests(content: &str) -> bool {
+    content.contains("#[test]")
+        || content.contains("#[cfg(test)]")
+        || content.contains("#[tokio::test]")
+        || content.contains("#[test ]")
+}
+
+fn detect_rust_run_target(ws: &Path, rel_path: &str, content: &str) -> Result<JavaRunTarget> {
+    let normalized = rel_path.replace('\\', "/");
+    let has_main = rust_has_main(content);
+    let has_tests = rust_has_tests(content);
+    let crate_root = native_build_tasks::cargo_manifest_root(ws, rel_path)?;
+
+    if let Some(root) = crate_root {
+        let rel_from_root = ws
+            .join(rel_path)
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| normalized.clone());
+        let is_integration_test = rel_from_root.starts_with("tests/");
+
+        if is_integration_test || (has_tests && !has_main) {
+            return Ok(JavaRunTarget {
+                runnable: true,
+                mode: "rust-test".into(),
+                class_type: "cargo-test".into(),
+                task: Some(native_build_tasks::cargo_test_command(ws, &root, rel_path)),
+                frameworks: vec!["cargo".into()],
+                ..Default::default()
+            });
+        }
+
+        let is_runnable_target = has_main
+            || rel_from_root == "src/main.rs"
+            || rel_from_root.starts_with("src/bin/")
+            || rel_from_root.starts_with("examples/");
+        if is_runnable_target {
+            return Ok(JavaRunTarget {
+                runnable: true,
+                mode: "rust".into(),
+                class_type: "cargo-run".into(),
+                task: Some(native_build_tasks::cargo_run_command(ws, &root, rel_path)),
+                frameworks: vec!["cargo".into()],
+                ..Default::default()
+            });
+        }
+
+        if has_tests {
+            return Ok(JavaRunTarget {
+                runnable: true,
+                mode: "rust-test".into(),
+                class_type: "cargo-test".into(),
+                task: Some(native_build_tasks::cargo_test_command(ws, &root, rel_path)),
+                frameworks: vec!["cargo".into()],
+                ..Default::default()
+            });
+        }
+
+        return Ok(JavaRunTarget {
+            runnable: false,
+            mode: "rust".into(),
+            class_type: "rust-source".into(),
+            reason: Some(
+                "No `fn main` or tests here — run the crate's binary or add #[test]".into(),
+            ),
+            frameworks: vec!["cargo".into()],
+            ..Default::default()
+        });
+    }
+
+    // Standalone `.rs` file with no Cargo project — compile & run via rustc.
+    if has_main {
+        return Ok(JavaRunTarget {
+            runnable: true,
+            mode: "rust".into(),
+            class_type: "rust-program".into(),
+            task: Some(native_build_tasks::rustc_run_single_file_command(rel_path)),
+            frameworks: vec!["rust".into()],
+            ..Default::default()
+        });
+    }
+    if has_tests {
+        return Ok(JavaRunTarget {
+            runnable: true,
+            mode: "rust-test".into(),
+            class_type: "rustc-test".into(),
+            task: Some(native_build_tasks::rustc_test_single_file_command(rel_path)),
+            frameworks: vec!["rust".into()],
+            ..Default::default()
+        });
+    }
+
+    Ok(JavaRunTarget {
+        runnable: false,
+        mode: "rust".into(),
+        class_type: "rust-source".into(),
+        reason: Some("No `fn main` or #[test] found in this file".into()),
+        frameworks: vec!["rust".into()],
         ..Default::default()
     })
 }
@@ -985,5 +1411,303 @@ pub fn stream_run_task(
         "gradle" => exec_stream::stream_gradle(ws, &rel_path, &task, tx),
         "maven" => exec_stream::stream_maven(ws, &rel_path, &task, tx),
         _ => bail!("unsupported build tool"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_ws(name: &str) -> std::path::PathBuf {
+        let ws = std::env::temp_dir().join(format!("reaper-run-project-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        ws
+    }
+
+    #[test]
+    fn rust_standalone_file_runs_via_rustc() {
+        let ws = tmp_ws("rustc-standalone");
+        std::fs::write(ws.join("hello.rs"), "fn main() { println!(\"hi\"); }").unwrap();
+        let target = detect_rust_run_target(&ws, "hello.rs", "fn main() { println!(\"hi\"); }").unwrap();
+        assert_eq!(target.mode, "rust");
+        assert!(target.runnable);
+        assert!(target.task.unwrap().contains("rustc"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rust_cargo_bin_runs_via_cargo_run() {
+        let ws = tmp_ws("cargo-bin");
+        std::fs::write(ws.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let content = "fn main() {}";
+        std::fs::write(ws.join("src/main.rs"), content).unwrap();
+        let target = detect_rust_run_target(&ws, "src/main.rs", content).unwrap();
+        assert_eq!(target.mode, "rust");
+        assert!(target.runnable);
+        assert!(target.task.unwrap().ends_with("cargo run"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rust_cargo_integration_test_runs_via_cargo_test() {
+        let ws = tmp_ws("cargo-test");
+        std::fs::write(ws.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::create_dir_all(ws.join("tests")).unwrap();
+        let content = "#[test]\nfn it_works() {}";
+        std::fs::write(ws.join("tests/it_works.rs"), content).unwrap();
+        let target = detect_rust_run_target(&ws, "tests/it_works.rs", content).unwrap();
+        assert_eq!(target.mode, "rust-test");
+        assert!(target.runnable);
+        assert!(target.task.unwrap().ends_with("cargo test --test it_works"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn js_plain_script_runs_via_node() {
+        let ws = tmp_ws("js-plain");
+        let target = detect_js_run_target(&ws, "scripts/build.js").unwrap();
+        assert_eq!(target.mode, "js");
+        assert!(target.runnable);
+        assert!(target.task.unwrap().contains("node"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ts_plain_script_uses_tsx_runner() {
+        let ws = tmp_ws("ts-plain");
+        let target = detect_js_run_target(&ws, "src/index.ts").unwrap();
+        assert_eq!(target.mode, "js");
+        assert!(target.task.unwrap().contains("tsx"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn js_test_file_detected_as_test_mode() {
+        let ws = tmp_ws("js-test");
+        let target = detect_js_run_target(&ws, "src/util.test.js").unwrap();
+        assert_eq!(target.mode, "js-test");
+        assert!(target.runnable);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn js_test_file_prefers_vitest_when_configured() {
+        let ws = tmp_ws("js-vitest");
+        std::fs::write(
+            ws.join("package.json"),
+            r#"{"name":"demo","devDependencies":{"vitest":"^1.0.0"}}"#,
+        )
+        .unwrap();
+        let target = detect_js_run_target(&ws, "src/util.test.ts").unwrap();
+        assert_eq!(target.mode, "js-test");
+        assert!(target.task.unwrap().contains("vitest run"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    fn run_target(ws: &Path, rel_path: &str, content: Option<&str>) -> JavaRunTarget {
+        run_context(ws, rel_path, content, 1, None, None)
+            .unwrap()
+            .target
+            .unwrap_or_else(|| panic!("no run target for {rel_path}"))
+    }
+
+    fn write_file(ws: &Path, rel_path: &str, content: &str) {
+        let path = ws.join(rel_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn assert_runnable_run_target(
+        ws: &Path,
+        rel_path: &str,
+        content: Option<&str>,
+        expected_mode: &str,
+        task_contains: &str,
+    ) {
+        let target = run_target(ws, rel_path, content);
+        assert_eq!(target.mode, expected_mode, "unexpected mode for {rel_path}");
+        assert!(target.runnable, "expected runnable target for {rel_path}: {:?}", target.reason);
+        let task = target.task.unwrap_or_else(|| panic!("missing task for {rel_path}"));
+        assert!(
+            task.contains(task_contains),
+            "task for {rel_path} should contain `{task_contains}`, got `{task}`"
+        );
+    }
+
+    #[test]
+    fn run_context_shell_script_is_runnable() {
+        let ws = tmp_ws("shell-run");
+        write_file(&ws, "scripts/run.sh", "#!/bin/bash\necho hi\n");
+        assert_runnable_run_target(&ws, "scripts/run.sh", None, "shell", "bash");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_kotlin_script_is_runnable() {
+        let ws = tmp_ws("kotlin-run");
+        write_file(&ws, "hello.kts", "println(\"hi\")\n");
+        assert_runnable_run_target(&ws, "hello.kts", None, "kotlin", "kotlinc");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_kotlin_test_in_gradle_project_is_runnable() {
+        let ws = tmp_ws("kotlin-test");
+        write_file(&ws, "build.gradle.kts", "plugins { kotlin(\"jvm\") version \"1.9.0\" }\n");
+        write_file(&ws, "src/test/kotlin/FooTest.kt", "class FooTest {}\n");
+        assert_runnable_run_target(&ws, "src/test/kotlin/FooTest.kt", None, "kotlin-test", "gradle test");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_dart_script_is_runnable() {
+        let ws = tmp_ws("dart-run");
+        write_file(&ws, "bin/main.dart", "void main() { print('hi'); }\n");
+        assert_runnable_run_target(&ws, "bin/main.dart", None, "dart", "dart");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_dart_test_file_is_runnable() {
+        let ws = tmp_ws("dart-test");
+        write_file(&ws, "test/widget_test.dart", "void main() {}\n");
+        assert_runnable_run_target(&ws, "test/widget_test.dart", None, "dart-test", "dart test");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_php_script_is_runnable() {
+        let ws = tmp_ws("php-run");
+        write_file(&ws, "index.php", "<?php echo \"hi\";\n");
+        assert_runnable_run_target(&ws, "index.php", None, "php", "php");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_php_test_file_is_runnable() {
+        let ws = tmp_ws("php-test");
+        write_file(&ws, "tests/UserTest.php", "<?php class UserTest {}\n");
+        assert_runnable_run_target(&ws, "tests/UserTest.php", None, "php-test", "php");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_python_script_is_runnable() {
+        let ws = tmp_ws("python-run");
+        write_file(&ws, "app.py", "print('hi')\n");
+        assert_runnable_run_target(&ws, "app.py", None, "python", "python");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_python_test_file_is_runnable() {
+        let ws = tmp_ws("python-test");
+        write_file(&ws, "tests/test_app.py", "def test_ok():\n    assert True\n");
+        assert_runnable_run_target(&ws, "tests/test_app.py", None, "python-test", "pytest");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_go_program_is_runnable() {
+        let ws = tmp_ws("go-run");
+        write_file(&ws, "main.go", "package main\nfunc main() {}\n");
+        assert_runnable_run_target(&ws, "main.go", None, "go", "go run");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_go_test_file_is_runnable() {
+        let ws = tmp_ws("go-test");
+        write_file(&ws, "main_test.go", "package main\nimport \"testing\"\nfunc TestMain(t *testing.T) {}\n");
+        assert_runnable_run_target(&ws, "main_test.go", None, "go-test", "go test");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_ruby_script_is_runnable() {
+        let ws = tmp_ws("ruby-run");
+        write_file(&ws, "app.rb", "puts 'hi'\n");
+        assert_runnable_run_target(&ws, "app.rb", None, "ruby", "ruby");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_ruby_spec_is_runnable() {
+        let ws = tmp_ws("ruby-spec");
+        write_file(&ws, "spec/app_spec.rb", "describe 'app' do\nend\n");
+        assert_runnable_run_target(&ws, "spec/app_spec.rb", None, "ruby-test", "rspec");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_native_c_main_is_runnable() {
+        let ws = tmp_ws("native-c-run");
+        let content = "#include <stdio.h>\nint main() { return 0; }\n";
+        write_file(&ws, "main.c", content);
+        assert_runnable_run_target(&ws, "main.c", Some(content), "native", "clang");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_java_main_is_runnable() {
+        let ws = tmp_ws("java-run");
+        let content = "public class Hello { public static void main(String[] args) {} }\n";
+        write_file(&ws, "Hello.java", content);
+        let target = run_target(&ws, "Hello.java", Some(content));
+        assert_eq!(target.mode, "main");
+        assert!(target.runnable);
+        assert_eq!(target.qualified_name.as_deref(), Some("Hello"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_sql_file_is_detected() {
+        let ws = tmp_ws("sql-run");
+        write_file(&ws, "queries/users.sql", "SELECT 1;\n");
+        let target = run_target(&ws, "queries/users.sql", None);
+        assert_eq!(target.mode, "sql");
+        assert_eq!(target.class_type, "sql-script");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn run_context_covers_all_supported_language_modes() {
+        let ws = tmp_ws("all-langs");
+        write_file(&ws, "scripts/run.sh", "#!/bin/bash\necho hi\n");
+        write_file(&ws, "hello.kts", "println(\"hi\")\n");
+        write_file(&ws, "main.dart", "void main() {}\n");
+        write_file(&ws, "index.php", "<?php echo \"hi\";\n");
+        write_file(&ws, "app.py", "print('hi')\n");
+        write_file(&ws, "main.go", "package main\nfunc main() {}\n");
+        write_file(&ws, "app.rb", "puts 'hi'\n");
+        write_file(&ws, "hello.rs", "fn main() {}\n");
+        write_file(&ws, "app.js", "console.log('hi')\n");
+        write_file(&ws, "main.c", "int main() { return 0; }\n");
+
+        let cases = [
+            ("scripts/run.sh", None, "shell"),
+            ("hello.kts", None, "kotlin"),
+            ("main.dart", None, "dart"),
+            ("index.php", None, "php"),
+            ("app.py", None, "python"),
+            ("main.go", None, "go"),
+            ("app.rb", None, "ruby"),
+            ("hello.rs", Some("fn main() {}\n"), "rust"),
+            ("app.js", None, "js"),
+            ("main.c", Some("int main() { return 0; }\n"), "native"),
+        ];
+
+        for (path, content, expected_mode) in cases {
+            let target = run_target(&ws, path, content);
+            assert_eq!(target.mode, expected_mode, "unexpected mode for {path}");
+            assert!(target.runnable, "expected runnable target for {path}: {:?}", target.reason);
+            assert!(target.task.is_some(), "missing task for {path}");
+        }
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }
