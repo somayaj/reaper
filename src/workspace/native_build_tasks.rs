@@ -17,6 +17,9 @@ pub fn try_native_tree(
     if let Some(tree) = try_npm_tree(ws, rel_path)? {
         return Ok(Some(tree));
     }
+    if let Some(tree) = try_composer_tree(ws, rel_path)? {
+        return Ok(Some(tree));
+    }
     if let Some(tree) = try_pyproject_tree(ws, rel_path)? {
         return Ok(Some(tree));
     }
@@ -125,6 +128,7 @@ fn is_manifest_file_name(name: &str) -> bool {
             | "compose.yml"
             | "compose.yaml"
             | "dockerfile"
+            | "composer.json"
     )
 }
 
@@ -614,6 +618,61 @@ fn npm_script_group(name: &str) -> &'static str {
         "build" | "compile" | "prepare" | "prepublishOnly" => "lifecycle",
         _ => "scripts",
     }
+}
+
+fn try_composer_tree(ws: &Path, rel_path: &str) -> Result<Option<BuildTasksTree>> {
+    let Some((dir, manifest_path)) = find_nearest_manifest(ws, rel_path, &["composer.json"])? else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(dir.join("composer.json"))
+        .with_context(|| format!("read {manifest_path}"))?;
+    let pkg: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let name = pkg
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project")
+        .to_string();
+    let mut tasks = vec![
+        task("install", "composer install", "lifecycle"),
+        task("update", "composer update", "lifecycle"),
+    ];
+    if let Some(scripts) = pkg.get("scripts").and_then(|v| v.as_object()) {
+        for script_name in scripts.keys() {
+            let group = composer_script_group(script_name);
+            tasks.push(task(
+                script_name,
+                &format!("composer run-script {script_name}"),
+                group,
+            ));
+        }
+    } else {
+        tasks.extend(default_composer_tasks());
+    }
+    Ok(Some(leaf_tree(
+        ws,
+        rel_path,
+        "composer",
+        &name,
+        &manifest_path,
+        tasks,
+    )?))
+}
+
+fn composer_script_group(name: &str) -> &'static str {
+    match name {
+        "test" | "tests" | "lint" | "lint-fix" | "check" | "phpstan" | "psalm" => "verification",
+        "serve" | "server" | "start" | "dev" => "application",
+        "build" | "compile" | "prepare" => "lifecycle",
+        "install" | "update" | "dump-autoload" => "lifecycle",
+        _ => "scripts",
+    }
+}
+
+fn default_composer_tasks() -> Vec<BuildTask> {
+    vec![
+        task("dump-autoload", "composer dump-autoload", "lifecycle"),
+        task("validate", "composer validate", "verification"),
+    ]
 }
 
 fn try_cargo_tree(ws: &Path, rel_path: &str) -> Result<Option<BuildTasksTree>> {
@@ -1281,6 +1340,436 @@ pub fn native_compiler_shell(is_cpp: bool) -> String {
         .unwrap_or_else(|| "clang".into())
 }
 
+pub fn is_rust_source_path(rel_path: &str) -> bool {
+    rel_path.to_lowercase().ends_with(".rs")
+}
+
+// ── Kotlin ────────────────────────────────────────────────────────────────────
+
+pub fn is_kotlin_source_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    lower.ends_with(".kt") || lower.ends_with(".kts")
+}
+
+/// Settings → Compiler `kotlin`, else `kotlinc` on PATH.
+pub fn kotlinc_program_shell() -> String {
+    match crate::toolchain::resolve_program("kotlin") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "kotlinc".into(),
+    }
+}
+
+fn kotlin_test_runner_for_project(project_dir: Option<&Path>) -> Option<String> {
+    let dir = project_dir?;
+    if find_nearest_manifest_from_dir(dir, &["pom.xml"]).ok().flatten().is_some() {
+        return Some("maven".into());
+    }
+    if find_nearest_manifest_from_dir(dir, &["build.gradle", "build.gradle.kts"])
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Some("gradle".into());
+    }
+    None
+}
+
+fn find_nearest_manifest_from_dir(
+    dir: &Path,
+    manifests: &[&str],
+) -> Result<Option<PathBuf>> {
+    for &name in manifests {
+        if dir.join(name).is_file() {
+            return Ok(Some(dir.to_path_buf()));
+        }
+    }
+    if let Some(parent) = dir.parent() {
+        return find_nearest_manifest_from_dir(parent, manifests);
+    }
+    Ok(None)
+}
+
+pub fn is_kotlin_test_path(rel_path: &str) -> bool {
+    let norm = rel_path.replace('\\', "/");
+    norm.contains("/test/") || norm.contains("/tests/")
+}
+
+pub fn kotlin_run_command(project_dir: Option<&Path>, rel_path: &str) -> String {
+    if let Some(build) = project_dir.and_then(|d| kotlin_test_runner_for_project(Some(d))) {
+        return match build.as_str() {
+            "gradle" => "gradle run".into(),
+            "maven" => "mvn exec:java".into(),
+            _ => format!("{} {}", kotlinc_program_shell(), shell_quote_path(rel_path)),
+        };
+    }
+    // Standalone script (.kts) or single file compile-and-run
+    if rel_path.to_lowercase().ends_with(".kts") {
+        return format!("{} -script {}", kotlinc_program_shell(), shell_quote_path(rel_path));
+    }
+    let stem = std::path::Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("MainKt");
+    let class_name = {
+        let mut c = stem.to_string();
+        if let Some(first) = c.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        format!("{c}Kt")
+    };
+    let kotlinc = kotlinc_program_shell();
+    format!(
+        "mkdir -p .reaper && {kotlinc} {} -include-runtime -d .reaper/kotlin-out.jar && java -jar .reaper/kotlin-out.jar",
+        shell_quote_path(rel_path)
+    )
+    .replace("MainKt", &class_name)
+}
+
+pub fn kotlin_test_command(project_dir: Option<&Path>) -> String {
+    if let Some(build) = project_dir.and_then(|d| kotlin_test_runner_for_project(Some(d))) {
+        return match build.as_str() {
+            "gradle" => "gradle test".into(),
+            "maven" => "mvn test".into(),
+            _ => "gradle test".into(),
+        };
+    }
+    "gradle test".into()
+}
+
+// ── PHP ───────────────────────────────────────────────────────────────────────
+
+pub fn is_php_source_path(rel_path: &str) -> bool {
+    rel_path.to_lowercase().ends_with(".php")
+}
+
+pub fn php_program_shell() -> String {
+    match crate::toolchain::resolve_program("php") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "php".into(),
+    }
+}
+
+pub fn is_php_test_path(rel_path: &str) -> bool {
+    let norm = rel_path.replace('\\', "/").to_lowercase();
+    let base = norm.rsplit('/').next().unwrap_or(&norm);
+    base.contains("test") || norm.contains("/test/") || norm.contains("/tests/")
+}
+
+pub fn php_run_command(ws: &Path, rel_path: &str) -> String {
+    let php = php_program_shell();
+    let quoted = shell_quote_path(rel_path);
+    // Prefer vendor/bin/phpunit if present (composer project)
+    if find_nearest_manifest(ws, rel_path, &["composer.json"]).ok().flatten().is_some() {
+        let ws_composer = ws.join("vendor/bin/phpunit");
+        if ws_composer.is_file() && is_php_test_path(rel_path) {
+            return format!("vendor/bin/phpunit {quoted}");
+        }
+        if is_php_test_path(rel_path) {
+            return format!("{php} vendor/bin/phpunit {quoted}");
+        }
+        // Regular script inside composer project — still just php
+    }
+    format!("{php} {quoted}")
+}
+
+pub fn php_test_command(ws: &Path, rel_path: &str) -> String {
+    let php = php_program_shell();
+    let quoted = shell_quote_path(rel_path);
+    if find_nearest_manifest(ws, rel_path, &["composer.json"]).ok().flatten().is_some() {
+        let phpunit = ws.join("vendor/bin/phpunit");
+        return if phpunit.is_file() {
+            format!("vendor/bin/phpunit {quoted}")
+        } else {
+            format!("{php} vendor/bin/phpunit {quoted}")
+        };
+    }
+    format!("{php} {quoted}")
+}
+
+// ── Dart ──────────────────────────────────────────────────────────────────────
+
+pub fn is_dart_source_path(rel_path: &str) -> bool {
+    rel_path.to_lowercase().ends_with(".dart")
+}
+
+pub fn dart_program_shell() -> String {
+    match crate::toolchain::resolve_program("dart") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "dart".into(),
+    }
+}
+
+pub fn dart_pubspec_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
+    Ok(find_nearest_manifest(ws, rel_path, &["pubspec.yaml"])?.map(|(dir, _)| dir))
+}
+
+pub fn is_dart_test_path(rel_path: &str) -> bool {
+    let norm = rel_path.replace('\\', "/");
+    let base = norm.rsplit('/').next().unwrap_or(&norm).to_lowercase();
+    base.ends_with("_test.dart")
+        || norm.contains("/test/")
+        || norm.contains("/tests/")
+}
+
+pub fn dart_run_command(ws: &Path, rel_path: &str) -> String {
+    let dart = dart_program_shell();
+    let quoted = shell_quote_path(rel_path);
+    if dart_pubspec_root(ws, rel_path).ok().flatten().is_some() {
+        return format!("{dart} run {quoted}");
+    }
+    format!("{dart} {quoted}")
+}
+
+pub fn dart_test_command(ws: &Path, rel_path: &str) -> String {
+    let dart = dart_program_shell();
+    if dart_pubspec_root(ws, rel_path).ok().flatten().is_some() {
+        return format!("{dart} test {}", shell_quote_path(rel_path));
+    }
+    format!("{dart} test {}", shell_quote_path(rel_path))
+}
+
+// ── Scala ──────────────────────────────────────────────────────────────────────
+
+pub fn is_scala_source_path(rel_path: &str) -> bool {
+    rel_path.to_lowercase().ends_with(".scala")
+}
+
+pub fn scala_program_shell() -> String {
+    match crate::toolchain::resolve_program("scala") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "scala".into(),
+    }
+}
+
+pub fn is_scala_test_path(rel_path: &str) -> bool {
+    let norm = rel_path.replace('\\', "/");
+    norm.contains("/test/") || norm.contains("/tests/")
+}
+
+pub fn scala_run_command(rel_path: &str) -> String {
+    let scala = scala_program_shell();
+    format!("{scala} {}", shell_quote_path(rel_path))
+}
+
+pub fn scala_test_command() -> String {
+    "sbt test".into()
+}
+
+// ── Clojure ────────────────────────────────────────────────────────────────────
+
+pub fn is_clojure_source_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    lower.ends_with(".clj") || lower.ends_with(".cljs") || lower.ends_with(".cljc")
+}
+
+pub fn clojure_program_shell() -> String {
+    match crate::toolchain::resolve_program("clojure") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "clojure".into(),
+    }
+}
+
+pub fn is_clojure_test_path(rel_path: &str) -> bool {
+    let norm = rel_path.replace('\\', "/");
+    norm.contains("/test/") || norm.contains("/tests/") || rel_path.contains("_test")
+}
+
+pub fn clojure_run_command(rel_path: &str) -> String {
+    let clojure = clojure_program_shell();
+    format!("{clojure} {}", shell_quote_path(rel_path))
+}
+
+pub fn clojure_test_command() -> String {
+    "lein test".into()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn is_js_source_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") || lower.ends_with(".jsx")
+}
+
+pub fn is_ts_source_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_lowercase();
+    (lower.ends_with(".ts") || lower.ends_with(".tsx")) && !lower.ends_with(".d.ts")
+}
+
+pub fn is_js_or_ts_source_path(rel_path: &str) -> bool {
+    is_js_source_path(rel_path) || is_ts_source_path(rel_path)
+}
+
+/// Settings → Compiler `node`, else `node` on PATH.
+pub fn node_program_shell() -> String {
+    match crate::toolchain::resolve_program("node") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "node".into(),
+    }
+}
+
+pub fn node_project_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
+    Ok(find_nearest_manifest(ws, rel_path, &["package.json"])?.map(|(dir, _)| dir))
+}
+
+fn read_package_json(dir: &Path) -> Value {
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn package_json_has_dep(pkg: &Value, name: &str) -> bool {
+    for section in ["dependencies", "devDependencies"] {
+        if pkg
+            .get(section)
+            .and_then(|v| v.as_object())
+            .is_some_and(|deps| deps.contains_key(name))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Wraps a bare CLI invocation with the project's package manager exec prefix
+/// (`npx`, `pnpm exec`, `yarn exec`, `bunx`) so locally-installed binaries resolve.
+fn node_exec_command(pm: &str, args: &str) -> String {
+    match pm {
+        "pnpm" => format!("pnpm exec {args}"),
+        "yarn" => format!("yarn exec {args}"),
+        "bun" => format!("bunx {args}"),
+        _ => format!("npx {args}"),
+    }
+}
+
+pub fn is_js_or_ts_test_path(rel_path: &str) -> bool {
+    let normalized = rel_path.replace('\\', "/").to_lowercase();
+    let base = normalized.rsplit('/').next().unwrap_or(&normalized);
+    base.contains(".test.")
+        || base.contains(".spec.")
+        || normalized.contains("/__tests__/")
+        || normalized.contains("/tests/")
+}
+
+/// Run command for a plain (non-test) `.js`/`.ts` file: `node` for JS, best-effort
+/// `tsx`/`ts-node` (via the project's package manager) for TS.
+pub fn js_run_file_command(project_dir: Option<&Path>, rel_path: &str) -> String {
+    let quoted = shell_quote_path(rel_path);
+    if is_ts_source_path(rel_path) {
+        let pkg = project_dir.map(read_package_json).unwrap_or(Value::Null);
+        let pm = project_dir
+            .map(|dir| detect_node_package_manager(dir))
+            .unwrap_or_else(|| "npm".into());
+        let runner = if package_json_has_dep(&pkg, "tsx") {
+            "tsx"
+        } else if package_json_has_dep(&pkg, "ts-node") {
+            "ts-node"
+        } else {
+            "tsx"
+        };
+        return node_exec_command(&pm, &format!("{runner} {quoted}"));
+    }
+    format!("{} {quoted}", node_program_shell())
+}
+
+/// Test command for a `.js`/`.ts` test file, preferring the project's configured
+/// runner (vitest/jest/mocha) when detectable, else falling back to `npx vitest run`.
+pub fn js_test_file_command(project_dir: Option<&Path>, rel_path: &str) -> String {
+    let quoted = shell_quote_path(rel_path);
+    let pkg = project_dir.map(read_package_json).unwrap_or(Value::Null);
+    let pm = project_dir
+        .map(|dir| detect_node_package_manager(dir))
+        .unwrap_or_else(|| "npm".into());
+    if package_json_has_dep(&pkg, "vitest") {
+        return node_exec_command(&pm, &format!("vitest run {quoted}"));
+    }
+    if package_json_has_dep(&pkg, "jest") {
+        return node_exec_command(&pm, &format!("jest {quoted}"));
+    }
+    if package_json_has_dep(&pkg, "mocha") {
+        return node_exec_command(&pm, &format!("mocha {quoted}"));
+    }
+    node_exec_command(&pm, &format!("vitest run {quoted}"))
+}
+
+/// Settings → Compiler `cargo`, else `cargo` on PATH.
+pub fn cargo_program_shell() -> String {
+    match crate::toolchain::resolve_program("cargo") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "cargo".into(),
+    }
+}
+
+/// Settings → Compiler `rustc`, else `rustc` on PATH.
+pub fn rustc_program_shell() -> String {
+    match crate::toolchain::resolve_program("rustc") {
+        Some(path) => toolchain_program_shell(&path),
+        None => "rustc".into(),
+    }
+}
+
+pub fn cargo_manifest_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
+    Ok(find_nearest_manifest(ws, rel_path, &["Cargo.toml"])?.map(|(dir, _)| dir))
+}
+
+fn rel_path_within(ws: &Path, root: &Path, rel_path: &str) -> String {
+    ws.join(rel_path)
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| rel_path.replace('\\', "/"))
+}
+
+/// `cargo run`, targeting the specific bin/example when the file lives under `src/bin` or `examples`.
+pub fn cargo_run_command(ws: &Path, crate_root: &Path, rel_path: &str) -> String {
+    let cargo = cargo_program_shell();
+    let rel = rel_path_within(ws, crate_root, rel_path);
+    if let Some(name) = rel
+        .strip_prefix("src/bin/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
+        let bin = name.rsplit('/').next().unwrap_or(name);
+        return format!("{cargo} run --bin {bin}");
+    }
+    if let Some(name) = rel
+        .strip_prefix("examples/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
+        let example = name.rsplit('/').next().unwrap_or(name);
+        return format!("{cargo} run --example {example}");
+    }
+    format!("{cargo} run")
+}
+
+/// `cargo test`, scoped to an integration test file under `tests/` when applicable.
+pub fn cargo_test_command(ws: &Path, crate_root: &Path, rel_path: &str) -> String {
+    let cargo = cargo_program_shell();
+    let rel = rel_path_within(ws, crate_root, rel_path);
+    if let Some(name) = rel
+        .strip_prefix("tests/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
+        let test = name.rsplit('/').next().unwrap_or(name);
+        return format!("{cargo} test --test {test}");
+    }
+    format!("{cargo} test")
+}
+
+/// Compile and run a standalone `.rs` file (no Cargo project) via rustc.
+pub fn rustc_run_single_file_command(rel_path: &str) -> String {
+    let rustc = rustc_program_shell();
+    let quoted = shell_quote_path(rel_path);
+    format!("mkdir -p .reaper && {rustc} {quoted} -o .reaper/rust-out && ./.reaper/rust-out")
+}
+
+/// Compile and run a standalone `.rs` file's tests via `rustc --test`.
+pub fn rustc_test_single_file_command(rel_path: &str) -> String {
+    let rustc = rustc_program_shell();
+    let quoted = shell_quote_path(rel_path);
+    format!(
+        "mkdir -p .reaper && {rustc} --test {quoted} -o .reaper/rust-test-out && ./.reaper/rust-test-out"
+    )
+}
+
 pub fn native_project_root(ws: &Path, rel_path: &str) -> Result<Option<(PathBuf, String)>> {
     if let Some((dir, _)) = find_nearest_manifest(ws, rel_path, &["CMakeLists.txt"])? {
         return Ok(Some((dir, "cmake".into())));
@@ -1709,6 +2198,24 @@ mod tests {
         let tree = try_npm_tree(&tmp, "package.json").unwrap().expect("tree");
         assert_eq!(tree.build_tool, "npm");
         assert!(tree.tree.tasks.iter().any(|t| t.command == "npm run build"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn composer_tree_reads_scripts() {
+        let tmp = std::env::temp_dir().join(format!("reaper-composer-tasks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("composer.json"),
+            r#"{"name":"php-pro/project","scripts":{"test":"phpunit","lint":"phpstan analyse"}}"#,
+        )
+        .unwrap();
+        let tree = try_composer_tree(&tmp, "composer.json").unwrap().expect("tree");
+        assert_eq!(tree.build_tool, "composer");
+        assert_eq!(tree.root_name, "php-pro/project");
+        assert!(tree.tree.tasks.iter().any(|t| t.command == "composer run-script test"));
+        assert!(tree.tree.tasks.iter().any(|t| t.command == "composer run-script lint"));
         let _ = fs::remove_dir_all(&tmp);
     }
 
