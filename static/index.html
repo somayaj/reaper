@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="378" />
+  <meta name="reaper-ui-build" content="391" />
   <meta name="reaper-app-version" content="0.1.2" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -71,7 +71,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=378" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=391" />
   <link rel="stylesheet" href="/logo-animated.css?v=5" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
@@ -650,9 +650,13 @@
           </p>
         </div>
 
-        <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-2 space-y-2 min-h-0">
-          <div id="agent-welcome-msg" class="agent-msg-system text-center py-4 px-2">
-            Ask the Cursor agent to edit files, run git commands, or explain the codebase.
+        <div id="agent-messages" class="flex-1 overflow-auto panel-scroll p-4 space-y-3 min-h-0 flex flex-col">
+          <div id="agent-welcome-msg" class="agent-msg-system text-center py-8 px-4 flex flex-col items-center justify-center gap-3">
+            <div class="text-3xl">🚀</div>
+            <div class="text-sm font-semibold text-gray-300">Cursor Agent</div>
+            <p class="text-xs text-gray-400 max-w-xs leading-relaxed">
+              Edit files, run commands, explore code, and ask questions about your project.
+            </p>
           </div>
         </div>
 
@@ -1529,9 +1533,9 @@
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/logo.js?v=43"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=378"></script>
-  <script src="/monaco-languages.js?v=378" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=391"></script>
+  <script src="/monaco-languages.js?v=391" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=378"></script>
+  <script src="/app.js?v=391"></script>
 </body>
 </html>
