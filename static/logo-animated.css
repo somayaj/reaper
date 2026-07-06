@@ -3,7 +3,7 @@
 .reaper-logo-anim .field-bg,
 .reaper-logo-anim .field-earth,
 .reaper-logo-anim .intro-field {
-  animation: reaperClearPanel 4s ease-in-out infinite;
+  animation: reaperClearPanel 7s ease-in-out infinite;
 }
 @keyframes reaperClearPanel {
   0%, 10%   { opacity: 1; }
@@ -13,12 +13,12 @@
 
 /* ─── Puzzle piece animations for logo unified ─── */
 .reaper-logo-anim .logo-unified {
-  animation: reaperPuzzlePhase 4s ease-in-out infinite;
+  animation: reaperPuzzlePhase 7s ease-in-out infinite;
 }
 
 .reaper-logo-anim .logo-unified .puzzle-piece {
   opacity: 0 !important;
-  animation: reaperPuzzlePiece 4s ease-out infinite !important;
+  animation: reaperPuzzlePiece 7s ease-out infinite !important;
 }
 
 .reaper-logo-anim .logo-unified .puzzle-piece:nth-child(1) {
@@ -49,11 +49,11 @@
   filter: brightness(0.3) !important;
 }
 
-.reaper-logo-anim .console-line.line-1 { animation: reaperLine1 4s ease infinite; }
-.reaper-logo-anim .console-line.line-2 { animation: reaperLine2 4s ease infinite; }
-.reaper-logo-anim .console-line.line-3 { animation: reaperLine3 4s ease infinite; }
-.reaper-logo-anim .console-line.line-4 { animation: reaperLine4 4s ease infinite; }
-.reaper-logo-anim .console-line.line-5 { animation: reaperLine5 4s ease infinite; }
+.reaper-logo-anim .console-line.line-1 { animation: reaperLine1 7s ease infinite; }
+.reaper-logo-anim .console-line.line-2 { animation: reaperLine2 7s ease infinite; }
+.reaper-logo-anim .console-line.line-3 { animation: reaperLine3 7s ease infinite; }
+.reaper-logo-anim .console-line.line-4 { animation: reaperLine4 7s ease infinite; }
+.reaper-logo-anim .console-line.line-5 { animation: reaperLine5 7s ease infinite; }
 @keyframes reaperLine1 { 0%, 2% { opacity: 0; } 6%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
 @keyframes reaperLine2 { 0%, 5% { opacity: 0; } 9%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
 @keyframes reaperLine3 { 0%, 8% { opacity: 0; } 12%, 18% { opacity: 1; } 22%, 100% { opacity: 0; } }
@@ -63,7 +63,7 @@
 .reaper-logo-anim .anim-layer {
   transform-box: view-box;
   transform-origin: 32px 32px;
-  animation: reaperShowAnim 4s ease-in-out infinite;
+  animation: reaperShowAnim 7s ease-in-out infinite;
 }
 @keyframes reaperShowAnim {
   0%, 18%   { opacity: 0; transform: scale(0.72) translateY(10px); }
@@ -71,14 +71,14 @@
   96%, 100% { opacity: 0; transform: scale(0.72) translateY(10px); }
 }
 
-.reaper-logo-anim .conduit { opacity: 0; animation: reaperConduit 4s ease infinite; }
+.reaper-logo-anim .conduit { opacity: 0; animation: reaperConduit 7s ease infinite; }
 @keyframes reaperConduit {
   0%, 18%   { opacity: 0; }
   22%, 38%  { opacity: 0.7; }
   42%, 100% { opacity: 0; }
 }
 
-.reaper-logo-anim .code-drop { opacity: 0; animation: reaperCodeDrop 4s ease-in infinite; }
+.reaper-logo-anim .code-drop { opacity: 0; animation: reaperCodeDrop 7s ease-in infinite; }
 .reaper-logo-anim .code-drop-1 { animation-delay: 0s; }
 .reaper-logo-anim .code-drop-2 { animation-delay: 0.12s; }
 .reaper-logo-anim .code-drop-3 { animation-delay: 0.24s; }
@@ -98,14 +98,14 @@
   opacity: 0;
   transform: scaleY(0);
 }
-.reaper-logo-anim .stalk-1 { animation: reaperCrop1 4s ease-out infinite; }
-.reaper-logo-anim .stalk-2 { animation: reaperCrop2 4s ease-out infinite; }
-.reaper-logo-anim .stalk-3 { animation: reaperCrop3 4s ease-out infinite; }
-.reaper-logo-anim .stalk-4 { animation: reaperCrop4 4s ease-out infinite; }
-.reaper-logo-anim .stalk-5 { animation: reaperCrop5 4s ease-out infinite; }
-.reaper-logo-anim .stalk-6 { animation: reaperCrop6 4s ease-out infinite; }
-.reaper-logo-anim .stalk-7 { animation: reaperCrop7 4s ease-out infinite; }
-.reaper-logo-anim .stalk-8 { animation: reaperCrop8 4s ease-out infinite; }
+.reaper-logo-anim .stalk-1 { animation: reaperCrop1 7s ease-out infinite; }
+.reaper-logo-anim .stalk-2 { animation: reaperCrop2 7s ease-out infinite; }
+.reaper-logo-anim .stalk-3 { animation: reaperCrop3 7s ease-out infinite; }
+.reaper-logo-anim .stalk-4 { animation: reaperCrop4 7s ease-out infinite; }
+.reaper-logo-anim .stalk-5 { animation: reaperCrop5 7s ease-out infinite; }
+.reaper-logo-anim .stalk-6 { animation: reaperCrop6 7s ease-out infinite; }
+.reaper-logo-anim .stalk-7 { animation: reaperCrop7 7s ease-out infinite; }
+.reaper-logo-anim .stalk-8 { animation: reaperCrop8 7s ease-out infinite; }
 @keyframes reaperCrop1 { 0%, 36% { transform: scaleY(0); opacity: 0; } 44%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
 @keyframes reaperCrop2 { 0%, 38% { transform: scaleY(0); opacity: 0; } 46%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
 @keyframes reaperCrop3 { 0%, 40% { transform: scaleY(0); opacity: 0; } 48%, 52% { transform: scaleY(1); opacity: 1; } 58%, 72% { transform: scaleY(0.2); opacity: 0.55; } 82%, 100% { transform: scaleY(0); opacity: 0; } }
@@ -117,7 +117,7 @@
 
 .reaper-logo-anim .reap-slash {
   font-family: Consolas, Menlo, Monaco, monospace;
-  animation: reaperSlash 4s ease-out infinite;
+  animation: reaperSlash 7s ease-out infinite;
 }
 @keyframes reaperSlash {
   0%, 50%   { opacity: 0; transform: translate(0, 10px) scale(0.85); }
@@ -130,14 +130,14 @@
 
 .reaper-logo-anim .reap-flash { display: none; }
 
-.reaper-logo-anim .harvest-pile { opacity: 0; animation: reaperHarvest 4s ease-out infinite; }
+.reaper-logo-anim .harvest-pile { opacity: 0; animation: reaperHarvest 7s ease-out infinite; }
 @keyframes reaperHarvest {
   0%, 58%   { opacity: 0; transform: translateY(6px) scale(0.7); }
   64%, 78%  { opacity: 1; transform: translateY(0) scale(1); }
   86%, 100% { opacity: 0; transform: translateY(-2px) scale(0.9); }
 }
 
-.reaper-logo-anim .harvest-bit { opacity: 0; animation: reaperBitOut 4s ease-out infinite; }
+.reaper-logo-anim .harvest-bit { opacity: 0; animation: reaperBitOut 7s ease-out infinite; }
 .reaper-logo-anim .harvest-bit-1 { animation-delay: 0s; }
 .reaper-logo-anim .harvest-bit-2 { animation-delay: 0.08s; }
 .reaper-logo-anim .harvest-bit-3 { animation-delay: 0.16s; }
