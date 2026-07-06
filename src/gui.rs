@@ -72,6 +72,7 @@ fn install_macos_menu() -> muda::Menu {
 enum UserEvent {
     OpenWindow(String),
     ShowWindow(tao::window::WindowId),
+    ToggleFullscreen(tao::window::WindowId),
 }
 
 #[cfg(target_os = "macos")]
@@ -101,6 +102,13 @@ fn parse_ipc_open_url(body: &str) -> Option<String> {
     } else {
         Some(url.to_string())
     }
+}
+
+fn parse_ipc_toggle_fullscreen(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(|t| t == "toggle-fullscreen"))
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -158,6 +166,8 @@ fn create_window(
         .with_ipc_handler(move |req: Request<String>| {
             if let Some(next_url) = parse_ipc_open_url(req.body()) {
                 let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
+            } else if parse_ipc_toggle_fullscreen(req.body()) {
+                let _ = ipc_proxy.send_event(UserEvent::ToggleFullscreen(window_id));
             }
         })
         .with_new_window_req_handler(move |target_url| {
@@ -208,6 +218,17 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
             Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
                 if let Some((window, _)) = webviews.get(&window_id) {
                     window.set_visible(true);
+                }
+            }
+            Event::UserEvent(UserEvent::ToggleFullscreen(window_id)) => {
+                if let Some((window, _)) = webviews.get(&window_id) {
+                    use tao::window::Fullscreen;
+                    let next = if window.fullscreen().is_some() {
+                        None
+                    } else {
+                        Some(Fullscreen::Borderless(None))
+                    };
+                    window.set_fullscreen(next);
                 }
             }
             Event::UserEvent(UserEvent::OpenWindow(next_url)) => {

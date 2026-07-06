@@ -20,7 +20,7 @@ use crate::git;
 use crate::repos::{
     self, CreateRepoRequest, ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest,
     PublishToGitHubRequest, import_local_repo, import_repo, link_remote, metadata, publish_to_github,
-    push_preview, push_to_remote, sync_from_remote,
+    push_preview, push_to_remote, sync_bare_from_workspace, sync_from_remote,
 };
 use crate::agent as git_agent;
 use crate::state::AppState;
@@ -824,26 +824,46 @@ async fn workspace_commit(
                 return git_response(commit_out);
             }
             match push_to_remote(&state.config, &state.settings, &name) {
+                Ok(push_out) if push_out.success() => git_response(git::GitOutput {
+                    stdout: format!(
+                        "{}\n{}",
+                        commit_out.stdout.trim(),
+                        push_out.stdout.trim()
+                    ),
+                    stderr: format!(
+                        "{}\n{}",
+                        commit_out.stderr.trim(),
+                        push_out.stderr.trim()
+                    ),
+                    exit_code: 0,
+                }),
                 Ok(push_out) => {
-                    if !push_out.success() {
-                        git_response(push_out)
-                    } else {
-                        git_response(git::GitOutput {
-                            stdout: format!(
-                                "{}\n{}",
-                                commit_out.stdout.trim(),
-                                push_out.stdout.trim()
-                            ),
-                            stderr: format!(
-                                "{}\n{}",
-                                commit_out.stderr.trim(),
-                                push_out.stderr.trim()
-                            ),
-                            exit_code: 0,
-                        })
-                    }
+                    let _ = git::run_git(Some(&ws), &["reset", "--mixed", "HEAD~1"]);
+                    let _ = sync_bare_from_workspace(&state.config, &name);
+                    let mut stderr = format!(
+                        "{}\n{}",
+                        commit_out.stderr.trim(),
+                        push_out.stderr.trim()
+                    );
+                    git_response(git::GitOutput {
+                        stdout: commit_out.stdout,
+                        stderr,
+                        exit_code: if push_out.exit_code != 0 {
+                            push_out.exit_code
+                        } else {
+                            1
+                        },
+                    })
                 }
-                Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+                Err(e) => {
+                    let _ = git::run_git(Some(&ws), &["reset", "--mixed", "HEAD~1"]);
+                    let _ = sync_bare_from_workspace(&state.config, &name);
+                    git_response(git::GitOutput {
+                        stdout: commit_out.stdout,
+                        stderr: format!("{}\n{}", commit_out.stderr.trim(), e),
+                        exit_code: 1,
+                    })
+                }
             }
         }
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),

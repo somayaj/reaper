@@ -3144,7 +3144,23 @@ function updateHeaderBrand() {
   syncHeaderMenuState();
 }
 
+function toggleWindowFullscreen() {
+  if (window.ipc?.postMessage) {
+    window.ipc.postMessage(JSON.stringify({ type: 'toggle-fullscreen' }));
+    return;
+  }
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen?.().catch(() => {});
+  } else {
+    document.exitFullscreen?.().catch(() => {});
+  }
+}
+
 function bindHeaderBrand() {
+  $('#window-titlebar')?.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    toggleWindowFullscreen();
+  });
   $('#header-logo-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     const root = e.currentTarget.closest('.ij-menu-root');
@@ -14354,8 +14370,13 @@ async function runCommit({ push = false } = {}) {
       body: JSON.stringify({ message, paths, push }),
     });
     if (out.exit_code !== 0) {
-      terminalLog(out.stderr || out.stdout || 'Commit failed');
-      toast(out.stderr?.trim() || out.stdout?.trim() || 'Commit failed', 'error');
+      terminalLog(out.stderr || out.stdout || (push ? 'Commit & push failed' : 'Commit failed'));
+      toast(out.stderr?.trim() || out.stdout?.trim() || (push ? 'Commit & push failed' : 'Commit failed'), 'error');
+      if (push) {
+        await refreshGitStatus();
+        await refreshHistory();
+        await refreshTree();
+      }
       return;
     }
     terminalLog(out.stdout || out.stderr || (push ? 'Committed and pushed' : 'Committed'));

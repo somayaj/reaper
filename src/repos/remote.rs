@@ -357,6 +357,59 @@ pub fn push_to_remote(
     push_workspace(config, settings, name)
 }
 
+fn bare_branch_rev(bare: &std::path::Path, branch: &str) -> Option<String> {
+    let refname = format!("refs/heads/{branch}");
+    let out = git::run_git(Some(bare), &["rev-parse", &refname]).ok()?;
+    if !out.success() {
+        return None;
+    }
+    let rev = out.stdout.trim();
+    if rev.is_empty() {
+        None
+    } else {
+        Some(rev.to_string())
+    }
+}
+
+fn rollback_bare_host(
+    config: &Config,
+    name: &str,
+    branch: &str,
+    rev: &str,
+) -> Result<()> {
+    let bare = config
+        .repo_path(name)
+        .canonicalize()
+        .with_context(|| format!("resolve bare repo {}", name))?;
+    git::run_git(
+        Some(&bare),
+        &["update-ref", &format!("refs/heads/{branch}"), rev],
+    )?;
+    if let Ok(ws) = workspace::ensure_workspace(config, name) {
+        let _ = sync_remote_tracking_ref(&ws, "origin", branch);
+    }
+    Ok(())
+}
+
+/// After undoing a workspace commit, sync the Reaper bare host to the current workspace HEAD.
+pub fn sync_bare_from_workspace(config: &Config, name: &str) -> Result<git::GitOutput> {
+    let ws = workspace::ensure_workspace(config, name)?;
+    let branch = current_branch(&ws)?;
+    let bare = config
+        .repo_path(name)
+        .canonicalize()
+        .with_context(|| format!("resolve bare repo {}", name))?;
+    let bare_url = bare
+        .to_str()
+        .context("invalid bare repo path")?
+        .to_string();
+    let out = git::push_url(&ws, &bare_url, &branch)?;
+    if out.success() {
+        let _ = sync_remote_tracking_ref(&ws, "origin", &branch);
+    }
+    Ok(out)
+}
+
 fn push_workspace(
     config: &Config,
     settings: &SettingsStore,
@@ -380,6 +433,7 @@ fn push_workspace(
         .to_str()
         .context("invalid bare repo path")?
         .to_string();
+    let pre_bare_rev = bare_branch_rev(&bare, &branch);
     let local = git::push_url(&ws, &bare_url, &branch)?;
     sync_remote_tracking_ref(&ws, "origin", &branch)?;
     steps.push(("local", local));
@@ -388,7 +442,13 @@ fn push_workspace(
         let auth_url = auth::authenticated_url(&clean, settings)?;
         if auth_url != bare_url {
             let remote = git::push_url(&ws, &auth_url, &branch)?;
-            sync_remote_tracking_ref(&ws, "upstream", &branch)?;
+            if !remote.success() {
+                if let Some(rev) = pre_bare_rev.as_deref() {
+                    let _ = rollback_bare_host(config, name, &branch, rev);
+                }
+            } else {
+                sync_remote_tracking_ref(&ws, "upstream", &branch)?;
+            }
             steps.push(("remote", remote));
         }
     }
