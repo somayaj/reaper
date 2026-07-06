@@ -14616,8 +14616,8 @@ function registerTerminalFileLinkProvider(term, xterm) {
 
 function xtermApi() {
   const Terminal = globalThis.Terminal;
-  const FitAddon = globalThis.FitAddon?.FitAddon;
-  if (!Terminal || !FitAddon) return null;
+  const FitAddon = globalThis.FitAddon?.FitAddon ?? globalThis.FitAddon;
+  if (!Terminal || typeof FitAddon !== 'function') return null;
   return { Terminal, FitAddon };
 }
 
@@ -14829,9 +14829,10 @@ function mountActiveTerminal({ fresh = false } = {}) {
 
   if (fresh || !term.xterm) {
     spawnTerminalInstance(term, host);
-  } else if (!term.shellSuspended && (!term.ws || term.ws.readyState === WebSocket.CLOSED)) {
+  } else if (term.streamLine == null && (!term.ws || term.ws.readyState !== WebSocket.OPEN)) {
     ensureTerminalPane(term, host);
     term.container.classList.remove('hidden');
+    if (term.shellSuspended) term.shellSuspended = false;
     connectTerminalWs(term);
     fitTerminal(term);
   } else {
@@ -15873,7 +15874,10 @@ function applyTerminalDock() {
   syncActivityButtons();
   updateStatusBar();
   if (showTerminal) {
-    requestAnimationFrame(() => fitActiveTerminal());
+    requestAnimationFrame(() => {
+      fitActiveTerminal();
+      requestAnimationFrame(() => fitActiveTerminal());
+    });
   }
 }
 
@@ -16549,6 +16553,12 @@ function bindEvents() {
   });
   bindTerminalTabs();
   bindEditorTabs();
+  const terminalHost = $('#terminal-xterm-host');
+  if (terminalHost && typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+      if (state.terminalOpen || state.activePanel === 'terminal') fitActiveTerminal();
+    }).observe(terminalHost);
+  }
   window.addEventListener('resize', () => {
     if (state.terminalOpen || state.activePanel === 'terminal') {
       fitActiveTerminal();
