@@ -766,13 +766,16 @@ function markUiReady() {
   document.body.style.backgroundColor = bg;
 }
 
-/** Remove launch splash immediately so repo-open spinner is visible and dismisses cleanly. */
+/** Remove launch splash once the IDE is ready. */
 function dismissLaunchSplashNow() {
   const splash = $('#launch-splash');
   if (!splash) return;
   splash.dataset.dismissing = '1';
-  markUiReady();
-  splash.remove();
+  splash.classList.add('is-dismissing');
+  setTimeout(() => {
+    markUiReady();
+    splash.remove();
+  }, 360);
 }
 
 function hideLaunchSplash(options = {}) {
@@ -784,13 +787,19 @@ function hideLaunchSplash(options = {}) {
   const splash = $('#launch-splash');
   if (!splash || splash.dataset.dismissing) return;
   splash.dataset.dismissing = '1';
+  dismissLaunchSplashNow();
+}
+
+function waitForLaunchSplashSequence() {
+  if (typeof window.waitForLaunchSplashHarvest === 'function') {
+    return window.waitForLaunchSplashHarvest();
+  }
   const started = window.__reaperSplashAt || Date.now();
-  const minVisible = 4500;
-  const wait = Math.max(0, minVisible - (Date.now() - started));
-  setTimeout(() => {
-    markUiReady();
-    splash.remove();
-  }, wait);
+  const total = window.__reaperSplashTiming?.totalMs || 0;
+  return new Promise((resolve) => {
+    const remain = Math.max(0, total - (Date.now() - started));
+    setTimeout(resolve, remain);
+  });
 }
 
 function busyIndicatorHtml({ large = false } = {}) {
@@ -3400,6 +3409,8 @@ function isProjectBuildFile(path) {
   if (base === 'composer.json') return true;
   // Rust / Cargo
   if (base === 'cargo.toml') return true;
+  // Dart / Flutter
+  if (base === 'pubspec.yaml') return true;
   // Generic Gradle/Kotlin files
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   // Generic TOML (project manifests)
@@ -3416,6 +3427,8 @@ function buildTasksPanelTitle(buildTool) {
     pnpm: 'pnpm scripts',
     bun: 'Bun scripts',
     cargo: 'Cargo tasks',
+    dart: 'Dart tasks',
+    flutter: 'Flutter tasks',
     rake: 'Rake tasks',
     rails: 'Rails tasks',
     ruby: 'Ruby tasks',
@@ -3446,7 +3459,7 @@ function buildTaskWorkdir(modulePath) {
   const manifestNames = new Set([
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
     'package.json', 'pyproject.toml', 'manage.py', 'go.mod', 'rakefile', 'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
-    'vcpkg.json', 'conanfile.txt', 'conanfile.py',
+    'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'pubspec.yaml',
     'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'dockerfile',
   ]);
   if (!manifestNames.has(lowerBase) && !lowerBase.startsWith('dockerfile.')) return undefined;
@@ -3460,6 +3473,7 @@ function packageManifestKindForPath(path) {
   const base = normalized.split('/').pop() || '';
   const lower = base.toLowerCase();
   if (lower === 'cargo.toml') return 'cargo';
+  if (lower === 'pubspec.yaml') return 'dart';
   if (lower === 'pyproject.toml') return 'python';
   if (lower === 'requirements.txt') return 'python-reqs';
   if (lower === 'pipfile') return 'pipfile';
@@ -3484,6 +3498,8 @@ function projectProfileSupportsManifest(kind) {
   switch (kind) {
     case 'cargo':
       return langs.has('rust');
+    case 'dart':
+      return langs.has('dart') || frameworks.has('flutter');
     case 'ruby':
       return langs.has('ruby') || frameworks.has('rails');
     case 'go':
@@ -3521,6 +3537,7 @@ function projectProfileSupportsBuildTasks(path) {
   if (normalized.endsWith('/gradle/libs.versions.toml')) return true;
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   if (base === 'cargo.toml') return true;
+  if (base === 'pubspec.yaml') return true;
   
   return true;
 }
@@ -3649,6 +3666,8 @@ function updatePackageManifestPanel(path) {
 function packageManifestEcosystemLabel(ecosystem) {
   const labels = {
     cargo: 'Rust · Cargo',
+    dart: 'Dart · pub',
+    flutter: 'Flutter · pub',
     python: 'Python',
     ruby: 'Ruby · Bundler',
     rake: 'Ruby · Rake',
@@ -4415,13 +4434,117 @@ function welcomeShowcaseHtml() {
     { file: 'search', label: 'Search', alt: 'Search classes, files, and text across the project' },
     { file: 'go-to-class', label: 'Navigate', alt: 'Go to Class for Java symbol navigation' },
   ];
-  return `<aside class="ij-welcome-showcase" aria-label="Reaper in action">
-    ${shots.map(({ file, label, alt }) => `
-      <figure class="ij-welcome-frame">
-        <img src="/screenshots/${file}.png" alt="${escapeHtml(alt)}" loading="lazy" decoding="async" data-shot="${file}" />
+  const slides = shots.map(({ file, label, alt }, i) => `
+      <figure class="ij-welcome-slide${i === 0 ? ' is-active' : ''}" data-slide="${i}">
+        <img src="/screenshots/${file}.png" alt="${escapeHtml(alt)}" loading="${i === 0 ? 'eager' : 'lazy'}" decoding="async" data-shot="${file}" />
         <figcaption>${escapeHtml(label)}</figcaption>
-      </figure>`).join('')}
+      </figure>`).join('');
+  const dots = shots.map(({ label }, i) => `
+      <button type="button" class="ij-welcome-carousel-dot${i === 0 ? ' is-active' : ''}" data-carousel-dot="${i}" role="tab" aria-label="${escapeHtml(label)}" aria-selected="${i === 0 ? 'true' : 'false'}"></button>`).join('');
+  return `<aside class="ij-welcome-showcase" aria-label="Reaper in action">
+    <div class="ij-welcome-carousel" data-welcome-carousel>
+      <div class="ij-welcome-carousel-viewport">
+        <div class="ij-welcome-carousel-track">${slides}</div>
+      </div>
+      <div class="ij-welcome-carousel-controls">
+        <button type="button" class="ij-welcome-carousel-btn" data-carousel-prev aria-label="Previous screenshot">‹</button>
+        <div class="ij-welcome-carousel-dots" role="tablist">${dots}</div>
+        <button type="button" class="ij-welcome-carousel-btn" data-carousel-next aria-label="Next screenshot">›</button>
+      </div>
+    </div>
   </aside>`;
+}
+
+function bindWelcomeCarousel(root = document) {
+  const carousel = root.querySelector('[data-welcome-carousel]');
+  if (!carousel) return;
+
+  const track = carousel.querySelector('.ij-welcome-carousel-track');
+  let slides = [].slice.call(carousel.querySelectorAll('.ij-welcome-slide'));
+  const dots = [].slice.call(carousel.querySelectorAll('[data-carousel-dot]'));
+  if (!track || !slides.length) return;
+
+  function visibleSlides() {
+    return slides.filter((slide) => !slide.classList.contains('is-missing'));
+  }
+
+  slides.forEach((slide) => {
+    const img = slide.querySelector('img');
+    if (!img) return;
+    img.addEventListener('error', () => {
+      slide.classList.add('is-missing');
+      slide.remove();
+      const dot = dots.find((d) => Number(d.dataset.carouselDot) === Number(slide.dataset.slide));
+      dot?.remove();
+      slides = visibleSlides();
+      if (!slides.length) {
+        carousel.closest('.ij-welcome-showcase')?.remove();
+        return;
+      }
+      if (index >= slides.length) index = 0;
+      syncTrack();
+    }, { once: true });
+  });
+
+  let index = 0;
+  let timer = null;
+
+  function syncTrack() {
+    const visible = visibleSlides();
+    if (!visible.length) return;
+    const active = visible[index] || visible[0];
+    if (!active) return;
+    index = visible.indexOf(active);
+    track.style.transform = `translate3d(${-index * 100}%, 0, 0)`;
+    visible.forEach((slide) => slide.classList.toggle('is-active', slide === active));
+    dots.forEach((dot) => {
+      const on = Number(active.dataset.slide) === Number(dot.dataset.carouselDot);
+      dot.classList.toggle('is-active', on);
+      dot.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  }
+
+  function goTo(nextIndex) {
+    const visible = visibleSlides();
+    if (!visible.length) return;
+    index = ((nextIndex % visible.length) + visible.length) % visible.length;
+    syncTrack();
+  }
+
+  function stopAuto() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function startAuto() {
+    stopAuto();
+    if (visibleSlides().length < 2) return;
+    timer = setInterval(() => goTo(index + 1), 5500);
+  }
+
+  carousel.querySelector('[data-carousel-prev]')?.addEventListener('click', () => {
+    goTo(index - 1);
+    startAuto();
+  });
+  carousel.querySelector('[data-carousel-next]')?.addEventListener('click', () => {
+    goTo(index + 1);
+    startAuto();
+  });
+  dots.forEach((dot) => {
+    dot.addEventListener('click', () => {
+      const visible = visibleSlides();
+      const target = visible.findIndex((s) => Number(s.dataset.slide) === Number(dot.dataset.carouselDot));
+      if (target >= 0) goTo(target);
+      startAuto();
+    });
+  });
+  carousel.addEventListener('mouseenter', stopAuto);
+  carousel.addEventListener('mouseleave', startAuto);
+
+  syncTrack();
+  startAuto();
 }
 
 function welcomeScreenHtml() {
@@ -4493,6 +4616,7 @@ function renderWelcome() {
   el.className = 'ij-welcome';
   el.innerHTML = welcomeScreenHtml();
   bindWelcomeActions(el);
+  bindWelcomeCarousel(el);
   syncWelcomeLayout();
 }
 
@@ -16631,6 +16755,7 @@ function bindEvents() {
 }
 
 async function init() {
+  const splashSequence = waitForLaunchSplashSequence();
   setStatusMessage('Ready');
   if (!window.ReaperAgentMarkdown?.libsReady?.()) {
     console.error('[Reaper] Agent markdown not ready — tables/diagrams will show as plain text until scripts load.');
@@ -16679,6 +16804,7 @@ async function init() {
   syncWelcomeLayout();
   void loadCursorStatus();
   void loadGeminiSettingsSection();
+  const initWork = (async () => {
   try {
     await loadRepos();
     void initStatusFooter();
@@ -16686,7 +16812,6 @@ async function init() {
   } catch (err) {
     toast(`Could not reach Reaper backend: ${err.message}. Quit other Reaper copies and relaunch.`, 'error', { duration: 15000 });
   }
-  hideLaunchSplash();
   let repoToOpen = shouldSkipAutoRepoOpen() ? null : getInitialRepoFromUrl();
   try {
     const general = await api('/api/settings/general');
@@ -16704,6 +16829,8 @@ async function init() {
     showNoRepoFileTree();
   }
   await applyCaptureDemoFromUrl();
+  })();
+  await Promise.all([splashSequence, initWork]);
   hideLaunchSplash({ immediate: true });
   setInterval(async () => {
     if (state.cursorConfigured && !state.cursorBridgeOk && !state.agentBusy) {
@@ -16712,7 +16839,8 @@ async function init() {
   }, 3000);
 }
 
-init().catch((e) => {
+init().catch(async (e) => {
   toast(e.message, 'error');
+  await waitForLaunchSplashSequence();
   hideLaunchSplash();
 });

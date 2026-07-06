@@ -1,18 +1,4 @@
-/** Reaper logo — polyglot console intro, then animated bit harvest. */
-(function () {
-  const SIZES = {
-    sm: 'w-7 h-7',
-    md: 'w-9 h-9',
-    lg: 'w-10 h-10',
-    xl: 'w-14 h-14',
-    welcome: 'w-[72px] h-[72px]',
-    splash: '',
-  };
-
-  const CODE_FONT = "Consolas,Menlo,Monaco,monospace";
-
-  // REAPER-LOGO-SVG:START
-  const SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Reaper">
   <rect class="panel-bg" width="64" height="64" rx="12" fill="#0a0a0a"/>
   <rect class="field-bg" x="8" y="43" width="48" height="13" rx="2" fill="#14110e"/>
   <rect class="field-earth" x="8" y="52" width="48" height="4" rx="1" fill="#2a2218"/>
@@ -62,47 +48,4 @@
       <text class="harvest-bit harvest-bit-3" x="14" y="47" fill="#c9a227" font-size="5.5" opacity="0.7" style="--ox:4px">01</text>
     </g>
   </g>
-</svg>`;
-    // REAPER-LOGO-SVG:END
-
-  const LOGO_SVG_URL = '/reaper-logo.svg?v=1';
-  let logoSvgMarkup = SVG;
-
-  function reaperLogoHtml(size = 'md', { pulse = false, chrome = false, extraClass = '', opacity = '' } = {}) {
-    const dim = SIZES[size] || SIZES.md;
-    const pulseCls = pulse ? ' loading-dot' : '';
-    const opacityCls = opacity ? ` ${opacity}` : '';
-    const chromeCls = chrome ? ' reaper-logo-chrome' : '';
-    const alt = extraClass.includes('ij-welcome-logo') ? 'Reaper' : '';
-    const classes = `logo-mark reaper-logo-anim${chromeCls} ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
-    return `<span class="${classes}" role="img" aria-label="${alt || 'Reaper'}">${logoSvgMarkup}</span>`;
-  }
-
-  function mountReaperLogos(root = document) {
-    root.querySelectorAll('[data-reaper-logo]').forEach((el) => {
-      const size = el.dataset.reaperLogo || 'md';
-      const pulse = el.dataset.reaperLogoPulse === 'true';
-      const chrome = el.dataset.reaperLogoChrome === 'true' || size === 'sm';
-      const extra = el.className.replace(/\blogo-mark\b/g, '').trim();
-      const opacity = el.dataset.reaperLogoOpacity || '';
-      el.outerHTML = reaperLogoHtml(size, { pulse, chrome, extraClass: extra ? `${extra} logo-mark` : 'logo-mark', opacity });
-    });
-  }
-
-  window.ReaperLogo = { reaperLogoHtml, mountReaperLogos, SIZES };
-
-  fetch(LOGO_SVG_URL)
-    .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
-    .then(function (text) {
-      logoSvgMarkup = text.trim();
-      mountReaperLogos();
-      window.dispatchEvent(new CustomEvent('reaper-logo-svg-ready'));
-    })
-    .catch(function () {});
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => mountReaperLogos());
-  } else {
-    mountReaperLogos();
-  }
-})();
+</svg>

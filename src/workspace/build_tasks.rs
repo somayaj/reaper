@@ -420,6 +420,7 @@ fn focus_module_key(ws: &Path, rel_path: &str) -> String {
             | "pyproject.toml"
             | "manage.py"
             | "cargo.toml"
+            | "pubspec.yaml"
             | "rakefile"
             | "gemfile"
             | "go.mod"
