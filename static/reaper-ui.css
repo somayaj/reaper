@@ -4826,7 +4826,7 @@ main { background: var(--ij-bg); }
   flex-shrink: 0;
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .logo-mark svg {
@@ -7878,6 +7878,24 @@ main { background: var(--ij-bg); }
   border: none !important;
   padding: 0 !important;
 }
+
+.agent-welcome-logo {
+  font-size: 3rem;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(255, 255, 255, 0.1));
+  animation: glow 2s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%, 100% {
+    opacity: 1;
+    filter: drop-shadow(0 2px 4px rgba(255, 255, 255, 0.1));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 2px 8px rgba(255, 255, 255, 0.2));
+  }
+}
   font-size: calc(var(--ij-ui-font-size, 11px) * 0.85);
 }
 
@@ -8515,7 +8533,8 @@ main { background: var(--ij-bg); }
 }
 
 .theme-light .logo-mark {
-  filter: brightness(0.85) saturate(1.1);
+  filter: brightness(0.9) saturate(1.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .ij-menu-theme {
