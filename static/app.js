@@ -16180,7 +16180,10 @@ async function runAgentChat(prompt, opts = {}) {
   state.agentLastToolPath = null;
   state.agentSeenPaths = new Set();
   state.agentHadFileChanges = false;
-  const pathsBefore = await snapshotAgentWorkspacePaths();
+  const needsRevertSnapshot = def.capabilities.tools && state.cursorMode === 'agent';
+  const pathsBeforePromise = needsRevertSnapshot
+    ? snapshotAgentWorkspacePaths()
+    : Promise.resolve(new Set());
   updateAgentUi();
   if (state.agentLiveFollow) showAgentDiffPlaceholder();
 
@@ -16226,6 +16229,7 @@ async function runAgentChat(prompt, opts = {}) {
         if (data.type === 'text') {
           buffer += data.text;
           textBuffer += data.text;
+          window.ReaperAgentMarkdown?.renderPlain(assistantEl, textBuffer);
           scheduleAgentMarkdownPreview(assistantEl, textBuffer);
           scrollAgentToBottom();
         } else if (data.type === 'tool') {
@@ -16265,6 +16269,7 @@ async function runAgentChat(prompt, opts = {}) {
       await finalizeAgentMessage(assistantEl, { textBuffer, buffer, summary: doneSummary });
     }
     const postStatus = await api(repoApi(state.repo, '/workspace/status'));
+    const pathsBefore = await pathsBeforePromise;
     const revertPaths = await collectAgentRevertPaths(pathsBefore, postStatus, state.agentSeenPaths);
     if (revertPaths.length || userWrap || assistantWrap) {
       state.agentLastRevertibleTurn = {
