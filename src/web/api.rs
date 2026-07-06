@@ -817,8 +817,35 @@ async fn workspace_commit(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    match workspace::commit_changes(&ws, &body.message, body.paths.as_deref(), body.push) {
-        Ok(out) => git_response(out),
+    match workspace::commit_changes(&ws, &body.message, body.paths.as_deref(), false) {
+        Ok(commit_out) if !commit_out.success() => git_response(commit_out),
+        Ok(commit_out) => {
+            if !body.push {
+                return git_response(commit_out);
+            }
+            match push_to_remote(&state.config, &state.settings, &name) {
+                Ok(push_out) => {
+                    if !push_out.success() {
+                        git_response(push_out)
+                    } else {
+                        git_response(git::GitOutput {
+                            stdout: format!(
+                                "{}\n{}",
+                                commit_out.stdout.trim(),
+                                push_out.stdout.trim()
+                            ),
+                            stderr: format!(
+                                "{}\n{}",
+                                commit_out.stderr.trim(),
+                                push_out.stderr.trim()
+                            ),
+                            exit_code: 0,
+                        })
+                    }
+                }
+                Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+            }
+        }
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
