@@ -231,6 +231,58 @@ pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
     word_before(line_text, col)
 }
 
+/// 1-based line/column range for the identifier at the cursor (same rules as [`word_at`]).
+pub(crate) fn word_range_at(content: &str, line: u32, column: u32) -> Option<(u32, u32, u32, u32)> {
+    let word = word_at(content, line, column)?;
+    if word.is_empty() || is_keyword(&word) {
+        return None;
+    }
+    let line_text = content.lines().nth(line.saturating_sub(1) as usize)?;
+    let col = column.saturating_sub(1) as usize;
+    let mut start = col.min(line_text.len());
+    if start < line_text.len() && is_ident_char(line_text.as_bytes()[start]) {
+        start = (0..=start)
+            .rev()
+            .find(|&i| !is_ident_char(line_text.as_bytes()[i]))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+    } else if start > 0 && is_ident_char(line_text.as_bytes()[start.saturating_sub(1)]) {
+        start = (0..start)
+            .rev()
+            .find(|&i| !is_ident_char(line_text.as_bytes()[i]))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+    } else {
+        return None;
+    }
+    let end = (start..line_text.len())
+        .find(|&i| !is_ident_char(line_text.as_bytes()[i]))
+        .unwrap_or(line_text.len());
+    if line_text[start..end] != word {
+        if let Some(c) = column_of_word(line_text, &word) {
+            let s = c.saturating_sub(1) as usize;
+            return Some((line, c, line, (s + word.len()) as u32));
+        }
+        return None;
+    }
+    Some((line, (start + 1) as u32, line, (end + 1) as u32))
+}
+
+fn column_of_word(line: &str, word: &str) -> Option<u32> {
+    let mut i = 0;
+    while let Some(idx) = line[i..].find(word) {
+        let start = i + idx;
+        let before_ok = start == 0 || !is_ident_char(line.as_bytes()[start - 1]);
+        let end = start + word.len();
+        let after_ok = end >= line.len() || !is_ident_char(line.as_bytes()[end]);
+        if before_ok && after_ok {
+            return Some((start + 1) as u32);
+        }
+        i = end;
+    }
+    None
+}
+
 pub(crate) fn java_method_name_on_line(line: &str) -> Option<String> {
     let trimmed = line.split("//").next()?.trim();
     if trimmed.is_empty() || !trimmed.contains('(') {
@@ -1521,10 +1573,105 @@ pub fn format_content(ws: &Path, rel_path: &str, content: &str) -> Result<String
             });
     }
     if ext == "groovy" || lower.ends_with(".gradle") {
-        bail!("no Groovy/Gradle formatter found on PATH (install prettier with a Groovy plugin or format manually)");
+        if let Ok(formatted) = try_tool_stdin(
+            ws,
+            "prettier",
+            &["--parser", "groovy", "--stdin-filepath", rel_path],
+            content,
+        ) {
+            return Ok(formatted);
+        }
+        return Ok(format_trim_trailing_whitespace(content));
+    }
+    if super::languages::is_c_like_path(rel_path) {
+        return try_tool_stdin(ws, "clang", &["-style=LLVM", "-assume-filename", rel_path], content)
+            .or_else(|_| try_stdin_command(ws, "clang-format", &["-style=LLVM", "-assume-filename", rel_path], content))
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "rb" || lower.ends_with("gemfile") || lower.ends_with("rakefile") {
+        return try_stdin_command(ws, "rufo", &[], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "php" {
+        return try_stdin_command(
+            ws,
+            "php-cs-fixer",
+            &["fix", "--stdin-path=stdin", "--stdout-path=stdout"],
+            content,
+        )
+        .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "swift" {
+        return try_stdin_command(ws, "swift-format", &[], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if matches!(ext, "sh" | "bash" | "zsh") {
+        return try_stdin_command(ws, "shfmt", &["-i", "2", "-ci"], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "dart" {
+        return try_stdin_command(ws, "dart", &["format", "-o", "show", "-"], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "lua" {
+        return try_stdin_command(ws, "stylua", &["-"], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "cs" {
+        return try_stdin_command(ws, "csharpier", &[], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "scala" {
+        return try_stdin_command(ws, "scalafmt", &["--stdin"], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "toml" {
+        return try_stdin_command(ws, "taplo", &["format", "-"], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "cmake" || lower == "cmakelists.txt" {
+        return try_stdin_command(ws, "cmake-format", &[], content)
+            .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if ext == "graphql" || ext == "gql" {
+        return try_tool_stdin(
+            ws,
+            "prettier",
+            &["--parser", "graphql", "--stdin-filepath", rel_path],
+            content,
+        )
+        .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
+    }
+    if matches!(ext, "vue" | "svelte") {
+        return try_tool_stdin(
+            ws,
+            "prettier",
+            &["--parser", "vue", "--stdin-filepath", rel_path],
+            content,
+        )
+        .or_else(|_| Ok(format_trim_trailing_whitespace(content)));
     }
 
-    bail!("no formatter available for .{ext} files");
+    Ok(format_trim_trailing_whitespace(content))
+}
+
+/// Safe fallback for any text file: trim trailing whitespace on each line.
+fn format_trim_trailing_whitespace(content: &str) -> String {
+    let had_trailing_newline = content.ends_with('\n');
+    let out = content
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if had_trailing_newline {
+        if out.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("{out}\n")
+        }
+    } else {
+        out
+    }
 }
 
 fn format_yaml(ws: &Path, rel_path: &str, content: &str) -> Result<String> {

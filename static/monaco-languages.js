@@ -9127,6 +9127,17 @@
     });
 
     editor.addAction({
+      id: 'reaper.changeAllOccurrences',
+      label: 'Change All Occurrences',
+      keybindings: [
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyG,
+      ],
+      contextMenuGroupId: 'modification',
+      contextMenuOrder: 1.4,
+      run: () => editor.getAction('editor.action.changeAll')?.run(),
+    });
+
+    editor.addAction({
       id: 'reaper.findUsages',
       label: 'Find Usages',
       keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.F7],

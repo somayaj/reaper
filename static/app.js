@@ -4886,6 +4886,9 @@ const PALETTE_COMMANDS = [
   { id: 'new-file', label: 'New file', kbd: '⌘N', run: showFileModal, needsRepo: true },
   { id: 'save', label: 'Save', kbd: '⌘S', run: saveFile, needsTab: true, needsDirty: true },
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
+  { id: 'find-usages', label: 'Find Usages', kbd: 'Alt+F7', run: () => runEditorMonacoAction('reaper.findUsages'), needsTab: true },
+  { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'Shift+F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
+  { id: 'change-all', label: 'Change All Occurrences', kbd: '⌘⌃G', run: () => runEditorMonacoAction('reaper.changeAllOccurrences'), needsTab: true },
   { id: 'run', label: 'Run', kbd: 'F5', run: runActive, needsRun: true },
   { id: 'commit', label: 'Commit…', run: () => switchPanel('git'), needsRepo: true },
   { id: 'pull', label: 'Pull', run: syncPull, needsRepo: true },
@@ -13061,6 +13064,19 @@ async function openFileAt(path, line = 1, column = 1) {
   state.editor.setPosition({ lineNumber: line, column });
   state.editor.focus();
   updateTreeBackButton();
+}
+
+function runEditorMonacoAction(actionId) {
+  if (!state.editor) {
+    toast('Open a file first', 'info');
+    return;
+  }
+  const action = state.editor.getAction(actionId);
+  if (!action) {
+    toast('Command not available for this file', 'info');
+    return;
+  }
+  void action.run();
 }
 
 async function formatDocument() {

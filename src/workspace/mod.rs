@@ -47,6 +47,7 @@ pub mod secret_scan;
 mod symbols;
 mod workspace_search;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -1485,22 +1486,20 @@ pub fn workspace_references(
     column: u32,
     content: &str,
 ) -> Result<Vec<ReferenceLocation>> {
-    if classpath::is_java_like(from_path) {
+    if is_java_source_path(from_path) {
         let jdtls_refs = jdtls::find_references(ws, from_path, line, column, content)?;
         let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
         return Ok(merge_reference_locations(jdtls_refs, fallback_refs));
     }
     if languages::is_c_like_path(from_path) {
         let refs = clangd::find_references(ws, from_path, line, column, content)?;
-        if !refs.is_empty() {
-            return Ok(refs);
-        }
+        let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
+        return Ok(merge_reference_locations(refs, fallback_refs));
     }
     if ruby_nav::is_ruby_path(from_path) {
         let refs = solargraph::find_references(ws, from_path, line, column, content)?;
-        if !refs.is_empty() {
-            return Ok(refs);
-        }
+        let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
+        return Ok(merge_reference_locations(refs, fallback_refs));
     }
     Ok(find_word_references_fallback(ws, from_path, line, column, content))
 }
@@ -1643,6 +1642,54 @@ fn scan_word_references(
     }
 }
 
+fn is_java_source_path(path: &str) -> bool {
+    path.replace('\\', "/").to_lowercase().ends_with(".java")
+}
+
+fn prepare_rename_word_fallback(content: &str, line: u32, column: u32) -> Option<RenameRange> {
+    let (start_line, start_col, end_line, end_col) = symbols::word_range_at(content, line, column)?;
+    Some(RenameRange {
+        line: start_line,
+        column: start_col,
+        end_line,
+        end_column: end_col,
+    })
+}
+
+fn rename_word_fallback(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+) -> Vec<FileTextEdits> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Vec::new();
+    }
+    let refs = find_word_references_fallback(ws, from_path, line, column, content);
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let mut by_file: HashMap<String, Vec<QuickFixEdit>> = HashMap::new();
+    for r in refs {
+        by_file.entry(r.path).or_default().push(QuickFixEdit {
+            start_line: r.line,
+            start_column: r.column,
+            end_line: r.end_line,
+            end_column: r.end_column,
+            text: new_name.to_string(),
+        });
+    }
+    let mut out: Vec<FileTextEdits> = by_file
+        .into_iter()
+        .map(|(path, edits)| FileTextEdits { path, edits })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 pub fn workspace_prepare_rename(
     ws: &Path,
     from_path: &str,
@@ -1650,7 +1697,7 @@ pub fn workspace_prepare_rename(
     column: u32,
     content: &str,
 ) -> Result<Option<RenameRange>> {
-    if classpath::is_java_like(from_path) {
+    if is_java_source_path(from_path) {
         if let Some(range) = jdtls::prepare_rename(ws, from_path, line, column, content)? {
             return Ok(Some(range));
         }
@@ -1660,7 +1707,7 @@ pub fn workspace_prepare_rename(
             return Ok(Some(range));
         }
     }
-    Ok(None)
+    Ok(prepare_rename_word_fallback(content, line, column))
 }
 
 pub fn workspace_rename(
@@ -1671,7 +1718,7 @@ pub fn workspace_rename(
     content: &str,
     new_name: &str,
 ) -> Result<Vec<FileTextEdits>> {
-    if classpath::is_java_like(from_path) {
+    if is_java_source_path(from_path) {
         let edits = jdtls::rename_symbol(ws, from_path, line, column, content, new_name)?;
         if !edits.is_empty() {
             return Ok(edits);
@@ -1682,6 +1729,10 @@ pub fn workspace_rename(
         if !edits.is_empty() {
             return Ok(edits);
         }
+    }
+    let fallback = rename_word_fallback(ws, from_path, line, column, content, new_name);
+    if !fallback.is_empty() {
+        return Ok(fallback);
     }
     Ok(Vec::new())
 }
@@ -2079,5 +2130,39 @@ mod path_tests {
         assert_eq!(ahead, 0);
         assert_eq!(behind, 0);
         assert_eq!(tracking.as_deref(), Some("upstream/main"));
+    }
+
+    #[test]
+    fn prepare_rename_word_fallback_on_identifier() {
+        let content = "fn main() {\n    let count = 1;\n}\n";
+        let range = prepare_rename_word_fallback(content, 2, 9).expect("range");
+        assert_eq!(range.line, 2);
+        assert_eq!(range.column, 9);
+        assert_eq!(range.end_column, 14);
+    }
+
+    #[test]
+    fn rename_word_fallback_replaces_all_occurrences_in_scope() {
+        let root = std::env::temp_dir().join(format!("reaper-rename-fb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/a.py"),
+            "def foo():\n    foo = 1\n    return foo\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/b.py"), "foo = 2\n").unwrap();
+        let edits = rename_word_fallback(
+            &root,
+            "src/a.py",
+            1,
+            5,
+            "def foo():\n    foo = 1\n    return foo\n",
+            "bar",
+        );
+        assert!(!edits.is_empty());
+        let a = edits.iter().find(|e| e.path == "src/a.py").expect("a.py edits");
+        assert_eq!(a.edits.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
