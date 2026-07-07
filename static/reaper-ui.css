@@ -9153,6 +9153,27 @@ html[data-theme="offwhite"] .ij-welcome .ij-welcome-logo.logo-mark,
   border-color: color-mix(in srgb, var(--ij-border) 70%, transparent);
 }
 
+.ij-compiler-badge--invalid {
+  color: var(--ij-error, #e06c75);
+  background: color-mix(in srgb, var(--ij-error, #e06c75) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ij-error, #e06c75) 28%, transparent);
+}
+
+.ij-compiler-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ij-error, #e06c75);
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.ij-compiler-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ij-text-dim);
+  line-height: 1.35;
+}
+
 .ij-compiler-path {
   width: 100%;
   min-width: 0;

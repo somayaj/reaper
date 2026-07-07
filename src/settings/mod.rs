@@ -758,3 +758,28 @@ pub fn cursor_auth_error(err: &str) -> Option<String> {
         None
     }
 }
+
+pub fn cursor_model_error(err: &str) -> Option<String> {
+    if err.contains("isn't available for your Cursor API key") {
+        return Some(err.into());
+    }
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("model") {
+        if lower.contains("not found")
+            || lower.contains("unsupported")
+            || lower.contains("not available")
+            || lower.contains("invalid model")
+            || lower.contains("unknown model")
+        {
+            return Some(
+                "That model isn't available for your Cursor API key — choose a supported model in the agent panel."
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
+pub fn cursor_agent_error(err: &str) -> Option<String> {
+    cursor_auth_error(err).or_else(|| cursor_model_error(err))
+}

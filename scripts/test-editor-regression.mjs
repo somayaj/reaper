@@ -3195,6 +3195,17 @@ async function main() {
     terminalHarness.testTerminalStaticRegression(appSrc, indexHtml, ok);
     terminalHarness.testTerminalVendorLoadRegression(ok);
     terminalHarness.testTerminalLifecycleRegression(appSrc, ok);
+    terminalHarness.testTerminalBuildTaskStreamRegression(appSrc, ok);
+  }
+
+  section('Compiler settings regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const toolchainSrc = fs.readFileSync(path.join(ROOT, 'src/toolchain.rs'), 'utf8');
+    const mavenRsSrc = fs.readFileSync(path.join(ROOT, 'src/maven.rs'), 'utf8');
+    const compilerHarness = await import(path.join(ROOT, 'scripts/lib/compiler-settings-harness.mjs'));
+    compilerHarness.testCompilerSettingsRegression(appSrc, toolchainSrc, mavenRsSrc, ok);
+    compilerHarness.testCompilerStatusSimulation(ok);
   }
 
   section('Java member completion + tab close regression');

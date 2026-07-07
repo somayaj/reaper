@@ -58,6 +58,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_GRADLE"),
     },
     ToolDef {
+        id: "maven",
+        label: "Maven (mvn)",
+        kind: ToolKind::Binary,
+        defaults: &["mvn"],
+        env_key: Some("REAPER_MVN"),
+    },
+    ToolDef {
         id: "python",
         label: "Python (python3)",
         kind: ToolKind::Binary,
@@ -392,6 +399,28 @@ pub fn resolve_program(id: &str) -> Option<PathBuf> {
         }
         return None;
     }
+    if id == "maven" {
+        if let Some(path) = configured_path(id) {
+            if let Ok(bin) = crate::maven::normalize_maven_binary(path) {
+                return Some(bin);
+            }
+        }
+        if let Some(key) = def.env_key {
+            if let Ok(raw) = std::env::var(key) {
+                if !raw.is_empty() {
+                    if let Ok(bin) = crate::maven::normalize_maven_binary(PathBuf::from(raw)) {
+                        return Some(bin);
+                    }
+                }
+            }
+        }
+        for name in def.defaults {
+            if let Some(path) = find_on_path(name) {
+                return Some(path);
+            }
+        }
+        return None;
+    }
     for name in def.defaults {
         if let Some(path) = find_on_path(name) {
             return Some(path);
@@ -427,6 +456,9 @@ pub fn validate_tool_path(id: &str, path: &str) -> Result<PathBuf> {
             if id == "gradle" {
                 return crate::gradle::validate_gradle_path(path);
             }
+            if id == "maven" {
+                return crate::maven::validate_maven_path(path);
+            }
             let p = PathBuf::from(path);
             if !p.is_file() {
                 bail!("not a file: {}", p.display());
@@ -440,6 +472,7 @@ pub fn tool_version(id: &str, path: &Path) -> Option<String> {
     match id {
         "java" => crate::jdk::java_version_string(path).ok(),
         "gradle" => crate::gradle::gradle_version_string(path).ok(),
+        "maven" => crate::maven::maven_version_string(path).ok(),
         _ => {
             let out = Command::new(path)
                 .arg("--version")
@@ -468,6 +501,8 @@ pub struct CompilerEntryView {
     pub version: Option<String>,
     pub source: Option<String>,
     pub extensions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -477,6 +512,8 @@ pub struct CompilersView {
     pub java_installed: Option<Vec<crate::jdk::JdkInstall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gradle_installed: Option<Vec<crate::gradle::GradleInstall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maven_installed: Option<Vec<crate::maven::MavenInstall>>,
 }
 
 pub fn compilers_view(
@@ -504,6 +541,11 @@ pub fn compilers_view(
         let version = effective
             .as_ref()
             .and_then(|p| tool_version(def.id, p));
+        let path_error = configured_path.as_ref().and_then(|p| {
+            validate_tool_path(def.id, p)
+                .err()
+                .map(|e| format!("{e:#}"))
+        });
 
         compilers.push(CompilerEntryView {
             id: def.id.to_string(),
@@ -522,6 +564,7 @@ pub fn compilers_view(
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            path_error,
         });
     }
 
@@ -529,6 +572,7 @@ pub fn compilers_view(
         compilers,
         java_installed: Some(crate::jdk::list_installed_jdks()),
         gradle_installed: Some(crate::gradle::list_installed_gradles()),
+        maven_installed: Some(crate::maven::list_installed_mavens()),
     }
 }
 

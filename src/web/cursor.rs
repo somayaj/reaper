@@ -126,13 +126,64 @@ async fn ensure_cursor_session(
         }
         Err(e) => {
             let msg = e.to_string();
-            if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
+            if let Some(hint) = crate::settings::cursor_agent_error(&msg) {
                 state.cursor_sessions.remove(name);
-                Err(api_error(StatusCode::UNAUTHORIZED, hint))
+                let status = if crate::settings::cursor_auth_error(&msg).is_some() {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                Err(api_error(status, hint))
             } else {
                 Err(api_error(StatusCode::BAD_REQUEST, msg))
             }
         }
+    }
+}
+
+async fn validate_cursor_model(
+    state: &AppState,
+    api_key: &str,
+    model: &str,
+) -> Result<(), Response> {
+    state
+        .cursor_bridge
+        .validate_model(api_key, model)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            api_error(
+                StatusCode::BAD_REQUEST,
+                crate::settings::cursor_model_error(&msg).unwrap_or(msg),
+            )
+        })
+}
+
+fn cursor_model_ids(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn reconcile_cursor_model_setting(state: &AppState, model_ids: &[String]) {
+    if model_ids.is_empty() {
+        return;
+    }
+    let saved = state.settings.cursor_model();
+    if model_ids.iter().any(|id| id == &saved) {
+        return;
+    }
+    if let Err(e) = state.settings.set_cursor_model(model_ids[0].clone()) {
+        tracing::warn!("failed to reconcile cursor model: {e:#}");
     }
 }
 
@@ -147,11 +198,26 @@ async fn cursor_models(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 
     match state.cursor_bridge.list_models(&api_key).await {
-        Ok(models) => Json(models).into_response(),
+        Ok(mut models) => {
+            let ids = cursor_model_ids(&models);
+            reconcile_cursor_model_setting(&state, &ids);
+            if let Some(obj) = models.as_object_mut() {
+                obj.insert(
+                    "current_model".into(),
+                    serde_json::Value::String(state.settings.cursor_model()),
+                );
+            }
+            Json(models).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
-            if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
-                return api_error(StatusCode::UNAUTHORIZED, hint);
+            if let Some(hint) = crate::settings::cursor_agent_error(&msg) {
+                let status = if crate::settings::cursor_auth_error(&msg).is_some() {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                return api_error(status, hint);
             }
             api_error(StatusCode::BAD_REQUEST, msg)
         }
@@ -178,6 +244,10 @@ async fn warm_cursor_session(
 
     let model = state.settings.cursor_model();
     let mode = state.settings.cursor_mode();
+
+    if let Err(resp) = validate_cursor_model(&state, &api_key, &model).await {
+        return resp;
+    }
 
     match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await {
         Ok(session_id) => Json(serde_json::json!({
@@ -223,6 +293,10 @@ async fn cursor_chat(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| state.settings.cursor_mode());
 
+    if let Err(resp) = validate_cursor_model(&state, &api_key, &model).await {
+        return resp;
+    }
+
     let session_id = match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await
     {
         Ok(id) => id,
@@ -238,8 +312,13 @@ async fn cursor_chat(
         Err(e) => {
             state.cursor_sessions.remove(&name);
             let msg = e.to_string();
-            if let Some(hint) = crate::settings::cursor_auth_error(&msg) {
-                return api_error(StatusCode::UNAUTHORIZED, hint);
+            if let Some(hint) = crate::settings::cursor_agent_error(&msg) {
+                let status = if crate::settings::cursor_auth_error(&msg).is_some() {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                return api_error(status, hint);
             }
             return api_error(StatusCode::BAD_REQUEST, msg);
         }
