@@ -7,6 +7,7 @@ mod git;
 mod agent;
 mod auth;
 mod gradle;
+mod maven;
 mod gui;
 mod jdk;
 mod local_https;

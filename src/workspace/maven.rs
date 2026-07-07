@@ -38,7 +38,7 @@ pub struct MavenCommand {
     pub cwd: PathBuf,
 }
 
-/// Prefer `./mvnw` in the project root, fall back to `mvn` on PATH.
+/// Prefer `./mvnw` in the project root, then Settings → Compiler, then `mvn` on PATH.
 pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
     let mvnw = if cfg!(windows) {
         project_root.join("mvnw.cmd")
@@ -48,6 +48,12 @@ pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
     if mvnw.is_file() {
         return MavenCommand {
             program: mvnw,
+            cwd: project_root.to_path_buf(),
+        };
+    }
+    if let Some(mvn) = crate::toolchain::resolve_program("maven") {
+        return MavenCommand {
+            program: mvn,
             cwd: project_root.to_path_buf(),
         };
     }

@@ -155,6 +155,17 @@ async fn set_cursor(
     }
     reset_cursor_sessions(&state).await;
     if let Some(model) = body.model.filter(|m| !m.is_empty()) {
+        if state.cursor_bridge.health().await {
+            if let Some(saved_key) = state.settings.cursor_api_key() {
+                if let Err(e) = state.cursor_bridge.validate_model(&saved_key, &model).await {
+                    let msg = e.to_string();
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        crate::settings::cursor_model_error(&msg).unwrap_or(msg),
+                    );
+                }
+            }
+        }
         if let Err(e) = state.settings.set_cursor_model(model) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
@@ -193,9 +204,21 @@ async fn set_cursor_model(
     if model.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "model required");
     }
+    if let Some(api_key) = state.settings.cursor_api_key() {
+        if state.cursor_bridge.health().await {
+            if let Err(e) = state.cursor_bridge.validate_model(&api_key, model).await {
+                let msg = e.to_string();
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    crate::settings::cursor_model_error(&msg).unwrap_or(msg),
+                );
+            }
+        }
+    }
     if let Err(e) = state.settings.set_cursor_model(model.to_string()) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
+    reset_cursor_sessions(&state).await;
     let bridge_ok = state.cursor_bridge.health().await;
     let bridge_error = if bridge_ok {
         None

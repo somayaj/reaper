@@ -140,6 +140,136 @@ export function testTerminalStaticRegression(appSrc, indexHtml, ok) {
 }
 
 /** Guards for xterm spawn lifecycle — hidden panel, repo switch, reopen. */
+export function testTerminalBuildTaskStreamRegression(appSrc, ok) {
+  const activeBody = extractFunctionBody(appSrc, 'isTerminalCommandActive');
+  ok(
+    activeBody.includes('streamLine != null') && !activeBody.includes('execAbortController'),
+    'build task stream: active command detected via streamLine only',
+  );
+
+  const restoreBody = extractFunctionBody(appSrc, 'restoreTerminalShellIfIdle');
+  ok(restoreBody.includes('term.shellSuspended'), 'build task stream: restore skips while shell is suspended');
+
+  const connectBody = extractFunctionBody(appSrc, 'connectTerminalWs');
+  ok(
+    connectBody.includes('term.shellSuspended || term.streamLine != null'),
+    'build task stream: connectTerminalWs skipped during exec stream',
+  );
+  ok(
+    connectBody.includes('disconnectTerminalWs(term, { silent: true })'),
+    'build task stream: stray shell websocket closed on open during exec stream',
+  );
+  ok(
+    connectBody.includes('term.shellSuspended || term.streamLine != null') &&
+      connectBody.includes('Terminal shell connection failed'),
+    'build task stream: suppress shell error toast during exec stream',
+  );
+  ok(
+    connectBody.indexOf('ensureLoopbackWsBase') < connectBody.lastIndexOf('term.shellSuspended'),
+    'build task stream: connectTerminalWs re-checks suspend state after async loopback lookup',
+  );
+  ok(connectBody.includes('term.ws !== ws'), 'build task stream: ignore stale websocket error handlers');
+
+  const runBody = extractFunctionBody(appSrc, 'runWorkspaceCommandStream');
+  ok(runBody.includes('ensureCommandTerminalReady'), 'build task stream: waits for xterm before streaming output');
+  const readyPos = runBody.indexOf('ensureCommandTerminalReady');
+  const suspendPos = runBody.indexOf('suspendTerminalShell(term)');
+  const beginPos = runBody.indexOf('beginTerminalStream');
+  ok(readyPos >= 0, 'build task stream: mounts terminal before exec stream');
+  ok(suspendPos > readyPos, 'build task stream: suspends shell after terminal is ready');
+  ok(beginPos > suspendPos, 'build task stream: begins exec stream after shell suspend');
+
+  const mountBody = extractFunctionBody(appSrc, 'mountActiveTerminal');
+  ok(mountBody.includes('sync'), 'build task stream: mountActiveTerminal supports synchronous spawn');
+  ok(mountBody.includes('isTerminalCommandActive(term)'), 'build task stream: mountActiveTerminal respects active exec stream');
+
+  const readyBody = extractFunctionBody(appSrc, 'ensureCommandTerminalReady');
+  ok(readyBody.includes('mountActiveTerminal({ fresh: needsSpawn, sync: true })'), 'build task stream: command path mounts xterm synchronously');
+  ok(readyBody.includes('terminalMountSync'), 'build task stream: command path suppresses competing async terminal mounts');
+
+  const dockBody = extractFunctionBody(appSrc, 'applyTerminalDock');
+  ok(dockBody.includes('terminalMountSync'), 'build task stream: applyTerminalDock skips async mount during command setup');
+
+  const initBody = extractFunctionBody(appSrc, 'initTerminalXterm');
+  ok(
+    initBody.includes('term.shellSuspended') && initBody.includes('connectTerminalWs(term)'),
+    'build task stream: initTerminalXterm skips shell connect while suspended',
+  );
+
+  const postBody = extractFunctionBody(appSrc, 'postWorkspaceExecStream');
+  ok(!postBody.includes('beginTerminalStream'), 'build task stream: postWorkspaceExecStream does not double-begin stream');
+
+  const runBuildBody = extractFunctionBody(appSrc, 'runBuildTask');
+  ok(!runBuildBody.includes('showTerminal()'), 'build task stream: runBuildTask relies on runWorkspaceCommandStream to open terminal');
+
+  testTerminalBuildTaskStreamSimulation(ok);
+}
+
+function testTerminalBuildTaskStreamSimulation(ok) {
+  const term = {
+    shellSuspended: false,
+    streamLine: null,
+    ws: null,
+    wsSilentClose: false,
+    xterm: null,
+    xtermReady: false,
+  };
+
+  let connectAttempts = 0;
+  let restoreAttempts = 0;
+  let errorToasts = 0;
+
+  const isTerminalCommandActive = (t) => t?.streamLine != null;
+
+  const suspendTerminalShell = (t) => {
+    t.shellSuspended = true;
+  };
+
+  const beginTerminalStream = (t) => {
+    suspendTerminalShell(t);
+    t.streamLine = '';
+  };
+
+  const connectTerminalWs = (t, afterAwait = false) => {
+    if (t.shellSuspended || t.streamLine != null) {
+      return afterAwait ? 'aborted' : undefined;
+    }
+    connectAttempts += 1;
+  };
+
+  const restoreTerminalShellIfIdle = (t) => {
+    if (!t || isTerminalCommandActive(t) || t.shellSuspended) return;
+    restoreAttempts += 1;
+    connectTerminalWs(t);
+  };
+
+  const wsOnError = (t, ws, activeWs) => {
+    if (activeWs !== ws || t.wsSilentClose || t.shellSuspended || t.streamLine != null) return;
+    errorToasts += 1;
+  };
+
+  const ensureReady = () => {
+    term.xterm = { element: { isConnected: true } };
+    term.xtermReady = true;
+  };
+
+  // Mirror runWorkspaceCommandStream ordering.
+  ensureReady();
+  suspendTerminalShell(term);
+  beginTerminalStream(term);
+  restoreTerminalShellIfIdle(term);
+  ok(connectAttempts === 0, 'build task sim: no connect while suspended');
+  ok(connectTerminalWs(term, true) === 'aborted', 'build task sim: async connect aborted after suspend');
+  wsOnError(term, {}, term.ws);
+  ok(errorToasts === 0, 'build task sim: shell error toast suppressed during stream');
+
+  term.streamLine = null;
+  term.shellSuspended = false;
+  restoreTerminalShellIfIdle(term);
+  ok(restoreAttempts === 1, 'build task sim: shell restore allowed after stream ends');
+  ok(connectAttempts === 1, 'build task sim: shell reconnect allowed after stream ends');
+}
+
 export function testTerminalLifecycleRegression(appSrc, ok) {
   const resetBody = extractFunctionBody(appSrc, 'resetTerminalCwds');
   ok(resetBody.includes('const mountNow = isTerminalPanelVisible()'), 'lifecycle: resetTerminalCwds checks panel visibility before spawn');

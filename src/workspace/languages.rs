@@ -197,6 +197,7 @@ pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
         "kotlin" => &[".kt", ".kts", ".gradle.kts"],
         "groovy" => &[".groovy", ".gvy", ".gy", ".gsh"],
         "gradle" => &[".gradle", ".gradle.kts", "gradlew"],
+        "maven" => &["pom.xml", "mvnw"],
         "python" => &[".py", ".pyw"],
         "ruby" => &[".rb"],
         "bundle" => &[".rb", "Gemfile"],

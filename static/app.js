@@ -299,25 +299,66 @@ const GEMINI_MODELS = [
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)' },
 ];
 
-const CURSOR_MODELS_FALLBACK = [
-  { id: 'composer-2.5', label: 'Composer 2.5' },
-  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
-  { id: 'claude-fable-5', label: 'Claude Fable 5' },
-  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { id: 'gpt-5.5', label: 'GPT-5.5' },
-  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-];
 const CURSOR_MODEL_DEFAULT = 'composer-2.5';
 
 function cursorModelsForSelect() {
-  return state.cursorModels?.length ? state.cursorModels : CURSOR_MODELS_FALLBACK;
+  if (!state.cursorConfigured) return [];
+  if (!state.cursorModelsLoaded) return [];
+  return state.cursorModels;
+}
+
+function cursorModelIsSupported(modelId) {
+  return !!modelId && state.cursorModels.some((m) => m.id === modelId);
 }
 
 function normalizeCursorModel(modelId) {
   const list = cursorModelsForSelect();
   if (modelId && list.some((m) => m.id === modelId)) return modelId;
-  return list[0]?.id || CURSOR_MODEL_DEFAULT;
+  if (list.length) return list[0].id;
+  if (!state.cursorModelsLoaded) return modelId || CURSOR_MODEL_DEFAULT;
+  return '';
+}
+
+function cursorModelLabel(modelId) {
+  const id = normalizeCursorModel(modelId);
+  if (!id) return 'no model';
+  return state.cursorModels.find((m) => m.id === id)?.label || id;
+}
+
+function cursorModelStatusError() {
+  if (state.agentProvider !== 'cursor' || !state.cursorConfigured || !state.cursorBridgeOk) {
+    return null;
+  }
+  if (!state.cursorModelsLoaded) return 'Loading Cursor models…';
+  if (state.cursorModelsError) return `Could not load Cursor models: ${state.cursorModelsError}`;
+  if (!state.cursorModels.length) return 'No Cursor models available for this API key.';
+  const model = normalizeCursorModel(state.cursorModel);
+  if (!cursorModelIsSupported(model)) {
+    return `Model "${model}" isn't available for your Cursor API key. Choose a supported model.`;
+  }
+  return null;
+}
+
+async function reconcileCursorModelSelection() {
+  const list = state.cursorModels;
+  if (!list.length) return;
+  const previous = state.cursorModel || CURSOR_MODEL_DEFAULT;
+  if (cursorModelIsSupported(previous)) return;
+  const next = list[0].id;
+  state.cursorModel = next;
+  try {
+    const cfg = await api('/api/settings/cursor/model', {
+      method: 'PATCH',
+      body: JSON.stringify({ model: next }),
+    });
+    state.cursorModel = cfg.model || next;
+  } catch {
+    /* keep local selection */
+  }
+  toast(
+    `Model "${previous}" isn't available for your Cursor API key — using ${list[0].label || next}.`,
+    'warn',
+  );
 }
 
 /** Registered chat agents — add providers here as backends land. */
@@ -356,7 +397,7 @@ const AGENT_PROVIDERS = {
     setModel: (id) => setCursorAgentModel(id),
     statusText: () => {
       const modeLabel = state.cursorMode === 'plan' ? 'Plan' : state.cursorMode === 'ask' ? 'Ask' : 'Agent';
-      return `Cursor ${modeLabel} · ${normalizeCursorModel(state.cursorModel)}`;
+      return `Cursor ${modeLabel} · ${cursorModelLabel(state.cursorModel)}`;
     },
     chatPath: '/cursor/chat',
     stopPath: '/cursor/stop',
@@ -434,6 +475,7 @@ const state = {
   dockerLogsLabel: '',
   dockerLogsAutoScroll: true,
   terminalOpen: false,
+  terminalMountSync: false,
   terminals: [],
   activeTerminalId: null,
   agentOpen: true,
@@ -446,6 +488,8 @@ const state = {
   agentProvider: localStorage.getItem(AGENT_PROVIDER_KEY) || 'cursor',
   cursorMode: 'agent',
   cursorModels: [],
+  cursorModelsLoaded: false,
+  cursorModelsError: null,
   agentBusy: false,
   agentMessageQueue: [],
   agentAbortController: null,
@@ -1966,7 +2010,7 @@ async function loadCompilersSettingsSection() {
   if (!list) return;
 
   const COMPILER_ORDER = [
-    'java', 'kotlin', 'groovy', 'gradle',
+    'java', 'kotlin', 'groovy', 'gradle', 'maven',
     'python', 'ruby', 'bundle', 'rails',
     'rustc', 'cargo', 'go',
     'node', 'tsc',
@@ -1977,6 +2021,9 @@ async function loadCompilersSettingsSection() {
   ];
 
   function compilerStatus(tool) {
+    if (tool.path_error) {
+      return { cls: 'invalid', label: 'Not found' };
+    }
     if (tool.configured) {
       return { cls: 'custom', label: 'Custom' };
     }
@@ -1986,15 +2033,18 @@ async function loadCompilersSettingsSection() {
     return { cls: 'missing', label: 'Missing' };
   }
 
-  function renderCompilerRow(tool, { javaInstalled, gradleInstalled }) {
+  function renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled }) {
     const isJava = tool.id === 'java';
     const isGradle = tool.id === 'gradle';
+    const isMaven = tool.id === 'maven';
     const status = compilerStatus(tool);
     const placeholder = tool.kind === 'home'
       ? '/Library/Java/JavaVirtualMachines/…/Contents/Home'
       : isGradle
         ? '/opt/homebrew/bin/gradle or GRADLE_HOME'
-        : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
+        : isMaven
+          ? '/opt/homebrew/bin/mvn or MAVEN_HOME'
+          : `/opt/homebrew/bin/${tool.id === 'python' ? 'python3' : tool.id}`;
     const version = tool.version ? `<span class="ij-compiler-version" title="${escapeHtml(tool.version)}">${escapeHtml(tool.version.split('\n')[0].slice(0, 48))}</span>` : '';
     const exts = (tool.extensions || []).length
       ? `<span class="ij-compiler-exts" title="File extensions">${escapeHtml(tool.extensions.join(' '))}</span>`
@@ -2023,8 +2073,26 @@ async function loadCompilersSettingsSection() {
           </select>
         </div>`
       : '';
+    const mavenSelect = isMaven && mavenInstalled.length
+      ? `<div class="ij-compiler-extra">
+          <label class="ij-compiler-extra-label">Installed Maven</label>
+          <select class="ij-settings-select settings-compiler-maven-select" data-tool-id="maven" title="Pick a Maven version">
+            <option value="">— pick installed Maven —</option>
+            ${mavenInstalled.map((m) => `<option value="${escapeHtml(m.path)}"${installSelected(tool.path || tool.effective, m.path) ? ' selected' : ''}>${escapeHtml(m.label || m.path)}</option>`).join('')}
+          </select>
+        </div>`
+      : '';
     const using = tool.effective
       ? `<div class="ij-compiler-using" title="${escapeHtml(tool.effective)}">Using ${escapeHtml(tool.effective)}</div>`
+      : '';
+    const pathError = tool.path_error
+      ? `<div class="ij-compiler-error" title="${escapeHtml(tool.path_error)}">${escapeHtml(tool.path_error)}</div>`
+      : '';
+    const wrapperNote = (isGradle || isMaven)
+      ? `<div class="ij-compiler-note">Project ${isGradle ? 'gradlew' : 'mvnw'} takes precedence when present.</div>`
+      : '';
+    const javaNote = isJava
+      ? '<div class="ij-compiler-note">Used by Gradle, Maven, and Java tooling.</div>'
       : '';
     return `<article class="ij-compiler-row" data-compiler-row="${escapeHtml(tool.id)}" data-compiler-label="${escapeHtml(tool.label.toLowerCase())} ${escapeHtml(tool.id)}">
       <div class="ij-compiler-row-main">
@@ -2041,13 +2109,17 @@ async function loadCompilersSettingsSection() {
         </div>
       </div>
       ${using}
+      ${pathError}
+      ${javaNote}
+      ${wrapperNote}
       ${jdkSelect}
       ${gradleSelect}
+      ${mavenSelect}
     </article>`;
   }
 
   function bindCompilerRows(root) {
-    root.querySelectorAll('.settings-compiler-jdk-select, .settings-compiler-gradle-select').forEach((sel) => {
+    root.querySelectorAll('.settings-compiler-jdk-select, .settings-compiler-gradle-select, .settings-compiler-maven-select').forEach((sel) => {
       sel.addEventListener('change', () => {
         const input = root.querySelector(`.settings-compiler-input[data-tool-id="${sel.dataset.toolId}"]`);
         if (input && sel.value) input.value = sel.value;
@@ -2082,6 +2154,7 @@ async function loadCompilersSettingsSection() {
     const tools = cfg.compilers || cfg.tools || [];
     const javaInstalled = cfg.java_installed || [];
     const gradleInstalled = cfg.gradle_installed || [];
+    const mavenInstalled = cfg.maven_installed || [];
     const byId = Object.fromEntries(tools.map((t) => [t.id, t]));
     const ordered = [
       ...COMPILER_ORDER.map((id) => byId[id]).filter(Boolean),
@@ -2097,7 +2170,7 @@ async function loadCompilersSettingsSection() {
         <span>Path override</span>
         <span></span>
       </div>
-      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled })).join('')}</div>
+      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled })).join('')}</div>
     </div>`;
     bindCompilerRows(list);
     }
@@ -2279,6 +2352,7 @@ async function clearCursorKeyFromSettings() {
     state.cursorKeyMasked = cfg.masked || null;
     state.cursorKeySource = cfg.source || null;
     await loadCursorSettingsSection();
+    await loadCursorModels();
     updateAgentUi();
     toast(
       cfg.configured ? 'Saved key removed; environment key still active' : 'Cursor API key removed',
@@ -4248,7 +4322,6 @@ async function runBuildTask(modulePath, taskCommand, taskLabel) {
     return;
   }
   if (state.dirty.has(state.activeTab)) await saveFile({ silent: true, skipProjectReload: true });
-  showTerminal();
   const term = getActiveTerminal();
   if (!term) {
     toast('Terminal not ready — try again', 'error');
@@ -14725,11 +14798,11 @@ function ensureLoopbackWsBase() {
 }
 
 function isTerminalCommandActive(term) {
-  return term?.streamLine != null && term.execAbortController != null;
+  return term?.streamLine != null;
 }
 
 function restoreTerminalShellIfIdle(term) {
-  if (!term || isTerminalCommandActive(term)) return;
+  if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -14864,7 +14937,9 @@ function disconnectTerminalWs(term, { silent = false } = {}) {
 
 async function connectTerminalWs(term) {
   if (!state.repo || !term) return;
+  if (term.shellSuspended || term.streamLine != null) return;
   const base = await ensureLoopbackWsBase();
+  if (term.shellSuspended || term.streamLine != null) return;
   const url = terminalWsUrl(term, base);
   if (!url) {
     toast('Terminal shell unavailable (loopback WebSocket not configured). Restart Reaper.', 'error');
@@ -14875,11 +14950,14 @@ async function connectTerminalWs(term) {
   term.ws = ws;
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
-    term.shellSuspended = false;
+    if (term.ws !== ws || term.shellSuspended || term.streamLine != null) {
+      disconnectTerminalWs(term, { silent: true });
+      return;
+    }
     fitTerminal(term);
   };
   ws.onerror = () => {
-    if (term.wsSilentClose) return;
+    if (term.ws !== ws || term.wsSilentClose || term.shellSuspended || term.streamLine != null) return;
     toast('Terminal shell connection failed. Try Restart Shell.', 'error');
   };
   ws.onmessage = (ev) => {
@@ -14972,10 +15050,12 @@ function initTerminalXterm(term, host) {
   term.xterm = xterm;
   term.fitAddon = fitAddon;
   fitTerminal(term);
-  void connectTerminalWs(term);
+  if (!term.shellSuspended && term.streamLine == null) {
+    void connectTerminalWs(term);
+  }
 }
 
-function mountActiveTerminal({ fresh = false } = {}) {
+function mountActiveTerminal({ fresh = false, sync = false } = {}) {
   ensureTerminals();
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
@@ -15015,7 +15095,8 @@ function mountActiveTerminal({ fresh = false } = {}) {
       });
     });
   };
-  requestAnimationFrame(() => requestAnimationFrame(spawn));
+  if (sync) spawn();
+  else requestAnimationFrame(() => requestAnimationFrame(spawn));
 }
 
 function renderTerminalTabs() {
@@ -15169,6 +15250,41 @@ function focusCommandTerminal(terminalId) {
   return term;
 }
 
+async function ensureCommandTerminalReady(terminalId) {
+  state.terminalMountSync = true;
+  try {
+    if (state.terminalDock === 'left') {
+      if (state.activePanel !== 'terminal') {
+        state.activePanel = 'terminal';
+        syncActivityButtons();
+      }
+    } else {
+      state.terminalOpen = true;
+    }
+    applyTerminalDock();
+    if (terminalId && state.activeTerminalId !== terminalId) {
+      state.activeTerminalId = terminalId;
+      renderTerminalTabs();
+    }
+    const term = resolveTerminal(terminalId);
+    const host = $('#terminal-xterm-host');
+    if (!term || !host) throw new Error('Terminal not ready — try again');
+    const needsSpawn = !term.xterm || !term.xterm.element?.isConnected;
+    mountActiveTerminal({ fresh: needsSpawn, sync: true });
+    for (let i = 0; i < 60; i += 1) {
+      if (term.xterm?.element?.isConnected) {
+        fitTerminal(term);
+        term.xterm.focus();
+        return term;
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    throw new Error('Terminal not ready — try again');
+  } finally {
+    state.terminalMountSync = false;
+  }
+}
+
 function terminalCommandBegin(label, terminalId, { kind } = {}) {
   const term = resolveTerminal(terminalId);
   if (!term?.xterm) return;
@@ -15317,7 +15433,6 @@ async function cancelActiveTerminalCommand(terminalId) {
 }
 
 async function postWorkspaceExecStream(path, body, terminalId) {
-  beginTerminalStream(terminalId);
   const term = resolveTerminal(terminalId);
   term?.execAbortController?.abort();
   const ac = new AbortController();
@@ -15341,8 +15456,10 @@ async function postWorkspaceExecStream(path, body, terminalId) {
 
 async function runWorkspaceCommandStream(path, body, { label, terminalId, kind } = {}) {
   const termId = terminalId ?? getActiveTerminal()?.id;
+  await ensureCommandTerminalReady(termId);
+  const term = resolveTerminal(termId);
+  if (term) suspendTerminalShell(term);
   beginTerminalStream(termId);
-  focusCommandTerminal(termId);
   if (label && termId) terminalCommandBegin(label, termId, { kind });
   try {
     const exitCode = await postWorkspaceExecStream(path, body, termId);
@@ -15568,7 +15685,8 @@ function setAgentWelcomeMessage() {
 function fillAgentModelSelect(select, models, currentId) {
   select.innerHTML = '';
   const ids = new Set();
-  for (const m of models) {
+  const supported = (models || []).filter((m) => m?.id);
+  for (const m of supported) {
     ids.add(m.id);
     const opt = document.createElement('option');
     opt.value = m.id;
@@ -15576,8 +15694,8 @@ function fillAgentModelSelect(select, models, currentId) {
     if (m.description) opt.title = m.description;
     select.appendChild(opt);
   }
-  const resolved = ids.has(currentId) ? currentId : (models[0]?.id || currentId);
-  select.value = resolved;
+  const resolved = ids.has(currentId) ? currentId : (supported[0]?.id || '');
+  if (resolved) select.value = resolved;
 }
 
 function agentProviderChipStatus(def) {
@@ -15687,6 +15805,16 @@ function renderAgentProviderControls() {
     if (def.id === 'cursor') state.cursorModel = select.value;
     else if (def.id === 'gemini') state.geminiModel = select.value;
     container.appendChild(select);
+  } else if (def.id === 'cursor' && state.cursorConfigured && !state.cursorModelsLoaded) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-gray-600 leading-snug';
+    hint.textContent = 'Loading models for your API key…';
+    container.appendChild(hint);
+  } else if (def.id === 'cursor' && state.cursorConfigured && state.cursorModelsLoaded) {
+    const hint = document.createElement('p');
+    hint.className = 'text-[10px] text-red-400 leading-snug';
+    hint.textContent = cursorModelStatusError() || 'No Cursor models available for this API key.';
+    container.appendChild(hint);
   }
 }
 
@@ -15720,7 +15848,9 @@ function agentCanChat() {
   if (!state.repo) return false;
   const def = agentProviderDef();
   if (def.comingSoon) return false;
-  return def.isReady();
+  if (!def.isReady()) return false;
+  if (def.id === 'cursor' && cursorModelStatusError()) return false;
+  return true;
 }
 
 async function setAgentProvider(provider) {
@@ -15777,6 +15907,9 @@ function updateAgentUi() {
     status = queued ? `Working… · ${queued} queued` : 'Working…';
   } else if (!state.repo) {
     status = 'Select a repo';
+  } else if (def.id === 'cursor') {
+    const modelErr = cursorModelStatusError();
+    status = modelErr || def.statusText();
   } else {
     status = def.statusText();
   }
@@ -15837,14 +15970,29 @@ function updateAgentUi() {
 
 async function loadCursorModels() {
   if (!state.cursorConfigured) {
+    state.cursorModels = [];
+    state.cursorModelsLoaded = false;
+    state.cursorModelsError = null;
     if (state.agentProvider === 'cursor') renderAgentProviderControls();
     return;
   }
+  state.cursorModelsLoaded = false;
+  state.cursorModelsError = null;
+  if (state.agentProvider === 'cursor') renderAgentProviderControls();
   try {
     const data = await api('/api/cursor/models');
-    state.cursorModels = data.models || [];
-  } catch {
-    /* keep fallback list */
+    state.cursorModels = (data.models || []).filter((m) => m?.id);
+    state.cursorModelsLoaded = true;
+    state.cursorModelsError = null;
+    if (data.current_model && cursorModelIsSupported(data.current_model)) {
+      state.cursorModel = data.current_model;
+    } else {
+      await reconcileCursorModelSelection();
+    }
+  } catch (err) {
+    state.cursorModels = [];
+    state.cursorModelsLoaded = true;
+    state.cursorModelsError = err.message || String(err);
   }
   if (state.agentProvider === 'cursor') renderAgentProviderControls();
   updateAgentUi();
@@ -15868,6 +16016,12 @@ async function setAgentMode(mode) {
 
 async function setCursorAgentModel(modelId) {
   if (!modelId || modelId === state.cursorModel) return;
+  if (state.cursorModelsLoaded && !cursorModelIsSupported(modelId)) {
+    toast(`Model "${modelId}" isn't available for your Cursor API key.`, 'error');
+    renderAgentProviderControls();
+    updateAgentUi();
+    return;
+  }
   state.cursorModel = modelId;
   updateAgentUi();
   try {
@@ -15878,6 +16032,8 @@ async function setCursorAgentModel(modelId) {
     state.cursorModel = cfg.model || modelId;
   } catch (err) {
     toast(err.message, 'error');
+    renderAgentProviderControls();
+    updateAgentUi();
   }
 }
 
@@ -15908,12 +16064,13 @@ async function loadCursorStatus() {
     state.cursorBridgeError = cfg.bridge_error || null;
     state.cursorKeyMasked = cfg.masked || null;
     state.cursorKeySource = cfg.source || null;
-    state.cursorModel = normalizeCursorModel(cfg.model || CURSOR_MODEL_DEFAULT);
+    state.cursorModel = cfg.model || CURSOR_MODEL_DEFAULT;
     state.cursorMode = cfg.mode || 'agent';
     $$('[data-agent-mode]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.agentMode === state.cursorMode);
     });
     await loadCursorModels();
+    state.cursorModel = normalizeCursorModel(state.cursorModel);
     refreshAgentProviderUi();
     if (state.repo && cfg.configured && cfg.bridge_ok) void warmCursorSession();
   } catch {
@@ -15936,6 +16093,7 @@ async function restartBridge() {
     if ($('#settings-modal-overlay')?.classList.contains('flex')) {
       await loadCursorSettingsSection();
     }
+    if (cfg.bridge_ok) await loadCursorModels();
     toast(cfg.bridge_ok ? 'Bridge connected' : (cfg.bridge_error || 'Bridge still offline'), cfg.bridge_ok ? 'success' : 'error');
   } catch (err) {
     toast(err.message, 'error');
@@ -16055,7 +16213,7 @@ function applyTerminalDock() {
 
   syncActivityButtons();
   updateStatusBar();
-  if (showTerminal) {
+  if (showTerminal && !state.terminalMountSync) {
     const term = getActiveTerminal();
     const xtermMissing = !term?.xterm || !term.xterm.element?.isConnected;
     if (xtermMissing) {
@@ -16255,6 +16413,11 @@ async function runAgentChat(prompt, opts = {}) {
   let cancelled = false;
 
   try {
+    if (def.id === 'cursor') {
+      const modelErr = cursorModelStatusError();
+      if (modelErr) throw new Error(modelErr);
+    }
+
     const chatUrl = repoApi(state.repo, def.chatPath);
     const res = await fetch(chatUrl, {
       method: 'POST',

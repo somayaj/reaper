@@ -248,6 +248,23 @@ impl CursorBridge {
         resp.json().await.context("invalid models response")
     }
 
+    pub async fn validate_model(&self, api_key: &str, model: &str) -> Result<()> {
+        let value = self.list_models(api_key).await?;
+        let models = value
+            .get("models")
+            .and_then(|m| m.as_array())
+            .context("failed to list cursor models")?;
+        let supported = models.iter().any(|entry| {
+            entry.get("id").and_then(|v| v.as_str()) == Some(model)
+        });
+        if !supported {
+            bail!(
+                "Model \"{model}\" isn't available for your Cursor API key. Choose a supported model in the agent panel."
+            );
+        }
+        Ok(())
+    }
+
     pub async fn stop_chat(&self, session_id: &str) -> Result<()> {
         let resp = self
             .client
