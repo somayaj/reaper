@@ -3208,6 +3208,16 @@ async function main() {
     compilerHarness.testCompilerStatusSimulation(ok);
   }
 
+  section('Refactoring regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const langSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
+    const modRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/mod.rs'), 'utf8');
+    const symbolsRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/symbols.rs'), 'utf8');
+    const refactorHarness = await import(path.join(ROOT, 'scripts/lib/refactor-harness.mjs'));
+    refactorHarness.testRefactorRegression(appSrc, langSrc, modRsSrc, symbolsRsSrc, ok);
+  }
+
   section('Java member completion + tab close regression');
   testJavaMemberCompletionPipelineRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
 
