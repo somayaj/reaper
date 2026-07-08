@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="423" />
+  <meta name="reaper-ui-build" content="424" />
   <meta name="reaper-app-version" content="0.1.3" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=423" />
+  <link rel="stylesheet" href="/logo-animated.css?v=424" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=423" />
-  <link rel="stylesheet" href="/logo-animated.css?v=423" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=423" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=424" />
+  <link rel="stylesheet" href="/logo-animated.css?v=424" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=424" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=423"></script>
-  <script src="/launch-splash.js?v=423"></script>
+  <script src="/logo.js?v=424"></script>
+  <script src="/launch-splash.js?v=424"></script>
   <script>
     (function () {
       function prefetchStartupIndex() {
@@ -1337,8 +1337,26 @@
   <div id="java-references-overlay" class="ij-overlay">
     <div class="ij-palette ij-goto-class">
       <div id="java-references-title" class="ij-goto-class-header">Find Usages</div>
-      <div id="java-references-results" class="max-h-80 overflow-auto panel-scroll py-1"></div>
+      <div id="java-references-results" class="panel-scroll py-1"></div>
       <div class="ij-goto-class-hint">↑↓ navigate · Enter open · Esc close</div>
+    </div>
+  </div>
+
+  <!-- Rename (file tree + symbol; window.prompt blocked in WebView) -->
+  <div id="rename-prompt-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="rename-prompt-title">
+    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="px-6 pt-6 pb-4">
+        <h3 id="rename-prompt-title" class="text-lg font-semibold text-white">Rename</h3>
+        <p id="rename-prompt-subtitle" class="text-xs text-gray-500 mt-1 font-mono truncate"></p>
+      </div>
+      <div class="px-6 pb-2">
+        <label for="rename-prompt-input" class="block text-xs font-medium text-gray-400 mb-1.5">New name</label>
+        <input id="rename-prompt-input" type="text" autocomplete="off" spellcheck="false" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+      </div>
+      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
+        <button type="button" id="rename-prompt-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
+        <button type="button" id="rename-prompt-submit" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Rename</button>
+      </div>
     </div>
   </div>
 
@@ -1415,9 +1433,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=423"></script>
-  <script src="/monaco-languages.js?v=423" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=424"></script>
+  <script src="/monaco-languages.js?v=424" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=423"></script>
+  <script src="/app.js?v=424"></script>
 </body>
 </html>

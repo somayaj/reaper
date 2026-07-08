@@ -431,7 +431,7 @@ pub fn rename_symbol(
     }
     let uri = file_uri(&abs_file)?;
     let deadline = Instant::now() + QUERY_TIMEOUT;
-    let result = query_rename(
+    let result = match query_rename(
         &ws,
         rel_path,
         &uri,
@@ -440,7 +440,13 @@ pub fn rename_symbol(
         content,
         new_name.trim(),
         deadline,
-    )?;
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("jdtls rename failed: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
     lsp::parse_workspace_edit(&ws, &result)
 }
 
@@ -904,7 +910,7 @@ fn lsp_request(
     _rel_path: &str,
     uri: &str,
     content: &str,
-    _deadline: Instant,
+    deadline: Instant,
     id: u64,
     request: Value,
 ) -> Result<Value> {
@@ -928,8 +934,7 @@ fn lsp_request(
     let stdout = session.child.stdout.as_mut().context("jdtls stdout")?;
 
     write_message(stdin, &request)?;
-    let query_deadline = Instant::now() + QUERY_TIMEOUT;
-    wait_for_id(stdout, id, query_deadline, Some(ws))
+    wait_for_id(stdout, id, deadline, Some(ws))
 }
 
 fn sync_document(
