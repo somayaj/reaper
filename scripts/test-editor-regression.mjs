@@ -1066,7 +1066,18 @@ function testInlineCompletionRegression(win) {
   );
   ok(
     mlSrc.includes('routeAi && aiOn'),
-    'empty-line provider waits for AI only when AI inline enabled',
+    'empty-line provider schedules debounced AI retry when enabled',
+  );
+  ok(
+    mlSrc.includes('fetchInlineComplete(model, position, linePrefix, false)')
+      && mlSrc.includes('buildLspInlineResult()')
+      && mlSrc.indexOf('fetchInlineComplete(model, position, linePrefix, false)')
+        < mlSrc.indexOf('const emptyLsp = await buildLspInlineResult()'),
+    'empty-line provider tries AI inline-complete before LSP fallback',
+  );
+  ok(
+    mlSrc.includes('getAiInlineProviderAvailable?.()'),
+    'inline AI gated on configured Cursor/Gemini/Claude provider',
   );
   ok(mlSrc.includes('emptyLine: isWhitespaceOnlyLine(linePrefix)'), 'pause path re-paints empty-line ghost');
 
@@ -3161,7 +3172,9 @@ async function main() {
     getJavaLanguageLevel: () => 17,
     getLanguageContext: () => ({}),
     getAiInlineComplete: () => false,
+    getAiInlineProviderAvailable: () => false,
     getGeminiConfigured: () => false,
+    getCursorInlineAvailable: () => false,
     toast: () => {},
     setCompleteDebugStatus: () => {},
     setStatusMessage: () => {},
@@ -3224,6 +3237,18 @@ async function main() {
     const compilerHarness = await import(path.join(ROOT, 'scripts/lib/compiler-settings-harness.mjs'));
     compilerHarness.testCompilerSettingsRegression(appSrc, toolchainSrc, mavenRsSrc, ok);
     compilerHarness.testCompilerStatusSimulation(ok);
+  }
+
+  section('Inline AI provider chain regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const langSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
+    const agentModSrc = fs.readFileSync(path.join(ROOT, 'src/agent/mod.rs'), 'utf8');
+    const apiSrc = fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8');
+    const cursorRsSrc = fs.readFileSync(path.join(ROOT, 'src/web/cursor.rs'), 'utf8');
+    const inlineHarness = await import(path.join(ROOT, 'scripts/lib/inline-provider-harness.mjs'));
+    inlineHarness.testInlineProviderRegression(appSrc, langSrc, agentModSrc, apiSrc, cursorRsSrc, ok);
+    inlineHarness.testCursorSessionRegression(appSrc, cursorRsSrc, ok);
   }
 
   section('Refactoring regression');

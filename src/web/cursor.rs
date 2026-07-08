@@ -47,6 +47,9 @@ async fn cursor_status(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 }
 
 async fn restart_bridge(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    for (_, session_id) in state.cursor_sessions.drain_all() {
+        let _ = state.cursor_bridge.delete_session(&session_id).await;
+    }
     cursor::stop_bridge().await;
     cursor::reclaim_bridge_port().await;
     invalidate_health_cache();
@@ -67,9 +70,14 @@ async fn cursor_status_json(state: &AppState) -> serde_json::Value {
 }
 
 async fn ensure_bridge_ready(state: &AppState) -> Result<(), Response> {
-    if !state.cursor_bridge.health_cached(BRIDGE_HEALTH_TTL).await {
+    let was_healthy = state.cursor_bridge.health_cached(BRIDGE_HEALTH_TTL).await;
+    if !was_healthy {
         if let Err(e) = ensure_bridge_running().await {
             tracing::warn!("Cursor bridge auto-retry failed: {e:#}");
+        }
+        if !was_healthy && state.cursor_bridge.health_cached(Duration::from_secs(1)).await {
+            // Bridge process restarted — in-memory sessions are gone.
+            let _ = state.cursor_sessions.drain_all();
         }
     }
     if !state.cursor_bridge.health_cached(BRIDGE_HEALTH_TTL).await {
@@ -260,6 +268,65 @@ async fn warm_cursor_session(
     }
 }
 
+fn cursor_session_stale(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("session not found") || lower.contains("no active run")
+}
+
+async fn cursor_chat_stream_with_retry(
+    state: &AppState,
+    name: &str,
+    cwd: &PathBuf,
+    api_key: &str,
+    model: &str,
+    mode: &str,
+    prompt: &str,
+) -> Result<reqwest::Response, Response> {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            if let Some(stale_id) = state.cursor_sessions.remove(name) {
+                let _ = state.cursor_bridge.delete_session(&stale_id).await;
+            }
+        }
+
+        let session_id =
+            match ensure_cursor_session(state, name, cwd, api_key, model, mode).await {
+                Ok(id) => id,
+                Err(resp) => return Err(resp),
+            };
+
+        match state
+            .cursor_bridge
+            .chat_stream(&session_id, prompt, Some(model), Some(mode))
+            .await
+        {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                let msg = e.to_string();
+                if attempt == 0 && cursor_session_stale(&msg) {
+                    tracing::debug!("cursor chat stale session for {name}, recreating");
+                    continue;
+                }
+                state.cursor_sessions.remove(name);
+                if let Some(hint) = crate::settings::cursor_agent_error(&msg) {
+                    let status = if crate::settings::cursor_auth_error(&msg).is_some() {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    };
+                    return Err(api_error(status, hint));
+                }
+                return Err(api_error(StatusCode::BAD_REQUEST, msg));
+            }
+        }
+    }
+
+    Err(api_error(
+        StatusCode::BAD_GATEWAY,
+        "Cursor session could not be established — try again",
+    ))
+}
+
 async fn cursor_chat(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -297,31 +364,19 @@ async fn cursor_chat(
         return resp;
     }
 
-    let session_id = match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await
-    {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-
-    let resp = match state
-        .cursor_bridge
-        .chat_stream(&session_id, prompt, Some(model.as_str()), Some(mode.as_str()))
-        .await
+    let resp = match cursor_chat_stream_with_retry(
+        &state,
+        &name,
+        &cwd,
+        &api_key,
+        model.as_str(),
+        mode.as_str(),
+        prompt,
+    )
+    .await
     {
         Ok(r) => r,
-        Err(e) => {
-            state.cursor_sessions.remove(&name);
-            let msg = e.to_string();
-            if let Some(hint) = crate::settings::cursor_agent_error(&msg) {
-                let status = if crate::settings::cursor_auth_error(&msg).is_some() {
-                    StatusCode::UNAUTHORIZED
-                } else {
-                    StatusCode::BAD_REQUEST
-                };
-                return api_error(status, hint);
-            }
-            return api_error(StatusCode::BAD_REQUEST, msg);
-        }
+        Err(resp) => return resp,
     };
 
     let stream = resp.bytes_stream().map(|chunk| {

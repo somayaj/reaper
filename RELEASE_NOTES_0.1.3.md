@@ -1,4 +1,4 @@
-Reaper 0.1.3 (build 424) — macOS split release.
+Reaper 0.1.3 (build 425) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -9,19 +9,19 @@ Reaper 0.1.3 (build 424) — macOS split release.
 
 Drag Reaper.app to Applications, then launch.
 
-### What's new (build 424)
+### What's new (build 425)
 
-- **Rename Symbol (F6):** Renames all occurrences across the project and renames the `.java` file when the class name matches the filename.
-- **File tree rename:** Renaming a Java file updates the class name and all references across the repo.
-- **Find Usages:** Faster text search (no jdtls wait when results exist), 12s timeout, results panel opens immediately with structured file/line rows.
-- **Rename dialog:** In-app modal replaces blocked `window.prompt` in the WebView.
-- **Editor regression:** Find usages/rename harness fixes and expanded refactor tests.
+- **Empty-line inline AI:** Tabnine-style ghost text on blank lines — tries configured LLMs in order (**Cursor agent → Gemini → Claude**), then falls back to LSP/index completions and local context patterns.
+- **Cursor agent chat:** Fixes first-message "session not found" — auto-retries with a fresh session after bridge restarts; chat awaits session warm before sending.
+- **Regression tests:** Inline provider chain and cursor session harness (1293 editor tests).
 
 ### Earlier in 0.1.3
 
-- **Refactoring (all languages):** Find Usages, Rename Symbol, Change All Occurrences, and Format Document.
+- **Rename Symbol (F6):** Renames all occurrences across the project and renames the `.java` file when the class name matches the filename.
+- **File tree rename:** Renaming a Java file updates the class name and all references across the repo.
+- **Find Usages:** Faster text search, 12s timeout, results panel opens immediately.
+- **Refactoring (all languages):** Find Usages, Rename Symbol, Change All, Format Document.
 - **Compiler settings:** Maven and Gradle path overrides in Settings → Compiler.
-- **Build task terminal:** Fixes for build output and spurious connection-failed toasts.
 - **Cursor agent:** Model list filtered to models your API key supports.
 
 **Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run `scripts/eject-reaper-dmgs.sh`.
