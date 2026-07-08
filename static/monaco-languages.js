@@ -5591,18 +5591,11 @@
   const INDEX_COMPLETION_BUDGET_MS = 600;
 
   function fetchCompletionsWithTimeout(helpers, model, position, prefix, timeoutMs = COMPLETION_FETCH_TIMEOUT_MS) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Completions timed out')), timeoutMs);
-      fetchCompletions(helpers, model, position, prefix)
-        .then((items) => {
-          clearTimeout(timer);
-          resolve(items);
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-    });
+    return raceWithTimeout(
+      fetchCompletions(helpers, model, position, prefix),
+      timeoutMs,
+      'Completions timed out',
+    );
   }
 
   const definitionCache = new Map();
@@ -5692,16 +5685,20 @@
     const promise = withNavigationBusy(helpers, 'Go to definition…', async () => {
       try {
         const url = helpers.repoApi(repo, '/workspace/definition');
-        const hit = dirty
-          ? await helpers.api(url, {
+        const fetchOpts = dirty
+          ? {
               method: 'POST',
               body: JSON.stringify({ path, line, column, content }),
-            })
-          : await helpers.api(`${url}?${new URLSearchParams({
-              path,
-              line: String(line),
-              column: String(column),
-            })}`);
+            }
+          : {};
+        const query = dirty
+          ? ''
+          : `?${new URLSearchParams({ path, line: String(line), column: String(column) })}`;
+        const hit = await raceWithTimeout(
+          helpers.api(`${url}${query}`, fetchOpts),
+          DEFINITION_FETCH_TIMEOUT_MS,
+          'Definition lookup timed out',
+        );
         if (!hit?.path) return null;
         if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
         definitionCache.set(cacheKey, hit);
@@ -5770,7 +5767,25 @@
     return hoverInfoHasContent(info) ? info : null;
   }
 
-  async function postWorkspaceLsp(helpers, model, position, endpoint, extra = {}) {
+  const RENAME_FETCH_TIMEOUT_MS = 15000;
+  const DEFINITION_FETCH_TIMEOUT_MS = 12000;
+  const REFERENCES_FETCH_TIMEOUT_MS = 12000;
+
+  function raceWithTimeout(promise, timeoutMs, message = 'Request timed out') {
+    if (!timeoutMs || timeoutMs <= 0) return promise;
+    const schedule = (typeof globalThis !== 'undefined' && typeof globalThis.setTimeout === 'function')
+      ? globalThis.setTimeout
+      : (typeof setTimeout === 'function' ? setTimeout : null);
+    if (!schedule) return promise;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        schedule(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  }
+
+  async function postWorkspaceLsp(helpers, model, position, endpoint, extra = {}, timeoutMs = 0) {
     if (!helpers.repoApi || !helpers.getRepo) return null;
     const repo = helpers.getRepo();
     if (!repo) return null;
@@ -5779,21 +5794,55 @@
     const line = position.lineNumber;
     const column = position.column;
     const content = model.getValue();
-    return helpers.api(helpers.repoApi(repo, endpoint), {
+    const request = helpers.api(helpers.repoApi(repo, endpoint), {
       method: 'POST',
       body: JSON.stringify({ path, line, column, content, ...extra }),
     });
+    if (!timeoutMs) return request;
+    return raceWithTimeout(request, timeoutMs);
+  }
+
+  const REFERENCES_CACHE_MAX = 64;
+  const referencesCache = new Map();
+  const referencesInflight = new Map();
+
+  function referencesCacheKey(repo, path, line, column, content) {
+    return `${repo}|${path}|${line}|${column}|${content.length}|${content.slice(0, 240)}`;
   }
 
   async function lookupReferences(helpers, model, position) {
-    return withNavigationBusy(helpers, 'Finding usages…', async () => {
+    if (!helpers.repoApi || !helpers.getRepo) return [];
+    const repo = helpers.getRepo();
+    if (!repo) return [];
+    const path = resolveEditorPath(helpers, model);
+    if (!path) return [];
+    const line = position.lineNumber;
+    const column = position.column;
+    const content = model.getValue();
+    const cacheKey = referencesCacheKey(repo, path, line, column, content);
+    const cached = referencesCache.get(cacheKey);
+    if (cached) return cached;
+
+    const inflight = referencesInflight.get(cacheKey);
+    if (inflight) return inflight;
+
+    const promise = withNavigationBusy(helpers, 'Finding usages…', async () => {
       try {
-        return await postWorkspaceLsp(helpers, model, position, '/workspace/references') || [];
+        const refs = await postWorkspaceLsp(
+          helpers, model, position, '/workspace/references', {}, REFERENCES_FETCH_TIMEOUT_MS,
+        ) || [];
+        if (referencesCache.size >= REFERENCES_CACHE_MAX) referencesCache.clear();
+        referencesCache.set(cacheKey, refs);
+        return refs;
       } catch (err) {
         console.warn('[ReaperLang] references failed:', err);
         return [];
+      } finally {
+        referencesInflight.delete(cacheKey);
       }
     });
+    referencesInflight.set(cacheKey, promise);
+    return promise;
   }
 
   async function runJavaOrganizeImports(editor, helpers) {
@@ -5823,27 +5872,37 @@
     if (!model || !pos) return;
     const path = resolveEditorPath(helpers, model);
     if (!path) return;
-    return withNavigationBusy(helpers, 'Preparing rename…', async () => {
+    const word = model.getWordAtPosition(pos)?.word || '';
+    if (!word) {
+      helpers.toast?.('Rename not available here', 'info');
+      return;
+    }
+    const newName = helpers.promptRename
+      ? await helpers.promptRename({ title: 'Rename Symbol', subtitle: path, value: word })
+      : window.prompt('Rename to:', word);
+    if (!newName || newName === word) return;
+    return withNavigationBusy(helpers, 'Renaming…', async () => {
       try {
-        const range = await postWorkspaceLsp(helpers, model, pos, '/workspace/prepare-rename');
-        if (!range) {
-          helpers.toast?.('Rename not available here', 'info');
-          return;
-        }
-        const word = model.getWordAtPosition(pos)?.word || '';
-        const newName = window.prompt('Rename to:', word);
-        if (!newName || newName === word) return;
-        const edits = await postWorkspaceLsp(helpers, model, pos, '/workspace/rename', {
-          new_name: newName,
-        });
-        if (!edits?.length) {
+        const result = await postWorkspaceLsp(
+          helpers, model, pos, '/workspace/rename', { new_name: newName }, RENAME_FETCH_TIMEOUT_MS,
+        );
+        const edits = Array.isArray(result) ? result : (result?.edits || []);
+        const pathRename = Array.isArray(result) ? null : result?.path_rename;
+        if (!edits?.length && !pathRename) {
           helpers.toast?.('Rename produced no edits', 'info');
           return;
         }
         const changed = await helpers.applyJavaWorkspaceEdits?.(edits);
+        let pathChanged = false;
+        if (pathRename?.from && pathRename?.to) {
+          pathChanged = await helpers.renameWorkspacePath?.(pathRename.from, pathRename.to, { skipSymbolEdits: true }) === true;
+        }
+        const totalChanged = (changed || 0) + (pathChanged ? 1 : 0);
         helpers.toast?.(
-          changed ? `Renamed to ${newName} (${changed} file${changed === 1 ? '' : 's'})` : 'Rename failed',
-          changed ? 'success' : 'error',
+          totalChanged
+            ? `Renamed to ${newName} (${totalChanged} file${totalChanged === 1 ? '' : 's'})`
+            : 'Rename failed',
+          totalChanged ? 'success' : 'error',
         );
       } catch (err) {
         helpers.toast?.(err?.message || 'Rename failed', 'error');
@@ -5855,9 +5914,15 @@
     const model = editor.getModel();
     const pos = editor.getPosition();
     if (!model || !pos) return;
-    const word = model.getWordAtPosition(pos)?.word || 'symbol';
+    const word = model.getWordAtPosition(pos)?.word || '';
+    if (!word) {
+      helpers.toast?.('Find Usages not available here', 'info');
+      return;
+    }
+    helpers.showJavaReferences?.([], `Usages of ${word}`, { loading: true });
     const refs = await lookupReferences(helpers, model, pos);
     if (!refs.length) {
+      helpers.hideJavaReferences?.();
       helpers.showNavigationResult?.('No usages found', 'info');
       helpers.toast?.('No usages found', 'info');
       return;
@@ -9132,8 +9197,7 @@
       keybindings: [
         monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyG,
       ],
-      contextMenuGroupId: 'modification',
-      contextMenuOrder: 1.4,
+      // Context menu: use Monaco's editor.action.changeAll (same behavior).
       run: () => editor.getAction('editor.action.changeAll')?.run(),
     });
 
@@ -9157,7 +9221,7 @@
     editor.addAction({
       id: 'reaper.renameSymbol',
       label: 'Rename Symbol',
-      keybindings: [monaco.KeyMod.Shift | monaco.KeyCode.F6],
+      keybindings: [monaco.KeyCode.F6],
       contextMenuGroupId: 'navigation',
       contextMenuOrder: 3.0,
       run: () => runRename(editor, helpers),

@@ -103,6 +103,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/api/repos/{name}/workspace/mkdir", post(workspace_mkdir))
         .route("/api/repos/{name}/workspace/reveal", post(workspace_reveal))
+        .route("/api/repos/{name}/workspace/rename-path", post(workspace_rename_path))
         .route("/api/repos/{name}/workspace/status", get(workspace_status))
         .route("/api/repos/{name}/workspace/diff", get(workspace_diff))
         .route("/api/repos/{name}/workspace/conflict", get(conflict_stages_handler))
@@ -600,6 +601,40 @@ async fn delete_workspace_file(
     };
     match workspace::delete_path(&ws, &q.path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenamePathRequest {
+    path: String,
+    new_path: String,
+    #[serde(default)]
+    plan_only: bool,
+}
+
+async fn workspace_rename_path(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RenamePathRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let from = body.path.trim();
+    let to = body.new_path.trim();
+    if from.is_empty() || to.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, anyhow::anyhow!("path required"));
+    }
+    if body.plan_only {
+        match workspace::rename_path_symbol_plan(&ws, from, to) {
+            Ok(plan) => return Json(plan).into_response(),
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+        }
+    }
+    match workspace::rename_path(&ws, from, to) {
+        Ok(()) => Json(serde_json::json!({ "path": to })).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }

@@ -360,6 +360,98 @@ pub fn delete_path(ws: &Path, rel_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn java_top_level_type_line(content: &str, type_name: &str) -> Option<(u32, u32)> {
+    for (idx, line_text) in content.lines().enumerate() {
+        let line = (idx + 1) as u32;
+        if java_ecosystem::java_class_simple_name_at_line(content, line).as_deref() != Some(type_name) {
+            continue;
+        }
+        let col = column_of_word(line_text, type_name)?;
+        return Some((line, col));
+    }
+    None
+}
+
+fn java_file_tree_symbol_edits(
+    ws: &Path,
+    from_rel: &str,
+    to_rel: &str,
+) -> Result<Vec<FileTextEdits>> {
+    if !is_java_source_path(from_rel) || !is_java_source_path(to_rel) {
+        return Ok(Vec::new());
+    }
+    let old_name = std::path::Path::new(from_rel)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let new_name = std::path::Path::new(to_rel)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if old_name.is_empty() || new_name.is_empty() || old_name == new_name {
+        return Ok(Vec::new());
+    }
+    if !is_valid_java_identifier(&old_name) || !is_valid_java_identifier(&new_name) {
+        return Ok(Vec::new());
+    }
+    let from_abs = safe_join(ws, from_rel)?;
+    if !from_abs.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&from_abs)?;
+    let Some((line, column)) = java_top_level_type_line(&content, &old_name) else {
+        return Ok(Vec::new());
+    };
+    if java_ecosystem::java_class_simple_name_at_line(&content, line).as_deref()
+        != Some(old_name.as_str())
+    {
+        return Ok(Vec::new());
+    }
+    Ok(rename_word_fallback(
+        ws, from_rel, line, column, &content, &new_name,
+    ))
+}
+
+/// Symbol edits for renaming a Java file whose top-level type matches the file stem.
+pub fn rename_path_symbol_plan(
+    ws: &Path,
+    from_rel: &str,
+    to_rel: &str,
+) -> Result<WorkspaceRenameResult> {
+    let from_rel = from_rel.replace('\\', "/");
+    let to_rel = to_rel.replace('\\', "/");
+    let edits = java_file_tree_symbol_edits(ws, &from_rel, &to_rel)?;
+    Ok(WorkspaceRenameResult {
+        edits,
+        path_rename: Some(PathRename {
+            from: from_rel,
+            to: to_rel,
+        }),
+    })
+}
+
+pub fn rename_path(ws: &Path, from_rel: &str, to_rel: &str) -> Result<()> {
+    let from = safe_join(ws, from_rel)?;
+    let to = safe_join(ws, to_rel)?;
+    if !from.exists() {
+        bail!("path not found");
+    }
+    if to.exists() {
+        bail!("destination already exists");
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&from, &to).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            from.display(),
+            to.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn create_dir(ws: &Path, rel_path: &str) -> Result<()> {
     let path = safe_join(ws, rel_path)?;
     if path.exists() {
@@ -1152,7 +1244,9 @@ pub use quick_fix::{
     suggest_local_quick_fixes,
 };
 pub use jdtls::JdtlsCodeAction;
-pub use lsp::{FileTextEdits, ReferenceLocation, RenameRange, SignatureHelp};
+pub use lsp::{
+    FileTextEdits, PathRename, ReferenceLocation, RenameRange, SignatureHelp, WorkspaceRenameResult,
+};
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
 pub fn ensure_developer_path() {
@@ -1457,9 +1551,11 @@ pub fn find_definition_with_content(
                 return Ok(Some(hit));
             }
         }
-        if let Some(hit) = jdtls::find_definition(ws, from_path, line, column, &content)? {
-            if classpath::definition_path_is_openable(ws, &hit.path) {
-                return Ok(Some(hit));
+        if jdtls::workspace_ready(ws) {
+            if let Some(hit) = jdtls::find_definition(ws, from_path, line, column, &content)? {
+                if classpath::definition_path_is_openable(ws, &hit.path) {
+                    return Ok(Some(hit));
+                }
             }
         }
     }
@@ -1487,19 +1583,28 @@ pub fn workspace_references(
     content: &str,
 ) -> Result<Vec<ReferenceLocation>> {
     if is_java_source_path(from_path) {
-        let jdtls_refs = jdtls::find_references(ws, from_path, line, column, content)?;
         let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
-        return Ok(merge_reference_locations(jdtls_refs, fallback_refs));
+        if !fallback_refs.is_empty() {
+            return Ok(fallback_refs);
+        }
+        if jdtls::workspace_ready(ws) {
+            return jdtls::find_references(ws, from_path, line, column, content);
+        }
+        return Ok(Vec::new());
     }
     if languages::is_c_like_path(from_path) {
-        let refs = clangd::find_references(ws, from_path, line, column, content)?;
         let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
-        return Ok(merge_reference_locations(refs, fallback_refs));
+        if !fallback_refs.is_empty() {
+            return Ok(fallback_refs);
+        }
+        return clangd::find_references(ws, from_path, line, column, content);
     }
     if ruby_nav::is_ruby_path(from_path) {
-        let refs = solargraph::find_references(ws, from_path, line, column, content)?;
         let fallback_refs = find_word_references_fallback(ws, from_path, line, column, content);
-        return Ok(merge_reference_locations(refs, fallback_refs));
+        if !fallback_refs.is_empty() {
+            return Ok(fallback_refs);
+        }
+        return solargraph::find_references(ws, from_path, line, column, content);
     }
     Ok(find_word_references_fallback(ws, from_path, line, column, content))
 }
@@ -1596,6 +1701,16 @@ fn file_matches_reference_scope(from_path: &str, candidate: &str) -> bool {
     languages::language_for_path(from_path) == languages::language_for_path(candidate)
 }
 
+fn workspace_relative_path(ws: &Path, path: &Path) -> String {
+    let ws_canon = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    let path_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path_canon
+        .strip_prefix(&ws_canon)
+        .unwrap_or(&path_canon)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 fn scan_word_references(
     ws: &Path,
     dir: &Path,
@@ -1617,11 +1732,7 @@ fn scan_word_references(
             scan_word_references(ws, &path, from_path, word, out);
             continue;
         }
-        let rel = path
-            .strip_prefix(ws)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = workspace_relative_path(ws, &path);
         if should_skip_search_path(&rel) || !file_matches_reference_scope(from_path, &rel) {
             continue;
         }
@@ -1697,7 +1808,11 @@ pub fn workspace_prepare_rename(
     column: u32,
     content: &str,
 ) -> Result<Option<RenameRange>> {
-    if is_java_source_path(from_path) {
+    // Word fallback is instant; jdtls/clangd prepareRename can block on cold start.
+    if let Some(range) = prepare_rename_word_fallback(content, line, column) {
+        return Ok(Some(range));
+    }
+    if is_java_source_path(from_path) && jdtls::workspace_ready(ws) {
         if let Some(range) = jdtls::prepare_rename(ws, from_path, line, column, content)? {
             return Ok(Some(range));
         }
@@ -1707,7 +1822,59 @@ pub fn workspace_prepare_rename(
             return Ok(Some(range));
         }
     }
-    Ok(prepare_rename_word_fallback(content, line, column))
+    Ok(None)
+}
+
+fn is_valid_java_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// When renaming a Java top-level type whose name matches the file stem, also rename `.java`.
+fn java_class_file_rename_candidate(
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    new_name: &str,
+) -> Option<PathRename> {
+    if !is_java_source_path(from_path) {
+        return None;
+    }
+    let new_name = new_name.trim();
+    if new_name.is_empty() || !is_valid_java_identifier(new_name) {
+        return None;
+    }
+    let old_name = symbols::word_at(content, line, column)?;
+    let path = std::path::Path::new(from_path);
+    let stem = path.file_stem()?.to_string_lossy();
+    if stem != old_name {
+        return None;
+    }
+    let class_on_line = java_ecosystem::java_class_simple_name_at_line(content, line)?;
+    if class_on_line != old_name {
+        return None;
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let new_rel = if parent.as_os_str().is_empty() {
+        format!("{new_name}.java")
+    } else {
+        format!(
+            "{}/{}.java",
+            parent.to_string_lossy().replace('\\', "/"),
+            new_name
+        )
+    };
+    Some(PathRename {
+        from: from_path.replace('\\', "/"),
+        to: new_rel,
+    })
 }
 
 pub fn workspace_rename(
@@ -1717,24 +1884,39 @@ pub fn workspace_rename(
     column: u32,
     content: &str,
     new_name: &str,
-) -> Result<Vec<FileTextEdits>> {
-    if is_java_source_path(from_path) {
+) -> Result<WorkspaceRenameResult> {
+    let path_rename = java_class_file_rename_candidate(from_path, line, column, content, new_name);
+    // Text fallback finds all word occurrences across the build; jdtls rename can
+    // return partial edits or block while indexing.
+    let fallback = rename_word_fallback(ws, from_path, line, column, content, new_name);
+    if !fallback.is_empty() {
+        return Ok(WorkspaceRenameResult {
+            edits: fallback,
+            path_rename,
+        });
+    }
+    if is_java_source_path(from_path) && jdtls::workspace_ready(ws) {
         let edits = jdtls::rename_symbol(ws, from_path, line, column, content, new_name)?;
         if !edits.is_empty() {
-            return Ok(edits);
+            return Ok(WorkspaceRenameResult {
+                edits,
+                path_rename,
+            });
         }
     }
     if languages::is_c_like_path(from_path) {
         let edits = clangd::rename_symbol(ws, from_path, line, column, content, new_name)?;
         if !edits.is_empty() {
-            return Ok(edits);
+            return Ok(WorkspaceRenameResult {
+                edits,
+                path_rename: None,
+            });
         }
     }
-    let fallback = rename_word_fallback(ws, from_path, line, column, content, new_name);
-    if !fallback.is_empty() {
-        return Ok(fallback);
-    }
-    Ok(Vec::new())
+    Ok(WorkspaceRenameResult {
+        edits: Vec::new(),
+        path_rename: None,
+    })
 }
 
 fn column_of_word(line: &str, word: &str) -> Option<u32> {
@@ -1773,7 +1955,7 @@ pub fn java_rename(
     column: u32,
     content: &str,
     new_name: &str,
-) -> Result<Vec<FileTextEdits>> {
+) -> Result<WorkspaceRenameResult> {
     workspace_rename(ws, from_path, line, column, content, new_name)
 }
 
@@ -2130,6 +2312,134 @@ mod path_tests {
         assert_eq!(ahead, 0);
         assert_eq!(behind, 0);
         assert_eq!(tracking.as_deref(), Some("upstream/main"));
+    }
+
+    #[test]
+    fn workspace_prepare_rename_java_returns_instant_word_range() {
+        let root =
+            std::env::temp_dir().join(format!("reaper-prepare-rename-java-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let content = "public class GatewayController {\n}\n";
+        std::fs::write(root.join("GatewayController.java"), content).unwrap();
+        let range = workspace_prepare_rename(&root, "GatewayController.java", 1, 14, content)
+            .expect("prepare rename")
+            .expect("word range");
+        assert_eq!(range.line, 1);
+        assert_eq!(range.column, 14);
+        assert_eq!(range.end_line, 1);
+        assert_eq!(range.end_column, 14 + "GatewayController".len() as u32);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_rename_java_uses_text_fallback_when_jdtls_cold() {
+        let root =
+            std::env::temp_dir().join(format!("reaper-rename-java-cold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gateway = "public class GatewayController {\n    int gateway;\n}\n";
+        let service = "public class Service {\n    GatewayController controller;\n}\n";
+        std::fs::write(root.join("GatewayController.java"), gateway).unwrap();
+        std::fs::write(root.join("Service.java"), service).unwrap();
+        let result = workspace_rename(&root, "GatewayController.java", 1, 14, gateway, "ApiGateway")
+            .expect("rename");
+        let edits = result.edits;
+        assert_eq!(edits.len(), 2);
+        assert!(
+            edits.iter().any(|e| e.path.ends_with("GatewayController.java")),
+            "gateway file edits: {:?}",
+            edits.iter().map(|e| &e.path).collect::<Vec<_>>(),
+        );
+        assert!(
+            edits.iter().any(|e| e.path.ends_with("Service.java")),
+            "service file edits: {:?}",
+            edits.iter().map(|e| &e.path).collect::<Vec<_>>(),
+        );
+        let gateway_edits = edits
+            .iter()
+            .find(|e| e.path.ends_with("GatewayController.java"))
+            .expect("gateway edits");
+        assert!(
+            gateway_edits
+                .edits
+                .iter()
+                .any(|e| e.text == "ApiGateway"),
+            "class name renamed"
+        );
+        let path_rename = result.path_rename.expect("java class rename should rename file");
+        assert_eq!(path_rename.from, "GatewayController.java");
+        assert_eq!(path_rename.to, "ApiGateway.java");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_rename_java_skips_file_rename_for_reference_in_other_file() {
+        let root = std::env::temp_dir().join(format!("reaper-rename-java-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gateway = "public class GatewayController {\n}\n";
+        let service = "public class Service {\n    GatewayController controller;\n}\n";
+        std::fs::write(root.join("GatewayController.java"), gateway).unwrap();
+        std::fs::write(root.join("Service.java"), service).unwrap();
+        let result = workspace_rename(&root, "Service.java", 2, 5, service, "ApiGateway")
+            .expect("rename");
+        assert!(!result.edits.is_empty());
+        assert!(result.path_rename.is_none(), "reference rename must not rename unrelated file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_path_symbol_plan_updates_references_for_java_file() {
+        let root =
+            std::env::temp_dir().join(format!("reaper-rename-path-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gateway = "public class GatewayController {\n}\n";
+        let service = "public class Service {\n    GatewayController controller;\n}\n";
+        std::fs::write(root.join("GatewayController.java"), gateway).unwrap();
+        std::fs::write(root.join("Service.java"), service).unwrap();
+        let plan = rename_path_symbol_plan(&root, "GatewayController.java", "ApiGateway.java")
+            .expect("plan");
+        assert_eq!(plan.edits.len(), 2);
+        assert!(
+            plan.edits.iter().any(|e| e.path.ends_with("Service.java")),
+            "service references should be updated"
+        );
+        assert_eq!(
+            plan.path_rename.as_ref().map(|p| p.to.as_str()),
+            Some("ApiGateway.java")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_references_java_uses_text_fallback_when_jdtls_cold() {
+        let root =
+            std::env::temp_dir().join(format!("reaper-refs-java-cold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let gateway = "public class GatewayController {\n}\n";
+        let service = "public class Service {\n    GatewayController controller;\n}\n";
+        std::fs::write(root.join("GatewayController.java"), gateway).unwrap();
+        std::fs::write(root.join("Service.java"), service).unwrap();
+        let refs = workspace_references(&root, "GatewayController.java", 1, 14, gateway)
+            .expect("references");
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.path.ends_with("Service.java")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_path_moves_file_within_workspace() {
+        let root = std::env::temp_dir().join(format!("reaper-rename-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GatewayController.java"), "class GatewayController {}\n").unwrap();
+        rename_path(&root, "GatewayController.java", "ApiGateway.java").expect("rename");
+        assert!(!root.join("GatewayController.java").exists());
+        assert!(root.join("ApiGateway.java").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

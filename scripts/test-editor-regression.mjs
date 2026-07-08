@@ -289,6 +289,10 @@ function loadEditorBundles(monaco) {
   const sandbox = {
     monaco,
     window: { ReaperLang: {} },
+    globalThis: null,
+    // No-op timer: provider tests must not fire timeouts synchronously (breaks raceWithTimeout).
+    setTimeout: (_fn, _ms = 0) => 1,
+    clearTimeout: () => {},
     URLSearchParams,
     document: {
       querySelector: () => ({ content: { trim: () => fs.readFileSync(path.join(STATIC, 'BUILD'), 'utf8').trim() } }),
@@ -300,6 +304,7 @@ function loadEditorBundles(monaco) {
     require: undefined,
     console,
   };
+  sandbox.globalThis = sandbox;
 
   vm.createContext(sandbox);
   for (const file of ['reaper-lang-core.js', 'monaco-languages.js']) {
@@ -2937,7 +2942,20 @@ function testLongRunningTaskBusyUi() {
   ok(appSrc.includes('runWithNavigationBusy,'), 'navigation busy helper wired to editor features');
   ok(langSrc.includes('withNavigationBusy') && langSrc.includes('Go to definition…'), 'definition lookup shows nav spinner');
   ok(langSrc.includes('Finding usages…'), 'find usages shows nav spinner');
-  ok(langSrc.includes('Preparing rename…'), 'rename shows nav spinner');
+  ok(langSrc.includes('Renaming…'), 'rename shows nav spinner');
+  ok(appSrc.includes("treeContextMenuItem('rename', 'Rename…')"), 'file tree context menu has rename');
+  ok(appSrc.includes('/workspace/rename-path') && appSrc.includes('renameTreePath'), 'file tree rename wired to API');
+  ok(appSrc.includes('plan_only: true'), 'file tree rename plans symbol edits before move');
+  ok(appSrc.includes('skipSymbolEdits'), 'symbol rename skips duplicate file-tree symbol pass');
+  ok(langSrc.includes('REFERENCES_FETCH_TIMEOUT_MS'), 'find usages has fetch timeout');
+  ok(langSrc.includes('referencesCache'), 'find usages caches recent lookups');
+  const runFindUsagesBody = extractFunctionBody(langSrc, 'runFindUsages');
+  ok(runFindUsagesBody.includes('loading: true'), 'find usages opens panel immediately while searching');
+  ok(appSrc.includes('javaReferencesLoading'), 'find usages panel has loading state');
+  ok(appSrc.includes('ij-references-file'), 'find usages shows file and line in structured rows');
+  ok(appSrc.includes('scrollTop = 0'), 'find usages resets scroll position on each search');
+  ok(appSrc.includes('showRenamePrompt') && appSrc.includes('rename-prompt-submit'), 'rename uses styled modal dialog');
+  ok(appSrc.includes('resolveWorkspaceEditPath'), 'rename edits resolve tab paths consistently');
 }
 
 function testAppPerformanceGuards() {
@@ -3214,8 +3232,9 @@ async function main() {
     const langSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
     const modRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/mod.rs'), 'utf8');
     const symbolsRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/symbols.rs'), 'utf8');
+    const jdtlsRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/jdtls.rs'), 'utf8');
     const refactorHarness = await import(path.join(ROOT, 'scripts/lib/refactor-harness.mjs'));
-    refactorHarness.testRefactorRegression(appSrc, langSrc, modRsSrc, symbolsRsSrc, ok);
+    refactorHarness.testRefactorRegression(appSrc, langSrc, modRsSrc, symbolsRsSrc, ok, jdtlsRsSrc);
   }
 
   section('Java member completion + tab close regression');

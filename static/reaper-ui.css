@@ -3665,7 +3665,8 @@ main { background: var(--ij-bg); }
 /* ── Go to Class ───────────────────────────────────────── */
 
 #goto-class-overlay,
-#goto-line-overlay {
+#goto-line-overlay,
+#java-references-overlay {
   align-items: flex-start;
   padding-top: 12vh;
   background: rgba(0, 0, 0, 0.55);
@@ -3785,6 +3786,53 @@ main { background: var(--ij-bg); }
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  color: var(--ij-text-dim);
+  padding: 2px 6px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+}
+
+#java-references-results {
+  max-height: min(20rem, 50vh);
+  overflow: auto;
+}
+
+.ij-references-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+}
+
+.ij-references-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ij-references-file {
+  font-weight: 600;
+  color: var(--ij-text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-references-path {
+  font-size: 11px;
+  color: var(--ij-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-references-loc {
+  flex-shrink: 0;
+  font-family: var(--ij-mono);
+  font-size: 11px;
   color: var(--ij-text-dim);
   padding: 2px 6px;
   border: 1px solid var(--ij-border);

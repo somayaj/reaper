@@ -4887,7 +4887,7 @@ const PALETTE_COMMANDS = [
   { id: 'save', label: 'Save', kbd: '⌘S', run: saveFile, needsTab: true, needsDirty: true },
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
   { id: 'find-usages', label: 'Find Usages', kbd: 'Alt+F7', run: () => runEditorMonacoAction('reaper.findUsages'), needsTab: true },
-  { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'Shift+F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
+  { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
   { id: 'change-all', label: 'Change All Occurrences', kbd: '⌘⌃G', run: () => runEditorMonacoAction('reaper.changeAllOccurrences'), needsTab: true },
   { id: 'run', label: 'Run', kbd: 'F5', run: runActive, needsRun: true },
   { id: 'commit', label: 'Commit…', run: () => switchPanel('git'), needsRepo: true },
@@ -5005,26 +5005,50 @@ function hideGoToClass() {
 
 let javaReferencesHits = [];
 let javaReferencesIndex = 0;
+let javaReferencesLoading = false;
 
 function hideJavaReferences() {
   $('#java-references-overlay')?.classList.remove('open');
   javaReferencesHits = [];
   javaReferencesIndex = 0;
+  javaReferencesLoading = false;
+}
+
+function formatReferenceHit(hit) {
+  const path = String(hit?.path || '');
+  const file = path.split('/').pop() || path || 'file';
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const line = Math.max(1, Number(hit?.line) || 1);
+  const column = Math.max(1, Number(hit?.column) || 1);
+  return { file, pathLabel: dir || path, loc: `${line}:${column}` };
 }
 
 function renderJavaReferencesHits() {
   const el = $('#java-references-results');
   if (!el) return;
+  el.scrollTop = 0;
+  if (javaReferencesLoading) {
+    el.innerHTML = '<div class="ij-palette-empty px-3 py-2 text-xs text-gray-500">Searching…</div>';
+    return;
+  }
   if (!javaReferencesHits.length) {
     el.innerHTML = '<div class="ij-palette-empty px-3 py-2 text-xs text-gray-500">No usages found</div>';
     return;
   }
   el.innerHTML = javaReferencesHits.map((hit, i) => {
     const active = i === javaReferencesIndex ? ' active' : '';
-    const loc = `${hit.path}:${hit.line}:${hit.column}`;
-    return `<button type="button" class="ij-palette-item${active}" data-ref-idx="${i}"><span class="ij-palette-item-label">${escapeHtml(loc)}</span></button>`;
+    const { file, pathLabel, loc } = formatReferenceHit(hit);
+    return `<button type="button" class="ij-references-item ij-palette-item${active}" data-ref-idx="${i}">
+      <span class="ij-references-main">
+        <span class="ij-references-file">${escapeHtml(file)}</span>
+        <span class="ij-references-path">${escapeHtml(pathLabel)}</span>
+      </span>
+      <span class="ij-references-loc">${escapeHtml(loc)}</span>
+    </button>`;
   }).join('');
-  el.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  if (javaReferencesIndex > 0) {
+    el.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 async function openJavaReferenceHit(hit) {
@@ -5033,7 +5057,12 @@ async function openJavaReferenceHit(hit) {
   await openFileAt(hit.path, hit.line || 1, hit.column || 1);
 }
 
-function showJavaReferences(refs, title) {
+function showJavaReferences(refs, title, { loading = false } = {}) {
+  closeAllMenus();
+  hidePalette();
+  hideSearchEverywhere();
+  hideGoToClass();
+  javaReferencesLoading = loading;
   javaReferencesHits = Array.isArray(refs) ? refs : [];
   javaReferencesIndex = 0;
   const heading = $('#java-references-title');
@@ -5066,31 +5095,40 @@ function applyTextEditsToLines(lines, edits) {
   return lines.join('\n');
 }
 
+function resolveWorkspaceEditPath(editPath) {
+  const norm = workspaceExplorerPath(editPath);
+  if (!norm) return editPath;
+  if (state.activeTab && workspaceExplorerPath(state.activeTab) === norm) return state.activeTab;
+  const openTab = state.tabs.find((t) => workspaceExplorerPath(t) === norm);
+  return openTab || norm;
+}
+
 async function applyJavaWorkspaceEdits(fileEdits) {
   if (!state.repo || !Array.isArray(fileEdits) || !fileEdits.length) return 0;
   let changed = 0;
   for (const batch of fileEdits) {
-    const path = batch.path;
     const edits = batch.edits || [];
-    if (!path || !edits.length) continue;
-    if (path === state.activeTab && state.editor) {
+    if (!batch.path || !edits.length) continue;
+    const tabPath = resolveWorkspaceEditPath(batch.path);
+    const apiPath = workspaceExplorerPath(batch.path) || batch.path;
+    if (tabPath === state.activeTab && state.editor) {
       const lines = state.editor.getValue().split('\n');
       const next = applyTextEditsToLines(lines, edits);
       state.suppressEditorChange = true;
       state.editor.setValue(next);
       state.suppressEditorChange = false;
-      state.tabContents.set(path, next);
-      state.dirty.add(path);
+      state.tabContents.set(tabPath, next);
+      state.dirty.add(tabPath);
       updateSaveButton();
       renderTabs();
       await saveFile({ silent: true, skipProjectReload: true });
       changed += 1;
       continue;
     }
-    let content = state.tabContents.get(path);
+    let content = state.tabContents.get(tabPath);
     if (content == null) {
       try {
-        const res = await api(repoApi(state.repo, `/workspace/file?${new URLSearchParams({ path })}`));
+        const res = await api(repoApi(state.repo, `/workspace/file?${new URLSearchParams({ path: apiPath })}`));
         content = res?.content ?? '';
       } catch {
         continue;
@@ -5100,10 +5138,10 @@ async function applyJavaWorkspaceEdits(fileEdits) {
     try {
       await api(repoApi(state.repo, '/workspace/file'), {
         method: 'PUT',
-        body: JSON.stringify({ path, content: next }),
+        body: JSON.stringify({ path: apiPath, content: next }),
       });
-      state.tabContents.set(path, next);
-      state.dirty.delete(path);
+      state.tabContents.set(tabPath, next);
+      state.dirty.delete(tabPath);
       changed += 1;
     } catch { /* skip */ }
   }
@@ -5210,6 +5248,62 @@ function updateGoToLinePreview() {
 
 function hideGoToLine() {
   $('#goto-line-overlay')?.classList.remove('open');
+}
+
+let renamePromptResolver = null;
+
+function renamePromptIsOpen() {
+  const overlay = $('#rename-prompt-overlay');
+  return overlay && !overlay.classList.contains('hidden');
+}
+
+function showRenamePrompt({ title = 'Rename', subtitle = '', value = '' } = {}) {
+  return new Promise((resolve) => {
+    if (renamePromptResolver) {
+      renamePromptResolver(null);
+      renamePromptResolver = null;
+    }
+    renamePromptResolver = resolve;
+    closeAllMenus();
+    hidePalette();
+    const overlay = $('#rename-prompt-overlay');
+    const input = $('#rename-prompt-input');
+    const titleEl = $('#rename-prompt-title');
+    const subtitleEl = $('#rename-prompt-subtitle');
+    const submitBtn = $('#rename-prompt-submit');
+    if (titleEl) titleEl.textContent = title;
+    if (subtitleEl) {
+      subtitleEl.textContent = subtitle;
+      subtitleEl.classList.toggle('hidden', !subtitle);
+    }
+    if (submitBtn) {
+      submitBtn.textContent = title.toLowerCase().includes('symbol') ? 'Rename Symbol' : 'Rename';
+    }
+    if (input) {
+      input.value = value;
+      overlay?.classList.remove('hidden');
+      overlay?.classList.add('flex');
+      setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 30);
+    }
+  });
+}
+
+function hideRenamePrompt(result = null) {
+  const overlay = $('#rename-prompt-overlay');
+  overlay?.classList.add('hidden');
+  overlay?.classList.remove('flex');
+  const resolve = renamePromptResolver;
+  renamePromptResolver = null;
+  if (resolve) resolve(result);
+}
+
+function submitRenamePrompt() {
+  const input = $('#rename-prompt-input');
+  const value = input?.value?.trim() ?? '';
+  hideRenamePrompt(value || null);
 }
 
 function parseGoToLineInput(raw, maxLine) {
@@ -5993,6 +6087,27 @@ function bindGoToLine() {
   $('#goto-line-overlay')?.addEventListener('click', (e) => {
     if (e.target === $('#goto-line-overlay')) hideGoToLine();
   });
+}
+
+function bindRenamePrompt() {
+  $('#rename-prompt-cancel')?.addEventListener('click', () => hideRenamePrompt(null));
+  $('#rename-prompt-submit')?.addEventListener('click', () => submitRenamePrompt());
+  $('#rename-prompt-input')?.addEventListener('keydown', (e) => {
+    if (!renamePromptIsOpen()) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideRenamePrompt(null);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitRenamePrompt();
+    }
+  });
+  $('#rename-prompt-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#rename-prompt-overlay')) hideRenamePrompt(null);
+  });
+  $('#rename-prompt-overlay .glass')?.addEventListener('click', (e) => e.stopPropagation());
 }
 
 function bindBranchPicker() {
@@ -9173,7 +9288,10 @@ function initEditor() {
       },
       getDbSchema: () => state.dbSchema,
       showJavaReferences,
+      hideJavaReferences,
       applyJavaWorkspaceEdits,
+      renameWorkspacePath,
+      promptRename: showRenamePrompt,
     });
       setCompleteDebugStatus('editor features OK');
       if (window.__reaperLangBundleError) {
@@ -10654,7 +10772,10 @@ function renderTreeContextMenu(target) {
     `<div class="ij-context-menu-heading">${escapeHtml(profile.label)}</div>`,
   ];
 
-  if (isFile) rows.push(treeContextMenuItem('open', 'Open'));
+  if (isFile) {
+    rows.push(treeContextMenuItem('open', 'Open'));
+    rows.push(treeContextMenuItem('rename', 'Rename…'));
+  }
 
   switch (profile.type) {
     case 'dir':
@@ -10880,6 +11001,88 @@ async function deleteTreePath(path) {
   }
 }
 
+function retargetOpenTabPath(oldRel, newRel) {
+  const normOld = workspaceExplorerPath(oldRel);
+  const normNew = workspaceExplorerPath(newRel);
+  if (!normOld || !normNew) return;
+  for (let i = 0; i < state.tabs.length; i += 1) {
+    if (workspaceExplorerPath(state.tabs[i]) !== normOld) continue;
+    const tab = state.tabs[i];
+    state.tabs[i] = normNew;
+    const content = state.tabContents.get(tab);
+    if (content != null) {
+      state.tabContents.delete(tab);
+      state.tabContents.set(normNew, content);
+    }
+    if (state.dirty.has(tab)) {
+      state.dirty.delete(tab);
+      state.dirty.add(normNew);
+    }
+  }
+  if (state.activeTab && workspaceExplorerPath(state.activeTab) === normOld) {
+    state.activeTab = normNew;
+  }
+  renderTabs();
+  updateSaveButton();
+}
+
+async function renameWorkspacePath(fromRel, toRel, { skipSymbolEdits = false } = {}) {
+  if (!state.repo) return false;
+  const from = workspaceExplorerPath(fromRel);
+  const to = workspaceExplorerPath(toRel);
+  if (!from || !to || from === to) return false;
+  try {
+    if (!skipSymbolEdits) {
+      const plan = await api(repoApi(state.repo, '/workspace/rename-path'), {
+        method: 'POST',
+        body: JSON.stringify({ path: from, new_path: to, plan_only: true }),
+      });
+      const edits = Array.isArray(plan) ? [] : (plan.edits || []);
+      if (edits.length) {
+        await applyJavaWorkspaceEdits(edits);
+      }
+    }
+    await api(repoApi(state.repo, '/workspace/rename-path'), {
+      method: 'POST',
+      body: JSON.stringify({ path: from, new_path: to }),
+    });
+    retargetOpenTabPath(from, to);
+    await refreshTree();
+    await refreshGitStatus();
+    return true;
+  } catch (err) {
+    toast(err.message || 'File rename failed', 'error');
+    return false;
+  }
+}
+
+async function renameTreePath(path) {
+  if (!state.repo) return;
+  const rel = workspaceExplorerPath(path);
+  if (!rel) return;
+  const base = rel.split('/').pop() || rel;
+  const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/') + 1) : '';
+  const newBase = await showRenamePrompt({
+    title: 'Rename file',
+    subtitle: rel,
+    value: base,
+  });
+  if (!newBase || newBase === base) return;
+  if (/[\\/]/.test(newBase) || newBase.trim() !== newBase) {
+    toast('Invalid file name', 'error');
+    return;
+  }
+  const newRel = `${parent}${newBase}`;
+  try {
+    const ok = await renameWorkspacePath(rel, newRel);
+    if (!ok) return;
+    hideTreeContextMenu();
+    toast('Renamed', 'success');
+  } catch (err) {
+    toast(err.message || 'Rename failed', 'error');
+  }
+}
+
 function runTreeContextAction(action) {
   const target = treeContextTarget;
   hideTreeContextMenu();
@@ -10888,6 +11091,9 @@ function runTreeContextAction(action) {
   switch (action) {
     case 'open':
       void openFileFromTree(path);
+      break;
+    case 'rename':
+      void renameTreePath(path);
       break;
     case 'run':
       void runTreeContextRun(path);
@@ -17011,6 +17217,11 @@ function bindEvents() {
         hideGoToLine();
         return;
       }
+      if ($('#rename-prompt-overlay') && renamePromptIsOpen()) {
+        e.preventDefault();
+        hideRenamePrompt(null);
+        return;
+      }
       if ($('#repo-picker-overlay')?.classList.contains('open')) {
         e.preventDefault();
         hideRepoPicker();
@@ -17166,6 +17377,7 @@ async function init() {
   bindGoToClass();
   bindJavaReferences();
   bindGoToLine();
+  bindRenamePrompt();
   bindSearchEverywhere();
   bindBranchPicker();
   bindRepoPicker();

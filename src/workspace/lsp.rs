@@ -32,6 +32,19 @@ pub struct FileTextEdits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRename {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRenameResult {
+    pub edits: Vec<FileTextEdits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_rename: Option<PathRename>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureParameter {
     pub label: String,
     pub documentation: Option<String>,
