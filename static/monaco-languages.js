@@ -7947,7 +7947,7 @@
     const EMPTY_LINE_PAUSE_MS = 100;
     const EMPTY_LINE_AI_DEBOUNCE_MS = 0;
     const INLINE_LOCAL_FETCH_MS = 180;
-    const INLINE_AI_FETCH_MS = 12000;
+    const INLINE_AI_FETCH_MS = 18000;
     let aiInlineSeq = 0;
     let aiInlinePendingKey = '';
     const aiCompleteCache = { key: '', items: [], time: 0 };
@@ -7988,8 +7988,7 @@
     }
 
     function aiInlineFetchEnabled() {
-      // Server reads the Gemini key from settings; client checkbox is the only gate here.
-      return !!helpers.getAiInlineComplete?.();
+      return !!helpers.getAiInlineComplete?.() && !!helpers.getAiInlineProviderAvailable?.();
     }
 
     function aiInlineEnabled() {
@@ -8340,7 +8339,7 @@
         if (context.triggerKind !== monaco.languages.CompletionTriggerKind.Invoke) {
           return { suggestions: [], incomplete: false };
         }
-        if (!helpers.getAiInlineComplete?.() || !helpers.getGeminiConfigured?.()) {
+        if (!helpers.getAiInlineComplete?.() || !helpers.getAiInlineProviderAvailable?.()) {
           return { suggestions: [], incomplete: false };
         }
         const path = helpers.getActivePath?.() || '';
@@ -8904,20 +8903,37 @@
         }
 
         if (isWhitespaceOnlyLine(linePrefix)) {
-          if (!aiOn) {
-            const emptyLsp = await buildLspInlineResult();
-            if (
-              emptyLsp
-              && !shouldSuppressInlineGhost(
-                path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
-              )
-            ) {
-              const meta = inlineCacheMeta(repo, path, position, linePrefix);
-              setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
-              editor._reaperPendingControlSnippet = null;
-              if (token.isCancellationRequested) return { items: [] };
-              return buildInlineItems(model, position, linePrefix, emptyLsp, path);
+          if (aiOn) {
+            try {
+              const aiText = await fetchInlineComplete(model, position, linePrefix, false);
+              if (
+                aiText
+                && !shouldSuppressInlineGhost(
+                  path, linePrefix, aiText, content, position.lineNumber, position.column,
+                )
+                && !token.isCancellationRequested
+              ) {
+                const meta = inlineCacheMeta(repo, path, position, linePrefix);
+                setInlineCache(editor, cacheKey, aiText, '', meta, { refresh: false });
+                editor._reaperPendingControlSnippet = null;
+                return buildInlineItems(model, position, linePrefix, aiText, path);
+              }
+            } catch {
+              // AI inline is best-effort; fall through to LSP/context.
             }
+          }
+          const emptyLsp = await buildLspInlineResult();
+          if (
+            emptyLsp
+            && !shouldSuppressInlineGhost(
+              path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
+            )
+          ) {
+            const meta = inlineCacheMeta(repo, path, position, linePrefix);
+            setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
+            editor._reaperPendingControlSnippet = null;
+            if (token.isCancellationRequested) return { items: [] };
+            return buildInlineItems(model, position, linePrefix, emptyLsp, path);
           }
           const emptyLocal = inferEmptyLineContinuationSuffix(
             path, content, position.lineNumber, linePrefix, javaLevel,
@@ -8934,25 +8950,10 @@
             if (token.isCancellationRequested) return { items: [] };
             return buildInlineItems(model, position, linePrefix, emptyLocal, path);
           }
-          if (aiOn) {
-            const emptyLsp = await buildLspInlineResult();
-            if (
-              emptyLsp
-              && !shouldSuppressInlineGhost(
-                path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
-              )
-            ) {
-              const meta = inlineCacheMeta(repo, path, position, linePrefix);
-              setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
-              editor._reaperPendingControlSnippet = null;
-              if (token.isCancellationRequested) return { items: [] };
-              return buildInlineItems(model, position, linePrefix, emptyLsp, path);
-            }
-          }
-          if (routeAi && aiOn) {
+          if (aiOn && routeAi) {
             scheduleAiInlineFetch();
-            return { items: [] };
           }
+          return { items: [] };
         }
 
         if (shouldPreferLspInlineGhost(path, linePrefix, content, position.lineNumber)) {

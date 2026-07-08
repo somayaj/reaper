@@ -570,6 +570,7 @@ const state = {
   mainView: 'editor',
   conflictPanelHidden: false,
   geminiConfigured: false,
+  anthropicConfigured: false,
   javaLanguageLevel: 17,
   languageContext: null,
   geminiModel: 'gemini-3.5-flash',
@@ -1233,6 +1234,14 @@ function getAiInlineCompleteEnabled() {
   const stored = localStorage.getItem(AI_INLINE_COMPLETE_KEY);
   if (stored === null) return true;
   return stored === '1';
+}
+
+/** Cursor → Gemini → Claude — whichever is configured first. */
+function getAiInlineProviderAvailable() {
+  if (state.cursorConfigured && state.cursorBridgeOk) return true;
+  if (state.geminiConfigured) return true;
+  if (state.anthropicConfigured) return true;
+  return false;
 }
 
 function ensureAiInlineCompleteDefault(enabled) {
@@ -9232,7 +9241,9 @@ function initEditor() {
       isFileDirty: (path) => state.dirty.has(path),
       getJavaSourceOverlays: (excludePath) => collectJavaDiagnosticOverlays(excludePath),
       getAiInlineComplete: () => getAiInlineCompleteEnabled(),
+      getAiInlineProviderAvailable: () => getAiInlineProviderAvailable(),
       getGeminiConfigured: () => state.geminiConfigured,
+      getCursorInlineAvailable: () => state.cursorConfigured && state.cursorBridgeOk,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
       getActiveTabContent: () => {
@@ -16317,6 +16328,7 @@ async function restartBridge() {
     }
     if (cfg.bridge_ok) await loadCursorModels();
     toast(cfg.bridge_ok ? 'Bridge connected' : (cfg.bridge_error || 'Bridge still offline'), cfg.bridge_ok ? 'success' : 'error');
+    if (cfg.bridge_ok && state.repo) await warmCursorSession(state.repo);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -16638,6 +16650,7 @@ async function runAgentChat(prompt, opts = {}) {
     if (def.id === 'cursor') {
       const modelErr = cursorModelStatusError();
       if (modelErr) throw new Error(modelErr);
+      await warmCursorSession(state.repo);
     }
 
     const chatUrl = repoApi(state.repo, def.chatPath);

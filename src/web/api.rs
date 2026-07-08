@@ -2059,6 +2059,7 @@ async fn workspace_inline_complete(
     }
     match git_agent::suggest_inline_completion(
         &state.settings,
+        Some(&state.cursor_bridge),
         &ws,
         body.path.trim(),
         body.line,

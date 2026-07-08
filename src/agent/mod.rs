@@ -183,8 +183,31 @@ pub async fn suggest_commit_message(
     client.suggest_commit_message(&context).await
 }
 
+const INLINE_CURSOR_TIMEOUT: Duration = Duration::from_secs(8);
+const INLINE_GEMINI_TIMEOUT: Duration = Duration::from_secs(6);
+
+const INLINE_COMPLETION_SYSTEM: &str = "You are an IDE inline ghost-text completion engine.\n\
+    The user sees text they already typed, then <CURSOR>, then your output as gray suggestion text.\n\
+    Press Tab to accept. Predict the next character(s), token, expression, statement, or lines.\n\
+    Infer intent from partial typing plus file context — works for every language and construct.\n\
+    RULES:\n\
+    - Output ONLY text to insert at <CURSOR>. Never repeat text before <CURSOR> on the current line.\n\
+    - Complete ANY valid syntax: keywords, identifiers, operators, punctuation (; ) ] } ), strings, \
+      calls, declarations, imports, HTML tags/attributes, CSS properties, SQL clauses, YAML keys, \
+      shell commands, regex, comments, closing delimiters, and multi-line blocks.\n\
+    - For control flow, offer full blocks when appropriate: while (cond) { body }, for loops, \
+      if/else, switch/case, try/catch — indented to match the file.\n\
+    - Prefer the smallest useful completion (even one character) when that finishes the token.\n\
+    - Offer multiple lines only when clearly continuing a block, method body, or unfinished structure.\n\
+    - Match local naming, types, braces, quotes, and indentation.\n\
+    - Use newlines between lines; indent continuation lines consistently.\n\
+    - No markdown, code fences, XML tags, labels, explanations, or reasoning.\n\
+    - Never output thinking, analysis, or commentary — only insertable code/text.\n\
+    - If nothing sensible fits, output nothing.";
+
 pub async fn suggest_inline_completion(
     settings: &SettingsStore,
+    cursor_bridge: Option<&crate::cursor::CursorBridge>,
     ws: &Path,
     path: &str,
     line: u32,
@@ -205,48 +228,159 @@ pub async fn suggest_inline_completion(
         ));
     }
 
-    let prefer_ai =
-        workspace::should_prefer_ai_statement_inline(path, line_prefix, content, line);
-    let local = if prefer_ai {
-        String::new()
-    } else {
-        apply_inline_fallback(ws, path, line, column, content, line_prefix)
-    };
-    if !local.is_empty() {
-        return Ok(local);
-    }
+    let context =
+        workspace::build_inline_completion_context(ws, path, line, column, content, line_prefix);
+    let is_prose = is_inline_prose_path(path);
 
-    if let Some(api_key) = settings.gemini_api_key() {
-        let context =
-            workspace::build_inline_completion_context(ws, path, line, column, content, line_prefix);
-        let client = GeminiClient::new(api_key, settings.gemini_model());
-        if let Ok(raw) = client.suggest_inline_completion(&context).await {
-            let is_prose = matches!(
-                workspace::language_for_path(path),
-                Some(
-                    "markdown" | "plaintext" | "yaml" | "json" | "html" | "xml" | "toml" | "ini"
-                        | "css" | "scss" | "less" | "sql" | "dockerfile" | "makefile" | "cmake"
-                        | "graphql" | "protobuf"
-                )
-            );
-            let normalized = if is_prose {
-                normalize_inline_suggestion_loose(&raw, line_prefix)
-            } else {
-                normalize_inline_suggestion(&raw, line_prefix)
-            };
-            if !normalized.is_empty() {
-                return Ok(normalized);
-            }
-            if !raw.trim().is_empty() && !is_prose {
-                let loose = normalize_inline_suggestion_loose(&raw, line_prefix);
-                if !loose.is_empty() {
-                    return Ok(loose);
-                }
-            }
+    if let Some(bridge) = cursor_bridge {
+        if let Some(text) =
+            try_inline_via_cursor(settings, bridge, ws, &context, line_prefix, is_prose).await
+        {
+            return Ok(text);
         }
     }
 
-    Ok(String::new())
+    if let Some(text) = try_inline_via_gemini(settings, &context, line_prefix, is_prose).await {
+        return Ok(text);
+    }
+
+    if let Some(text) =
+        try_inline_via_anthropic(settings, &context, line_prefix, is_prose).await
+    {
+        return Ok(text);
+    }
+
+    Ok(apply_inline_fallback(
+        ws, path, line, column, content, line_prefix,
+    ))
+}
+
+fn is_inline_prose_path(path: &str) -> bool {
+    matches!(
+        workspace::language_for_path(path),
+        Some(
+            "markdown" | "plaintext" | "yaml" | "json" | "html" | "xml" | "toml" | "ini"
+                | "css" | "scss" | "less" | "sql" | "dockerfile" | "makefile" | "cmake"
+                | "graphql" | "protobuf"
+        )
+    )
+}
+
+fn normalize_inline_from_raw(raw: &str, line_prefix: &str, is_prose: bool) -> Option<String> {
+    let normalized = if is_prose {
+        normalize_inline_suggestion_loose(raw, line_prefix)
+    } else {
+        normalize_inline_suggestion(raw, line_prefix)
+    };
+    if !normalized.is_empty() {
+        return Some(normalized);
+    }
+    if !raw.trim().is_empty() && !is_prose {
+        let loose = normalize_inline_suggestion_loose(raw, line_prefix);
+        if !loose.is_empty() {
+            return Some(loose);
+        }
+    }
+    None
+}
+
+async fn try_inline_via_cursor(
+    settings: &SettingsStore,
+    bridge: &crate::cursor::CursorBridge,
+    ws: &Path,
+    context: &str,
+    line_prefix: &str,
+    is_prose: bool,
+) -> Option<String> {
+    if settings.cursor_api_key().is_none() {
+        return None;
+    }
+    if !bridge.health_cached(Duration::from_secs(5)).await {
+        return None;
+    }
+    let fut = suggest_inline_completion_via_cursor(settings, bridge, ws, context);
+    match timeout(INLINE_CURSOR_TIMEOUT, fut).await {
+        Ok(Ok(raw)) => normalize_inline_from_raw(&raw, line_prefix, is_prose),
+        Ok(Err(e)) => {
+            tracing::debug!("cursor inline completion failed: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                "cursor inline completion timed out after {:?}",
+                INLINE_CURSOR_TIMEOUT
+            );
+            None
+        }
+    }
+}
+
+async fn suggest_inline_completion_via_cursor(
+    settings: &SettingsStore,
+    bridge: &crate::cursor::CursorBridge,
+    ws: &Path,
+    context: &str,
+) -> Result<String> {
+    let api_key = settings
+        .cursor_api_key()
+        .ok_or_else(|| anyhow::anyhow!("cursor not configured"))?;
+    let model = settings.cursor_model();
+    let cwd = ws
+        .canonicalize()
+        .unwrap_or_else(|_| ws.to_path_buf())
+        .display()
+        .to_string();
+    let session_id = bridge
+        .create_session(&cwd, &api_key, &model, "ask")
+        .await?;
+    let prompt = format!("{INLINE_COMPLETION_SYSTEM}\n\n{context}");
+    let raw = match bridge
+        .chat_collect(&session_id, &prompt, Some(model.as_str()), Some("ask"))
+        .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            let _ = bridge.delete_session(&session_id).await;
+            return Err(e);
+        }
+    };
+    let _ = bridge.delete_session(&session_id).await;
+    Ok(raw)
+}
+
+async fn try_inline_via_gemini(
+    settings: &SettingsStore,
+    context: &str,
+    line_prefix: &str,
+    is_prose: bool,
+) -> Option<String> {
+    let api_key = settings.gemini_api_key()?;
+    let client = GeminiClient::new(api_key, settings.gemini_model());
+    let fut = client.suggest_inline_completion(context);
+    match timeout(INLINE_GEMINI_TIMEOUT, fut).await {
+        Ok(Ok(raw)) => normalize_inline_from_raw(&raw, line_prefix, is_prose),
+        Ok(Err(e)) => {
+            tracing::debug!("gemini inline completion failed: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                "gemini inline completion timed out after {:?}",
+                INLINE_GEMINI_TIMEOUT
+            );
+            None
+        }
+    }
+}
+
+async fn try_inline_via_anthropic(
+    _settings: &SettingsStore,
+    _context: &str,
+    _line_prefix: &str,
+    _is_prose: bool,
+) -> Option<String> {
+    // Claude/Anthropic inline — third in chain when API settings land.
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -975,5 +1109,33 @@ mod inline_tests {
         let multi = normalize_inline_suggestion("urn null;\n        log.info(\"ok\");", "        ret");
         assert!(multi.contains("urn null"));
         assert!(multi.contains("log.info"));
+    }
+
+    #[test]
+    fn suggest_inline_completion_prefers_cursor_then_gemini_then_anthropic_then_fallback() {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split("pub async fn suggest_inline_completion")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\npub async fn ").next())
+            .unwrap_or("");
+        let cursor = body.find("try_inline_via_cursor").expect("cursor inline step");
+        let gemini = body.find("try_inline_via_gemini").expect("gemini inline step");
+        let anthropic = body.find("try_inline_via_anthropic").expect("anthropic inline step");
+        let fallback = body
+            .rfind("apply_inline_fallback")
+            .expect("inline LSP fallback");
+        assert!(cursor < gemini);
+        assert!(gemini < anthropic);
+        assert!(anthropic < fallback);
+        assert!(body.contains("if local_only"));
+    }
+
+    #[test]
+    fn normalize_inline_from_raw_accepts_code_and_rejects_prose() {
+        let code = normalize_inline_from_raw("println();", "    ", false);
+        assert_eq!(code.as_deref(), Some("println();"));
+        let prose = normalize_inline_from_raw("Here is the next line", "    ", false);
+        assert!(prose.is_none());
     }
 }
