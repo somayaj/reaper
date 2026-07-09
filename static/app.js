@@ -16905,27 +16905,7 @@ function isFormField(el) {
   return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
 }
 
-function insertTextIntoFormField(el, text) {
-  if (!text || !isFormField(el) || el.disabled || el.readOnly) return false;
-  const start = el.selectionStart;
-  const end = el.selectionEnd;
-  if (start === null || end === null) return false;
-  el.setRangeText(text, start, end, 'end');
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  return true;
-}
-
 function installFormClipboardShortcuts() {
-  document.addEventListener('paste', (e) => {
-    const el = document.activeElement;
-    if (!isFormField(el) || el.disabled || el.readOnly) return;
-    const text = e.clipboardData?.getData('text/plain');
-    if (!text) return;
-    e.preventDefault();
-    e.stopPropagation();
-    insertTextIntoFormField(el, text);
-  }, true);
-
   document.addEventListener('keydown', async (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
     const el = document.activeElement;
@@ -16941,17 +16921,6 @@ function installFormClipboardShortcuts() {
     const start = el.selectionStart;
     const end = el.selectionEnd;
     if (start === null || end === null) return;
-
-    if (key === 'v') {
-      try {
-        const text = await navigator.clipboard.readText();
-        if (!text) return;
-        e.preventDefault();
-        e.stopPropagation();
-        insertTextIntoFormField(el, text);
-      } catch { /* fall back to native Edit menu */ }
-      return;
-    }
 
     if (key === 'c' || key === 'x') {
       if (start === end) return;

@@ -411,30 +411,39 @@ async fn open_workspace(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match workspace::ensure_workspace(&state.config, &name) {
-        Ok(ws) => {
-            if let Err(e) = state.settings.set_last_repo(&name) {
-                tracing::warn!("Could not persist last opened repo {name}: {e:#}");
-            }
-            let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
-            state.project_index_jobs.on_open(&name, &ws);
-            let index_status = state.project_index_jobs.status(&name);
-            let uses_jdtls = workspace::workspace_uses_jdtls(&ws, &profile);
-            let jdtls_ready = workspace::jdtls_workspace_ready(&ws);
-            Json(serde_json::json!({
-                "path": ws.display().to_string(),
-                "profile": profile,
-                "indexing": index_status.state == "running",
-                "jdtls": {
-                    "enabled": workspace::jdtls_enabled(),
-                    "uses": uses_jdtls,
-                    "ready": jdtls_ready,
-                    "warming": workspace::jdtls_enabled() && uses_jdtls && !jdtls_ready,
-                },
-            }))
-            .into_response()
+    let config = Arc::clone(&state.config);
+    let settings = state.settings.clone();
+    let project_index_jobs = Arc::clone(&state.project_index_jobs);
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let ws = workspace::ensure_workspace(&config, &name)?;
+        if let Err(e) = settings.set_last_repo(&name) {
+            tracing::warn!("Could not persist last opened repo {name}: {e:#}");
         }
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+        let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
+        project_index_jobs.on_open(&name, &ws);
+        let index_status = project_index_jobs.status(&name);
+        let uses_jdtls = workspace::workspace_uses_jdtls(&ws, &profile);
+        let jdtls_ready = workspace::jdtls_workspace_ready(&ws);
+        Ok(serde_json::json!({
+            "path": ws.display().to_string(),
+            "profile": profile,
+            "indexing": index_status.state == "running",
+            "jdtls": {
+                "enabled": workspace::jdtls_enabled(),
+                "uses": uses_jdtls,
+                "ready": jdtls_ready,
+                "warming": workspace::jdtls_enabled() && uses_jdtls && !jdtls_ready,
+            },
+        }))
+    })
+    .await
+    {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("workspace open task"),
+        ),
     }
 }
 
@@ -2135,13 +2144,25 @@ async fn project_index_status(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let mut status = state.project_index_jobs.status(&name);
-    if status.state != "running" {
-        if let Ok(ws) = workspace::ensure_workspace(&state.config, &name) {
-            status.needs_refresh = workspace::java_index_needs_refresh(&ws);
+    let config = Arc::clone(&state.config);
+    let project_index_jobs = Arc::clone(&state.project_index_jobs);
+    match tokio::task::spawn_blocking(move || {
+        let mut status = project_index_jobs.status(&name);
+        if status.state != "running" {
+            if let Ok(ws) = workspace::ensure_workspace(&config, &name) {
+                status.needs_refresh = workspace::java_index_needs_refresh(&ws);
+            }
         }
+        status
+    })
+    .await
+    {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("project index status task"),
+        ),
     }
-    Json(status).into_response()
 }
 
 async fn reload_project_index(

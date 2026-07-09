@@ -3320,6 +3320,15 @@ async function main() {
     refactorHarness.testRefactorRegression(appSrc, langSrc, modRsSrc, symbolsRsSrc, ok, jdtlsRsSrc);
   }
 
+  section('Java navigation discovery regression');
+  {
+    const classpathRs = fs.readFileSync(path.join(ROOT, 'src/workspace/classpath.rs'), 'utf8');
+    const modRs = fs.readFileSync(path.join(ROOT, 'src/workspace/mod.rs'), 'utf8');
+    const projectJobsRs = fs.readFileSync(path.join(ROOT, 'src/workspace/project_jobs.rs'), 'utf8');
+    const navHarness = await import(path.join(ROOT, 'scripts/lib/navigation-discovery-harness.mjs'));
+    navHarness.testNavigationDiscoveryRegression(classpathRs, modRs, projectJobsRs, ok);
+  }
+
   section('Java member completion + tab close regression');
   testJavaMemberCompletionPipelineRegression(fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8'));
 

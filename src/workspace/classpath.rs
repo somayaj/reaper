@@ -422,6 +422,7 @@ static LIBRARY_SOURCE_DIRS_CACHE: LazyLock<Mutex<HashMap<String, Vec<PathBuf>>>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NAVIGATION_SOURCES_WARM: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static JDK_WARM_INFLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static INDEX_FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -550,6 +551,16 @@ pub fn index_root_for_path(ws: &Path, from_path: &str) -> Result<Option<PathBuf>
 
 fn gradle_index_source_scope(gradle_root: &Path) -> PathBuf {
     super::gradle::find_gradle_settings_repo_root(gradle_root)
+}
+
+/// Repo root for JDK source extraction (Gradle settings root or Maven reactor parent).
+fn jdk_source_scope(project_root: &Path) -> PathBuf {
+    if super::maven::is_maven_project_root(project_root) {
+        super::maven::find_maven_reactor_root(project_root)
+            .unwrap_or_else(|| project_root.to_path_buf())
+    } else {
+        gradle_index_source_scope(project_root)
+    }
 }
 
 fn merge_warm_status(combined: &mut WarmIndexStatus, index: &JavaIndex, meta: &IndexMeta, cached: bool) {
@@ -4589,6 +4600,73 @@ fn ensure_jdk_navigation_sources(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn jdk_sources_ready(project_root: &Path) -> bool {
+    reaper_source_roots(project_root)
+        .iter()
+        .any(|root| reaper_dir(root).join("java-sources/jdk/.extracted").is_file())
+}
+
+/// Kick off JDK extract in the background when navigation arrives before workspace warm finishes.
+fn spawn_jdk_warm_if_needed(project_root: &Path) {
+    if jdk_sources_ready(project_root) {
+        return;
+    }
+    let scope = jdk_source_scope(project_root);
+    let key = scope
+        .canonicalize()
+        .unwrap_or(scope)
+        .display()
+        .to_string();
+    let Ok(mut guard) = JDK_WARM_INFLIGHT.lock() else {
+        return;
+    };
+    if !guard.insert(key.clone()) {
+        return;
+    }
+    drop(guard);
+    std::thread::spawn(move || {
+        let scope = PathBuf::from(&key);
+        if let Err(e) = ensure_jdk_navigation_sources(&scope) {
+            tracing::debug!("background JDK extract: {e:#}");
+        }
+        if let Ok(mut guard) = JDK_WARM_INFLIGHT.lock() {
+            guard.remove(&key);
+        }
+    });
+}
+
+fn is_jdk_fqcn(fqcn: &str) -> bool {
+    fqcn.starts_with("java.")
+        || fqcn.starts_with("javax.")
+        || fqcn.starts_with("jakarta.")
+        || fqcn.starts_with("jdk.")
+}
+
+/// Extract JDK `src.zip` into `.reaper/java-sources/jdk` for every Java project root (idempotent).
+pub fn warm_jdk_sources(ws: &Path) -> Result<bool> {
+    let roots = find_all_index_roots(ws)?;
+    if roots.is_empty() {
+        return Ok(false);
+    }
+    let mut seen = HashSet::new();
+    let mut any = false;
+    for root in roots {
+        let scope = jdk_source_scope(&root);
+        let key = scope
+            .canonicalize()
+            .unwrap_or_else(|_| scope.clone())
+            .display()
+            .to_string();
+        if !seen.insert(key) {
+            continue;
+        }
+        ensure_jdk_navigation_sources(&scope)?;
+        let jdk = reaper_dir(&scope).join("java-sources/jdk");
+        any |= jdk.join(".extracted").is_file();
+    }
+    Ok(any)
+}
+
 fn ensure_lombok_navigation_stubs(project_root: &Path) -> Result<()> {
     let base = reaper_dir(project_root).join("java-sources/deps/lombok");
     for (simple, fqcn) in WELL_KNOWN_LOMBOK_IMPORTS {
@@ -7159,8 +7237,11 @@ fn resolve_fqcn_from_jdk_files(
     symbol: &str,
     imports: &ImportMap,
 ) -> Option<String> {
-    ensure_jdk_sources_materialized(gradle_root).ok()?;
-    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
+    if !jdk_sources_ready(gradle_root) {
+        spawn_jdk_warm_if_needed(gradle_root);
+        return None;
+    }
+    let jdk = reaper_dir(&jdk_source_scope(gradle_root)).join("java-sources/jdk");
     let mut candidates = Vec::new();
     if let Some(fqcn) = imports.explicit.get(symbol) {
         // Explicit single-type import wins; do not fall through to wildcard homonyms in the JDK.
@@ -7173,32 +7254,45 @@ fn resolve_fqcn_from_jdk_files(
         candidates.push(format!("{prefix}.{symbol}"));
     }
     candidates.push(format!("java.lang.{symbol}"));
+    if is_java_util_simple_type(symbol) {
+        candidates.push(format!("java.util.{symbol}"));
+    }
     candidates.into_iter().find(|fqcn| jdk_source_exists(&jdk, fqcn))
 }
 
-fn resolve_jdk_type_location(
+fn jdk_source_search_dirs(gradle_root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+    for root in reaper_source_roots(gradle_root) {
+        let jdk = reaper_dir(&root).join("java-sources/jdk");
+        if jdk.join(".extracted").is_file() && jdk.is_dir() && seen.insert(jdk.clone()) {
+            dirs.push(jdk);
+        }
+    }
+    dirs
+}
+
+fn resolve_jdk_fqcn_location(
     ws: &Path,
     gradle_root: &Path,
+    fqcn: &str,
     symbol: &str,
-    imports: &ImportMap,
-) -> Result<Option<SymbolLocation>> {
-    let Some(fqcn) = resolve_fqcn_from_jdk_files(gradle_root, symbol, imports) else {
-        return Ok(None);
-    };
+) -> Option<SymbolLocation> {
     let cache_key = format!("{}:{}", gradle_root.display(), fqcn);
     if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
         if let Some(loc) = guard.get(&cache_key) {
-            return Ok(Some(loc.clone()));
+            if !loc.path.ends_with(".jar") {
+                return Some(loc.clone());
+            }
         }
     }
 
-    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
-    if !jdk.join(".extracted").is_file() {
-        let _ = ensure_jdk_navigation_sources(gradle_root);
+    let dirs = jdk_source_search_dirs(gradle_root);
+    if dirs.is_empty() {
+        spawn_jdk_warm_if_needed(gradle_root);
+        return None;
     }
-    let Some(source_path) = find_java_source_for_fqcn(ws, gradle_root, &[jdk], &fqcn) else {
-        return Ok(None);
-    };
+    let source_path = find_java_source_for_fqcn(ws, gradle_root, &dirs, fqcn)?;
     let rel = rel_path_for(ws, &source_path)
         .map(|p| normalize_index_path(ws, gradle_root, &p))
         .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
@@ -7211,13 +7305,20 @@ fn resolve_jdk_type_location(
         line,
         column,
     };
-    if let Ok(mut guard) = JDK_LOCATION_CACHE.lock() {
-        if guard.len() >= DEFINITION_CACHE_MAX {
-            guard.clear();
-        }
-        guard.insert(cache_key, loc.clone());
-    }
-    Ok(Some(loc))
+    cache_fqcn_location(&cache_key, &loc);
+    Some(loc)
+}
+
+fn resolve_jdk_type_location(
+    ws: &Path,
+    gradle_root: &Path,
+    symbol: &str,
+    imports: &ImportMap,
+) -> Result<Option<SymbolLocation>> {
+    let Some(fqcn) = resolve_fqcn_from_jdk_files(gradle_root, symbol, imports) else {
+        return Ok(None);
+    };
+    Ok(resolve_jdk_fqcn_location(ws, gradle_root, &fqcn, symbol))
 }
 
 fn fast_java_lang_location(
@@ -7240,49 +7341,11 @@ fn fast_java_lang_location(
         }
     }
 
+    if !is_java_lang_public_type(symbol) {
+        return Ok(None);
+    }
     let fqcn = format!("java.lang.{symbol}");
-    let cache_key = format!("{}:{}", gradle_root.display(), fqcn);
-    if let Ok(guard) = JDK_LOCATION_CACHE.lock() {
-        if let Some(loc) = guard.get(&cache_key) {
-            return Ok(Some(loc.clone()));
-        }
-    }
-
-    let jdk = reaper_dir(gradle_root).join("java-sources/jdk");
-    if !jdk.join(".extracted").is_file() {
-        return Ok(None);
-    }
-    let rel = format!("java/lang/{symbol}.java");
-    let source_path = ["java.base", ""]
-        .into_iter()
-        .filter_map(|module| {
-            let path = if module.is_empty() {
-                jdk.join(&rel)
-            } else {
-                jdk.join(module).join(&rel)
-            };
-            path.is_file().then_some(path)
-        })
-        .next();
-    let Some(source_path) = source_path else {
-        return Ok(None);
-    };
-
-    let rel_path = rel_path_for(ws, &source_path)
-        .map(|p| normalize_index_path(ws, gradle_root, &p))
-        .unwrap_or_else(|_| normalize_index_path(ws, gradle_root, &source_path.to_string_lossy()));
-    let (line, column) = read_type_line_in_java_source(&source_path, symbol);
-    let loc = SymbolLocation {
-        name: symbol.to_string(),
-        kind: "class".into(),
-        path: rel_path,
-        line,
-        column,
-    };
-    if let Ok(mut guard) = JDK_LOCATION_CACHE.lock() {
-        guard.insert(cache_key, loc.clone());
-    }
-    Ok(Some(loc))
+    Ok(resolve_jdk_fqcn_location(ws, gradle_root, &fqcn, symbol))
 }
 
 fn read_type_line_in_java_source(path: &Path, simple: &str) -> (u32, u32) {
@@ -7817,6 +7880,14 @@ fn resolve_type_by_fqcn(
         }
     }
 
+    if is_jdk_fqcn(fqcn) {
+        if let Some(loc) = resolve_jdk_fqcn_location(ws, root, fqcn, symbol) {
+            return Some(loc);
+        }
+        // JDK not extracted yet — avoid blocking Spring/Maven source downloads on F12.
+        return None;
+    }
+
     if is_library_fqcn(fqcn) {
         if let Some(loc) = resolve_library_type_location(ws, root, fqcn, symbol) {
             cache_fqcn_location(&cache_key, &loc);
@@ -7865,6 +7936,9 @@ fn resolve_library_type_location(
     fqcn: &str,
     symbol: &str,
 ) -> Option<SymbolLocation> {
+    if is_jdk_fqcn(fqcn) {
+        return None;
+    }
     if fqcn.starts_with("lombok.") {
         let _ = ensure_lombok_navigation_stubs(gradle_root);
         invalidate_library_source_dirs_cache(gradle_root);
@@ -8819,6 +8893,317 @@ dependencies {
             .expect("String location");
         assert!(loc.path.contains("String.java"));
         assert_eq!(loc.line, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn warm_jdk_sources_uses_maven_reactor_root() {
+        let ws = std::env::temp_dir().join("reaper-warm-jdk-maven-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("services/app/src/main/java")).unwrap();
+        std::fs::write(
+            ws.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+  <modules><module>services/app</module></modules>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("services/app/pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>app</artifactId>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+
+        assert!(warm_jdk_sources(&ws).expect("warm"));
+        assert!(ws.join(".reaper/java-sources/jdk/.extracted").is_file());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn warm_jdk_sources_reports_materialized_tree() {
+        let ws = std::env::temp_dir().join("reaper-warm-jdk-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        assert!(warm_jdk_sources(&ws).expect("warm"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_java_util_list_from_materialized_jdk_sources() {
+        let ws = std::env::temp_dir().join("reaper-jdk-list-nav-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/util")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.base/java/util/List.java"),
+            "package java.util;\n\npublic interface List<E> {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let java = "package com.example;\n\nimport java.util.List;\n\npublic class App {\n  List<String> names;\n}\n";
+        std::fs::write(ws.join("src/main/java/com/example/App.java"), java).unwrap();
+
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 6, 3, java)
+            .expect("lookup ok")
+            .expect("List location");
+        assert!(hit.path.contains("List.java"));
+        assert_eq!(hit.line, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_java_lang_string_via_find_external_definition() {
+        let ws = std::env::temp_dir().join("reaper-jdk-string-nav-test");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.base/java/lang/String.java"),
+            "package java.lang;\n\npublic final class String {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let java = "package com.example;\n\npublic class App {\n  String name;\n}\n";
+        std::fs::write(ws.join("src/main/java/com/example/App.java"), java).unwrap();
+
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 4, 3, java)
+            .expect("lookup ok")
+            .expect("String location");
+        assert!(hit.path.contains("String.java"));
+        assert_eq!(hit.line, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn jdk_navigation_skips_sync_extract_when_not_ready() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-jdk-nonblock-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(ws.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let java = "package com.example;\n\npublic class App {\n  String name;\n}\n";
+        std::fs::write(ws.join("src/main/java/com/example/App.java"), java).unwrap();
+
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 4, 3, java)
+            .expect("lookup ok");
+        assert!(
+            hit.is_none(),
+            "expected no blocking JDK hit before extract, got {:?}",
+            hit
+        );
+        assert!(
+            !ws.join(".reaper/java-sources/jdk/.extracted").is_file(),
+            "navigation must not synchronously materialize JDK sources"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn warm_jdk_sources_gradle_settings_root() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-warm-jdk-gradle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(ws.join("gradlew"), "#!/bin/sh\n").unwrap();
+        std::fs::write(ws.join("build.gradle"), "subprojects { apply plugin: 'java' }\n").unwrap();
+        let gateway = ws.join("services/gateway");
+        std::fs::create_dir_all(gateway.join("src/main/java")).unwrap();
+        std::fs::write(gateway.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+
+        assert!(warm_jdk_sources(&ws).expect("warm"));
+        assert!(ws.join(".reaper/java-sources/jdk/.extracted").is_file());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_java_lang_string_maven_module() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-jdk-string-maven-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0.0</version>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join(".reaper/java-sources/jdk/java.base/java/lang")).unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/jdk/java.base/java/lang/String.java"),
+            "package java.lang;\n\npublic final class String {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".reaper/java-sources/jdk/.extracted"), "test").unwrap();
+        let java = "package com.example;\n\npublic class App {\n  String name;\n}\n";
+        std::fs::write(ws.join("src/main/java/com/example/App.java"), java).unwrap();
+
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 4, 3, java)
+            .expect("lookup ok")
+            .expect("String location");
+        assert!(hit.path.contains("String.java"));
+        assert_eq!(hit.line, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn maven_submodule_definition_finds_sibling_type() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-maven-sibling-def-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+  <modules>
+    <module>libs/common</module>
+    <module>services/gateway</module>
+  </modules>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("libs/common/src/main/java/com/example/common")).unwrap();
+        std::fs::write(
+            ws.join("libs/common/pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>common</artifactId>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("libs/common/src/main/java/com/example/common/ApiResponse.java"),
+            "package com.example.common;\npublic class ApiResponse {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("services/gateway/src/main/java/com/example")).unwrap();
+        std::fs::write(
+            ws.join("services/gateway/pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+  <artifactId>gateway</artifactId>
+</project>
+"#,
+        )
+        .unwrap();
+        let gateway_src = "services/gateway/src/main/java/com/example/Gateway.java";
+        let content = "package com.example;\nimport com.example.common.ApiResponse;\npublic class Gateway { ApiResponse r; }\n";
+        std::fs::write(ws.join(gateway_src), content).unwrap();
+
+        let hit = find_external_definition_with_well_known(
+            &ws,
+            gateway_src,
+            2,
+            35,
+            content,
+            Some(true),
+        )
+        .expect("definition")
+        .expect("ApiResponse hit");
+        assert!(
+            hit.path.replace('\\', "/").contains("libs/common"),
+            "expected sibling module path, got {}",
+            hit.path
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolves_spring_type_from_maven_dependency_sources() {
+        let ws = std::env::temp_dir().join(format!(
+            "reaper-spring-maven-nav-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(
+            ws.join(".reaper/java-sources/deps/spring_web/org/springframework/web/bind/annotation"),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join(".reaper/java-sources/deps/spring_web/org/springframework/web/bind/annotation/RestController.java"),
+            "package org.springframework.web.bind.annotation;\n\npublic @interface RestController {\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>app</artifactId>
+  <version>1.0.0</version>
+</project>
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.join("src/main/java/com/example")).unwrap();
+        let content = "package com.example;\n\nimport org.springframework.web.bind.annotation.RestController;\n\n@RestController\npublic class App {\n}\n";
+        std::fs::write(ws.join("src/main/java/com/example/App.java"), content).unwrap();
+
+        let hit = find_external_definition(&ws, "src/main/java/com/example/App.java", 5, 2, &content)
+            .expect("lookup ok")
+            .expect("RestController location");
+        assert!(hit.path.contains("RestController.java"));
+        assert_eq!(hit.line, 3);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

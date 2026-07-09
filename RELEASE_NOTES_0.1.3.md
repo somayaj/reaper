@@ -1,4 +1,4 @@
-Reaper 0.1.3 (build 426) — macOS split release.
+Reaper 0.1.3 (build 427) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -9,18 +9,18 @@ Reaper 0.1.3 (build 426) — macOS split release.
 
 Drag Reaper.app to Applications, then launch.
 
-### What's new (build 426)
+### What's new (build 427)
 
-- **Java go-to-definition:** Reliable navigation in Gradle multi-module projects (sibling modules like `libs:common`), JDK types (`String`, `RuntimeException`), and imported project types. Classpath/index runs first; jdtls supplements library lookups.
-- **Navigation stability:** Failed go-to-definition no longer poisons later requests; jdtls sessions reset on timeout; definition cache evicts jar/build-output stubs.
-- **Java language level:** Settings → Compiler Java release dropdown (`--release` for javac and inline AI context).
-- **Gradle classpath:** Multi-module `CLASSES:` / `SRCROOT:` from sibling modules; improved annotation completion and missing-import diagnostics.
-- **Regression tests:** 1319 editor tests.
+- **Project open:** Workspace open no longer blocks the server — heavy profile detection and indexing run on background threads so projects load reliably.
+- **JDK navigation:** `java.lang.String`, `java.util.List`, and other JDK types resolve via extracted JDK sources; warm extract kicks off during splash for Maven and Gradle projects.
+- **Paste:** Form fields use native WKWebView paste again — no floating Paste button on every input.
+- **Regression tests:** Navigation discovery harness for Gradle/Maven siblings, JDK types, and Spring dependency sources.
 
-### Earlier in 0.1.3 (build 425)
+### Earlier in 0.1.3 (build 426)
 
-- **Empty-line inline AI:** Tabnine-style ghost text on blank lines — Cursor agent → Gemini → Claude, then LSP/index fallbacks.
-- **Cursor agent chat:** Auto-retries with a fresh session after bridge restarts.
-- **Rename / Find Usages / Format:** Cross-language refactoring with Java file rename sync.
+- **Java go-to-definition:** Reliable navigation in Gradle multi-module projects, JDK types, and imported project types.
+- **Navigation stability:** Failed go-to-definition no longer poisons later requests; jdtls sessions reset on timeout.
+- **Java language level:** Settings → Compiler Java release dropdown.
+- **Gradle classpath:** Multi-module `CLASSES:` / `SRCROOT:` from sibling modules.
 
 **Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run `scripts/eject-reaper-dmgs.sh`.

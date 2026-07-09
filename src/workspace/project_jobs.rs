@@ -64,6 +64,22 @@ impl ProjectIndexJobs {
 
     /// Scan the repo and start background indexers (called when a workspace opens).
     pub fn on_open(&self, repo: &str, ws: &Path) {
+        if classpath::is_java_indexable_workspace(ws) {
+            let ws_jdk = ws.to_path_buf();
+            std::thread::spawn(move || {
+                match classpath::warm_jdk_sources(&ws_jdk) {
+                    Ok(true) => tracing::info!(
+                        "JDK sources extracted for Java workspace {}",
+                        ws_jdk.display()
+                    ),
+                    Ok(false) => tracing::warn!(
+                        "JDK sources not found for {} — install a full JDK (not JRE) for java.* navigation",
+                        ws_jdk.display()
+                    ),
+                    Err(e) => tracing::debug!("JDK source extract during open: {e:#}"),
+                }
+            });
+        }
         let profile = project_profile::detect(ws).unwrap_or_default();
         if profile.indexers.iter().any(|i| i == "java") {
             self.java.init_on_demand(repo, ws);
