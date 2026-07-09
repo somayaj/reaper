@@ -1253,7 +1253,7 @@ pub fn ensure_developer_path() {
     exec::ensure_developer_path();
 }
 
-/// Paths that use the custom Java index (Go to Class, Spring props). Completions merge index + jdtls.
+/// Paths that use the custom Java index when jdtls is offline (Go to Class, Spring props).
 pub fn definition_uses_java_index(from_path: &str) -> bool {
     classpath::is_java_like(from_path)
 }
@@ -1508,9 +1508,7 @@ pub fn find_hover_with_content(
     }
 
     if from_path.ends_with(".java") {
-        if let Some(hit) =
-            classpath::find_external_definition(ws, from_path, line, column, &content)?
-        {
+        if let Some(hit) = classpath::find_local_java_definition(from_path, line, column, &content) {
             if classpath::definition_path_is_openable(ws, &hit.path) {
                 let def_content = read_file(ws, &hit.path).unwrap_or_else(|_| content.clone());
                 return Ok(Some(symbols::hover_info_from_location(
@@ -1518,8 +1516,32 @@ pub fn find_hover_with_content(
                 )));
             }
         }
-        if let Some(info) = jdtls::find_hover(ws, from_path, line, column, &content)? {
-            return Ok(Some(info));
+        let mut allow_well_known = jdtls::use_java_navigation_fallback(ws);
+        if jdtls::workspace_ready(ws) {
+            if let Some(info) = jdtls::find_hover(ws, from_path, line, column, &content)? {
+                return Ok(Some(info));
+            }
+            allow_well_known = true;
+        }
+        if let Some(hit) = classpath::find_external_definition_with_well_known(
+            ws,
+            from_path,
+            line,
+            column,
+            &content,
+            Some(allow_well_known),
+        )? {
+            if classpath::definition_path_is_openable(ws, &hit.path) {
+                let def_content = read_file(ws, &hit.path).unwrap_or_else(|_| content.clone());
+                return Ok(Some(symbols::hover_info_from_location(
+                    &def_content, &hit,
+                )));
+            }
+        }
+        if !jdtls::workspace_ready(ws) {
+            if let Some(info) = jdtls::find_hover(ws, from_path, line, column, &content)? {
+                return Ok(Some(info));
+            }
         }
     }
 
@@ -1542,18 +1564,39 @@ pub fn find_definition_with_content(
         Some(c) => c.to_string(),
         None => read_file(ws, from_path)?,
     };
-    // Java: indexed classpath navigation first (in-memory, cached), then jdtls LSP.
+    // Java: same-file → classpath/index (Gradle siblings, imports) → jdtls (libraries) → symbol scan.
     if classpath::is_java_like(from_path) {
-        if let Some(hit) =
-            classpath::find_external_definition(ws, from_path, line, column, &content)?
-        {
-            if classpath::definition_path_is_openable(ws, &hit.path) {
+        if let Some(hit) = classpath::find_local_java_definition(from_path, line, column, &content) {
+            if classpath::accept_java_definition(ws, &hit.path) {
+                return Ok(Some(hit));
+            }
+        }
+        if let Some(hit) = classpath::find_external_definition_with_well_known(
+            ws,
+            from_path,
+            line,
+            column,
+            &content,
+            Some(true),
+        )? {
+            if classpath::accept_java_definition(ws, &hit.path) {
                 return Ok(Some(hit));
             }
         }
         if jdtls::workspace_ready(ws) {
             if let Some(hit) = jdtls::find_definition(ws, from_path, line, column, &content)? {
-                if classpath::definition_path_is_openable(ws, &hit.path) {
+                if classpath::accept_java_definition(ws, &hit.path) {
+                    return Ok(Some(hit));
+                }
+            }
+        }
+        if let Some(symbol) = symbols::word_at(&content, line, column)
+            .filter(|s| !s.is_empty() && !symbols::is_keyword(s))
+        {
+            if let Some(hit) =
+                symbols::find_definition_for_symbol(ws, from_path, &content, &symbol)?
+            {
+                if classpath::accept_java_definition(ws, &hit.path) {
                     return Ok(Some(hit));
                 }
             }
@@ -1656,36 +1699,8 @@ fn find_word_references_fallback(
     out
 }
 
-/// Limit text-based reference search to the enclosing build (Gradle wrapper root,
-/// Maven reactor, or plain-Java root) so multi-module projects include sibling modules.
 fn reference_scan_root(ws: &Path, from_path: &str) -> PathBuf {
-    if let Ok(Some(root)) = gradle::find_gradle_root(ws, from_path) {
-        let repo_root = gradle::find_gradle_wrapper_root(&root);
-        if repo_root.is_dir() {
-            return repo_root;
-        }
-    }
-    if let Ok(Some(module)) = maven::find_maven_root(ws, from_path) {
-        if let Some(reactor) = maven::find_maven_reactor_root(&module) {
-            if reactor.is_dir() {
-                return reactor;
-            }
-        }
-        if module.is_dir() {
-            return module;
-        }
-    }
-    if let Ok(Some(root)) = classpath::index_root_for_path(ws, from_path) {
-        let root = if root.is_absolute() {
-            root
-        } else {
-            ws.join(root)
-        };
-        if root.is_dir() {
-            return root;
-        }
-    }
-    ws.to_path_buf()
+    classpath::java_navigation_scan_root(ws, from_path)
 }
 
 fn file_matches_reference_scope(from_path: &str, candidate: &str) -> bool {
@@ -2044,19 +2059,22 @@ pub fn java_completions(
         return spring_props::completions(ws, from_path, line, column, &content, prefix);
     }
 
-    // Always run the Java index (type inference → FQCN → members). jdtls merges on top when
-    // available — never skip the index when jdtls is ready (empty jdtls would hide all members).
-    let mut items = if classpath::is_java_like(from_path) {
-        classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)?
-    } else {
-        Vec::new()
-    };
-
-    if from_path.ends_with(".java") {
+    let mut items = Vec::new();
+    if from_path.ends_with(".java") && jdtls::workspace_ready(ws) {
         let jdtls_items = jdtls::find_completions(ws, from_path, line, column, &content)?;
         if !jdtls_items.is_empty() {
-            items = merge_completion_items(jdtls_items, items, 80);
+            let index_items = if classpath::is_java_like(from_path) {
+                classpath::java_completions_for_jdtls_gap_fill(
+                    ws, from_path, line, column, &content, prefix, overlays,
+                )?
+            } else {
+                Vec::new()
+            };
+            items = merge_completion_items(jdtls_items, index_items, 80);
         }
+    }
+    if items.is_empty() && classpath::is_java_like(from_path) {
+        items = classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)?;
     }
 
     let sym_items = symbols::completions(ws, from_path, &content, prefix, line, column)?;
@@ -2474,5 +2492,28 @@ mod path_tests {
         let a = edits.iter().find(|e| e.path == "src/a.py").expect("a.py edits");
         assert_eq!(a.edits.len(), 3);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Manual repro against a local multi-module Gradle checkout (run with `--ignored`).
+    #[test]
+    #[ignore]
+    fn spring_gradle_gateway_navigates_to_common_api_response() {
+        let ws = std::path::Path::new("/Users/sunny/reaper/workspaces/Spring-gradle-complicated");
+        if !ws.join("settings.gradle").is_file() {
+            return;
+        }
+        let path = "services/gateway-service/src/main/java/com/example/gateway/web/GatewayController.java";
+        let content = std::fs::read_to_string(ws.join(path)).expect("gateway source");
+        for (line, col, label) in [(3, 33, "import"), (21, 12, "return-type")] {
+            let hit = find_definition_with_content(ws, path, line, col, Some(&content))
+                .expect("definition lookup")
+                .unwrap_or_else(|| panic!("no definition for {label} at {line}:{col}"));
+            let norm = hit.path.replace('\\', "/");
+            assert!(
+                norm.contains("libs/common") && norm.contains("ApiResponse.java"),
+                "{label}: expected common ApiResponse source, got {:?}",
+                hit
+            );
+        }
     }
 }

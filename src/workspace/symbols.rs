@@ -178,8 +178,13 @@ pub fn find_definition_for_symbol(
     if let Some(hit) = find_in_content(symbol, from_path, content) {
         hits.push(hit);
     }
-    collect_definitions(ws, ws, from_path, symbol, &mut hits)?;
-    Ok(best_definition(&hits, symbol, from_path))
+    let scan_root = if crate::workspace::classpath::is_java_like(from_path) {
+        crate::workspace::classpath::java_navigation_scan_root(ws, from_path)
+    } else {
+        ws.to_path_buf()
+    };
+    collect_definitions(ws, &scan_root, from_path, symbol, &mut hits)?;
+    Ok(best_definition(&hits, symbol, from_path, content))
 }
 
 pub(crate) fn word_at(content: &str, line: u32, column: u32) -> Option<String> {
@@ -1370,10 +1375,24 @@ fn find_keyword_definition(line: &str, keyword: &str, symbol: &str) -> Option<us
     None
 }
 
-fn best_definition(hits: &[SymbolLocation], symbol: &str, from_path: &str) -> Option<SymbolLocation> {
+fn best_definition(
+    hits: &[SymbolLocation],
+    symbol: &str,
+    from_path: &str,
+    content: &str,
+) -> Option<SymbolLocation> {
     if hits.is_empty() {
         return None;
     }
+
+    let import_path_hint = if is_java_context(from_path) {
+        crate::workspace::java_psi::parse_imports(content)
+            .explicit
+            .get(symbol)
+            .map(|fqcn| format!("{}.java", fqcn.replace('.', "/")))
+    } else {
+        None
+    };
 
     let from_dir = from_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
     let snake = crate::workspace::ruby_nav::camel_to_snake(symbol);
@@ -1398,7 +1417,9 @@ fn best_definition(hits: &[SymbolLocation], symbol: &str, from_path: &str) -> Op
         let file = hit.path.rsplit('/').next().unwrap_or(&hit.path);
         let score = {
             let mut score = 100;
-            if exact_names.iter().any(|name| file == name) {
+            if import_path_hint.as_ref().is_some_and(|hint| hit.path.replace('\\', "/").ends_with(hint)) {
+                score = -100;
+            } else if exact_names.iter().any(|name| file == name) {
                 score = 0;
             } else if hit.path.ends_with(&format!("/{symbol}")) {
                 score = 10;
@@ -2908,7 +2929,7 @@ mod tests {
                 column: 1,
             },
         ];
-        let best = best_definition(&hits, "Rock", "rocks/RockFormatter.java").unwrap();
+        let best = best_definition(&hits, "Rock", "rocks/RockFormatter.java", "").unwrap();
         assert_eq!(best.path, "rocks/Rock.java");
     }
 

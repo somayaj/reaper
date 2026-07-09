@@ -22,6 +22,9 @@ struct SettingsFile {
     cursor_mode: Option<String>,
     #[serde(default)]
     jdk_home: Option<String>,
+    /// Explicit Java language level for editor javac when the project does not declare one.
+    #[serde(default)]
+    java_release: Option<u32>,
     #[serde(default)]
     toolchain_paths: HashMap<String, String>,
     /// Repos hidden from the IDE list (bare repo data is kept on disk).
@@ -96,10 +99,20 @@ impl SettingsStore {
             inner: Arc::new(RwLock::new(file)),
         })
         .map(|store| {
-            store.sync_java_home_cache();
+            store.sync_java_compiler_cache();
             store.sync_toolchain_cache();
             store
         })
+    }
+
+    fn sync_java_compiler_cache(&self) {
+        self.sync_java_home_cache();
+        let release = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.java_release);
+        crate::jdk::set_configured_java_release(release);
     }
 
     fn sync_toolchain_cache(&self) {
@@ -147,6 +160,26 @@ impl SettingsStore {
         crate::jdk::set_configured_java_home(home);
     }
 
+    pub fn java_release(&self) -> Option<u32> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.java_release)
+    }
+
+    pub fn set_java_release(&self, release: Option<u32>) -> Result<()> {
+        if let Some(v) = release {
+            if !(8..=30).contains(&v) {
+                anyhow::bail!("java_release must be between 8 and 30");
+            }
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.java_release = release;
+        self.save(&guard)?;
+        self.sync_java_compiler_cache();
+        Ok(())
+    }
+
     pub fn java_home(&self) -> Option<String> {
         if let Ok(guard) = self.inner.read() {
             if let Some(home) = &guard.jdk_home {
@@ -169,7 +202,7 @@ impl SettingsStore {
         let mut guard = self.inner.write().expect("settings lock poisoned");
         guard.jdk_home = Some(home);
         self.save(&guard)?;
-        self.sync_java_home_cache();
+        self.sync_java_compiler_cache();
         Ok(())
     }
 
@@ -179,7 +212,7 @@ impl SettingsStore {
         if removed {
             self.save(&guard)?;
         }
-        self.sync_java_home_cache();
+        self.sync_java_compiler_cache();
         Ok(removed)
     }
 
@@ -188,12 +221,12 @@ impl SettingsStore {
             .ok()
             .filter(|h| !h.is_empty());
 
-        let from_file = self
-            .inner
-            .read()
-            .ok()
+        let guard = self.inner.read().ok();
+        let from_file = guard
+            .as_ref()
             .and_then(|g| g.jdk_home.clone())
             .filter(|h| !h.is_empty());
+        let java_release = guard.as_ref().and_then(|g| g.java_release);
 
         let (_configured, java_home, source) = if let Some(home) = from_file {
             (true, Some(home), Some("settings".to_string()))
@@ -203,7 +236,7 @@ impl SettingsStore {
             (false, None, None)
         };
 
-        crate::jdk::jdk_settings_view(java_home.as_deref(), source.as_deref())
+        crate::jdk::jdk_settings_view(java_home.as_deref(), source.as_deref(), java_release)
     }
 
     pub fn compilers_view(&self) -> crate::toolchain::CompilersView {

@@ -1068,18 +1068,22 @@ function testInlineCompletionRegression(win) {
     mlSrc.includes('routeAi && aiOn'),
     'empty-line provider schedules debounced AI retry when enabled',
   );
+  const emptyLspCachedIdx = mlSrc.indexOf('const emptyLspCached = inlineSuffixFromCachedIndex');
+  ok(emptyLspCachedIdx !== -1, 'empty-line provider uses cached LSP path');
+  const emptyProviderSlice = mlSrc.slice(Math.max(0, emptyLspCachedIdx - 200), emptyLspCachedIdx + 2200);
   ok(
-    mlSrc.includes('fetchInlineComplete(model, position, linePrefix, false)')
-      && mlSrc.includes('buildLspInlineResult()')
-      && mlSrc.indexOf('fetchInlineComplete(model, position, linePrefix, false)')
-        < mlSrc.indexOf('const emptyLsp = await buildLspInlineResult()'),
-    'empty-line provider tries AI inline-complete before LSP fallback',
+    emptyProviderSlice.includes('scheduleAiInlineFetch()')
+      && !emptyProviderSlice.includes('await fetchInlineComplete(model, position, linePrefix, false)'),
+    'empty-line provider shows instant ghosts and schedules AI async (no blocking fetch)',
   );
   ok(
     mlSrc.includes('getAiInlineProviderAvailable?.()'),
     'inline AI gated on configured Cursor/Gemini/Claude provider',
   );
-  ok(mlSrc.includes('emptyLine: isWhitespaceOnlyLine(linePrefix)'), 'pause path re-paints empty-line ghost');
+  ok(
+    !mlSrc.includes("ed.trigger('reaper', 'editor.action.inlineSuggest.hide', {});\n          requestAnimationFrame(paint)"),
+    'empty-line inline repaint does not hide-before-show (avoids backspace flicker)',
+  );
 
   const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
   ok(appSrc.includes("mode: 'prefix'"), 'Monaco inlineSuggest uses prefix mode for empty lines');
@@ -2629,6 +2633,15 @@ function testJavaCompilerErrorRegression(appSrc) {
     'backend: missing-import scan uses whole identifiers (not createTempFile→TempFile)',
   );
   ok(
+    javaDiagSrc.includes('parse_class_symbol_accepts_pascal_case_variable'),
+    'backend: filters javac variable Foo when Foo is a project type (ApiResponse.ok)',
+  );
+  ok(
+    javaDiagSrc.includes('classpath::is_java_lang_public_type')
+      && javaDiagSrc.includes('local_missing_import_skips_java_lang_runtime_exception'),
+    'backend: missing-import scan skips all java.lang public types (RuntimeException, etc.)',
+  );
+  ok(
     !javaDiagSrc.includes('fn local_instant_diags'),
     'backend: diagnostics are javac-only (no instant local substitutes)',
   );
@@ -2826,15 +2839,59 @@ function testJavaMemberCompletionPipelineRegression(appSrc) {
   const bindTabsBody = extractFunctionBody(appSrc, 'bindEditorTabs');
 
   ok(
-    modRs.includes('Always run the Java index')
-      && modRs.includes('classpath::java_completions(ws, from_path, line, column, &content, prefix, overlays)')
-      && modRs.includes('merge_completion_items(jdtls_items, items, 80)'),
-    'backend: java_completions always runs index then merges jdtls (never index-only skip)',
+    modRs.includes('java_completions_for_jdtls_gap_fill')
+      && modRs.includes('merge_completion_items(jdtls_items, index_items, 80)'),
+    'backend: java_completions uses jdtls primary with lightweight index gap-fill when ready',
   );
   ok(
-    !modRs.includes('if from_path.ends_with(".java") && jdtls::workspace_ready(ws)')
-      && !modRs.includes('return Ok(jdtls_items);'),
-    'backend: jdtls ready must not bypass index or return jdtls-only completions',
+    modRs.includes('find_local_java_definition')
+      && modRs.includes('find_external_definition_with_well_known')
+      && modRs.includes('Some(true)')
+      && modRs.includes('jdtls::find_definition'),
+    'backend: definition tries same-file then classpath/index then jdtls then symbol scan',
+  );
+  ok(
+    classpathRs.includes('super::gradle::find_gradle_repo_root')
+      && classpathRs.includes('find_gradle_settings_repo_root')
+      && classpathRs.includes('java_navigation_scan_root')
+      && classpathRs.includes('accept_java_definition')
+      && classpathRs.includes('get_navigation_lookup'),
+    'backend: Gradle navigation uses wrapper repo root for multi-module index + source scan',
+  );
+  const jdtlsRs = fs.readFileSync(path.join(ROOT, 'src/workspace/jdtls.rs'), 'utf8');
+  ok(
+    jdtlsRs.includes('if result.is_err()') && jdtlsRs.includes('session.child.kill()'),
+    'backend: jdtls drops poisoned session after request timeout/error',
+  );
+  ok(
+    classpathRs.includes('is_preferred_java_definition_path')
+      && classpathRs.includes('guard.remove(key)'),
+    'backend: definition cache evicts jar/build-output hits instead of caching permanent misses',
+  );
+  ok(
+    classpathRs.includes('annotation_indices')
+      && classpathRs.includes('annotations_matching_name_prefix'),
+    'backend: @ annotation lookup uses precomputed annotation index (not full symbol scan)',
+  );
+  ok(
+    modRs.includes('if items.is_empty() && classpath::is_java_like(from_path)')
+      && classpathRs.includes('use_java_navigation_fallback'),
+    'backend: full index + hardcoded FQCN tables only when jdtls offline or jdtls returns empty',
+  );
+  ok(
+    classpathRs.includes('collect_annotation_completions')
+      && classpathRs.includes('is_annotation_fqcn')
+      && classpathRs.includes('if at_annotation'),
+    'backend: @ annotation context uses dedicated annotation completion path',
+  );
+  ok(
+    symbolsRs.includes('import_path_hint')
+      || (symbolsRs.includes('parse_imports(content)') && symbolsRs.includes('best_definition')),
+    'backend: symbol scan prefers explicit import path for Java definitions',
+  );
+  ok(
+    classpathRs.includes('symbol_known_on_classpath'),
+    'backend: classpath index resolves annotation types for missing-import diagnostics',
   );
   ok(
     classpathRs.includes('infer_java_receiver_type_from_expr')
@@ -2950,6 +3007,7 @@ function testLongRunningTaskBusyUi() {
   ok(appSrc.includes('function navigationBusyHtml') && appSrc.includes('ij-nav-busy'), 'navigation busy uses styled pill indicator');
   ok(appSrc.includes('function stopNavigationBusyIndicator') && appSrc.includes('showNavigationResult'), 'navigation result clears spinner');
   ok(langSrc.includes('definitionInflight') && langSrc.includes('reportNoDefinition'), 'definition lookup deduped and guards false no-def');
+  ok(langSrc.includes('definitionRequestSeq') && langSrc.includes('resetDefinitionInflight'), 'definition lookup clears poisoned inflight after failure');
   ok(appSrc.includes('runWithNavigationBusy,'), 'navigation busy helper wired to editor features');
   ok(langSrc.includes('withNavigationBusy') && langSrc.includes('Go to definition…'), 'definition lookup shows nav spinner');
   ok(langSrc.includes('Finding usages…'), 'find usages shows nav spinner');

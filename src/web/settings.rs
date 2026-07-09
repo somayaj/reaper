@@ -265,20 +265,33 @@ async fn get_jdk(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct SetJdkRequest {
-    java_home: String,
+struct PatchJdkRequest {
+    #[serde(default)]
+    java_home: Option<String>,
+    #[serde(default)]
+    java_release: Option<Option<u32>>,
 }
 
 async fn set_jdk(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<SetJdkRequest>,
+    Json(body): Json<PatchJdkRequest>,
 ) -> impl IntoResponse {
-    let home = body.java_home.trim();
-    if home.is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "java_home required");
+    if body.java_home.is_none() && body.java_release.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "java_home or java_release required");
     }
-    if let Err(e) = state.settings.set_java_home(home.to_string()) {
-        return api_error(StatusCode::BAD_REQUEST, e);
+    if let Some(home) = body.java_home {
+        let home = home.trim();
+        if home.is_empty() {
+            return api_error(StatusCode::BAD_REQUEST, "java_home required");
+        }
+        if let Err(e) = state.settings.set_java_home(home.to_string()) {
+            return api_error(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(release) = body.java_release {
+        if let Err(e) = state.settings.set_java_release(release) {
+            return api_error(StatusCode::BAD_REQUEST, e);
+        }
     }
     Json(state.settings.jdk_view()).into_response()
 }

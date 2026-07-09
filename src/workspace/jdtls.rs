@@ -136,6 +136,16 @@ pub fn workspace_ready(ws: &Path) -> bool {
         .is_some_and(|s| s.service_ready && session_alive(Some(s)))
 }
 
+/// Hardcoded Spring/Lombok/JUnit FQCN tables apply only when jdtls is not ready.
+pub fn use_java_navigation_fallback(ws: &Path) -> bool {
+    !workspace_ready(ws)
+}
+
+/// Emergency well-known FQCN tables when jdtls is offline or was ready but missed the symbol.
+pub fn use_java_navigation_emergency_fallback(ws: &Path, jdtls_missed: bool) -> bool {
+    use_java_navigation_fallback(ws) || jdtls_missed
+}
+
 /// jdtls publishDiagnostics for the typing path (no javac while editing).
 pub fn typing_diagnostics(
     ws: &Path,
@@ -934,7 +944,14 @@ fn lsp_request(
     let stdout = session.child.stdout.as_mut().context("jdtls stdout")?;
 
     write_message(stdin, &request)?;
-    wait_for_id(stdout, id, deadline, Some(ws))
+    let result = wait_for_id(stdout, id, deadline, Some(ws));
+    if result.is_err() {
+        if let Some(mut session) = map.remove(ws) {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+    }
+    result
 }
 
 fn sync_document(
@@ -1127,7 +1144,7 @@ fn java_se_runtime_name(major: u32) -> String {
 
 fn workspace_project_java_release(ws: &Path) -> u32 {
     let probe = project_settings_probe_path(ws);
-    super::java_diagnostics::project_java_release(ws, &probe).unwrap_or(17)
+    super::java_diagnostics::javac_release_for_path(ws, &probe)
 }
 
 /// Eclipse compiler prefs so jdtls uses pom/Gradle release before Maven import finishes.
@@ -1870,7 +1887,7 @@ fn parse_definition_location(
         .unwrap_or_else(|| "symbol".into());
 
     if let Ok(path) = lsp::uri_to_workspace_path(ws, uri) {
-        if super::classpath::definition_path_is_openable(ws, &path) {
+        if super::classpath::accept_java_definition(ws, &path) {
             return Some(SymbolLocation {
                 name,
                 kind: "definition".into(),

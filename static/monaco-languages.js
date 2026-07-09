@@ -5604,9 +5604,17 @@
   const DEF_CACHE_MAX = 512;
   const DEF_NAV_GUARD_MS = 400;
   let lastDefinitionNavMs = 0;
+  let definitionRequestSeq = 0;
 
   function markDefinitionNavigation() {
     lastDefinitionNavMs = Date.now();
+  }
+
+  function resetDefinitionInflight(reason) {
+    if (definitionInflight.size > 0) {
+      console.warn('[ReaperLang] clearing definition inflight:', reason);
+      definitionInflight.clear();
+    }
   }
 
   /** Avoid "no definition" when a parallel lookup already navigated (F12 + provideDefinition). */
@@ -5671,9 +5679,8 @@
 
     const line = position.lineNumber;
     const column = position.column;
-    const dirty = helpers.isFileDirty?.(path);
-    const content = dirty ? model.getValue() : undefined;
-    const cacheKey = definitionCacheKey(repo, path, line, column, content ?? model.getValue());
+    const content = model.getValue();
+    const cacheKey = definitionCacheKey(repo, path, line, column, content);
     const cached = definitionCache.get(cacheKey);
     if (cached) {
       return definitionLocationFromHit(cached);
@@ -5682,28 +5689,28 @@
     const inflight = definitionInflight.get(cacheKey);
     if (inflight) return inflight;
 
+    const requestSeq = ++definitionRequestSeq;
     const promise = withNavigationBusy(helpers, 'Go to definition…', async () => {
       try {
         const url = helpers.repoApi(repo, '/workspace/definition');
-        const fetchOpts = dirty
-          ? {
-              method: 'POST',
-              body: JSON.stringify({ path, line, column, content }),
-            }
-          : {};
-        const query = dirty
-          ? ''
-          : `?${new URLSearchParams({ path, line: String(line), column: String(column) })}`;
         const hit = await raceWithTimeout(
-          helpers.api(`${url}${query}`, fetchOpts),
+          helpers.api(url, {
+            method: 'POST',
+            body: JSON.stringify({ path, line, column, content }),
+            allowDuringSave: true,
+          }),
           DEFINITION_FETCH_TIMEOUT_MS,
           'Definition lookup timed out',
         );
+        if (requestSeq !== definitionRequestSeq) return null;
         if (!hit?.path) return null;
         if (definitionCache.size >= DEF_CACHE_MAX) definitionCache.clear();
         definitionCache.set(cacheKey, hit);
         return definitionLocationFromHit(hit);
       } catch (err) {
+        if (requestSeq === definitionRequestSeq) {
+          resetDefinitionInflight(err?.message || 'definition failed');
+        }
         console.warn('[ReaperLang] lookupDefinition failed:', err);
         return null;
       }
@@ -7945,7 +7952,7 @@
     const AI_INLINE_STATEMENT_DEBOUNCE_MS = 150;
     const INLINE_PAUSE_MS = 200;
     const EMPTY_LINE_PAUSE_MS = 100;
-    const EMPTY_LINE_AI_DEBOUNCE_MS = 0;
+    const EMPTY_LINE_AI_DEBOUNCE_MS = 120;
     const INLINE_LOCAL_FETCH_MS = 180;
     const INLINE_AI_FETCH_MS = 18000;
     let aiInlineSeq = 0;
@@ -7965,21 +7972,20 @@
       aiInlineSeq += 1;
     }
 
-    function queueInlineSuggestion(ed, { emptyLine = false } = {}) {
+    function queueInlineSuggestion(ed, { emptyLine = false, soft = false } = {}) {
       clearTimeout(inlineShowTimer);
       inlineShowTimer = setTimeout(() => {
         const paint = () => {
           ed.trigger('reaper', 'editor.action.inlineSuggest.trigger', {});
         };
-        if (emptyLine) {
-          ed.trigger('reaper', 'editor.action.inlineSuggest.hide', {});
+        if (emptyLine && !soft) {
           requestAnimationFrame(paint);
           if (aiInlineCache.text) {
             clearTimeout(ed._reaperEmptyInlinePaintTimer);
             ed._reaperEmptyInlinePaintTimer = setTimeout(() => {
               const visible = ed._contextKeyService?.getContextKeyValue('inlineSuggestionVisible');
               if (!visible) paint();
-            }, 48);
+            }, 32);
           }
         } else {
           requestAnimationFrame(paint);
@@ -8484,6 +8490,9 @@
       }
       const linePrefix = editorLinePrefix(model, position);
       const content = editorContent(ed, model);
+      const cacheKey = buildInlineCacheKey(
+        repo, path, position.lineNumber, position.column, linePrefix,
+      );
       if (isDeclarationTyping(path, linePrefix)) {
         dismissSuggestUi(ed);
       }
@@ -8492,9 +8501,12 @@
         clearInlineCache(ed);
         return;
       }
-      const cacheKey = buildInlineCacheKey(
-        repo, path, position.lineNumber, position.column, linePrefix,
-      );
+      if (isWhitespaceOnlyLine(linePrefix)) {
+        if (aiInlineCache.key === cacheKey && aiInlineCache.text) {
+          queueInlineSuggestion(ed, { emptyLine: true, soft: true });
+        }
+        return;
+      }
       const meta = inlineCacheMeta(repo, path, position, linePrefix);
       const javaLevel = inlineJavaLevel(helpers);
       const indexCtx = { helpers, model, position };
@@ -8561,10 +8573,16 @@
         return;
       }
 
-      if (light && isWhitespaceOnlyLine(linePrefix)) {
-        const ghost = inferEmptyLineContinuationSuffix(
+      if (isWhitespaceOnlyLine(linePrefix)) {
+        const indexPrefix = inlineIndexPrefix(linePrefix);
+        let ghost = inferEmptyLineContinuationSuffix(
           path, content, position.lineNumber, linePrefix, javaLevel,
         );
+        if (!ghost) {
+          ghost = inlineSuffixFromCachedIndex(
+            helpers, model, position, linePrefix, indexPrefix,
+          );
+        }
         if (
           ghost
           && !shouldSuppressInlineGhost(
@@ -8572,25 +8590,10 @@
           )
         ) {
           setInlineCache(ed, cacheKey, ghost, '', meta);
-        } else {
-          const stale = inlineGhostFromCache(
-            aiInlineCache, repo, path, position.lineNumber, position.column, linePrefix, content,
-          );
-          if (stale) {
-            aiInlineCache = {
-              key: cacheKey,
-              text: stale,
-              controlSnippet: '',
-              repo,
-              path,
-              lineNumber: position.lineNumber,
-              column: position.column,
-              linePrefix,
-            };
-            queueInlineSuggestion(ed, { emptyLine: true });
-          } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
-            clearInlineCache(ed);
-          }
+        } else if (aiInlineCache.key === cacheKey && aiInlineCache.text) {
+          queueInlineSuggestion(ed, { emptyLine: true, soft: true });
+        } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+          clearInlineCache(ed);
         }
         return;
       }
@@ -8903,37 +8906,23 @@
         }
 
         if (isWhitespaceOnlyLine(linePrefix)) {
-          if (aiOn) {
-            try {
-              const aiText = await fetchInlineComplete(model, position, linePrefix, false);
-              if (
-                aiText
-                && !shouldSuppressInlineGhost(
-                  path, linePrefix, aiText, content, position.lineNumber, position.column,
-                )
-                && !token.isCancellationRequested
-              ) {
-                const meta = inlineCacheMeta(repo, path, position, linePrefix);
-                setInlineCache(editor, cacheKey, aiText, '', meta, { refresh: false });
-                editor._reaperPendingControlSnippet = null;
-                return buildInlineItems(model, position, linePrefix, aiText, path);
-              }
-            } catch {
-              // AI inline is best-effort; fall through to LSP/context.
-            }
-          }
-          const emptyLsp = await buildLspInlineResult();
+          const indexPrefix = memberContext
+            ? (memberContext.memberPrefix || '')
+            : (extractInlinePartialToken(linePrefix) || '');
+          const emptyLspCached = inlineSuffixFromCachedIndex(
+            helpers, model, position, linePrefix, indexPrefix,
+          );
           if (
-            emptyLsp
+            emptyLspCached
             && !shouldSuppressInlineGhost(
-              path, linePrefix, emptyLsp, content, position.lineNumber, position.column,
+              path, linePrefix, emptyLspCached, content, position.lineNumber, position.column,
             )
+            && !token.isCancellationRequested
           ) {
             const meta = inlineCacheMeta(repo, path, position, linePrefix);
-            setInlineCache(editor, cacheKey, emptyLsp, '', meta, { refresh: false });
+            setInlineCache(editor, cacheKey, emptyLspCached, '', meta, { refresh: false });
             editor._reaperPendingControlSnippet = null;
-            if (token.isCancellationRequested) return { items: [] };
-            return buildInlineItems(model, position, linePrefix, emptyLsp, path);
+            return buildInlineItems(model, position, linePrefix, emptyLspCached, path);
           }
           const emptyLocal = inferEmptyLineContinuationSuffix(
             path, content, position.lineNumber, linePrefix, javaLevel,
@@ -8943,15 +8932,18 @@
             && !shouldSuppressInlineGhost(
               path, linePrefix, emptyLocal, content, position.lineNumber, position.column,
             )
+            && !token.isCancellationRequested
           ) {
             const meta = inlineCacheMeta(repo, path, position, linePrefix);
             setInlineCache(editor, cacheKey, emptyLocal, '', meta, { refresh: false });
             editor._reaperPendingControlSnippet = null;
-            if (token.isCancellationRequested) return { items: [] };
             return buildInlineItems(model, position, linePrefix, emptyLocal, path);
           }
           if (aiOn && routeAi) {
             scheduleAiInlineFetch();
+          }
+          if (helpers.repoApi && shouldFetchEmptyLineInline(path, linePrefix, content, position.lineNumber)) {
+            prefetchIndexInlineGhost(editor, linePrefix, indexPrefix);
           }
           return { items: [] };
         }

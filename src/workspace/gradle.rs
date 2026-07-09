@@ -331,6 +331,34 @@ pub fn find_gradle_wrapper_root(project_root: &Path) -> PathBuf {
     project_root.to_path_buf()
 }
 
+/// True when `dir` is the Gradle settings / multi-module root.
+pub fn is_gradle_settings_root(dir: &Path) -> bool {
+    dir.join("settings.gradle").is_file() || dir.join("settings.gradle.kts").is_file()
+}
+
+/// Closest Gradle settings / multi-module root above `project_root` (walks parents; gradlew not required).
+pub fn find_gradle_settings_repo_root(project_root: &Path) -> PathBuf {
+    let mut dir = project_root.to_path_buf();
+    loop {
+        if is_gradle_settings_root(&dir) {
+            return dir;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent.to_path_buf();
+    }
+    find_gradle_wrapper_root(project_root)
+}
+
+/// Wrapper root for a source file in a multi-module Gradle build (sibling modules share one index).
+pub fn find_gradle_repo_root(ws: &Path, rel_path: &str) -> Result<Option<PathBuf>> {
+    let Some(module) = find_gradle_root(ws, rel_path)? else {
+        return Ok(None);
+    };
+    Ok(Some(find_gradle_settings_repo_root(&module)))
+}
+
 fn gradle_wrapper_command(
     wrapper_root: &Path,
     project_root: &Path,
@@ -729,6 +757,89 @@ pub(crate) fn read_build_file(root: &Path) -> Option<String> {
     None
 }
 
+/// Gradle `project(':…')` paths declared in a module build file (e.g. `:libs:common`).
+pub(crate) fn parse_gradle_project_dependency_paths(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let needle = "project(";
+    let mut search_from = 0usize;
+    while let Some(idx) = content[search_from..].find(needle) {
+        let start = search_from + idx + needle.len();
+        let rest = content[start..].trim_start();
+        let Some(quote) = rest.chars().next() else {
+            search_from = start;
+            continue;
+        };
+        if quote != '\'' && quote != '"' {
+            search_from = start;
+            continue;
+        }
+        let path_start = quote.len_utf8();
+        let Some(end_rel) = rest[path_start..].find(quote) else {
+            break;
+        };
+        let path = rest[path_start..path_start + end_rel].trim().to_string();
+        if !path.is_empty() && !out.iter().any(|p| p == &path) {
+            out.push(path);
+        }
+        search_from = start + path_start + end_rel + quote.len_utf8();
+    }
+    out
+}
+
+fn gradle_project_path_to_relative_dir(project_path: &str) -> String {
+    project_path
+        .trim()
+        .trim_start_matches(':')
+        .replace(':', "/")
+}
+
+/// Transitive Gradle `project()` dependency module directories under the wrapper root.
+pub fn gradle_project_dependency_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let wrapper_root = find_gradle_wrapper_root(project_root);
+    let module_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut visited = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    collect_gradle_project_dependency_dirs_inner(
+        &module_root,
+        &wrapper_root,
+        &mut visited,
+        &mut out,
+    );
+    out
+}
+
+fn collect_gradle_project_dependency_dirs_inner(
+    module_root: &Path,
+    wrapper_root: &Path,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) {
+    let Some(content) = read_build_file(module_root) else {
+        return;
+    };
+    for project_path in parse_gradle_project_dependency_paths(&content) {
+        let rel = gradle_project_path_to_relative_dir(&project_path);
+        let sibling = if rel.is_empty() {
+            wrapper_root.to_path_buf()
+        } else {
+            wrapper_root.join(rel)
+        };
+        let sibling = sibling.canonicalize().unwrap_or(sibling);
+        if sibling == module_root {
+            continue;
+        }
+        if !is_gradle_project_dir(&sibling) {
+            continue;
+        }
+        if visited.insert(sibling.clone()) {
+            out.push(sibling.clone());
+            collect_gradle_project_dependency_dirs_inner(&sibling, wrapper_root, visited, out);
+        }
+    }
+}
+
 pub(crate) fn has_application_plugin(content: &str) -> bool {
     let normalized: String = content
         .chars()
@@ -893,6 +1004,81 @@ mod tests {
     fn max_java_for_gradle_8_14() {
         assert_eq!(max_java_for_gradle(8, 14), 24);
         assert_eq!(max_java_for_gradle(8, 5), 21);
+    }
+
+    #[test]
+    fn parse_gradle_project_dependency_paths_finds_colon_paths() {
+        let text = r#"
+dependencies {
+    implementation project(':libs:common')
+    api project(":libs:core:core-web")
+}
+"#;
+        let paths = parse_gradle_project_dependency_paths(text);
+        assert_eq!(paths, vec![":libs:common", ":libs:core:core-web"]);
+    }
+
+    #[test]
+    fn gradle_project_dependency_dirs_includes_transitive_siblings() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-gradle-project-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("libs/common/src/main/java")).unwrap();
+        std::fs::create_dir_all(root.join("libs/core/core-web/src/main/java")).unwrap();
+        std::fs::create_dir_all(root.join("services/gateway/src/main/java")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "subprojects { apply plugin: 'java' }\n").unwrap();
+        std::fs::write(root.join("libs/common/build.gradle"), "plugins { id 'java-library' }\n").unwrap();
+        std::fs::write(
+            root.join("libs/core/core-web/build.gradle"),
+            "plugins { id 'java-library' }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("services/gateway/build.gradle"),
+            r#"plugins { id 'java' }
+dependencies {
+    implementation project(':libs:common')
+    implementation project(':libs:core:core-web')
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("libs/common/build.gradle"),
+            r#"plugins { id 'java-library' }
+dependencies {
+    implementation project(':libs:core:core-web')
+}
+"#,
+        )
+        .unwrap();
+
+        let gateway = root.join("services/gateway");
+        let root = root.canonicalize().unwrap_or(root);
+        let siblings = gradle_project_dependency_dirs(&gateway);
+        let names: Vec<String> = siblings
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "libs/common"),
+            "expected libs/common in {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "libs/core/core-web"),
+            "expected libs/core/core-web in {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

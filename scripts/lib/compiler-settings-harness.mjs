@@ -49,6 +49,32 @@ export function testCompilerSettingsRegression(appSrc, toolchainSrc, mavenRsSrc,
   ok(bindBody.includes('settings-compiler-maven-select'), 'compiler settings: maven select bound');
 
   ok(orderBody.includes('maven_installed'), 'compiler settings: loads maven_installed from API');
+  ok(orderBody.includes('settings-java-release-select'), 'compiler settings: Java language level picker');
+  ok(orderBody.includes('JAVA_RELEASE_LEVELS'), 'compiler settings: Java language level options');
+  ok(orderBody.includes('/api/settings/jdk'), 'compiler settings: language level saves via jdk API');
+
+  const settingsSrc = fs.readFileSync(path.join(ROOT, 'src/settings/mod.rs'), 'utf8');
+  ok(settingsSrc.includes('java_release: Option<u32>'), 'settings: persists java_release');
+  ok(settingsSrc.includes('set_java_release'), 'settings: set_java_release API');
+
+  const javaDiagSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/java_diagnostics.rs'), 'utf8');
+  ok(javaDiagSrc.includes('java_release_from_gradle_tree'), 'java diagnostics: walks Gradle tree for release');
+  ok(javaDiagSrc.includes('configured_java_release'), 'java diagnostics: uses configured java_release fallback');
+  ok(javaDiagSrc.includes('javac_release_for_path'), 'java diagnostics: exposes resolved javac release');
+
+  const classpathRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/classpath.rs'), 'utf8');
+  ok(classpathRsSrc.includes('workspace_sibling_module_classpath'), 'classpath: merges sibling module outputs');
+  ok(classpathRsSrc.includes('gradle_project_dependency_dirs'), 'classpath: resolves Gradle project() deps');
+  ok(classpathRsSrc.includes('supplement_jakarta_validation_api'), 'classpath: supplements jakarta.validation-api for @Valid');
+
+  const gradleRsSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/gradle.rs'), 'utf8');
+  ok(gradleRsSrc.includes('parse_gradle_project_dependency_paths'), 'gradle: parses project() dependency paths');
+
+  const initGradleSrc = fs.readFileSync(path.join(ROOT, 'gradle/reaper-classpath.init.gradle'), 'utf8');
+  ok(initGradleSrc.includes('f.isDirectory()'), 'gradle init: emits CLASSES for project dependency dirs');
+
+  const langCtxSrc = fs.readFileSync(path.join(ROOT, 'src/workspace/language_compiler_context.rs'), 'utf8');
+  ok(langCtxSrc.includes('configured_java_release'), 'language context: exposes configured_java_release');
 
   ok(toolchainSrc.includes('id: "maven"'), 'compiler settings: maven tool in TOOLS');
   ok(toolchainSrc.includes('REAPER_MVN'), 'compiler settings: maven env key');

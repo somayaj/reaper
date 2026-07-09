@@ -25,7 +25,10 @@ pub struct LanguageCompilerContext {
     /// Gradle/Maven declared source/release level.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_java_level: Option<u32>,
-    /// max(configured JDK, project release) — drives inline/AI completion syntax.
+    /// Settings → Compiler → Java language level override (when set).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_java_release: Option<u32>,
+    /// max(JDK, project, settings release) — drives inline/AI completion syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java_level: Option<u32>,
     /// Primary configured compiler tool id for this file type.
@@ -54,6 +57,11 @@ pub fn detect(ws: &Path, path: &str) -> LanguageCompilerContext {
     } else {
         None
     };
+    let configured_java_release = if language == "java" {
+        crate::jdk::configured_java_release()
+    } else {
+        None
+    };
     let java_level = if language == "java" {
         Some(java_diagnostics::completion_java_level(ws, path))
     } else {
@@ -66,6 +74,7 @@ pub fn detect(ws: &Path, path: &str) -> LanguageCompilerContext {
         dialect,
         jdk_level,
         project_java_level,
+        configured_java_release,
         java_level,
         completion_tool,
         completion_version,
@@ -86,8 +95,11 @@ pub fn append_to_prompt(out: &mut String, ctx: &LanguageCompilerContext) {
     if let Some(level) = ctx.project_java_level {
         writeln!(out, "Project source/release level: {level}").ok();
     }
+    if let Some(level) = ctx.configured_java_release {
+        writeln!(out, "Configured Java language level (Settings): {level}").ok();
+    }
     if let Some(level) = ctx.java_level {
-        writeln!(out, "Completion language level: {level} (max of configured JDK and project)").ok();
+        writeln!(out, "Completion language level: {level}").ok();
     }
     if let (Some(tool), Some(ver)) = (&ctx.completion_tool, &ctx.completion_version) {
         writeln!(out, "Completion compiler: {tool} — {ver}").ok();

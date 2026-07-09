@@ -41,6 +41,12 @@ allprojects { project ->
                 }
 
                 conf.files.each { f ->
+                    if (f.isDirectory()) {
+                        if (seenClasses.add(f.absolutePath)) {
+                            println 'CLASSES:' + f.absolutePath
+                        }
+                        return
+                    }
                     if (f.name.endsWith('.jar') && seenJars.add(f.absolutePath)) {
                         println 'JAR:' + f.absolutePath
                     }
@@ -65,7 +71,16 @@ allprojects { project ->
                 try {
                     conf.resolvedConfiguration.resolvedArtifacts.each { artifact ->
                         def file = artifact.file
-                        if (file == null || !file.name.endsWith('.jar')) {
+                        if (file == null) {
+                            return
+                        }
+                        if (file.isDirectory()) {
+                            if (seenClasses.add(file.absolutePath)) {
+                                println 'CLASSES:' + file.absolutePath
+                            }
+                            return
+                        }
+                        if (!file.name.endsWith('.jar')) {
                             return
                         }
                         def id = artifact.moduleVersion.id
