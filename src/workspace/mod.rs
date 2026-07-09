@@ -1225,6 +1225,10 @@ pub fn warm_java_index(ws: &Path) -> Result<classpath::WarmIndexStatus> {
     classpath::warm_index(ws)
 }
 
+pub fn warm_jdk_sources(ws: &Path) -> Result<bool> {
+    classpath::warm_jdk_sources(ws)
+}
+
 pub fn peek_java_index(ws: &Path) -> Result<classpath::WarmIndexStatus> {
     classpath::peek_index_status(ws)
 }
