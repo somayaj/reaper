@@ -21,14 +21,18 @@ function extractRustFnBody(src, name) {
 }
 
 function extractEmptyLineInlineBlock(langSrc) {
-  const start = langSrc.indexOf('if (isWhitespaceOnlyLine(linePrefix)) {\n          if (aiOn)');
-  if (start === -1) return '';
+  const start = langSrc.indexOf('if (isWhitespaceOnlyLine(linePrefix)) {');
+  const anchor = start !== -1
+    ? langSrc.indexOf('const emptyLspCached = inlineSuffixFromCachedIndex', start)
+    : -1;
+  if (anchor === -1) return '';
+  const blockStart = langSrc.lastIndexOf('if (isWhitespaceOnlyLine(linePrefix)) {', anchor);
   const end = langSrc.indexOf(
     'if (shouldPreferLspInlineGhost(path, linePrefix, content, position.lineNumber))',
-    start,
+    blockStart,
   );
-  if (end === -1) return '';
-  return langSrc.slice(start, end);
+  if (blockStart === -1 || end === -1) return '';
+  return langSrc.slice(blockStart, end);
 }
 
 export function testInlineProviderRegression(appSrc, langSrc, agentModSrc, apiSrc, cursorRsSrc, ok) {
@@ -77,19 +81,22 @@ export function testInlineProviderRegression(appSrc, langSrc, agentModSrc, apiSr
 
   const emptyLineBlock = extractEmptyLineInlineBlock(langSrc);
   ok(!!emptyLineBlock, 'inline provider: empty-line inline block present');
-  const aiFetchIdx = emptyLineBlock.indexOf('fetchInlineComplete(model, position, linePrefix, false)');
-  const lspIdx = emptyLineBlock.indexOf('const emptyLsp = await buildLspInlineResult()');
+  const aiFetchIdx = emptyLineBlock.indexOf('scheduleAiInlineFetch()');
+  const lspIdx = emptyLineBlock.indexOf('const emptyLspCached = inlineSuffixFromCachedIndex');
   const contextIdx = emptyLineBlock.indexOf('const emptyLocal = inferEmptyLineContinuationSuffix(');
-  ok(aiFetchIdx !== -1, 'inline provider: empty line tries AI inline-complete first');
-  ok(lspIdx !== -1, 'inline provider: empty line falls back to LSP');
+  ok(lspIdx !== -1, 'inline provider: empty line falls back to LSP cache');
   ok(contextIdx !== -1, 'inline provider: empty line uses context template after LSP');
   ok(
-    aiFetchIdx < lspIdx && lspIdx < contextIdx,
-    'inline provider: empty line order is AI → LSP → context templates',
+    lspIdx < contextIdx,
+    'inline provider: empty line order is LSP cache before context templates',
   );
   ok(
-    emptyLineBlock.includes('// AI inline is best-effort; fall through to LSP/context.'),
-    'inline provider: empty line AI failure falls through to LSP',
+    !emptyLineBlock.includes('await fetchInlineComplete(model, position, linePrefix, false)'),
+    'inline provider: empty line does not block provider on AI network fetch',
+  );
+  ok(
+    aiFetchIdx !== -1,
+    'inline provider: empty line schedules async AI fetch',
   );
 
   ok(

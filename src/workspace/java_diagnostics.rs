@@ -113,11 +113,9 @@ fn check_project_java(
     let overlay_root =
         sync_java_diagnostics_overlays(ws, project_root, rel_path, content, overlays, scope)?;
 
-    let sourcepath = if scope == JavaDiagScope::Full {
-        classpath::project_java_sourcepath(ws, project_root, &overlay_root)
-    } else {
-        Vec::new()
-    };
+    // -sourcepath resolves cross-module project types (e.g. ApiResponse in libs:common)
+    // without compiling the whole tree — only the active file is passed to javac.
+    let sourcepath = classpath::project_java_sourcepath(ws, project_root, &overlay_root);
 
     let out_dir = ws.join(DIAG_OUT);
     std::fs::create_dir_all(&out_dir)?;
@@ -760,6 +758,9 @@ fn is_project_type_false_positive(
     if read_project_type_source(ws, project_root, &type_name, content, overlays).is_some() {
         return true;
     }
+    if read_project_type_source(ws, ws, &type_name, content, overlays).is_some() {
+        return true;
+    }
     if is_well_known_external_type(&type_name, content) {
         return false;
     }
@@ -787,14 +788,21 @@ fn parse_missing_class_symbol(message: &str) -> Option<String> {
     None
 }
 
-/// Only `symbol: class Foo` — not `symbol: variable x` or `location: class Foo`.
+/// `symbol: class Foo`, or `symbol: variable Foo` when Foo is PascalCase (static/type reference).
 fn parse_class_symbol_on_line(line: &str) -> Option<String> {
     let sym_idx = line.find("symbol:")?;
     let after = line[sym_idx + "symbol:".len()..].trim();
-    if !after.starts_with("class") {
+    let type_part = if let Some(rest) = after.strip_prefix("class") {
+        rest.trim()
+    } else if let Some(rest) = after.strip_prefix("variable") {
+        let name = simple_type_name(rest.split_whitespace().next().unwrap_or(rest));
+        if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return Some(name.to_string());
+        }
         return None;
-    }
-    let type_part = after.strip_prefix("class").unwrap_or(after).trim();
+    } else {
+        return None;
+    };
     let type_name = simple_type_name(type_part.split_whitespace().next().unwrap_or(type_part));
     if type_name.is_empty() {
         return None;
@@ -1327,15 +1335,18 @@ fn check_plain_java(ws: &Path, rel_path: &str, content: &str) -> Result<(Vec<Dia
         .replace('\\', "/");
 
     let content_fp = fingerprint(content);
-    let javac_args = [
-        "-encoding",
-        "UTF-8",
-        "-d",
-        out_dir.to_str().context("invalid out dir")?,
-        &rel,
+    let mut args = vec![
+        "-encoding".to_string(),
+        "UTF-8".to_string(),
+        "-proc:none".to_string(),
+        "-d".to_string(),
+        out_dir.to_string_lossy().into_owned(),
     ];
+    append_javac_release_args(&mut args, ws);
+    args.push(rel);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = java_javac_inflight::with_workspace_java_lock(ws, || {
-        run_cancellable_javac(ws, rel_path, content, &javac_args)
+        run_cancellable_javac(ws, rel_path, content, &arg_refs)
     })?;
     let out = if out.cancelled {
         java_javac_inflight::peek_cached(ws, rel_path, content_fp).unwrap_or(out)
@@ -1465,32 +1476,72 @@ fn append_javac_release_args(args: &mut Vec<String>, gradle_root: &Path) {
 }
 
 fn javac_release_flag(gradle_root: &Path) -> String {
-    let project = detect_java_release(gradle_root);
+    effective_java_release(gradle_root)
+}
+
+/// Resolved Java `--release` for editor javac: project → settings → configured JDK.
+pub fn javac_release_for_path(ws: &Path, path: &str) -> u32 {
+    let project_root = find_gradle_root(ws, path)
+        .ok()
+        .flatten()
+        .or_else(|| find_maven_root(ws, path).ok().flatten());
+    let release = project_root
+        .as_ref()
+        .map(|root| effective_java_release(root))
+        .unwrap_or_else(|| effective_java_release(ws));
+    release.parse().unwrap_or_else(|_| configured_jdk_major())
+}
+
+fn effective_java_release(project_root: &Path) -> String {
+    let release = java_release_from_project(project_root)
+        .or_else(|| crate::jdk::configured_java_release().map(|v| v.to_string()))
+        .unwrap_or_else(|| configured_jdk_major().to_string());
     if let Ok(home) = crate::jdk::effective_java_home() {
         if crate::jdk::java_major_version(&home).is_some_and(|major| major <= 8) {
             return "8".into();
         }
     }
-    project
+    release
 }
 
 fn detect_java_release(project_root: &Path) -> String {
+    effective_java_release(project_root)
+}
+
+fn java_release_from_project(project_root: &Path) -> Option<String> {
     if super::maven::is_maven_project_root(project_root) {
         if let Ok(text) = std::fs::read_to_string(project_root.join("pom.xml")) {
             if let Some(v) = extract_maven_java_version(&text) {
-                return v;
+                return Some(v);
             }
         }
     }
-    for name in ["build.gradle.kts", "build.gradle"] {
-        let path = project_root.join(name);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(v) = extract_release_version(&text) {
-                return v;
+    java_release_from_gradle_tree(project_root)
+}
+
+/// Walk from the module Gradle root up to the wrapper root so `subprojects { … }`
+/// toolchain/source settings on the repo root apply to submodule sources.
+fn java_release_from_gradle_tree(project_root: &Path) -> Option<String> {
+    let wrapper_root = gradle::find_gradle_wrapper_root(project_root);
+    let mut dir = project_root.to_path_buf();
+    loop {
+        for name in ["build.gradle.kts", "build.gradle"] {
+            let path = dir.join(name);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Some(v) = extract_release_version(&text) {
+                    return Some(v);
+                }
             }
         }
+        if dir == wrapper_root {
+            break;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent.to_path_buf();
     }
-    "17".into()
+    None
 }
 
 fn extract_maven_java_version(pom: &str) -> Option<String> {
@@ -1535,12 +1586,15 @@ pub fn configured_jdk_major() -> u32 {
         .unwrap_or(17)
 }
 
-/// Java language level for completions: max(configured JDK, project source/release).
-/// Never min() — a higher configured JDK is not capped by an older project declaration.
+/// Java language level for completions: max(configured JDK, project, settings release).
 pub fn completion_java_level(ws: &Path, path: &str) -> u32 {
     let jdk = configured_jdk_major();
-    project_java_release(ws, path)
-        .map(|project| jdk.max(project))
+    let project = project_java_release(ws, path);
+    let configured = crate::jdk::configured_java_release();
+    [Some(jdk), project, configured]
+        .into_iter()
+        .flatten()
+        .max()
         .unwrap_or(jdk)
 }
 
@@ -1551,7 +1605,8 @@ pub fn project_java_release(ws: &Path, path: &str) -> Option<u32> {
         .ok()
         .flatten()
         .or_else(|| find_maven_root(ws, path).ok().flatten())?;
-    detect_java_release(&project_root).parse().ok()
+    java_release_from_project(&project_root)
+        .and_then(|v| v.parse().ok())
 }
 
 fn extract_release_version(text: &str) -> Option<String> {
@@ -1768,13 +1823,6 @@ fn same_missing_symbol(a: &str, b: &str) -> bool {
         .is_some_and(|sym| parse_missing_class_symbol(b).is_some_and(|other| sym == other))
 }
 
-const IMPLICIT_JAVA_TYPES: &[&str] = &[
-    "String", "Integer", "Long", "Boolean", "Double", "Float", "Object", "Class", "System",
-    "Math", "Runtime", "Thread", "Throwable", "Exception", "Error", "Override", "Deprecated",
-    "SuppressWarnings", "FunctionalInterface", "AutoCloseable", "Iterable", "Comparable",
-    "StringBuilder", "StringBuffer",
-];
-
 fn local_missing_import_type_diags(
     ws: &Path,
     project_root: Option<&Path>,
@@ -1789,6 +1837,7 @@ fn local_missing_import_type_diags(
     let package = unit.package.as_deref();
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut classpath_known: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
 
     for (idx, line) in content.lines().enumerate() {
         let code = line.split("//").next().unwrap_or(line);
@@ -1805,10 +1854,16 @@ fn local_missing_import_type_diags(
             if simple.len() < 2 || imported.contains(&simple) || declared.contains(&simple) {
                 continue;
             }
-            if IMPLICIT_JAVA_TYPES.contains(&simple.as_str()) {
+            if classpath::is_java_lang_public_type(&simple) {
                 continue;
             }
             if is_well_known_external_type(&simple, content) {
+                continue;
+            }
+            let known = *classpath_known.entry(simple.clone()).or_insert_with(|| {
+                classpath::symbol_known_on_classpath(ws, rel_path, content, &simple)
+            });
+            if known {
                 continue;
             }
             if project_root.is_some_and(|root| {
@@ -2048,6 +2103,48 @@ java { sourceCompatibility = JavaVersion.VERSION_21 }
     }
 
     #[test]
+    fn java_release_from_gradle_tree_reads_root_subprojects_toolchain() {
+        let root = std::env::temp_dir().join("reaper-diag-gradle-release-tree");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("libs/common")).unwrap();
+        std::fs::write(
+            root.join("build.gradle"),
+            r#"subprojects {
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("libs/common/build.gradle"),
+            "plugins { id 'java-library' }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            java_release_from_gradle_tree(&root.join("libs/common")).as_deref(),
+            Some("21")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn effective_java_release_uses_settings_when_project_missing() {
+        crate::jdk::set_configured_java_release(Some(21));
+        let root = std::env::temp_dir().join("reaper-diag-plain-java-release");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(effective_java_release(&root), "21");
+        crate::jdk::set_configured_java_release(None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn parses_caret_column_from_javac_context() {
         let ws = PathBuf::from("/repo");
         let text = r#"src/App.java:5: error: cannot find symbol
@@ -2131,6 +2228,30 @@ public class App {
         assert!(
             diags.iter().any(|d| d.message.contains("SpringApplication")),
             "expected SpringApplication missing-import diagnostic, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn local_missing_import_skips_java_lang_runtime_exception() {
+        let content = r#"package com.example.common.exception;
+
+public class NotFoundException extends RuntimeException {
+    public NotFoundException(String message) {
+        super(message);
+    }
+}
+"#;
+        let diags = local_missing_import_type_diags(
+            Path::new("/repo"),
+            None,
+            "NotFoundException.java",
+            content,
+            &[],
+            &[],
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("RuntimeException")),
+            "java.lang.RuntimeException must not need import: {diags:?}"
         );
     }
 
@@ -2460,6 +2581,50 @@ class Worker {
             import_msg,
         ));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn filters_api_response_variable_symbol_when_type_in_project() {
+        let ws = std::env::temp_dir().join("reaper-diag-api-response-var");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("libs/common/src/main/java/com/example/common/model")).unwrap();
+        std::fs::create_dir_all(ws.join("services/gateway/src/main/java/com/example/gateway/web")).unwrap();
+        std::fs::write(
+            ws.join("libs/common/src/main/java/com/example/common/model/ApiResponse.java"),
+            "package com.example.common.model;\npublic record ApiResponse<T>(T data) {\n  public static <T> ApiResponse<T> ok(T data) { return new ApiResponse<>(data); }\n}\n",
+        )
+        .unwrap();
+        let content = r#"
+package com.example.gateway.web;
+import com.example.common.model.ApiResponse;
+public class GatewayController {
+    ApiResponse<String> ok() { return ApiResponse.ok("x"); }
+}
+"#;
+        let msg = "error: cannot find symbol\n  symbol:   variable ApiResponse\n  location: class GatewayController";
+        assert!(is_project_type_false_positive(
+            &ws,
+            &ws.join("services/gateway"),
+            content,
+            &[],
+            msg,
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn parse_class_symbol_accepts_pascal_case_variable() {
+        assert_eq!(
+            parse_missing_class_symbol(
+                "cannot find symbol\n  symbol:   variable ApiResponse\n  location: class GatewayController"
+            )
+            .as_deref(),
+            Some("ApiResponse")
+        );
+        assert!(parse_missing_class_symbol(
+            "cannot find symbol\n  symbol:   variable fike\n  location: class App"
+        )
+        .is_none());
     }
 
     #[test]

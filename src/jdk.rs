@@ -6,15 +6,33 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 static JAVA_HOME_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+static JAVA_RELEASE_OVERRIDE: OnceLock<RwLock<Option<u32>>> = OnceLock::new();
 
 fn override_slot() -> &'static RwLock<Option<PathBuf>> {
     JAVA_HOME_OVERRIDE.get_or_init(|| RwLock::new(None))
+}
+
+fn release_override_slot() -> &'static RwLock<Option<u32>> {
+    JAVA_RELEASE_OVERRIDE.get_or_init(|| RwLock::new(None))
 }
 
 pub fn set_configured_java_home(home: Option<PathBuf>) {
     if let Ok(mut guard) = override_slot().write() {
         *guard = home.filter(|p| p.is_dir());
     }
+}
+
+pub fn set_configured_java_release(release: Option<u32>) {
+    if let Ok(mut guard) = release_override_slot().write() {
+        *guard = release.filter(|v| (8..=30).contains(v));
+    }
+}
+
+pub fn configured_java_release() -> Option<u32> {
+    release_override_slot()
+        .read()
+        .ok()
+        .and_then(|g| *g)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +52,9 @@ pub struct JdkSettingsView {
     pub effective_version: Option<String>,
     pub gradle_home: Option<String>,
     pub gradle_version: Option<String>,
+    /// Settings → Compiler → Java language level (squiggles when project has no declaration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub java_release: Option<u32>,
     pub installed: Vec<JdkInstall>,
 }
 
@@ -193,7 +214,11 @@ fn parse_macos_java_home_line(line: &str) -> Option<JdkInstall> {
     })
 }
 
-pub fn jdk_settings_view(configured: Option<&str>, source: Option<&str>) -> JdkSettingsView {
+pub fn jdk_settings_view(
+    configured: Option<&str>,
+    source: Option<&str>,
+    java_release: Option<u32>,
+) -> JdkSettingsView {
     let installed = list_installed_jdks();
     let configured_path = configured.filter(|s| !s.is_empty()).map(PathBuf::from);
     let configured_version = configured_path
@@ -215,6 +240,7 @@ pub fn jdk_settings_view(configured: Option<&str>, source: Option<&str>) -> JdkS
         effective_version,
         gradle_home: gradle.as_ref().map(|p| p.display().to_string()),
         gradle_version,
+        java_release,
         installed,
     }
 }

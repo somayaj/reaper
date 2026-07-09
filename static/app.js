@@ -1091,12 +1091,18 @@ function setAutoSaveEnabled(enabled) {
 async function refreshJavaLanguageLevel() {
   try {
     const jdk = await api('/api/settings/jdk');
+    if (jdk?.java_release) {
+      state.javaLanguageLevel = jdk.java_release;
+      return;
+    }
     const ver = jdk?.effective_version || jdk?.version || '';
     state.javaLanguageLevel = parseJavaMajorVersion(ver);
   } catch {
     state.javaLanguageLevel = 17;
   }
 }
+
+const JAVA_RELEASE_LEVELS = [8, 11, 17, 21, 22, 23, 24, 25, 26];
 
 /** Parse `21.0.2`, `1.8.0_392`, `openjdk version "21"` → major version. */
 function parseJavaMajorVersion(ver) {
@@ -1173,6 +1179,9 @@ function updateStatusLanguage(path) {
       }
       if (ctx?.project_java_level) {
         parts.push(`project declares ${ctx.project_java_level}`);
+      }
+      if (ctx?.configured_java_release) {
+        parts.push(`settings level ${ctx.configured_java_release}`);
       }
     } else if (ctx?.dialect) {
       parts.push(`project declares ${ctx.dialect}`);
@@ -2042,7 +2051,7 @@ async function loadCompilersSettingsSection() {
     return { cls: 'missing', label: 'Missing' };
   }
 
-  function renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled }) {
+  function renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled, jdkSettings }) {
     const isJava = tool.id === 'java';
     const isGradle = tool.id === 'gradle';
     const isMaven = tool.id === 'maven';
@@ -2070,6 +2079,18 @@ async function loadCompilersSettingsSection() {
           <select class="ij-settings-select settings-compiler-jdk-select" data-tool-id="java" title="Pick a JDK">
             <option value="">— pick installed JDK —</option>
             ${javaInstalled.map((j) => `<option value="${escapeHtml(j.path)}"${installSelected(tool.path, j.path) ? ' selected' : ''}>${escapeHtml(j.label || j.path)}</option>`).join('')}
+          </select>
+        </div>`
+      : '';
+    const javaReleaseSelect = isJava
+      ? `<div class="ij-compiler-extra">
+          <label class="ij-compiler-extra-label">Language level</label>
+          <select class="ij-settings-select settings-java-release-select" data-tool-id="java" title="Java language level for editor squiggles when the project does not declare one">
+            <option value="">Auto (from project, else JDK)</option>
+            ${JAVA_RELEASE_LEVELS.map((v) => {
+              const selected = jdkSettings?.java_release === v ? ' selected' : '';
+              return `<option value="${v}"${selected}>Java ${v}</option>`;
+            }).join('')}
           </select>
         </div>`
       : '';
@@ -2101,7 +2122,7 @@ async function loadCompilersSettingsSection() {
       ? `<div class="ij-compiler-note">Project ${isGradle ? 'gradlew' : 'mvnw'} takes precedence when present.</div>`
       : '';
     const javaNote = isJava
-      ? '<div class="ij-compiler-note">Used by Gradle, Maven, and Java tooling.</div>'
+      ? '<div class="ij-compiler-note">JDK runs javac. Language level applies when Gradle/Maven do not declare a version.</div>'
       : '';
     return `<article class="ij-compiler-row" data-compiler-row="${escapeHtml(tool.id)}" data-compiler-label="${escapeHtml(tool.label.toLowerCase())} ${escapeHtml(tool.id)}">
       <div class="ij-compiler-row-main">
@@ -2122,6 +2143,7 @@ async function loadCompilersSettingsSection() {
       ${javaNote}
       ${wrapperNote}
       ${jdkSelect}
+      ${javaReleaseSelect}
       ${gradleSelect}
       ${mavenSelect}
     </article>`;
@@ -2134,6 +2156,25 @@ async function loadCompilersSettingsSection() {
         if (input && sel.value) input.value = sel.value;
       });
     });
+    const releaseSel = root.querySelector('.settings-java-release-select');
+    if (releaseSel && !releaseSel.dataset.bound) {
+      releaseSel.dataset.bound = '1';
+      releaseSel.addEventListener('change', async () => {
+        const raw = releaseSel.value.trim();
+        const release = raw ? parseInt(raw, 10) : null;
+        try {
+          await api('/api/settings/jdk', {
+            method: 'PATCH',
+            body: JSON.stringify({ java_release: release }),
+          });
+          await refreshJavaLanguageLevel();
+          if (state.activeTab) await refreshLanguageContextForPath(state.activeTab);
+          toast(release ? `Java language level set to ${release}` : 'Java language level: auto', 'success');
+        } catch (err) {
+          toast(err.message || 'Failed to save Java language level', 'error');
+        }
+      });
+    }
     root.querySelectorAll('.settings-compiler-save').forEach((btn) => {
       btn.addEventListener('click', () => saveCompilerFromSettings(btn.dataset.toolId));
     });
@@ -2159,7 +2200,10 @@ async function loadCompilersSettingsSection() {
   }
 
   try {
-    const cfg = await api('/api/settings/compilers');
+    const [cfg, jdkSettings] = await Promise.all([
+      api('/api/settings/compilers'),
+      api('/api/settings/jdk').catch(() => null),
+    ]);
     const tools = cfg.compilers || cfg.tools || [];
     const javaInstalled = cfg.java_installed || [];
     const gradleInstalled = cfg.gradle_installed || [];
@@ -2179,7 +2223,7 @@ async function loadCompilersSettingsSection() {
         <span>Path override</span>
         <span></span>
       </div>
-      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled })).join('')}</div>
+      <div class="ij-compiler-body">${ordered.map((tool) => renderCompilerRow(tool, { javaInstalled, gradleInstalled, mavenInstalled, jdkSettings })).join('')}</div>
     </div>`;
     bindCompilerRows(list);
     }
@@ -2240,10 +2284,23 @@ async function saveCompilerFromSettings(id) {
     return;
   }
   try {
-    await api('/api/settings/compilers', {
-      method: 'PATCH',
-      body: JSON.stringify({ id, path }),
-    });
+    if (id === 'java') {
+      const releaseSel = document.querySelector('.settings-java-release-select');
+      const raw = releaseSel?.value?.trim() || '';
+      const release = raw ? parseInt(raw, 10) : null;
+      await api('/api/settings/jdk', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          java_home: path,
+          ...(releaseSel ? { java_release: release } : {}),
+        }),
+      });
+    } else {
+      await api('/api/settings/compilers', {
+        method: 'PATCH',
+        body: JSON.stringify({ id, path }),
+      });
+    }
     await loadCompilersSettingsSection();
     await refreshJavaLanguageLevel();
     if (state.activeTab) await refreshLanguageContextForPath(state.activeTab);

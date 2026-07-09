@@ -158,27 +158,46 @@ struct IndexedSymbol {
     column: u32,
 }
 
+fn is_annotation_fqcn(fqcn: &str) -> bool {
+    fqcn.contains(".annotation.")
+        || fqcn.contains(".constraints.")
+        || fqcn.starts_with("jakarta.validation.")
+        || fqcn.starts_with("javax.validation.")
+        || fqcn.starts_with("lombok.")
+}
+
+fn indexed_annotation_symbol(sym: &IndexedSymbol) -> bool {
+    sym.kind == "annotation" || (sym.kind != "method" && is_annotation_fqcn(&sym.qualified))
+}
+
 /// In-memory index with O(1) symbol lookup (avoids reparsing 100MB+ JSON on every F12).
 struct IndexLookup {
     project_root: String,
     symbols: Vec<IndexedSymbol>,
     by_qualified: HashMap<String, usize>,
     by_name: HashMap<String, Vec<usize>>,
+    /// Precomputed annotation indices — avoids scanning 100k+ symbols on every `@` completion.
+    annotation_indices: Vec<usize>,
 }
 
 impl IndexLookup {
     fn from_index(index: JavaIndex) -> Self {
         let mut by_qualified = HashMap::new();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut annotation_indices = Vec::new();
         for (i, sym) in index.symbols.iter().enumerate() {
             by_qualified.entry(sym.qualified.clone()).or_insert(i);
             by_name.entry(sym.name.clone()).or_default().push(i);
+            if indexed_annotation_symbol(sym) {
+                annotation_indices.push(i);
+            }
         }
         Self {
             project_root: index.project_root,
             symbols: index.symbols,
             by_qualified,
             by_name,
+            annotation_indices,
         }
     }
 
@@ -188,6 +207,7 @@ impl IndexLookup {
             symbols: Vec::new(),
             by_qualified: HashMap::new(),
             by_name: HashMap::new(),
+            annotation_indices: Vec::new(),
         }
     }
 
@@ -347,6 +367,35 @@ impl IndexLookup {
         items.truncate(limit);
         items
     }
+
+    fn annotations_matching_name_prefix<'a>(
+        &'a self,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a IndexedSymbol> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut items: Vec<&'a IndexedSymbol> = self
+            .annotation_indices
+            .iter()
+            .filter_map(|&i| {
+                let sym = &self.symbols[i];
+                if prefix.is_empty() || sym.name.to_lowercase().starts_with(&prefix_lower) {
+                    Some(sym)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            let pa = spring_priority(&a.qualified);
+            let pb = spring_priority(&b.qualified);
+            pa.cmp(&pb)
+                .then_with(|| a.name.len().cmp(&b.name.len()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        items.truncate(limit);
+        items
+    }
 }
 
 struct CachedLookup {
@@ -442,9 +491,65 @@ fn cached_gradle_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
     Ok(root)
 }
 
+fn cached_gradle_index_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
+    if let Some(repo) = super::gradle::find_gradle_repo_root(ws, from_path)? {
+        return Ok(Some(repo));
+    }
+    cached_gradle_root(ws, from_path)
+}
+
+fn get_navigation_lookup(
+    ws: &Path,
+    module_root: &Path,
+    index_root: &Path,
+) -> Result<Arc<IndexLookup>> {
+    if index_root != module_root {
+        if let Ok(lookup) = get_lookup(ws, index_root) {
+            if !lookup.symbols.is_empty() {
+                return Ok(lookup);
+            }
+        }
+    }
+    get_lookup(ws, module_root)
+}
+
+/// Workspace subtree to scan for Java definitions (Gradle wrapper root, Maven reactor, or workspace).
+pub fn java_navigation_scan_root(ws: &Path, from_path: &str) -> PathBuf {
+    if let Ok(Some(repo)) = super::gradle::find_gradle_repo_root(ws, from_path) {
+        if repo.is_dir() {
+            return repo;
+        }
+    }
+    if let Ok(Some(module)) = super::maven::find_maven_root(ws, from_path) {
+        if let Some(reactor) = super::maven::find_maven_reactor_root(&module) {
+            if reactor.is_dir() {
+                return reactor;
+            }
+        }
+        if module.is_dir() {
+            return module;
+        }
+    }
+    if let Ok(Some(root)) = cached_gradle_root(ws, from_path) {
+        let root = if root.is_absolute() {
+            root
+        } else {
+            ws.join(root)
+        };
+        if root.is_dir() {
+            return root;
+        }
+    }
+    ws.to_path_buf()
+}
+
 /// Maven/Gradle/plain-Java module root for a workspace-relative path.
 pub fn index_root_for_path(ws: &Path, from_path: &str) -> Result<Option<PathBuf>> {
-    cached_gradle_root(ws, from_path)
+    cached_gradle_index_root(ws, from_path)
+}
+
+fn gradle_index_source_scope(gradle_root: &Path) -> PathBuf {
+    super::gradle::find_gradle_settings_repo_root(gradle_root)
 }
 
 fn merge_warm_status(combined: &mut WarmIndexStatus, index: &JavaIndex, meta: &IndexMeta, cached: bool) {
@@ -525,7 +630,10 @@ fn content_fingerprint(content: &str) -> u64 {
 }
 
 fn cache_definition(key: String, hit: Option<SymbolLocation>) {
-    if hit.is_none() {
+    let Some(loc) = hit else {
+        return;
+    };
+    if loc.path.ends_with(".jar") || !is_preferred_java_definition_path(&loc.path) {
         return;
     }
     let Ok(mut guard) = DEFINITION_CACHE.lock() else {
@@ -534,15 +642,21 @@ fn cache_definition(key: String, hit: Option<SymbolLocation>) {
     if guard.len() >= DEFINITION_CACHE_MAX {
         guard.clear();
     }
-    guard.insert(key, hit);
+    guard.insert(key, Some(loc));
 }
 
 fn cached_definition(key: &str) -> Option<Option<SymbolLocation>> {
-    DEFINITION_CACHE.lock().ok().and_then(|guard| {
-        guard.get(key).cloned().map(|hit| {
-            hit.filter(|loc| !loc.path.ends_with(".jar"))
-        })
-    })
+    let Ok(mut guard) = DEFINITION_CACHE.lock() else {
+        return None;
+    };
+    let hit = guard.get(key).cloned()?;
+    if hit.as_ref().is_some_and(|loc| {
+        loc.path.ends_with(".jar") || !is_preferred_java_definition_path(&loc.path)
+    }) {
+        guard.remove(key);
+        return None;
+    }
+    Some(hit)
 }
 
 fn parse_imports_cached(gradle_root: &Path, from_path: &str, content: &str) -> ImportMap {
@@ -1247,7 +1361,7 @@ fn resolve_maven_classpath_via_tooling(
         }
         _ => {}
     }
-    resolved.jars = supplement_jakarta_persistence_api(&resolved.jars);
+    resolved.jars = supplement_wellknown_api_jars(&resolved.jars, None);
     Ok(resolved)
 }
 
@@ -1280,6 +1394,107 @@ fn cached_classpath_trustworthy(project_root: &Path, cached: &[PathBuf]) -> bool
     !resolve_dependency_tree_jars(project_root, true).is_empty()
 }
 
+/// Compiled outputs from a Gradle/Maven module directory (classes dirs + packaged jars).
+fn module_compiled_classpath_entries(module_dir: &Path) -> Vec<PathBuf> {
+    let (classes, _) = discover_gradle_output_dirs(module_dir);
+    let mut entries = classes;
+    for libs_root in [module_dir.join("build/libs"), module_dir.join("target")] {
+        let Ok(rd) = std::fs::read_dir(&libs_root) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.extension().and_then(|e| e.to_str()) != Some("jar") {
+                continue;
+            }
+            if name.contains("-sources")
+                || name.contains("-javadoc")
+                || name.ends_with(".original")
+            {
+                continue;
+            }
+            if !entries.iter().any(|p| p == &path) {
+                entries.push(path);
+            }
+        }
+    }
+    entries
+}
+
+/// JARs from a sibling's `api` dependencies (exported compile classpath), via its cached resolve.
+fn sibling_api_dependency_jars(sibling: &Path) -> Vec<PathBuf> {
+    let Some(content) = super::gradle::read_build_file_content(sibling) else {
+        return Vec::new();
+    };
+    let mut wanted_artifacts = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.split("//").next().unwrap_or(line).trim();
+        if !(trimmed.starts_with("api ") || trimmed.starts_with("api(")) {
+            continue;
+        }
+        if let Some((_, artifact)) = parse_gradle_dependency_notation(trimmed) {
+            if !wanted_artifacts.iter().any(|a| a == &artifact) {
+                wanted_artifacts.push(artifact);
+            }
+        }
+    }
+    if wanted_artifacts.is_empty() {
+        return Vec::new();
+    }
+    cached_classpath_jars(sibling)
+        .into_iter()
+        .filter(|p| {
+            let s = p.to_string_lossy().to_ascii_lowercase();
+            wanted_artifacts
+                .iter()
+                .any(|artifact| s.contains(&artifact.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
+fn parse_gradle_dependency_notation(line: &str) -> Option<(String, String)> {
+    let api_idx = line.find("api")?;
+    let rest = line[api_idx + 3..].trim_start();
+    let rest = rest.strip_prefix('(').unwrap_or(rest).trim();
+    let quote = rest.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let inner_start = quote.len_utf8();
+    let inner_end = rest[inner_start..].find(quote)?;
+    let coords = rest[inner_start..inner_start + inner_end].trim();
+    let mut parts = coords.split(':');
+    let group = parts.next()?.trim();
+    let artifact = parts.next()?.trim();
+    if group.is_empty() || artifact.is_empty() {
+        return None;
+    }
+    Some((group.to_string(), artifact.to_string()))
+}
+
+/// Classes dirs and JARs from compiled workspace sibling modules (Gradle `project()` / Maven reactor).
+fn workspace_sibling_module_classpath(project_root: &Path) -> Vec<PathBuf> {
+    let mut entries = Vec::new();
+    if super::maven::is_maven_project_root(project_root) {
+        if let Some(ctx) = super::maven::maven_reactor_context(project_root) {
+            let (classes, jars) =
+                super::maven::workspace_module_classpath_entries(project_root, &ctx);
+            entries.extend(classes);
+            entries.extend(jars);
+        }
+    } else if super::gradle::is_gradle_project_dir(project_root) {
+        for sibling in super::gradle::gradle_project_dependency_dirs(project_root) {
+            entries.extend(module_compiled_classpath_entries(&sibling));
+            entries.extend(sibling_api_dependency_jars(&sibling));
+        }
+    }
+    dedupe_classpath_entries(filter_existing_classpath_entries(entries))
+}
+
 /// Full project classpath: tooling + declared build-file transitive tree + compiled/generated outputs.
 pub fn resolve_full_project_classpath(project_root: &Path) -> Vec<PathBuf> {
     let mut entries = resolve_dependency_tree_jars(project_root, true);
@@ -1297,7 +1512,10 @@ pub fn resolve_full_project_classpath(project_root: &Path) -> Vec<PathBuf> {
         }
     };
     entries = merge_classpath_jars(&tooling_jars, &entries);
+    let file_jars: Vec<PathBuf> = entries.iter().filter(|p| p.is_file()).cloned().collect();
+    let mut entries = supplement_wellknown_api_jars(&file_jars, None);
     entries.extend(cached_project_classes_dirs(project_root));
+    entries.extend(workspace_sibling_module_classpath(project_root));
     entries = super::java_classpath::complete_classpath(entries, true);
     dedupe_classpath_entries(filter_existing_classpath_entries(entries))
 }
@@ -1643,6 +1861,51 @@ fn supplement_jakarta_persistence_api(jars: &[PathBuf]) -> Vec<PathBuf> {
     jars.to_vec()
 }
 
+/// `@Valid` / constraint annotations live in jakarta.validation-api — Hibernate Validator alone is not enough.
+fn supplement_jakarta_validation_api(jars: &[PathBuf], content: Option<&str>) -> Vec<PathBuf> {
+    if classpath_includes_validation(jars) {
+        return jars.to_vec();
+    }
+    let needs_validation = jars.iter().any(|p| {
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.contains("hibernate-validator")
+            || s.contains("spring-boot-starter-validation")
+    }) || content.is_some_and(|text| {
+        text.contains("jakarta.validation")
+            || text.contains("javax.validation")
+            || text.contains("@Valid")
+            || text.contains("@Validated")
+    });
+    if !needs_validation {
+        return jars.to_vec();
+    }
+    let files_root = super::java_classpath::gradle_user_home().join("caches/modules-2/files-2.1");
+    for version in ["3.0.2", "3.0.1", "3.0.0", "2.0.2"] {
+        if let Some(jar) = super::java_classpath::find_cached_jar(
+            &files_root,
+            "jakarta.validation",
+            "jakarta.validation-api",
+            version,
+        ) {
+            if jar.is_file() {
+                return merge_classpath_jars(jars, &[jar]);
+            }
+        }
+        if let Some(jar) =
+            super::maven::find_m2_jar("jakarta.validation", "jakarta.validation-api", version)
+        {
+            if jar.is_file() {
+                return merge_classpath_jars(jars, &[jar]);
+            }
+        }
+    }
+    jars.to_vec()
+}
+
+fn supplement_wellknown_api_jars(jars: &[PathBuf], content: Option<&str>) -> Vec<PathBuf> {
+    supplement_jakarta_validation_api(&supplement_jakarta_persistence_api(jars), content)
+}
+
 fn merge_classpath_jars(primary: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -1683,13 +1946,16 @@ pub fn resolve_javac_classpath_for_file(
 ) -> Vec<PathBuf> {
     let include_test = file_needs_test_classpath(rel_path, content);
     let mut jars = collect_dependency_jars_for_javac(project_root, include_test);
-    jars = supplement_jakarta_persistence_api(&jars);
+    let sibling = workspace_sibling_module_classpath(project_root);
+    jars.extend(sibling.iter().filter(|p| p.is_file()).cloned());
+    jars = supplement_wellknown_api_jars(&jars, Some(content));
     jars = super::java_classpath::complete_classpath(jars, include_test);
     jars = dedupe_classpath_entries(filter_existing_classpath_entries(
         jars.into_iter().filter(|p| p.is_file()).collect(),
     ));
 
     let mut dirs = cached_project_classes_dirs(project_root);
+    dirs.extend(sibling.into_iter().filter(|p| p.is_dir()));
     dirs.retain(|p| p.is_dir());
 
     let mut entries = jars;
@@ -1723,6 +1989,31 @@ pub fn project_build_root(ws: &Path, from_path: &str) -> Result<Option<PathBuf>>
     cached_gradle_root(ws, from_path)
 }
 
+/// True when a simple name resolves on the project classpath (index first; hardcoded tables only offline).
+pub fn symbol_known_on_classpath(
+    ws: &Path,
+    from_path: &str,
+    content: &str,
+    symbol: &str,
+) -> bool {
+    if symbol.is_empty() {
+        return false;
+    }
+    let Ok(Some(module_root)) = cached_gradle_root(ws, from_path) else {
+        return well_known_import_if_offline(ws, symbol).is_some();
+    };
+    let index_root = match cached_gradle_index_root(ws, from_path) {
+        Ok(Some(r)) => r,
+        _ => module_root.clone(),
+    };
+    let Ok(lookup) = get_navigation_lookup(ws, &module_root, &index_root) else {
+        return well_known_import_if_offline(ws, symbol).is_some();
+    };
+    let imports = parse_imports_cached(&module_root, from_path, content);
+    let offline = super::jdtls::use_java_navigation_fallback(ws);
+    resolve_type_fqcn(&lookup, symbol, &imports, &module_root, offline).is_some()
+}
+
 /// Best FQCN to import for a simple type name (e.g. RestController).
 pub fn import_fqcn_for_symbol(
     ws: &Path,
@@ -1730,11 +2021,27 @@ pub fn import_fqcn_for_symbol(
     content: &str,
     symbol: &str,
 ) -> Result<Option<String>> {
+    import_fqcn_for_symbol_with_well_known(
+        ws,
+        from_path,
+        content,
+        symbol,
+        super::jdtls::use_java_navigation_fallback(ws),
+    )
+}
+
+fn import_fqcn_for_symbol_with_well_known(
+    ws: &Path,
+    from_path: &str,
+    content: &str,
+    symbol: &str,
+    allow_well_known: bool,
+) -> Result<Option<String>> {
     if symbol.is_empty() || !symbol.chars().next().is_some_and(|c| c.is_uppercase()) {
         return Ok(None);
     }
 
-    if let Some(fqcn) = well_known_import(symbol) {
+    if let Some(fqcn) = well_known_import_if_allowed(allow_well_known, symbol) {
         if !content.contains(&format!("import {fqcn};")) {
             return Ok(Some(fqcn.to_string()));
         }
@@ -1742,14 +2049,16 @@ pub fn import_fqcn_for_symbol(
     }
 
     let Some(root) = cached_gradle_root(ws, from_path)? else {
-        return Ok(well_known_import(symbol).map(str::to_string));
+        return Ok(
+            well_known_import_if_allowed(allow_well_known, symbol).map(str::to_string),
+        );
     };
     let lookup = get_lookup(ws, &root)?;
     let imports = parse_imports_cached(&root, from_path, content);
     if imports.explicit.contains_key(symbol) {
         return Ok(None);
     }
-    if resolve_type_fqcn(&lookup, symbol, &imports, &root).is_some() {
+    if resolve_type_fqcn(&lookup, symbol, &imports, &root, allow_well_known).is_some() {
         return Ok(None);
     }
 
@@ -1758,7 +2067,9 @@ pub fn import_fqcn_for_symbol(
         .filter(|s| is_library_fqcn(&s.qualified))
         .collect();
     if candidates.is_empty() {
-        return Ok(well_known_import(symbol).map(str::to_string));
+        return Ok(
+            well_known_import_if_allowed(allow_well_known, symbol).map(str::to_string),
+        );
     }
     if candidates.len() == 1 {
         return Ok(Some(candidates[0].qualified.clone()));
@@ -1777,6 +2088,30 @@ fn well_known_import(symbol: &str) -> Option<&'static str> {
         .chain(WELL_KNOWN_TEST_IMPORTS.iter())
         .chain(WELL_KNOWN_JDK_IMPORTS.iter())
         .find_map(|(name, fqcn)| (*name == symbol).then_some(*fqcn))
+}
+
+fn well_known_import_if_offline(ws: &Path, symbol: &str) -> Option<&'static str> {
+    if super::jdtls::use_java_navigation_fallback(ws) {
+        well_known_import(symbol)
+    } else {
+        None
+    }
+}
+
+fn well_known_import_if_allowed(allow_well_known: bool, symbol: &str) -> Option<&'static str> {
+    if allow_well_known {
+        well_known_import(symbol)
+    } else {
+        None
+    }
+}
+
+fn well_known_lombok_import_if_offline(ws: &Path, symbol: &str) -> Option<&'static str> {
+    if super::jdtls::use_java_navigation_fallback(ws) {
+        well_known_lombok_import(symbol)
+    } else {
+        None
+    }
 }
 
 fn well_known_lombok_import(symbol: &str) -> Option<&'static str> {
@@ -1859,6 +2194,7 @@ fn ordered_type_fqcn_candidates(
     content: &str,
     line: u32,
     column: u32,
+    offline_fallback: bool,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -1879,12 +2215,15 @@ fn ordered_type_fqcn_candidates(
         if let Some(fqcn) = infer_lombok_fqcn(content, symbol, gradle_root) {
             push(fqcn);
         }
-        if let Some(fqcn) = well_known_import(symbol) {
-            push(fqcn.to_string());
+        if offline_fallback {
+            if let Some(fqcn) = well_known_import(symbol) {
+                push(fqcn.to_string());
+            }
         }
     }
 
     let skip_non_lombok_wildcards = used_as_annotation
+        && offline_fallback
         && well_known_lombok_import(symbol).is_some()
         && (project_uses_lombok(gradle_root) || super::java_ecosystem::file_uses_lombok(content));
     for fqcn in import_fqcns(symbol, imports) {
@@ -1911,6 +2250,7 @@ fn ordered_type_fqcn_candidates(
     }
 
     let lombok_annotation_intent = used_as_annotation
+        && offline_fallback
         && well_known_lombok_import(symbol).is_some()
         && (project_uses_lombok(gradle_root) || super::java_ecosystem::file_uses_lombok(content));
     let mut indexed: Vec<String> = lookup
@@ -1940,11 +2280,13 @@ fn ordered_type_fqcn_candidates(
             push(fqcn);
         }
     }
-    if let Some(fqcn) = well_known_lombok_import(symbol).filter(|_| used_as_annotation) {
-        push(fqcn.to_string());
-    }
-    if let Some(fqcn) = well_known_import(symbol) {
-        push(fqcn.to_string());
+    if offline_fallback {
+        if let Some(fqcn) = well_known_lombok_import(symbol).filter(|_| used_as_annotation) {
+            push(fqcn.to_string());
+        }
+        if let Some(fqcn) = well_known_import(symbol) {
+            push(fqcn.to_string());
+        }
     }
 
     out
@@ -2725,6 +3067,26 @@ pub fn definition_path_is_openable(ws: &Path, path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Prefer `src/main/java` (or test) over compiled `.class` trees for project navigation.
+pub fn is_preferred_java_definition_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    if p.ends_with(".class") {
+        return false;
+    }
+    if p.contains("/build/classes/")
+        || p.contains("/target/classes/")
+        || p.contains("/build/tmp/")
+    {
+        return false;
+    }
+    true
+}
+
+/// Openable project/library definition worth returning (skips build output stubs jdtls may return).
+pub fn accept_java_definition(ws: &Path, path: &str) -> bool {
+    definition_path_is_openable(ws, path) && is_preferred_java_definition_path(path)
+}
+
 fn resolve_definition_path(ws: &Path, path: &str) -> Result<PathBuf> {
     let path = path.replace('\\', "/");
     if path.starts_with('/') || path.chars().nth(1) == Some(':') {
@@ -2748,6 +3110,21 @@ pub fn resolve_java_library_definition(
     Ok(resolve_type_by_fqcn(ws, &root, &lookup, fqcn, symbol))
 }
 
+/// Same-file / same-buffer Java definition (instant; no index or LSP).
+pub fn find_local_java_definition(
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+) -> Option<SymbolLocation> {
+    if !is_java_like(from_path) {
+        return None;
+    }
+    let symbol = super::symbols::word_at(content, line, column)
+        .filter(|s| !s.is_empty() && !super::symbols::is_keyword(s))?;
+    super::symbols::find_in_content(&symbol, from_path, content)
+}
+
 pub fn find_external_definition(
     ws: &Path,
     from_path: &str,
@@ -2755,47 +3132,72 @@ pub fn find_external_definition(
     column: u32,
     content: &str,
 ) -> Result<Option<SymbolLocation>> {
+    find_external_definition_with_well_known(ws, from_path, line, column, content, None)
+}
+
+pub fn find_external_definition_with_well_known(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    allow_well_known: Option<bool>,
+) -> Result<Option<SymbolLocation>> {
     if !is_java_like(from_path) {
         return Ok(None);
     }
 
-    let Some(root) = cached_gradle_root(ws, from_path)? else {
+    let Ok(Some(module_root)) = cached_gradle_root(ws, from_path) else {
         return Ok(None);
     };
+    let index_root = cached_gradle_index_root(ws, from_path)?.unwrap_or_else(|| module_root.clone());
 
-    let cache_key = definition_cache_key(&root, from_path, line, column, content);
+    let cache_key = definition_cache_key(&index_root, from_path, line, column, content);
     if let Some(cached) = cached_definition(&cache_key) {
         return Ok(cached);
     }
 
-    let hit = find_external_definition_inner(ws, &root, from_path, line, column, content)?;
+    let allow_well_known =
+        allow_well_known.unwrap_or_else(|| super::jdtls::use_java_navigation_fallback(ws));
+    let hit = find_external_definition_inner(
+        ws,
+        &module_root,
+        &index_root,
+        from_path,
+        line,
+        column,
+        content,
+        allow_well_known,
+    )?;
     cache_definition(cache_key, hit.clone());
     Ok(hit)
 }
 
 fn find_external_definition_inner(
     ws: &Path,
-    root: &Path,
+    module_root: &Path,
+    index_root: &Path,
     from_path: &str,
     line: u32,
     column: u32,
     content: &str,
+    allow_well_known: bool,
 ) -> Result<Option<SymbolLocation>> {
-    let lookup = get_lookup(ws, root)?;
+    let lookup = get_navigation_lookup(ws, module_root, index_root)?;
     let symbol = match super::symbols::word_at(content, line, column) {
         Some(s) if !s.is_empty() && !super::symbols::is_keyword(&s) => s,
         _ => return Ok(None),
     };
 
-    let imports = parse_imports_cached(root, from_path, content);
+    let imports = parse_imports_cached(module_root, from_path, content);
 
     // Qualified member: receiver.field / receiver.method — type from imports + class body.
     if let Some(receiver) = super::symbols::java_member_qualifier(content, line, column, &symbol) {
         if let Some(receiver_fqcn) =
-            resolve_receiver_type_fqcn(ws, root, &lookup, content, &receiver, &imports)
+            resolve_receiver_type_fqcn(ws, module_root, &lookup, content, &receiver, &imports)
         {
             if let Some(loc) =
-                resolve_member_definition(ws, root, &lookup, &receiver_fqcn, &symbol)
+                resolve_member_definition(ws, module_root, &lookup, &receiver_fqcn, &symbol)
             {
                 return Ok(Some(loc));
             }
@@ -2805,7 +3207,7 @@ fn find_external_definition_inner(
     // Unqualified member on the current class (methods/fields — not type names).
     if symbol.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
         if let Some(fqcn) = super::symbols::java_class_from_source_path(from_path) {
-            if let Some(loc) = resolve_member_definition(ws, root, &lookup, &fqcn, &symbol) {
+            if let Some(loc) = resolve_member_definition(ws, module_root, &lookup, &fqcn, &symbol) {
                 return Ok(Some(loc));
             }
         }
@@ -2814,16 +3216,20 @@ fn find_external_definition_inner(
     // Explicit single-type import wins over wildcard homonyms (e.g. lombok.Data vs javax.xml.crypto.Data).
     if let Some(fqcn) = imports.explicit.get(&symbol) {
         if fqcn.starts_with("lombok.") {
-            let _ = ensure_lombok_navigation_stubs(root);
-            invalidate_library_source_dirs_cache(root);
+            let _ = ensure_lombok_navigation_stubs(module_root);
+            invalidate_library_source_dirs_cache(module_root);
         }
-        if let Some(loc) =
-            try_resolve_type_candidates(ws, root, &lookup, std::slice::from_ref(fqcn), &symbol)
-        {
+        if let Some(loc) = try_resolve_type_candidates(
+            ws,
+            module_root,
+            &lookup,
+            std::slice::from_ref(fqcn),
+            &symbol,
+        ) {
             return Ok(Some(loc));
         }
         if fqcn.starts_with("lombok.") {
-            if let Some(loc) = library_type_location_from_dirs(ws, root, fqcn, &symbol) {
+            if let Some(loc) = library_type_location_from_dirs(ws, module_root, fqcn, &symbol) {
                 return Ok(Some(loc));
             }
         }
@@ -2834,36 +3240,57 @@ fn find_external_definition_inner(
         return Ok(Some(loc));
     }
 
-    // Type / annotation: usage context → wildcards → index.
-    let candidates =
-        ordered_type_fqcn_candidates(&lookup, &symbol, &imports, root, content, line, column);
-    if let Some(loc) = try_resolve_type_candidates(ws, root, &lookup, &candidates, &symbol) {
+    let offline_fallback = allow_well_known;
+    // Type / annotation: usage context → wildcards → index (hardcoded FQCN tables when allowed).
+    let candidates = ordered_type_fqcn_candidates(
+        &lookup,
+        &symbol,
+        &imports,
+        module_root,
+        content,
+        line,
+        column,
+        offline_fallback,
+    );
+    if let Some(loc) = try_resolve_type_candidates(ws, module_root, &lookup, &candidates, &symbol) {
         return Ok(Some(loc));
     }
 
     if symbol.chars().next().is_some_and(|c| c.is_uppercase()) {
-        if let Some(loc) = fast_java_lang_location(ws, root, &symbol, &imports)? {
+        if let Some(loc) = fast_java_lang_location(ws, module_root, &symbol, &imports)? {
             return Ok(Some(loc));
         }
-        let lombok_intent = lombok_navigation_intent(content, &symbol, root, &imports);
+        let lombok_intent = lombok_navigation_intent(content, &symbol, module_root, &imports);
         if lombok_intent {
-            let _ = ensure_lombok_navigation_stubs(root);
-            invalidate_library_source_dirs_cache(root);
+            let _ = ensure_lombok_navigation_stubs(module_root);
+            invalidate_library_source_dirs_cache(module_root);
             if let Some(fqcn) = well_known_lombok_import(&symbol) {
-                if let Some(loc) = library_type_location_from_dirs(ws, root, fqcn, &symbol) {
+                if let Some(loc) = library_type_location_from_dirs(ws, module_root, fqcn, &symbol) {
                     return Ok(Some(loc));
                 }
             }
         }
         if !lombok_intent {
-            if let Some(loc) = resolve_jdk_type_location(ws, root, &symbol, &imports)? {
+            if let Some(loc) = resolve_jdk_type_location(ws, module_root, &symbol, &imports)? {
                 return Ok(Some(loc));
             }
         }
     }
 
-    if let Some(fqcn) = import_fqcn_for_symbol(ws, from_path, content, &symbol)? {
-        if let Some(loc) = resolve_type_by_fqcn(ws, root, &lookup, &fqcn, &symbol) {
+    if let Some(fqcn) = import_fqcn_for_symbol_with_well_known(
+        ws,
+        from_path,
+        content,
+        &symbol,
+        allow_well_known,
+    )? {
+        if let Some(loc) = resolve_type_by_fqcn(ws, module_root, &lookup, &fqcn, &symbol) {
+            return Ok(Some(loc));
+        }
+    }
+
+    if let Some(loc) = super::symbols::find_definition_for_symbol(ws, from_path, content, &symbol)? {
+        if accept_java_definition(ws, &loc.path) {
             return Ok(Some(loc));
         }
     }
@@ -2877,7 +3304,7 @@ fn find_external_definition_inner(
             .cmp(&import_match_priority(&b.qualified, &imports))
             .then_with(|| spring_priority(&a.qualified).cmp(&spring_priority(&b.qualified)))
     });
-    Ok(Some(to_location(ws, root, methods[0])))
+    Ok(Some(to_location(ws, module_root, methods[0])))
 }
 
 pub fn java_completions(
@@ -2889,6 +3316,32 @@ pub fn java_completions(
     prefix: &str,
     overlays: &[(String, String)],
 ) -> Result<Vec<CompletionItem>> {
+    java_completions_inner(ws, from_path, line, column, content, prefix, overlays, true)
+}
+
+/// Lightweight index gap-fill when jdtls is primary — skips full-symbol scan.
+pub fn java_completions_for_jdtls_gap_fill(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    prefix: &str,
+    overlays: &[(String, String)],
+) -> Result<Vec<CompletionItem>> {
+    java_completions_inner(ws, from_path, line, column, content, prefix, overlays, false)
+}
+
+fn java_completions_inner(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    prefix: &str,
+    overlays: &[(String, String)],
+    full_index_scan: bool,
+) -> Result<Vec<CompletionItem>> {
     if !is_java_like(from_path) {
         return Ok(Vec::new());
     }
@@ -2898,6 +3351,7 @@ pub fn java_completions(
     };
 
     let lookup = get_lookup(ws, &root)?;
+    let offline_fallback = super::jdtls::use_java_navigation_fallback(ws);
     let at_annotation = is_annotation_context(content, line, column);
     let imports = parse_imports_cached(&root, from_path, content);
     let prefix = if prefix.is_empty() {
@@ -2928,6 +3382,16 @@ pub fn java_completions(
         if !member_items.is_empty() {
             return Ok(member_items);
         }
+    }
+
+    if at_annotation {
+        return Ok(collect_annotation_completions(
+            ws,
+            &root,
+            &lookup,
+            &prefix,
+            offline_fallback,
+        ));
     }
 
     if prefix.is_empty() && !at_annotation {
@@ -3018,7 +3482,7 @@ pub fn java_completions(
         }
     }
 
-    if type_preferred && !prefix.is_empty() {
+    if type_preferred && !prefix.is_empty() && !at_annotation {
         let types = lookup.types_matching_name_prefix(&prefix, 80);
         if !types.is_empty() {
             return Ok(types
@@ -3026,6 +3490,13 @@ pub fn java_completions(
                 .map(|sym| symbol_to_completion_item(ws, &root, sym, None))
                 .collect());
         }
+        if !full_index_scan {
+            return Ok(Vec::new());
+        }
+    }
+
+    if !full_index_scan {
+        return Ok(Vec::new());
     }
 
     let prefix_lower = prefix.to_lowercase();
@@ -3034,7 +3505,7 @@ pub fn java_completions(
     let mut items = Vec::new();
 
     for sym in lookup.symbols.iter() {
-        if at_annotation && !is_annotation_index_symbol(sym) {
+        if at_annotation && !is_annotation_index_symbol(sym, offline_fallback) {
             continue;
         }
         if type_preferred && sym.kind == "method" {
@@ -3285,7 +3756,13 @@ fn member_completions_for_qualifier(
 
     if is_array_type {
         push_builtin_array_members(&mut items, &mut seen, member_prefix);
-        if let Some(obj_fqcn) = resolve_type_fqcn(lookup, "Object", imports, root) {
+        if let Some(obj_fqcn) = resolve_type_fqcn(
+            lookup,
+            "Object",
+            imports,
+            root,
+            super::jdtls::use_java_navigation_fallback(ws),
+        ) {
             for sym in lookup.members_for_type(&obj_fqcn, member_prefix, 40) {
                 if !seen.insert(sym.name.clone()) {
                     continue;
@@ -3338,7 +3815,8 @@ fn member_completions_for_qualifier(
 }
 
 fn member_source_dirs(gradle_root: &Path) -> Vec<PathBuf> {
-    let mut dirs = java_project_source_dirs(gradle_root);
+    let scope = gradle_index_source_scope(gradle_root);
+    let mut dirs = java_project_source_dirs(&scope);
     if dirs.is_empty() {
         for rel in super::java_sources::discovery_suffixes() {
             let p = gradle_root.join(rel);
@@ -3484,6 +3962,7 @@ fn resolve_receiver_type_fqcn(
     if qualifier.is_empty() {
         return None;
     }
+    let offline_fallback = super::jdtls::use_java_navigation_fallback(ws);
 
     if let Some((parent, member)) = qualifier.rsplit_once('.') {
         let parent = parent.trim();
@@ -3491,12 +3970,12 @@ fn resolve_receiver_type_fqcn(
         if !parent.is_empty() && !member.is_empty() {
             let parent_fqcn = resolve_receiver_type_fqcn(ws, root, lookup, content, parent, imports)?;
             let field_type = field_type_name_from_class_source(ws, root, &parent_fqcn, member)?;
-            return resolve_type_fqcn(lookup, &field_type, imports, root);
+            return resolve_type_fqcn(lookup, &field_type, imports, root, offline_fallback);
         }
     }
 
     if let Some(type_name) = super::symbols::infer_java_receiver_type_from_expr(content, qualifier) {
-        let resolved = resolve_type_fqcn(lookup, &type_name, imports, root);
+        let resolved = resolve_type_fqcn(lookup, &type_name, imports, root, offline_fallback);
         if resolved.is_some() {
             return resolved;
         }
@@ -3505,11 +3984,11 @@ fn resolve_receiver_type_fqcn(
         }
         let base = type_name.trim_end_matches("[]").trim();
         if base != type_name.as_str() {
-            return resolve_type_fqcn(lookup, base, imports, root);
+            return resolve_type_fqcn(lookup, base, imports, root, offline_fallback);
         }
     }
 
-    resolve_type_fqcn(lookup, qualifier, imports, root)
+    resolve_type_fqcn(lookup, qualifier, imports, root, offline_fallback)
 }
 
 fn field_type_name_from_class_source(
@@ -3851,7 +4330,7 @@ fn build_index(
         report(progress, "indexing", symbols.len());
     }
 
-    index_all_java_source_trees(ws, gradle_root, &mut symbols, progress)?;
+    index_all_java_source_trees(ws, &gradle_index_source_scope(gradle_root), &mut symbols, progress)?;
 
     for dir in &classpath.project_source_dirs {
         if dir.is_dir() {
@@ -4426,6 +4905,11 @@ fn resolve_classpath_for_index(project_root: &Path) -> GradleClasspath {
             project_source_dirs.push(dir);
         }
     }
+    for entry in workspace_sibling_module_classpath(project_root) {
+        if entry.is_dir() && !classes_dirs.iter().any(|p| p == &entry) {
+            classes_dirs.push(entry);
+        }
+    }
 
     GradleClasspath {
         jars,
@@ -4609,7 +5093,7 @@ fn fan_out_reactor_classpaths_from_cache(
         if resolved.jars.is_empty() {
             continue;
         }
-        resolved.jars = supplement_jakarta_persistence_api(&resolved.jars);
+        resolved.jars = supplement_wellknown_api_jars(&resolved.jars, None);
         persist_tooling_classpath(
             &module,
             &resolved,
@@ -6376,18 +6860,75 @@ fn jar_is_index_priority(name: &str) -> bool {
         || name.contains("lombok")
 }
 
-fn is_annotation_index_symbol(sym: &IndexedSymbol) -> bool {
-    if sym.kind == "annotation" {
+fn is_annotation_index_symbol(sym: &IndexedSymbol, offline_fallback: bool) -> bool {
+    if indexed_annotation_symbol(sym) {
         return true;
     }
-    if sym.kind != "class" && sym.kind != "interface" {
-        return false;
+    if offline_fallback {
+        well_known_import(&sym.name).is_some_and(is_annotation_fqcn)
+            || well_known_lombok_import(&sym.name).is_some()
+    } else {
+        false
     }
-    if sym.qualified.contains(".annotation.") {
-        return true;
+}
+
+fn collect_annotation_completions(
+    ws: &Path,
+    root: &Path,
+    lookup: &IndexLookup,
+    prefix: &str,
+    offline_fallback: bool,
+) -> Vec<CompletionItem> {
+    let prefix_lower = prefix.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut items: Vec<CompletionItem> = lookup
+        .annotations_matching_name_prefix(prefix, 80)
+        .into_iter()
+        .filter_map(|sym| {
+            seen.insert(sym.qualified.clone())
+                .then(|| symbol_to_completion_item(ws, root, sym, None))
+        })
+        .collect();
+
+    if offline_fallback {
+        let mut push_offline = |name: &str, fqcn: &str| {
+            if !is_annotation_fqcn(fqcn) && well_known_lombok_import(name).is_none() {
+                return;
+            }
+            if !prefix.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
+                return;
+            }
+            if !seen.insert(fqcn.to_string()) {
+                return;
+            }
+            items.push(CompletionItem {
+                label: name.to_string(),
+                kind: "annotation".into(),
+                detail: Some(fqcn.to_string()),
+                insert: None,
+                path: None,
+                line: None,
+                column: None,
+                documentation: None,
+            });
+        };
+        for (name, fqcn) in WELL_KNOWN_JAVA_IMPORTS
+            .iter()
+            .chain(WELL_KNOWN_TEST_IMPORTS.iter())
+            .chain(WELL_KNOWN_LOMBOK_IMPORTS.iter())
+        {
+            push_offline(name, fqcn);
+        }
     }
-    well_known_import(&sym.name).is_some_and(|fqcn| fqcn.contains(".annotation."))
-        || well_known_lombok_import(&sym.name).is_some()
+
+    items.sort_by(|a, b| {
+        let pa = spring_priority(a.detail.as_deref().unwrap_or(""));
+        let pb = spring_priority(b.detail.as_deref().unwrap_or(""));
+        pa.cmp(&pb)
+            .then_with(|| a.label.len().cmp(&b.label.len()))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    items
 }
 
 const ACC_INTERFACE: u16 = 0x0200;
@@ -7008,8 +7549,9 @@ fn lookup_imported_symbol<'a>(
     gradle_root: &Path,
     symbol: &str,
     imports: &ImportMap,
+    offline_fallback: bool,
 ) -> Option<&'a IndexedSymbol> {
-    resolve_type_fqcn(lookup, symbol, imports, gradle_root)
+    resolve_type_fqcn(lookup, symbol, imports, gradle_root, offline_fallback)
         .and_then(|fqcn| lookup.type_by_qualified(&fqcn))
 }
 
@@ -7035,38 +7577,120 @@ fn is_library_fqcn(fqcn: &str) -> bool {
         || fqcn.starts_with("kotlin.")
 }
 
+/// Public `java.lang` types (and annotations) that need no import.
+pub fn is_java_lang_public_type(symbol: &str) -> bool {
+    JAVA_LANG_PUBLIC_TYPES.contains(&symbol)
+}
+
+const JAVA_LANG_PUBLIC_TYPES: &[&str] = &[
+    "AbstractMethodError",
+    "Appendable",
+    "ArithmeticException",
+    "ArrayIndexOutOfBoundsException",
+    "ArrayStoreException",
+    "AssertionError",
+    "AutoCloseable",
+    "Boolean",
+    "BootstrapMethodError",
+    "Byte",
+    "CharSequence",
+    "Character",
+    "Class",
+    "ClassCastException",
+    "ClassCircularityError",
+    "ClassFormatError",
+    "ClassLoader",
+    "ClassNotFoundException",
+    "ClassValue",
+    "CloneNotSupportedException",
+    "Cloneable",
+    "Comparable",
+    "Compiler",
+    "Deprecated",
+    "Double",
+    "Enum",
+    "EnumConstantNotPresentException",
+    "Error",
+    "Exception",
+    "Float",
+    "FunctionalInterface",
+    "IllegalAccessError",
+    "IllegalAccessException",
+    "IllegalArgumentException",
+    "IllegalCallerException",
+    "IllegalMonitorStateException",
+    "IllegalStateException",
+    "IllegalThreadStateException",
+    "IncompatibleClassChangeError",
+    "IndexOutOfBoundsException",
+    "InheritableThreadLocal",
+    "InstantiationError",
+    "InstantiationException",
+    "Integer",
+    "InternalError",
+    "InterruptedException",
+    "Iterable",
+    "LayerInstantiationException",
+    "LinkageError",
+    "LiveStackFrame",
+    "Long",
+    "Math",
+    "Module",
+    "ModuleLayer",
+    "NegativeArraySizeException",
+    "NoClassDefFoundError",
+    "NoSuchFieldError",
+    "NoSuchFieldException",
+    "NoSuchMethodError",
+    "NoSuchMethodException",
+    "NullPointerException",
+    "Number",
+    "NumberFormatException",
+    "Object",
+    "OutOfMemoryError",
+    "Override",
+    "Package",
+    "Process",
+    "ProcessBuilder",
+    "ProcessHandle",
+    "Readable",
+    "Record",
+    "ReflectiveOperationException",
+    "Runnable",
+    "Runtime",
+    "RuntimeException",
+    "RuntimePermission",
+    "SafeVarargs",
+    "SecurityException",
+    "SecurityManager",
+    "Short",
+    "StackOverflowError",
+    "StackTraceElement",
+    "StackWalker",
+    "StrictMath",
+    "String",
+    "StringBuffer",
+    "StringBuilder",
+    "StringIndexOutOfBoundsException",
+    "SuppressWarnings",
+    "System",
+    "Thread",
+    "ThreadDeath",
+    "ThreadGroup",
+    "ThreadLocal",
+    "Throwable",
+    "TypeNotPresentException",
+    "UnknownError",
+    "UnsatisfiedLinkError",
+    "UnsupportedClassVersionError",
+    "UnsupportedOperationException",
+    "VerifyError",
+    "VirtualMachineError",
+    "Void",
+];
+
 fn is_java_lang_simple_type(symbol: &str) -> bool {
-    matches!(
-        symbol,
-        "String"
-            | "Object"
-            | "Integer"
-            | "Long"
-            | "Boolean"
-            | "Character"
-            | "Byte"
-            | "Short"
-            | "Float"
-            | "Double"
-            | "Class"
-            | "Throwable"
-            | "Exception"
-            | "RuntimeException"
-            | "Error"
-            | "System"
-            | "Math"
-            | "StringBuilder"
-            | "StringBuffer"
-            | "Void"
-            | "Enum"
-            | "Record"
-            | "Thread"
-            | "Runnable"
-            | "Comparable"
-            | "Iterable"
-            | "AutoCloseable"
-            | "Cloneable"
-    )
+    is_java_lang_public_type(symbol)
 }
 
 fn is_java_util_simple_type(symbol: &str) -> bool {
@@ -7212,6 +7836,26 @@ fn resolve_type_by_fqcn(
         }
     }
 
+    let scope = gradle_index_source_scope(root);
+    let mut project_dirs = java_project_source_dirs(&scope);
+    project_dirs.extend(cached_project_source_dirs(&scope));
+    if let Some(source_path) = find_java_source_for_fqcn(ws, root, &project_dirs, fqcn) {
+        let rel = rel_path_for(ws, &source_path)
+            .map(|p| normalize_index_path(ws, root, &p))
+            .unwrap_or_else(|_| normalize_index_path(ws, root, &source_path.to_string_lossy()));
+        let simple = fqcn.rsplit('.').next().unwrap_or(symbol);
+        let (line, column) = read_type_line_in_java_source(&source_path, simple);
+        let loc = SymbolLocation {
+            name: symbol.to_string(),
+            kind: "class".into(),
+            path: rel,
+            line,
+            column,
+        };
+        cache_fqcn_location(&cache_key, &loc);
+        return Some(loc);
+    }
+
     None
 }
 
@@ -7273,6 +7917,7 @@ fn resolve_type_fqcn(
     symbol: &str,
     imports: &ImportMap,
     gradle_root: &Path,
+    offline_fallback: bool,
 ) -> Option<String> {
     if let Some(fqcn) = imports.explicit.get(symbol) {
         return Some(fqcn.clone());
@@ -7319,8 +7964,13 @@ fn resolve_type_fqcn(
         return Some(candidates[0].clone());
     }
 
-    resolve_fqcn_from_jdk_files(gradle_root, symbol, imports)
-        .or_else(|| well_known_import(symbol).map(str::to_string))
+    resolve_fqcn_from_jdk_files(gradle_root, symbol, imports).or_else(|| {
+        if offline_fallback {
+            well_known_import(symbol).map(str::to_string)
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) fn is_java_like(path: &str) -> bool {
@@ -7424,6 +8074,147 @@ mod tests {
         )
         .unwrap();
         std::fs::write(jdk.join(".extracted"), "test").unwrap();
+    }
+
+    #[test]
+    fn workspace_sibling_module_classpath_merges_gradle_project_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-sibling-cp-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(
+            root.join("libs/common/build/classes/java/main/com/example/common/model"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("services/gateway/src/main/java")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "subprojects { apply plugin: 'java' }\n").unwrap();
+        std::fs::write(root.join("libs/common/build.gradle"), "plugins { id 'java-library' }\n").unwrap();
+        std::fs::write(
+            root.join("services/gateway/build.gradle"),
+            r#"plugins { id 'java' }
+dependencies {
+    implementation project(':libs:common')
+}
+"#,
+        )
+        .unwrap();
+
+        let gateway = root.join("services/gateway");
+        let entries = workspace_sibling_module_classpath(&gateway);
+        assert!(
+            entries.iter().any(|p| {
+                p.to_string_lossy().contains("libs/common/build/classes/java/main")
+            }),
+            "expected common classes dir on gateway classpath, got {:?}",
+            entries
+        );
+
+        let full = resolve_full_project_classpath(&gateway);
+        assert!(
+            full.iter().any(|p| {
+                p.to_string_lossy().contains("libs/common/build/classes/java/main")
+            }),
+            "resolve_full_project_classpath should include sibling outputs"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_gradle_repo_root_from_nested_module() {
+        let root = std::env::temp_dir().join(format!("reaper-gradle-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gradle/wrapper")).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        let gateway = root.join("services/gateway");
+        std::fs::create_dir_all(gateway.join("src/main/java")).unwrap();
+        std::fs::write(gateway.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let from = "services/gateway/src/main/java/com/example/Foo.java";
+        let repo = crate::workspace::gradle::find_gradle_repo_root(&root, from)
+            .expect("lookup")
+            .expect("repo");
+        assert_eq!(
+            repo.canonicalize().unwrap_or(repo.clone()),
+            root.canonicalize().unwrap_or(root.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_gradle_repo_root_without_gradlew_uses_settings_parent() {
+        let root = std::env::temp_dir().join(format!("reaper-gradle-nogradle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        let gateway = root.join("services/gateway");
+        std::fs::create_dir_all(gateway.join("src/main/java")).unwrap();
+        std::fs::write(gateway.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let from = "services/gateway/src/main/java/com/example/Foo.java";
+        let repo = crate::workspace::gradle::find_gradle_settings_repo_root(&gateway);
+        assert_eq!(
+            repo.canonicalize().unwrap_or(repo.clone()),
+            root.canonicalize().unwrap_or(root.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gradle_submodule_definition_finds_sibling_type() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-sibling-def-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.gradle"), "rootProject.name = 'demo'\n").unwrap();
+        std::fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        std::fs::write(root.join("build.gradle"), "subprojects { apply plugin: 'java' }\n").unwrap();
+        std::fs::create_dir_all(root.join("libs/common/src/main/java/com/example/common")).unwrap();
+        std::fs::write(root.join("libs/common/build.gradle"), "plugins { id 'java-library' }\n").unwrap();
+        std::fs::write(
+            root.join("libs/common/src/main/java/com/example/common/ApiResponse.java"),
+            "package com.example.common;\npublic class ApiResponse {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("services/gateway/src/main/java/com/example")).unwrap();
+        std::fs::write(
+            root.join("services/gateway/build.gradle"),
+            "plugins { id 'java' }\ndependencies { implementation project(':libs:common') }\n",
+        )
+        .unwrap();
+        let gateway_src = "services/gateway/src/main/java/com/example/Gateway.java";
+        std::fs::write(
+            root.join(gateway_src),
+            "package com.example;\nimport com.example.common.ApiResponse;\npublic class Gateway { ApiResponse r; }\n",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(root.join(gateway_src)).unwrap();
+        let hit = find_external_definition_with_well_known(
+            &root,
+            gateway_src,
+            2,
+            35,
+            &content,
+            Some(true),
+        )
+        .expect("definition")
+        .expect("ApiResponse hit");
+        assert!(
+            hit.path.replace('\\', "/").contains("libs/common"),
+            "expected sibling module path, got {}",
+            hit.path
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -7768,7 +8559,7 @@ dependencies {
         };
         let imports = parse_imports("package com.example;\n");
         let lookup = IndexLookup::from_index(index);
-        let hit = lookup_imported_symbol(&lookup, Path::new("."), "String", &imports);
+        let hit = lookup_imported_symbol(&lookup, Path::new("."), "String", &imports, true);
         assert_eq!(hit.map(|s| s.qualified.as_str()), Some("java.lang.String"));
     }
 
@@ -7779,9 +8570,9 @@ dependencies {
             symbols: vec![],
         });
         let imports = parse_imports("package com.example;\n");
-        let fqcn = resolve_type_fqcn(&lookup, "String", &imports, Path::new("."));
+        let fqcn = resolve_type_fqcn(&lookup, "String", &imports, Path::new("."), true);
         assert_eq!(fqcn.as_deref(), Some("java.lang.String"));
-        let list = resolve_type_fqcn(&lookup, "List", &imports, Path::new("."));
+        let list = resolve_type_fqcn(&lookup, "List", &imports, Path::new("."), true);
         assert_eq!(list.as_deref(), Some("java.util.List"));
     }
 
@@ -7818,7 +8609,7 @@ dependencies {
             line: 1,
             column: 1,
         };
-        assert!(is_annotation_index_symbol(&spring));
+        assert!(is_annotation_index_symbol(&spring, true));
         let plain = IndexedSymbol {
             name: "Hello".into(),
             qualified: "com.example.Hello".into(),
@@ -7827,7 +8618,16 @@ dependencies {
             line: 1,
             column: 1,
         };
-        assert!(!is_annotation_index_symbol(&plain));
+        assert!(!is_annotation_index_symbol(&plain, true));
+        let valid = IndexedSymbol {
+            name: "Valid".into(),
+            qualified: "jakarta.validation.Valid".into(),
+            kind: "class".into(),
+            path: "jar".into(),
+            line: 1,
+            column: 1,
+        };
+        assert!(is_annotation_index_symbol(&valid, false));
     }
 
     #[test]
@@ -8426,6 +9226,36 @@ dependencies {
             "jakarta.validation.constraints",
         ));
         assert!(classpath_includes_validation(&[api]));
+    }
+
+    #[test]
+    fn supplement_jakarta_validation_api_adds_api_when_hibernate_validator_present() {
+        let validator = PathBuf::from(
+            "/cache/files-2.1/org.hibernate.validator/hibernate-validator/8.0.2.Final/x/hibernate-validator-8.0.2.Final.jar",
+        );
+        let api = PathBuf::from(
+            "/Users/sunny/.gradle/caches/modules-2/files-2.1/jakarta.validation/jakarta.validation-api/3.0.2/b1581d1ef516be94c473c0f4d97e59e394c70150/jakarta.validation-api-3.0.2.jar",
+        );
+        if !api.is_file() {
+            return;
+        }
+        let out = supplement_jakarta_validation_api(&[validator], None);
+        assert!(
+            classpath_includes_validation(&out),
+            "expected jakarta.validation-api supplement, got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn parse_gradle_dependency_notation_reads_api_coords() {
+        assert_eq!(
+            parse_gradle_dependency_notation("    api 'jakarta.validation:jakarta.validation-api'"),
+            Some((
+                "jakarta.validation".to_string(),
+                "jakarta.validation-api".to_string()
+            ))
+        );
     }
 
     #[test]
