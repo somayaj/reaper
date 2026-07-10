@@ -471,6 +471,7 @@ const state = {
   packageManifestDock: localStorage.getItem(PACKAGE_MANIFEST_DOCK_KEY) || 'right',
   dockerLogsStreaming: false,
   dockerLogsAbortController: null,
+  dockerLogsXhr: null,
   dockerLogsModulePath: null,
   dockerLogsLabel: '',
   dockerLogsAutoScroll: true,
@@ -8654,11 +8655,18 @@ async function followSelectedDockerContainerLogs() {
   const name = state.dockerContainers.find((c) => c.id === id)?.name || id;
   const input = $('#docker-console-command');
   if (input) input.value = `logs -f --tail=200 ${name}`;
-  // Container logs by id are global; merge stderr (docker logs writes there).
+  const qid = shellQuoteDocker(id);
+  // Finite history first — WKWebView can buffer open-ended fetch streams until close,
+  // so `docker logs -f` alone often shows nothing. Then follow only new lines.
   await startDockerLogsStream(
-    `docker logs -f --tail=200 ${shellQuoteDocker(id)} 2>&1`,
+    `docker logs --tail=200 ${qid} 2>&1`,
     undefined,
     { label: `logs · ${name}`, modulePath: state.dockerLogsModulePath },
+  );
+  await startDockerLogsStream(
+    `docker logs -f --tail=0 ${qid} 2>&1`,
+    undefined,
+    { label: `logs · ${name}`, modulePath: state.dockerLogsModulePath, append: true },
   );
 }
 
@@ -8719,10 +8727,26 @@ async function runDockerConsoleCommand(commandText, { stream = false, raw = fals
       const streamCmd = needsComposeCwd || /\s2>&1\s*$/.test(shellCmd)
         ? shellCmd
         : `${shellCmd} 2>&1`;
-      await startDockerLogsStream(streamCmd, cwd, {
-        label: display || 'docker',
-        modulePath: state.dockerLogsModulePath,
-      });
+      const isFollow = /\blogs\b/.test(display || shellCmd)
+        && /(^|\s)-f(\s|$)|--follow/.test(` ${display || shellCmd} `);
+      if (isFollow && needsComposeCwd) {
+        // History then follow — same WKWebView buffering workaround as container logs.
+        await startDockerLogsStream(
+          dockerComposeShell('logs --tail=200'),
+          cwd,
+          { label: display || 'docker', modulePath: state.dockerLogsModulePath },
+        );
+        await startDockerLogsStream(
+          `${dockerComposeShell('logs -f --tail=0')} 2>&1`,
+          cwd,
+          { label: display || 'docker', modulePath: state.dockerLogsModulePath, append: true },
+        );
+      } else {
+        await startDockerLogsStream(streamCmd, cwd, {
+          label: display || 'docker',
+          modulePath: state.dockerLogsModulePath,
+        });
+      }
     } finally {
       if (runBtn) runBtn.disabled = false;
     }
@@ -8862,6 +8886,8 @@ function setDockerLogsControlsStreaming(streaming) {
 async function stopDockerLogsStream() {
   const ac = state.dockerLogsAbortController;
   state.dockerLogsAbortController = null;
+  try { state.dockerLogsXhr?.abort(); } catch { /* ignore */ }
+  state.dockerLogsXhr = null;
   ac?.abort();
   if (state.repo && state.dockerLogsStreaming) {
     try {
@@ -8870,6 +8896,25 @@ async function stopDockerLogsStream() {
   }
   setDockerLogsControlsStreaming(false);
   updateDockerLogsStatus('');
+}
+
+function drainDockerSseBuffer(sseBuffer, onChunk) {
+  const parts = String(sseBuffer || '').split('\n\n');
+  const rest = parts.pop() || '';
+  let exitCode = null;
+  for (const part of parts) {
+    const line = part.split('\n').find((l) => l.startsWith('data: '));
+    if (!line) continue;
+    let event;
+    try {
+      event = JSON.parse(line.slice(6));
+    } catch {
+      continue;
+    }
+    if (event.text) onChunk(event.text);
+    if (event.t === 'exit' && event.code != null) exitCode = event.code;
+  }
+  return { rest, exitCode };
 }
 
 async function consumeExecStreamToCallback(res, onChunk) {
@@ -8883,53 +8928,98 @@ async function consumeExecStreamToCallback(res, onChunk) {
     const { done, value } = await reader.read();
     if (done) break;
     sseBuffer += decoder.decode(value, { stream: true });
-    const parts = sseBuffer.split('\n\n');
-    sseBuffer = parts.pop() || '';
-    for (const part of parts) {
-      const line = part.split('\n').find((l) => l.startsWith('data: '));
-      if (!line) continue;
-      let event;
-      try {
-        event = JSON.parse(line.slice(6));
-      } catch {
-        continue;
-      }
-      if (event.text) onChunk(event.text);
-      if (event.t === 'exit' && event.code != null) exitCode = event.code;
-    }
+    const parsed = drainDockerSseBuffer(sseBuffer, onChunk);
+    sseBuffer = parsed.rest;
+    if (parsed.exitCode != null) exitCode = parsed.exitCode;
+  }
+  if (sseBuffer.trim()) {
+    const parsed = drainDockerSseBuffer(`${sseBuffer}\n\n`, onChunk);
+    if (parsed.exitCode != null) exitCode = parsed.exitCode;
   }
   return exitCode;
 }
 
-async function startDockerLogsStream(command, cwd, { label, modulePath } = {}) {
+/** XHR streaming — WKWebView often buffers fetch ReadableStream until the response ends. */
+function postWorkspaceShellStreamXhr(command, cwd, { signal, onChunk } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    state.dockerLogsXhr = xhr;
+    let offset = 0;
+    let sseBuffer = '';
+    let exitCode = 0;
+    let settled = false;
+
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (state.dockerLogsXhr === xhr) state.dockerLogsXhr = null;
+      fn(arg);
+    };
+
+    const onAbort = () => {
+      try { xhr.abort(); } catch { /* ignore */ }
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      finish(reject, err);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const consumeNew = () => {
+      const text = xhr.responseText || '';
+      if (text.length <= offset) return;
+      sseBuffer += text.slice(offset);
+      offset = text.length;
+      const parsed = drainDockerSseBuffer(sseBuffer, onChunk);
+      sseBuffer = parsed.rest;
+      if (parsed.exitCode != null) exitCode = parsed.exitCode;
+    };
+
+    xhr.open('POST', repoApi(state.repo, '/workspace/shell'));
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.responseType = 'text';
+    xhr.onprogress = () => consumeNew();
+    xhr.onload = () => {
+      consumeNew();
+      if (sseBuffer.trim()) {
+        const parsed = drainDockerSseBuffer(`${sseBuffer}\n\n`, onChunk);
+        if (parsed.exitCode != null) exitCode = parsed.exitCode;
+      }
+      finish(resolve, exitCode);
+    };
+    xhr.onerror = () => finish(reject, new Error('Docker shell request failed'));
+    xhr.onabort = () => {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      finish(reject, err);
+    };
+    xhr.send(JSON.stringify({ command, cwd: cwd || undefined }));
+  });
+}
+
+async function startDockerLogsStream(command, cwd, { label, modulePath, append = false } = {}) {
   if (!state.repo || !command) return;
   await stopDockerLogsStream();
   if (label || modulePath) setDockerLogsMeta(label, modulePath);
-  clearDockerLogsOutput();
+  if (!append) clearDockerLogsOutput();
   setDockerLogsControlsStreaming(true);
-  updateDockerLogsStatus('Streaming…', { live: true });
+  updateDockerLogsStatus(append ? 'Following…' : 'Streaming…', { live: true });
   setDockerConsoleOutputMeta(label || 'streaming');
   const out = $('#docker-logs-output');
-  if (out) out.classList.add('is-waiting');
+  if (out && !out.textContent) out.classList.add('is-waiting');
 
   const ac = new AbortController();
   state.dockerLogsAbortController = ac;
   try {
-    const res = await fetch(repoApi(state.repo, '/workspace/shell'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, cwd: cwd || undefined }),
+    const exitCode = await postWorkspaceShellStreamXhr(command, cwd, {
       signal: ac.signal,
+      onChunk: appendDockerLogsText,
     });
-    if (!res.ok) {
-      let errMsg = res.statusText;
-      try {
-        const err = await res.json();
-        errMsg = err.error || errMsg;
-      } catch { /* ignore */ }
-      throw new Error(errMsg);
-    }
-    const exitCode = await consumeExecStreamToCallback(res, appendDockerLogsText);
     if (state.dockerLogsAbortController !== ac) return;
     if (exitCode === 130) {
       updateDockerLogsStatus('Stopped');
@@ -8937,7 +9027,7 @@ async function startDockerLogsStream(command, cwd, { label, modulePath } = {}) {
       updateDockerLogsStatus(`Exited ${exitCode}`);
       setDockerConsoleOutputMeta(`exit ${exitCode}`, { error: true });
     } else {
-      updateDockerLogsStatus('Done');
+      updateDockerLogsStatus(append ? 'Following ended' : 'Done');
     }
   } catch (e) {
     if (state.dockerLogsAbortController !== ac && e?.name === 'AbortError') return;
