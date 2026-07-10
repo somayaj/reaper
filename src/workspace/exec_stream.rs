@@ -59,7 +59,7 @@ fn pump_reader<R: Read + Send + 'static>(
     }
 }
 
-fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+pub(crate) fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
     process_registry::configure_command(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -264,6 +264,12 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
     if let Some(code) = run_project::try_stream_spring_boot_main(ws, &rel_path, &source, tx.clone())? {
         return Ok(code);
     }
+    // Maven/Gradle mains: compile + run with the resolved dependency classpath (mvnw/gradlew).
+    if let Some(code) =
+        run_project::try_stream_build_tool_java_main(ws, &rel_path, &source, tx.clone())?
+    {
+        return Ok(code);
+    }
 
     let info = parse_java_main(&source, &file_path)?;
     let rel = rel_path.replace('\\', "/");
@@ -319,9 +325,26 @@ pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sende
     let root = find_maven_root(ws, rel_path)?
         .ok_or_else(|| anyhow::anyhow!("not inside a Maven project"))?;
     let cmd = resolve_maven_command(&root);
-    let mut args = vec!["-q".to_string(), "--batch-mode".to_string()];
+    let mut args = cmd.project_args.clone();
+    // `-am` includes packaging=pom parents; `spring-boot:run` then fails on the reactor
+    // ("Unable to find a suitable main class" on enterprise-platform). Keep `-pl` only.
+    if is_maven_app_run_goal(&parts) {
+        args.retain(|a| a != "-am");
+    }
+    args.push("-q".to_string());
+    args.push("--batch-mode".to_string());
     args.extend(parts);
     stream_maven_command(&cmd, &args, tx)
+}
+
+fn is_maven_app_run_goal(parts: &[String]) -> bool {
+    parts.iter().any(|p| {
+        let p = p.as_str();
+        p == "spring-boot:run"
+            || p.ends_with(":spring-boot:run")
+            || p == "exec:java"
+            || p.ends_with(":exec:java")
+    })
 }
 
 pub fn stream_maven_command(

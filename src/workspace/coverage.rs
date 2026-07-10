@@ -779,13 +779,12 @@ fn stream_maven_coverage(
     let root = find_maven_root(ws, rel_path)?
         .ok_or_else(|| anyhow::anyhow!("not inside a Maven project"))?;
     let cmd = resolve_maven_command(&root);
-    let mut args = vec![
-        "-q".to_string(),
-        "--batch-mode".to_string(),
-        format!("-Dtest={test_filter}"),
-        "compile".to_string(),
-        "test-compile".to_string(),
-    ];
+    let mut args = cmd.project_args.clone();
+    args.push("-q".to_string());
+    args.push("--batch-mode".to_string());
+    args.push(format!("-Dtest={test_filter}"));
+    args.push("compile".to_string());
+    args.push("test-compile".to_string());
     if has_jacoco {
         args.push("test".into());
         args.push("jacoco:report".into());
@@ -804,7 +803,8 @@ fn stream_maven_coverage(
             let merged = format!("{agent_arg} {existing}");
             write_maven_coverage_overlay(&root, &merged)?;
             args.push("-f".into());
-            args.push(".reaper/coverage-pom.xml".into());
+            // Absolute path: command may run from reactor/wrapper root, not the module.
+            args.push(root.join(".reaper/coverage-pom.xml").display().to_string());
         } else {
             args.push(format!("-DargLine={agent_arg}"));
         }

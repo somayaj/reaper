@@ -3287,6 +3287,17 @@ async function main() {
     terminalHarness.testTerminalBuildTaskStreamRegression(appSrc, ok);
   }
 
+  section('Debugger regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const sessionRs = fs.readFileSync(path.join(ROOT, 'src/workspace/debug/session.rs'), 'utf8');
+    const dapRs = fs.readFileSync(path.join(ROOT, 'src/workspace/debug/dap.rs'), 'utf8');
+    const adaptersRs = fs.readFileSync(path.join(ROOT, 'src/workspace/debug/adapters.rs'), 'utf8');
+    const debugHarness = await import(path.join(ROOT, 'scripts/lib/debug-harness.mjs'));
+    debugHarness.testDebugRegression(appSrc, indexHtml, sessionRs, dapRs, adaptersRs, ok);
+  }
+
   section('Compiler settings regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

@@ -1838,8 +1838,18 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   border: 2px solid color-mix(in srgb, #f07178 55%, transparent);
 }
 
-.ij-debug-current-line {
-  background: color-mix(in srgb, #c792ea 22%, transparent) !important;
+/* Purple wash + left bar — clear while stepping, text stays readable */
+.monaco-editor .ij-debug-current-line {
+  background: color-mix(in srgb, #c792ea 26%, transparent) !important;
+  outline: 1px solid color-mix(in srgb, #c792ea 55%, transparent);
+  outline-offset: -1px;
+}
+
+.monaco-editor .ij-debug-current-line-margin {
+  background: #c792ea;
+  width: 4px !important;
+  margin-left: 2px;
+  border-radius: 1px;
 }
 
 @keyframes ij-bulb-flicker {

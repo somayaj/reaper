@@ -34,9 +34,14 @@ pub struct LaunchPlan {
     pub use_jdtls_java: bool,
 }
 
-pub fn debug_capabilities(ws: &Path, rel_path: &str, line: u32) -> Result<DebugCapabilities> {
+pub fn debug_capabilities(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    content: Option<&str>,
+) -> Result<DebugCapabilities> {
     let rel_path = workspace::normalize_workspace_source_path(rel_path);
-    let ctx = workspace::run_context(ws, &rel_path, None, line.max(1), None, None)?;
+    let ctx = workspace::run_context(ws, &rel_path, content, line.max(1), None, None)?;
     let target = ctx.target.as_ref();
     let language = debug_language_label(target);
     let Some(target) = target else {
@@ -92,19 +97,49 @@ pub fn build_launch_plan(
     let class_type = target.class_type.as_str();
     let mode = target.mode.as_str();
 
-    if mode == "python" || class_type == "python-script" {
+    if mode == "python"
+        || mode == "python-test"
+        || class_type == "python-script"
+        || class_type == "pytest"
+        || class_type == "django-test"
+    {
         let adapter = find_debugpy_adapter()?;
         let py = native_build_tasks::python_interpreter_for_project(
             native_build_tasks::python_package_manager_at(ws, rel_path)?
                 .0
                 .as_deref(),
         );
-        return Ok(LaunchPlan {
-            language: "Python".into(),
-            adapter,
-            pre_commands: Vec::new(),
-            prebuild_cwd: None,
-            launch: json!({
+        let is_pytest = class_type == "pytest" || (mode == "python-test" && class_type != "django-test");
+        let launch = if is_pytest {
+            json!({
+                "type": "debugpy",
+                "request": "launch",
+                "module": "pytest",
+                "args": [abs_path.display().to_string()],
+                "python": py,
+                "cwd": ws.display().to_string(),
+                "justMyCode": false,
+                "stopOnEntry": breakpoints.is_empty(),
+            })
+        } else if class_type == "django-test" {
+            // manage.py test <label> — debug the manage.py entry with args.
+            let manage = native_build_tasks::python_package_manager_at(ws, rel_path)?
+                .0
+                .map(|root| root.join("manage.py"))
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| ws.join("manage.py"));
+            json!({
+                "type": "debugpy",
+                "request": "launch",
+                "program": manage.display().to_string(),
+                "args": ["test", rel_path.replace('\\', "/")],
+                "python": py,
+                "cwd": ws.display().to_string(),
+                "justMyCode": false,
+                "stopOnEntry": breakpoints.is_empty(),
+            })
+        } else {
+            json!({
                 "type": "debugpy",
                 "request": "launch",
                 "program": abs_path.display().to_string(),
@@ -112,13 +147,30 @@ pub fn build_launch_plan(
                 "cwd": ws.display().to_string(),
                 "justMyCode": false,
                 "stopOnEntry": breakpoints.is_empty(),
-            }),
+            })
+        };
+        return Ok(LaunchPlan {
+            language: "Python".into(),
+            adapter,
+            pre_commands: Vec::new(),
+            prebuild_cwd: None,
+            launch,
             use_jdtls_java: false,
         });
     }
 
-    if mode == "go" || class_type.contains("go") {
+    if mode == "go" || mode == "go-test" || class_type.contains("go") {
         let adapter = find_delve_adapter()?;
+        let is_test = mode == "go-test" || class_type == "go-test" || rel_path.ends_with("_test.go");
+        let program = if is_test {
+            abs_path
+                .parent()
+                .unwrap_or(ws)
+                .display()
+                .to_string()
+        } else {
+            abs_path.display().to_string()
+        };
         return Ok(LaunchPlan {
             language: "Go".into(),
             adapter,
@@ -127,8 +179,8 @@ pub fn build_launch_plan(
             launch: json!({
                 "type": "go",
                 "request": "launch",
-                "mode": "debug",
-                "program": abs_path.display().to_string(),
+                "mode": if is_test { "test" } else { "debug" },
+                "program": program,
                 "cwd": ws.display().to_string(),
                 "stopOnEntry": breakpoints.is_empty(),
             }),
@@ -136,10 +188,31 @@ pub fn build_launch_plan(
         });
     }
 
-    if mode == "js" || class_type == "js-script" || class_type == "ts-script" {
+    if mode == "js"
+        || mode == "js-test"
+        || class_type == "js-script"
+        || class_type == "ts-script"
+        || class_type == "js-test"
+    {
         let adapter = find_js_debug_adapter(ws)?;
+        let is_ts = class_type == "ts-script"
+            || rel_path.ends_with(".ts")
+            || rel_path.ends_with(".tsx");
+        let mut launch = json!({
+            "type": "node",
+            "request": "launch",
+            "program": abs_path.display().to_string(),
+            "cwd": ws.display().to_string(),
+            "stopOnEntry": breakpoints.is_empty(),
+            "console": "internalConsole",
+        });
+        if is_ts {
+            if let Some(runtime) = ts_debug_runtime(ws, rel_path) {
+                launch["runtimeExecutable"] = json!(runtime);
+            }
+        }
         return Ok(LaunchPlan {
-            language: if class_type == "ts-script" {
+            language: if is_ts {
                 "TypeScript".into()
             } else {
                 "JavaScript".into()
@@ -147,37 +220,36 @@ pub fn build_launch_plan(
             adapter,
             pre_commands: Vec::new(),
             prebuild_cwd: None,
-            launch: json!({
-                "type": "node",
-                "request": "launch",
-                "program": abs_path.display().to_string(),
-                "cwd": ws.display().to_string(),
-                "stopOnEntry": breakpoints.is_empty(),
-                "console": "integratedTerminal",
-            }),
+            launch,
             use_jdtls_java: false,
         });
     }
 
-    if mode == "rust" || class_type.starts_with("rust") || class_type.starts_with("cargo") {
+    if mode == "rust"
+        || mode == "rust-test"
+        || class_type.starts_with("rust")
+        || class_type.starts_with("cargo")
+    {
         let adapter = find_lldb_adapter()?;
         let is_test = mode == "rust-test" || class_type.contains("test");
         let pre = if is_test {
-            format!("cargo test --no-run")
+            "cargo test --no-run".to_string()
         } else {
-            format!("cargo build")
+            "cargo build".to_string()
         };
-        let binary = guess_rust_binary(ws, rel_path, is_test)?;
+        let cargo_cwd = native_build_tasks::cargo_manifest_root(ws, rel_path)?
+            .unwrap_or_else(|| ws.to_path_buf());
+        let binary = guess_rust_binary(&cargo_cwd, rel_path, is_test)?;
         return Ok(LaunchPlan {
             language: "Rust".into(),
             adapter,
             pre_commands: vec![pre],
-            prebuild_cwd: None,
+            prebuild_cwd: Some(cargo_cwd.clone()),
             launch: json!({
                 "type": "lldb",
                 "request": "launch",
                 "program": binary.display().to_string(),
-                "cwd": ws.display().to_string(),
+                "cwd": cargo_cwd.display().to_string(),
                 "stopOnEntry": breakpoints.is_empty(),
             }),
             use_jdtls_java: false,
@@ -189,11 +261,37 @@ pub fn build_launch_plan(
         || class_type.contains("native")
         || class_type == "gtest"
         || class_type == "catch2"
+        || class_type == "c-source"
+        || class_type == "cpp-source"
         || native_build_tasks::is_cpp_source_path(rel_path)
         || native_build_tasks::is_c_source_path(rel_path)
     {
-        let adapter = find_lldb_adapter()?;
+        let adapter = find_lldb_adapter().map_err(|e| {
+            anyhow::anyhow!(
+                "{e:#} — C/C++ debugging needs CodeLLDB (bundled in Reaper.app) or `lldb-dap`"
+            )
+        })?;
         let is_cpp = native_build_tasks::is_cpp_source_path(rel_path);
+
+        // Prefer CMake Debug build so include dirs + linked sources (e.g. greeter.cpp) resolve.
+        if let Some(cmake) = native_build_tasks::native_cmake_debug_launch(ws, rel_path)? {
+            let program = ws.join(&cmake.program_rel);
+            return Ok(LaunchPlan {
+                language: if is_cpp { "C++".into() } else { "C".into() },
+                adapter,
+                pre_commands: vec![cmake.prebuild],
+                prebuild_cwd: Some(cmake.cwd),
+                launch: json!({
+                    "type": "lldb",
+                    "request": "launch",
+                    "program": program.display().to_string(),
+                    "cwd": ws.display().to_string(),
+                    "stopOnEntry": breakpoints.is_empty(),
+                }),
+                use_jdtls_java: false,
+            });
+        }
+
         let out = ws.join(".reaper/native-debug-out");
         let compiler = native_build_tasks::native_compiler_shell(is_cpp);
         let std_flag = if is_cpp { "-std=c++17" } else { "-std=c17" };
@@ -203,17 +301,18 @@ pub fn build_launch_plan(
             ""
         };
         let quoted = shell_quote(rel_path);
+        let includes = native_debug_include_flags(ws);
         let pre = if class_type == "gtest" {
             format!(
-                "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} {quoted} -g -O0 -lgtest -lgtest_main -pthread -o .reaper/native-debug-out"
+                "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} {includes} {quoted} -g -O0 -lgtest -lgtest_main -pthread -o .reaper/native-debug-out"
             )
         } else if class_type == "catch2" {
             format!(
-                "mkdir -p .reaper && {compiler} -std=c++17 -g -O0 -DCATCH_CONFIG_MAIN {quoted} -o .reaper/native-debug-out"
+                "mkdir -p .reaper && {compiler} -std=c++17 {includes} -g -O0 -DCATCH_CONFIG_MAIN {quoted} -o .reaper/native-debug-out"
             )
         } else {
             format!(
-                "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} -g -O0 -o .reaper/native-debug-out {quoted}"
+                "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} {includes} -g -O0 -o .reaper/native-debug-out {quoted}"
             )
         };
         return Ok(LaunchPlan {
@@ -238,7 +337,10 @@ pub fn build_launch_plan(
             .qualified_name
             .clone()
             .filter(|s| !s.is_empty())
-            .context("could not resolve Spring Boot main class")?;
+            .context(
+                "could not resolve Spring Boot main class — ensure the file has a package \
+                 declaration or lives under src/main/java",
+            )?;
         let mut plan = java_launch_plan(
             "Spring Boot",
             adapter,
@@ -257,7 +359,14 @@ pub fn build_launch_plan(
         return Ok(plan);
     }
 
-    if mode == "main" || class_type.contains("java") || rel_path.ends_with(".java") {
+    if mode == "main"
+        || mode == "test"
+        || class_type.contains("java")
+        || class_type == "plain-main"
+        || class_type == "junit-test"
+        || class_type == "spring-boot-test"
+        || rel_path.ends_with(".java")
+    {
         let (adapter, use_jdtls_java) = resolve_java_debug_backend()?;
         let main_class = target
             .qualified_name
@@ -265,7 +374,11 @@ pub fn build_launch_plan(
             .filter(|s| !s.is_empty())
             .context("could not resolve Java main class")?;
         let mut plan = java_launch_plan(
-            "Java",
+            if mode == "test" || class_type.contains("test") {
+                "Java Test"
+            } else {
+                "Java"
+            },
             adapter,
             use_jdtls_java,
             main_class,
@@ -282,14 +395,19 @@ pub fn build_launch_plan(
         return Ok(plan);
     }
 
-    if mode == "kotlin" || rel_path.ends_with(".kt") || rel_path.ends_with(".kts") {
+    if mode == "kotlin"
+        || mode == "kotlin-test"
+        || class_type.starts_with("kotlin")
+        || rel_path.ends_with(".kt")
+        || rel_path.ends_with(".kts")
+    {
         let (adapter, use_jdtls_java) = resolve_java_debug_backend()?;
         let main_class = target
             .qualified_name
             .clone()
             .filter(|s| !s.is_empty())
             .context("could not resolve Kotlin entry point")?;
-        return Ok(java_launch_plan(
+        let mut plan = java_launch_plan(
             "Kotlin",
             adapter,
             use_jdtls_java,
@@ -299,7 +417,12 @@ pub fn build_launch_plan(
             rel_path,
             true,
             resolve_java_launch,
-        )?);
+        )?;
+        if let Some((cwd, cmd)) = java_compile_prebuild(ws, rel_path, &ctx.project) {
+            plan.pre_commands.push(cmd);
+            plan.prebuild_cwd = Some(cwd);
+        }
+        return Ok(plan);
     }
 
     bail!(
@@ -388,12 +511,13 @@ fn find_delve_adapter() -> Result<AdapterSpec> {
 }
 
 fn find_lldb_adapter() -> Result<AdapterSpec> {
+    // CodeLLDB 1.12+ uses stdio by default and rejects the old `--stdio` flag.
     if let Some(path) = config::bundled_codelldb() {
         if path.is_file() {
             let mut spec = adapter(
                 "codelldb (bundled)",
                 path.display().to_string(),
-                vec!["--stdio".into()],
+                Vec::new(),
             );
             spec.cwd = path.parent().map(|p| p.to_path_buf());
             return Ok(spec);
@@ -403,10 +527,10 @@ fn find_lldb_adapter() -> Result<AdapterSpec> {
         return Ok(adapter("lldb-dap", "lldb-dap", Vec::new()));
     }
     if which("codelldb") {
-        return Ok(adapter("codelldb", "codelldb", vec!["--stdio".into()]));
+        return Ok(adapter("codelldb", "codelldb", Vec::new()));
     }
     if let Some(path) = find_vscode_adapter("vadimcn.vscode-lldb", "codelldb") {
-        return Ok(adapter("codelldb", path, vec!["--stdio".into()]));
+        return Ok(adapter("codelldb", path, Vec::new()));
     }
     bail!("install a native debugger adapter: Xcode 16+ lldb-dap, or brew install codelldb")
 }
@@ -444,6 +568,28 @@ fn find_js_debug_adapter(ws: &Path) -> Result<AdapterSpec> {
     bail!("install Node.js and js-debug (npm i -D @vscode/js-debug)")
 }
 
+fn gradle_debug_classes_cmd(gradlew: &str, module: &str) -> String {
+    // Force recompile with full debug info (lines, vars, source).
+    let debug_flags =
+        "--rerun-tasks -Dorg.gradle.caching=false -Dorg.gradle.java.compile.options.debug=true";
+    if module.is_empty() {
+        format!("{gradlew} classes -x test {debug_flags}")
+    } else {
+        format!(
+            "{gradlew} :{}:classes -x test {debug_flags}",
+            module.replace('/', ":")
+        )
+    }
+}
+
+fn maven_debug_compile_cmd(mvn: &str, pl_suffix: &str) -> String {
+    // lines,vars,source — without vars, stepping often skips and hover/locals are empty.
+    // Prefer compile (not clean) so debug start stays fast.
+    format!(
+        "{mvn} -q -DskipTests -Dmaven.compiler.debug=true -Dmaven.compiler.debuglevel=lines,vars,source{pl_suffix} compile"
+    )
+}
+
 fn java_compile_prebuild(
     ws: &Path,
     rel_path: &str,
@@ -455,46 +601,24 @@ fn java_compile_prebuild(
     match project.build_tool.as_str() {
         "gradle" => {
             let root = gradle::find_gradle_root(ws, rel_path).ok()??;
-            let cwd = gradle::find_gradle_wrapper_root(&root);
-            let module = gradle::find_gradle_module_for_source_file(ws, rel_path, &cwd)
+            let cmd = gradle::resolve_gradle_command(&root).ok()?;
+            let module = gradle::find_gradle_module_for_source_file(ws, rel_path, &cmd.cwd)
                 .ok()
                 .and_then(|m| m)
                 .unwrap_or_default();
-            let gradlew = if cwd.join("gradlew").is_file() {
-                "./gradlew"
-            } else {
-                "gradle"
-            };
-            let cmd = if module.is_empty() {
-                format!("{gradlew} classes -x test")
-            } else {
-                format!(
-                    "{gradlew} :{}:classes -x test",
-                    module.replace('/', ":")
-                )
-            };
-            Some((cwd, cmd))
+            let program = cmd.program.to_string_lossy().into_owned();
+            Some((cmd.cwd, gradle_debug_classes_cmd(&program, &module)))
         }
         "maven" => {
             let module_root = maven::find_maven_root(ws, rel_path).ok()??;
-            let reactor = maven::find_maven_reactor_root(&module_root).unwrap_or_else(|| module_root.clone());
-            let cwd = if reactor.join("mvnw").is_file() || reactor.join("mvnw.cmd").is_file() {
-                reactor
+            let cmd = maven::resolve_maven_command(&module_root);
+            let program = cmd.program.to_string_lossy().into_owned();
+            let pl_suffix = if cmd.project_args.is_empty() {
+                String::new()
             } else {
-                module_root.clone()
+                format!(" {}", cmd.project_args.join(" "))
             };
-            let mvn = if cwd.join("mvnw").is_file() {
-                "./mvnw"
-            } else if cfg!(windows) && cwd.join("mvnw.cmd").is_file() {
-                "./mvnw.cmd"
-            } else {
-                "mvn"
-            };
-            let pl_suffix = maven::maven_reactor_context(&module_root)
-                .filter(|ctx| !ctx.module_pl.is_empty())
-                .map(|ctx| format!(" -pl {} -am", ctx.module_pl))
-                .unwrap_or_default();
-            Some((cwd, format!("{mvn} -q -DskipTests{pl_suffix} compile")))
+            Some((cmd.cwd, maven_debug_compile_cmd(&program, &pl_suffix)))
         }
         _ => None,
     }
@@ -513,28 +637,9 @@ fn java_launch_plan(
 ) -> Result<LaunchPlan> {
     let launch = if use_jdtls_java {
         if resolve_java_launch {
-            let args = jdtls::prepare_java_launch(ws, &main_class, Some(rel_path))?;
-            let mut launch = json!({
-                "type": "java",
-                "request": "launch",
-                "mainClass": args.main_class,
-                "classPaths": args.class_paths,
-                "modulePaths": args.module_paths,
-                "cwd": args.cwd.display().to_string(),
-                "stopOnEntry": stop_on_entry,
-                "console": "internalConsole",
-                "shortenCommandLine": "auto",
-            });
-            if let Some(name) = args.project_name.filter(|s| !s.is_empty()) {
-                launch["projectName"] = json!(name);
-            }
-            if let Some(java_exec) = args.java_exec.filter(|s| !s.is_empty()) {
-                launch["javaExec"] = json!(java_exec);
-            }
-            launch
-        } else if !jdtls::workspace_ready(ws) {
-            bail!("Java language server is still starting — wait for Maven/Gradle import to finish");
+            java_launch_from_jdtls(ws, &main_class, rel_path, stop_on_entry)?
         } else {
+            // Stub — `finalize_java_launch_plan` fills classpaths after prebuild.
             json!({
                 "type": "java",
                 "request": "launch",
@@ -563,6 +668,106 @@ fn java_launch_plan(
         launch,
         use_jdtls_java,
     })
+}
+
+fn java_launch_from_jdtls(
+    ws: &Path,
+    main_class: &str,
+    rel_path: &str,
+    stop_on_entry: bool,
+) -> Result<Value> {
+    let args = jdtls::prepare_java_launch(ws, main_class, Some(rel_path))?;
+    let mut launch = json!({
+        "type": "java",
+        "request": "launch",
+        "mainClass": args.main_class,
+        "classPaths": args.class_paths,
+        "modulePaths": args.module_paths,
+        "cwd": args.cwd.display().to_string(),
+        "stopOnEntry": stop_on_entry,
+        "console": "internalConsole",
+        "shortenCommandLine": "auto",
+    });
+    // Required by Java Debug Server for evaluate/hover expressions.
+    let project_name = args
+        .project_name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            args.cwd
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app")
+                .to_string()
+        });
+    launch["projectName"] = json!(project_name);
+    if let Some(java_exec) = args.java_exec.filter(|s| !s.is_empty()) {
+        launch["javaExec"] = json!(java_exec);
+    }
+    Ok(launch)
+}
+
+/// Resolve classpaths via jdtls after Maven/Gradle prebuild.
+pub fn finalize_java_launch_plan(plan: &mut LaunchPlan, ws: &Path, rel_path: &str) -> Result<()> {
+    if !plan.use_jdtls_java {
+        return Ok(());
+    }
+    let main_class = plan
+        .launch
+        .get("mainClass")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .context("Java launch missing mainClass")?;
+    let stop_on_entry = plan
+        .launch
+        .get("stopOnEntry")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match java_launch_from_jdtls(ws, &main_class, rel_path, stop_on_entry) {
+        Ok(launch) => {
+            plan.launch = launch;
+            Ok(())
+        }
+        Err(e) => {
+            // Large Spring Boot projects often need a beat after `classes`/`compile`
+            // before jdtls can resolve the classpath.
+            tracing::warn!("java launch resolve failed, retrying once: {e:#}");
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            plan.launch = java_launch_from_jdtls(ws, &main_class, rel_path, stop_on_entry)
+                .with_context(|| format!("after prebuild: {e:#}"))?;
+            Ok(())
+        }
+    }
+}
+
+/// Refresh Rust/C++ program paths that only exist after prebuild.
+pub fn resolve_launch_program_after_prebuild(
+    plan: &mut LaunchPlan,
+    ws: &Path,
+    rel_path: &str,
+) -> Result<()> {
+    if plan.language == "Rust" {
+        let is_test = plan.pre_commands.iter().any(|c| c.contains("test --no-run"));
+        let cwd = plan
+            .prebuild_cwd
+            .clone()
+            .unwrap_or_else(|| ws.to_path_buf());
+        let binary = guess_rust_binary(&cwd, rel_path, is_test)?;
+        if !binary.is_file() || binary.file_name().and_then(|s| s.to_str()) == Some("pending")
+            || binary
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with("-pending"))
+        {
+            bail!(
+                "Rust {} binary not found after prebuild under {}",
+                if is_test { "test" } else { "debug" },
+                cwd.join("target/debug").display()
+            );
+        }
+        plan.launch["program"] = json!(binary.display().to_string());
+    }
+    Ok(())
 }
 
 fn resolve_java_debug_backend() -> Result<(AdapterSpec, bool)> {
@@ -646,37 +851,100 @@ fn guess_rust_binary(ws: &Path, rel_path: &str, is_test: bool) -> Result<PathBuf
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("main");
-    let candidates = if is_test {
-        vec![
-            ws.join(format!("target/debug/deps/{name}")),
-            ws.join("target/debug/deps"),
-        ]
-    } else {
-        let pkg = ws
-            .join("Cargo.toml")
-            .is_file()
-            .then(|| {
-                std::fs::read_to_string(ws.join("Cargo.toml"))
-                    .ok()
-                    .and_then(|t| {
-                        t.lines()
-                            .find(|l| l.trim().starts_with("name ="))
-                            .and_then(|l| l.split('"').nth(1).map(str::to_string))
-                    })
-            })
-            .flatten()
-            .unwrap_or_else(|| name.to_string());
-        vec![
-            ws.join(format!("target/debug/{pkg}")),
-            ws.join(format!("target/debug/{name}")),
-        ]
-    };
-    for c in candidates {
+    let sanitized = name.replace('-', "_");
+    if is_test {
+        let deps = ws.join("target/debug/deps");
+        if deps.is_dir() {
+            let mut matches: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&deps) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let fname = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    // cargo test --no-run emits `foo-hash` / `foo_hash` binaries (no extension on Unix).
+                    if fname.contains('.') {
+                        continue;
+                    }
+                    if fname.starts_with(name)
+                        || fname.starts_with(&sanitized)
+                        || fname.starts_with(&format!("{name}-"))
+                        || fname.starts_with(&format!("{sanitized}-"))
+                    {
+                        let modified = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        matches.push((modified, path));
+                    }
+                }
+            }
+            matches.sort_by(|a, b| b.0.cmp(&a.0));
+            if let Some((_, path)) = matches.into_iter().next() {
+                return Ok(path);
+            }
+        }
+        // Before `cargo test --no-run`, deps binaries do not exist yet.
+        return Ok(deps.join(format!("{sanitized}-pending")));
+    }
+
+    let pkg = ws
+        .join("Cargo.toml")
+        .is_file()
+        .then(|| {
+            std::fs::read_to_string(ws.join("Cargo.toml"))
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find(|l| l.trim().starts_with("name ="))
+                        .and_then(|l| l.split('"').nth(1).map(str::to_string))
+                })
+        })
+        .flatten()
+        .unwrap_or_else(|| name.to_string());
+    for c in [
+        ws.join(format!("target/debug/{pkg}")),
+        ws.join(format!("target/debug/{name}")),
+    ] {
         if c.is_file() {
             return Ok(c);
         }
     }
-    bail!("build Rust binary first (cargo build)")
+    // Provisional path — `resolve_launch_program_after_prebuild` re-checks after cargo build.
+    Ok(ws.join(format!("target/debug/{pkg}")))
+}
+
+fn ts_debug_runtime(ws: &Path, rel_path: &str) -> Option<String> {
+    let project = native_build_tasks::node_project_root(ws, rel_path)
+        .ok()
+        .flatten();
+    let pkg = project
+        .as_ref()
+        .map(|p| p.join("package.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let prefer_tsx = pkg.contains("\"tsx\"") || !pkg.contains("\"ts-node\"");
+    let candidates = if prefer_tsx {
+        ["tsx", "ts-node"]
+    } else {
+        ["ts-node", "tsx"]
+    };
+    for name in candidates {
+        if let Some(root) = project.as_ref() {
+            let local = root.join("node_modules").join(".bin").join(name);
+            if local.is_file() {
+                return Some(local.display().to_string());
+            }
+        }
+        if which(name) {
+            return Some(name.into());
+        }
+    }
+    None
 }
 
 fn node_command() -> String {
@@ -709,5 +977,110 @@ fn shell_quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     } else {
         s.to_string()
+    }
+}
+
+/// `-I` flags for single-file C/C++ debug when CMake is not available.
+fn native_debug_include_flags(ws: &Path) -> String {
+    let mut flags = Vec::new();
+    for dir in ["include", "src", "inc", "headers", "."] {
+        if dir == "." || ws.join(dir).is_dir() {
+            flags.push(format!("-I{dir}"));
+        }
+    }
+    flags.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maven_debug_compile_includes_line_var_source_symbols() {
+        let cmd = maven_debug_compile_cmd("mvn", "");
+        assert!(cmd.contains("maven.compiler.debug=true"));
+        assert!(cmd.contains("debuglevel=lines,vars,source"));
+        assert!(cmd.ends_with(" compile"));
+        assert!(
+            !cmd.contains(" clean "),
+            "clean makes first debug start feel hung"
+        );
+    }
+
+    #[test]
+    fn maven_debug_compile_keeps_reactor_pl_suffix() {
+        let cmd = maven_debug_compile_cmd("./mvnw", " -pl :app -am");
+        assert!(cmd.contains(" -pl :app -am "));
+        assert!(cmd.contains("debuglevel=lines,vars,source"));
+        assert!(cmd.starts_with("./mvnw "));
+    }
+
+    #[test]
+    fn gradle_debug_prebuild_prefers_wrapper_program() {
+        let cmd = gradle_debug_classes_cmd("./gradlew", "services/api");
+        assert!(cmd.starts_with("./gradlew "));
+        assert!(cmd.contains(":services:api:classes"));
+    }
+
+    #[test]
+    fn gradle_debug_classes_forces_rerun_and_debug_symbols() {
+        let cmd = gradle_debug_classes_cmd("./gradlew", "");
+        assert!(cmd.contains("--rerun-tasks"));
+        assert!(cmd.contains("org.gradle.caching=false"));
+        assert!(cmd.contains("org.gradle.java.compile.options.debug=true"));
+        assert!(cmd.contains("classes -x test"));
+    }
+
+    #[test]
+    fn python_pytest_mode_is_accepted_by_language_label() {
+        let t = JavaRunTarget {
+            mode: "python-test".into(),
+            class_type: "pytest".into(),
+            runnable: true,
+            ..Default::default()
+        };
+        assert_eq!(debug_language_label(Some(&t)), "Python");
+    }
+
+    #[test]
+    fn go_test_language_label() {
+        let t = JavaRunTarget {
+            mode: "go-test".into(),
+            class_type: "go-test".into(),
+            runnable: true,
+            ..Default::default()
+        };
+        assert_eq!(debug_language_label(Some(&t)), "Go");
+    }
+
+    #[test]
+    fn spring_boot_language_label() {
+        let t = JavaRunTarget {
+            mode: "spring-boot".into(),
+            class_type: "spring-boot-app".into(),
+            runnable: true,
+            qualified_name: Some("com.example.App".into()),
+            ..Default::default()
+        };
+        assert_eq!(debug_language_label(Some(&t)), "Spring Boot");
+    }
+
+    #[test]
+    fn rust_pending_test_binary_path_is_provisional() {
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-rust-debug-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = guess_rust_binary(&dir, "src/lib.rs", true).unwrap();
+        assert!(
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with("-pending")),
+            "got {}",
+            path.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

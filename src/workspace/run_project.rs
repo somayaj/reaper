@@ -612,6 +612,8 @@ fn kotlin_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, Java
         project.project_root = gradle::rel_path_for(ws, dir)?;
         project.frameworks = vec!["kotlin".into()];
     }
+    let content = super::read_file(ws, rel_path).unwrap_or_default();
+    let qualified_name = kotlin_entry_fqcn(rel_path, &content);
     let (mode, class_type, task) = if is_test {
         (
             "kotlin-test",
@@ -631,9 +633,61 @@ fn kotlin_run_context(ws: &Path, rel_path: &str) -> Result<(RunProjectInfo, Java
         class_type: class_type.into(),
         task: Some(task),
         frameworks: vec!["kotlin".into()],
+        qualified_name,
         ..Default::default()
     };
     Ok((project, target))
+}
+
+/// JVM class name for a Kotlin file: `FooKt` for top-level `main`, else named class/object.
+fn kotlin_entry_fqcn(rel_path: &str, content: &str) -> Option<String> {
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())?;
+    let package = content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("package ")
+            .map(|rest| rest.trim().trim_end_matches(';').trim())
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+    });
+    let named = content.lines().find_map(|line| {
+        let t = line.trim();
+        for prefix in ["class ", "object ", "data class ", "enum class "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                let name = rest
+                    .split(|c: char| c == '(' || c == ':' || c == '<' || c.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    });
+    let has_top_level_main = content.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("fun main(") || t.starts_with("fun main (") || t.starts_with("fun main()")
+    });
+    let simple = if has_top_level_main && named.is_none() {
+        format!("{stem}Kt")
+    } else {
+        named.unwrap_or_else(|| {
+            if has_top_level_main {
+                format!("{stem}Kt")
+            } else {
+                stem.to_string()
+            }
+        })
+    };
+    Some(match package {
+        Some(pkg) => format!("{pkg}.{simple}"),
+        None => simple,
+    })
 }
 
 fn find_gradle_or_maven_root(ws: &Path, rel_path: &str) -> Result<Option<std::path::PathBuf>> {
@@ -1289,8 +1343,11 @@ fn build_spring_boot_task(
 }
 
 fn maven_spring_boot_run_goal(main_class: Option<&str>) -> String {
+    // Always pass mainClass so multi-module reactors don't guess wrong.
     if let Some(mc) = main_class.filter(|s| !s.is_empty()) {
-        format!("spring-boot:run -Dspring-boot.run.mainClass={mc}")
+        format!(
+            "spring-boot:run -Dspring-boot.run.mainClass={mc} -Dstart-class={mc}"
+        )
     } else {
         "spring-boot:run".into()
     }
@@ -1379,8 +1436,152 @@ pub fn try_stream_spring_boot_main(
     let main_class = java::parse_java_main(source, &super::safe_join(ws, &rel_path)?)
         .ok()
         .map(|m| m.qualified_name);
+    // Compile module + upstream deps first (`-am`). spring-boot:run itself must not use
+    // `-am` or Maven also runs the goal on packaging=pom parents and fails.
+    if project.build_tool == "maven" {
+        let compile_code = stream_run_task(ws, &rel_path, "compile", false, tx.clone())?;
+        if compile_code != 0 {
+            return Ok(Some(compile_code));
+        }
+    }
     let task = build_spring_boot_task(ws, &rel_path, &project, main_class.as_deref())?;
     Ok(Some(stream_run_task(ws, &rel_path, &task, false, tx)?))
+}
+
+/// Run a `main` in a Maven/Gradle project with the wrapper + resolved dependency classpath.
+/// Avoids bare `java -cp .reaper/java-out` which misses slf4j / Spring / etc.
+pub fn try_stream_build_tool_java_main(
+    ws: &Path,
+    rel_path: &str,
+    source: &str,
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<Option<i32>> {
+    if !source.contains("public static void main") && !source.contains("static void main") {
+        return Ok(None);
+    }
+    let rel_path = super::normalize_workspace_source_path(rel_path);
+    let project = run_project_info(ws, &rel_path)?;
+    if !project.has_project {
+        return Ok(None);
+    }
+    let main = java::parse_java_main(source, &super::safe_join(ws, &rel_path)?)?;
+    match project.build_tool.as_str() {
+        "maven" => Ok(Some(stream_maven_java_main(
+            ws,
+            &rel_path,
+            &main.qualified_name,
+            source,
+            tx,
+        )?)),
+        "gradle" => Ok(Some(stream_gradle_java_main(
+            ws,
+            &rel_path,
+            &main.qualified_name,
+            source,
+            tx,
+        )?)),
+        _ => Ok(None),
+    }
+}
+
+fn stream_maven_java_main(
+    ws: &Path,
+    rel_path: &str,
+    main_class: &str,
+    source: &str,
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
+    // Compile with mvnw so Lombok / annotation processors run and deps resolve.
+    let compile_code = stream_run_task(ws, rel_path, "compile", false, tx.clone())?;
+    if compile_code != 0 {
+        return Ok(compile_code);
+    }
+    let module_root = super::maven::find_maven_root(ws, rel_path)?
+        .ok_or_else(|| anyhow::anyhow!("not inside a Maven project"))?;
+    let cp = runtime_classpath_string(&module_root, rel_path, source);
+    if cp.is_empty() {
+        bail!(
+            "Maven dependency classpath is empty for {} — wait for indexing or run ./mvnw dependency:resolve",
+            module_root.display()
+        );
+    }
+    let _ = emit_run(
+        &tx,
+        &format!("$ java -cp <resolved Maven classpath> {main_class}\n"),
+        "java",
+    );
+    let mut java = std::process::Command::new("java");
+    java.current_dir(&module_root)
+        .args(["-cp", &cp, main_class]);
+    crate::jdk::apply_java_env(&mut java);
+    let code = exec_stream::stream_process(&mut java, &tx)?;
+    let _ = tx.blocking_send(ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: Some("java".into()),
+    });
+    Ok(code)
+}
+
+fn stream_gradle_java_main(
+    ws: &Path,
+    rel_path: &str,
+    main_class: &str,
+    source: &str,
+    tx: async_mpsc::Sender<ExecStreamEvent>,
+) -> Result<i32> {
+    let compile_code = stream_run_task(ws, rel_path, "classes", false, tx.clone())?;
+    if compile_code != 0 {
+        return Ok(compile_code);
+    }
+    let module_root = super::gradle::find_gradle_root(ws, rel_path)?
+        .ok_or_else(|| anyhow::anyhow!("not inside a Gradle project"))?;
+    let cp = runtime_classpath_string(&module_root, rel_path, source);
+    if cp.is_empty() {
+        bail!(
+            "Gradle dependency classpath is empty for {} — wait for indexing or run ./gradlew dependencies",
+            module_root.display()
+        );
+    }
+    let _ = emit_run(
+        &tx,
+        &format!("$ java -cp <resolved Gradle classpath> {main_class}\n"),
+        "java",
+    );
+    let mut java = std::process::Command::new("java");
+    java.current_dir(&module_root)
+        .args(["-cp", &cp, main_class]);
+    crate::jdk::apply_java_env(&mut java);
+    let code = exec_stream::stream_process(&mut java, &tx)?;
+    let _ = tx.blocking_send(ExecStreamEvent {
+        t: "exit".into(),
+        text: None,
+        code: Some(code),
+        step: Some("java".into()),
+    });
+    Ok(code)
+}
+
+fn runtime_classpath_string(project_root: &Path, rel_path: &str, source: &str) -> String {
+    let entries = super::classpath::resolve_javac_classpath_for_file(project_root, rel_path, source);
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    entries
+        .into_iter()
+        .filter(|p| p.exists())
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+fn emit_run(tx: &async_mpsc::Sender<ExecStreamEvent>, text: &str, step: &str) -> bool {
+    tx.blocking_send(ExecStreamEvent {
+        t: "stdout".into(),
+        text: Some(text.to_string()),
+        code: None,
+        step: Some(step.into()),
+    })
+    .is_ok()
 }
 
 pub fn stream_run_task(
@@ -1709,5 +1910,23 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn kotlin_entry_fqcn_top_level_main() {
+        let fqcn = kotlin_entry_fqcn(
+            "src/main/kotlin/com/example/App.kt",
+            "package com.example\n\nfun main() {\n  println(\"hi\")\n}\n",
+        );
+        assert_eq!(fqcn.as_deref(), Some("com.example.AppKt"));
+    }
+
+    #[test]
+    fn kotlin_entry_fqcn_named_class() {
+        let fqcn = kotlin_entry_fqcn(
+            "src/main/kotlin/com/example/App.kt",
+            "package com.example\n\nclass App {\n  companion object {\n    @JvmStatic fun main(args: Array<String>) {}\n  }\n}\n",
+        );
+        assert_eq!(fqcn.as_deref(), Some("com.example.App"));
     }
 }

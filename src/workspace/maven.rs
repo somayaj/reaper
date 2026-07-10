@@ -36,31 +36,110 @@ pub fn is_maven_project_root(dir: &Path) -> bool {
 pub struct MavenCommand {
     pub program: PathBuf,
     pub cwd: PathBuf,
+    /// Extra args when invoking from a wrapper/reactor root for a nested module (`-pl` / `-am`).
+    pub project_args: Vec<String>,
 }
 
-/// Prefer `./mvnw` in the project root, then Settings → Compiler, then `mvn` on PATH.
-pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
-    let mvnw = if cfg!(windows) {
-        project_root.join("mvnw.cmd")
+/// Directory containing `mvnw` — walk up from a nested module if needed.
+pub fn find_maven_wrapper_root(project_root: &Path) -> PathBuf {
+    let mut dir = project_root.to_path_buf();
+    loop {
+        if dir.join("mvnw").is_file() || dir.join("mvnw.cmd").is_file() {
+            return dir;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        dir = parent.to_path_buf();
+    }
+    project_root.to_path_buf()
+}
+
+fn system_maven_program() -> PathBuf {
+    crate::toolchain::resolve_program("maven").unwrap_or_else(|| PathBuf::from("mvn"))
+}
+
+fn maven_pl_args(wrapper_or_reactor: &Path, project_root: &Path) -> Vec<String> {
+    let project_canon = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let base_canon = wrapper_or_reactor
+        .canonicalize()
+        .unwrap_or_else(|_| wrapper_or_reactor.to_path_buf());
+    if project_canon == base_canon {
+        return Vec::new();
+    }
+    if let Some(pl) = module_pl_selector(&project_canon, &base_canon) {
+        return vec!["-pl".into(), pl, "-am".into()];
+    }
+    if let Some(ctx) = maven_reactor_context(&project_canon) {
+        if !ctx.module_pl.is_empty()
+            && ctx.reactor_root.canonicalize().ok().as_ref() == Some(&base_canon)
+        {
+            return vec!["-pl".into(), ctx.module_pl, "-am".into()];
+        }
+    }
+    Vec::new()
+}
+
+fn maven_wrapper_command(wrapper_root: &Path, project_root: &Path) -> MavenCommand {
+    let _ = ensure_mvnw_executable(wrapper_root);
+    let program = if cfg!(windows) && wrapper_root.join("mvnw.cmd").is_file() {
+        PathBuf::from("./mvnw.cmd")
     } else {
-        project_root.join("mvnw")
+        PathBuf::from("./mvnw")
     };
-    if mvnw.is_file() {
-        return MavenCommand {
-            program: mvnw,
-            cwd: project_root.to_path_buf(),
-        };
-    }
-    if let Some(mvn) = crate::toolchain::resolve_program("maven") {
-        return MavenCommand {
-            program: mvn,
-            cwd: project_root.to_path_buf(),
-        };
-    }
     MavenCommand {
-        program: PathBuf::from("mvn"),
-        cwd: project_root.to_path_buf(),
+        program,
+        cwd: wrapper_root.to_path_buf(),
+        project_args: maven_pl_args(wrapper_root, project_root),
     }
+}
+
+/// Prefer `./mvnw` (walking up to the reactor if needed), then Settings → Compiler, then `mvn` on PATH.
+/// Nested modules get `-pl <module> -am` when the command runs from a parent wrapper/reactor.
+pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
+    let wrapper_root = find_maven_wrapper_root(project_root);
+    if wrapper_root.join("mvnw").is_file() || wrapper_root.join("mvnw.cmd").is_file() {
+        return maven_wrapper_command(&wrapper_root, project_root);
+    }
+
+    // No wrapper: still run multi-module builds from the reactor with `-pl` so dependencies compile.
+    if let Some(ctx) = maven_reactor_context(project_root) {
+        if !ctx.module_pl.is_empty() {
+            return MavenCommand {
+                program: system_maven_program(),
+                cwd: ctx.reactor_root,
+                project_args: vec!["-pl".into(), ctx.module_pl, "-am".into()],
+            };
+        }
+    }
+
+    MavenCommand {
+        program: system_maven_program(),
+        cwd: project_root.to_path_buf(),
+        project_args: Vec::new(),
+    }
+}
+
+/// Ensure `mvnw` is executable (git checkouts sometimes drop the bit).
+pub fn ensure_mvnw_executable(root: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mvnw = root.join("mvnw");
+        if mvnw.is_file() {
+            let meta = std::fs::metadata(&mvnw)?;
+            let mut perms = meta.permissions();
+            let mode = perms.mode();
+            if mode & 0o111 == 0 {
+                perms.set_mode(mode | 0o755);
+                std::fs::set_permissions(&mvnw, perms)?;
+            }
+        }
+    }
+    let _ = root;
+    Ok(())
 }
 
 pub fn run_maven(project_root: &Path, args: &[&str]) -> Result<std::process::Output> {
@@ -69,7 +148,10 @@ pub fn run_maven(project_root: &Path, args: &[&str]) -> Result<std::process::Out
     }
     let cmd = resolve_maven_command(project_root);
     let mut process = Command::new(&cmd.program);
-    process.current_dir(&cmd.cwd).args(args);
+    process
+        .current_dir(&cmd.cwd)
+        .args(&cmd.project_args)
+        .args(args);
     crate::process_registry::configure_command(&mut process);
     jdk::apply_java_env(&mut process);
     let label = format!("mvn {}", args.join(" "));
@@ -254,7 +336,9 @@ pub fn maven_project_info(ws: &Path, rel_path: &str) -> Result<MavenProjectInfo>
 
     let project_root = gradle::rel_path_for(ws, &root)?;
     let is_spring_boot = is_spring_boot_project(&root);
-    let has_wrapper = root.join("mvnw").is_file() || root.join("mvnw.cmd").is_file();
+    let wrapper_root = find_maven_wrapper_root(&root);
+    let has_wrapper =
+        wrapper_root.join("mvnw").is_file() || wrapper_root.join("mvnw.cmd").is_file();
     let default_goal = if is_spring_boot {
         "spring-boot:run".to_string()
     } else {
@@ -522,15 +606,18 @@ fn effective_dependency_management(
     }
 
     let mut management = HashMap::new();
-    if let Some((group, artifact, version)) = pom.parent_coords() {
-        if let Some(parent_pom) = read_m2_pom_model(&group, &artifact, &version) {
-            if let Some(parent_dir) = resolve_pom_directory(&group, &artifact, &version) {
+    // Prefer workspace `relativePath` parents, then ~/.m2 coordinates.
+    if let Some(parent_dir) = parent_pom_dir(root, pom) {
+        if let Ok(parent_pom) = read_pom(&parent_dir) {
+            management = effective_dependency_management(&parent_dir, &parent_pom, depth + 1);
+        } else if let Some((group, artifact, version)) = pom.parent_coords() {
+            // ~/.m2 layout uses `$artifact-$version.pom`, not `pom.xml`.
+            if let Some(parent_pom) = read_m2_pom_model(&group, &artifact, &version) {
                 management = effective_dependency_management(&parent_dir, &parent_pom, depth + 1);
             }
         }
     }
     merge_pom_dependency_management(pom, &mut management);
-    let _ = root;
     management
 }
 
@@ -564,6 +651,19 @@ fn merge_pom_dependency_management(
     pom: &PomModel,
     management: &mut HashMap<String, (String, String)>,
 ) {
+    merge_pom_dependency_management_depth(pom, management, 0);
+}
+
+/// Expand `dependencyManagement` entries, recursively following `scope=import` BOMs
+/// (e.g. `spring-cloud-dependencies` → `spring-cloud-netflix-dependencies` → starters).
+fn merge_pom_dependency_management_depth(
+    pom: &PomModel,
+    management: &mut HashMap<String, (String, String)>,
+    depth: usize,
+) {
+    if depth > 12 {
+        return;
+    }
     for dep in &pom.dependency_management {
         if dep.optional {
             continue;
@@ -579,13 +679,7 @@ fn merge_pom_dependency_management(
         if scope == "import" {
             if let Some(version) = version {
                 if let Some(bom_pom) = read_m2_pom_model(&group, &artifact, &version) {
-                    for bom_dep in &bom_pom.dependency_management {
-                        if let Some(ver) = resolve_version(bom_dep.version.as_deref(), &bom_pom) {
-                            management
-                                .entry(format!("{}:{}", bom_dep.group_id, bom_dep.artifact_id))
-                                .or_insert((ver, bom_dep.artifact_id.clone()));
-                        }
-                    }
+                    merge_pom_dependency_management_depth(&bom_pom, management, depth + 1);
                 }
             }
             continue;
@@ -739,16 +833,48 @@ fn read_pom(root: &Path) -> Result<PomModel> {
 }
 
 fn parse_pom(raw: &str) -> PomModel {
-    let properties = parse_properties(raw);
+    let mut properties = parse_properties(raw);
     let parent = parse_parent(raw, &properties);
-    let dependency_management = parse_dependencies_in_section(raw, "dependencyManagement", &properties);
-    let dependencies = parse_dependencies_in_section(raw, "dependencies", &properties);
+    let group_id =
+        tag_value(raw, "groupId").or_else(|| parent.as_ref().map(|(g, _, _)| g.clone()));
+    let artifact_id = tag_value(raw, "artifactId");
+    let version = tag_value(raw, "version")
+        .or_else(|| parent.as_ref().map(|(_, _, v)| v.clone()));
+    // Maven interpolates ${project.version} / ${project.groupId} in BOMs (Spring Cloud).
+    if let Some(ref g) = group_id {
+        properties
+            .entry("project.groupId".into())
+            .or_insert_with(|| g.clone());
+    }
+    if let Some(ref a) = artifact_id {
+        properties
+            .entry("project.artifactId".into())
+            .or_insert_with(|| a.clone());
+    }
+    if let Some(ref v) = version {
+        properties
+            .entry("project.version".into())
+            .or_insert_with(|| v.clone());
+    }
+    if let Some((_, _, ref pv)) = parent {
+        properties
+            .entry("project.parent.version".into())
+            .or_insert_with(|| pv.clone());
+    }
+
+    let dependency_management =
+        parse_dependencies_in_section(raw, "dependencyManagement", &properties);
+    // Top-level <dependencies>, not the nested list inside <dependencyManagement>.
+    let dependencies = parse_dependencies_in_section(
+        &strip_tag_block(raw, "dependencyManagement"),
+        "dependencies",
+        &properties,
+    );
     let modules = parse_modules(raw);
     PomModel {
-        group_id: tag_value(raw, "groupId").or_else(|| parent.as_ref().map(|(g, _, _)| g.clone())),
-        artifact_id: tag_value(raw, "artifactId"),
-        version: tag_value(raw, "version")
-            .or_else(|| parent.as_ref().map(|(_, _, v)| v.clone())),
+        group_id,
+        artifact_id,
+        version,
         packaging: tag_value(raw, "packaging"),
         parent,
         properties,
@@ -757,6 +883,28 @@ fn parse_pom(raw: &str) -> PomModel {
         modules,
         raw: raw.to_string(),
     }
+}
+
+/// Remove the first `<tag>...</tag>` block so nested sections are not mistaken for top-level ones.
+fn strip_tag_block(raw: &str, tag: &str) -> String {
+    let Some(block) = extract_tag_block(raw, tag) else {
+        return raw.to_string();
+    };
+    // extract_tag_block returns inner content; remove the full element including tags.
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let Some(start) = raw.find(&open) else {
+        return raw.to_string();
+    };
+    let Some(rel_end) = raw[start..].find(&close) else {
+        return raw.to_string();
+    };
+    let end = start + rel_end + close.len();
+    let mut out = String::with_capacity(raw.len() - (end - start));
+    out.push_str(&raw[..start]);
+    out.push_str(&raw[end..]);
+    let _ = block;
+    out
 }
 
 fn parse_parent(raw: &str, properties: &HashMap<String, String>) -> Option<(String, String, String)> {
@@ -1021,23 +1169,36 @@ fn collect_workspace_modules(dir: &Path, out: &mut HashMap<String, PathBuf>) {
 }
 
 /// Run Maven with cwd at an arbitrary directory (reactor root for `-pl` / `-am`).
+/// Prefers `./mvnw` at `cwd` or an ancestor; does not add nested `-pl` (caller owns args).
 pub fn run_maven_from(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
     if crate::process_registry::is_shutdown_requested() {
         bail!("Reaper is shutting down");
     }
-    let cmd = resolve_maven_command(cwd);
-    let mut process = Command::new(&cmd.program);
-    process.current_dir(cwd).args(args);
+    let wrapper_root = find_maven_wrapper_root(cwd);
+    let (program, run_cwd) =
+        if wrapper_root.join("mvnw").is_file() || wrapper_root.join("mvnw.cmd").is_file() {
+            let _ = ensure_mvnw_executable(&wrapper_root);
+            let program = if cfg!(windows) && wrapper_root.join("mvnw.cmd").is_file() {
+                PathBuf::from("./mvnw.cmd")
+            } else {
+                PathBuf::from("./mvnw")
+            };
+            (program, wrapper_root)
+        } else {
+            (system_maven_program(), cwd.to_path_buf())
+        };
+    let mut process = Command::new(&program);
+    process.current_dir(&run_cwd).args(args);
     crate::process_registry::configure_command(&mut process);
     jdk::apply_java_env(&mut process);
     let label = format!("mvn {}", args.join(" "));
     let mut child = process
         .spawn()
-        .with_context(|| format!("spawn {} in {}", cmd.program.display(), cwd.display()))?;
+        .with_context(|| format!("spawn {} in {}", program.display(), run_cwd.display()))?;
     let _guard = crate::process_registry::guard_for_child(&mut child, &label);
     child
         .wait_with_output()
-        .with_context(|| format!("wait for {} in {}", cmd.program.display(), cwd.display()))
+        .with_context(|| format!("wait for {} in {}", program.display(), run_cwd.display()))
 }
 
 /// Compiled outputs for workspace sibling modules declared in this module's POM.
@@ -1160,6 +1321,10 @@ fn parent_pom_dir(current: &Path, model: &PomModel) -> Option<PathBuf> {
         let rel = tag_value(&section, "relativePath").unwrap_or_else(|| "../pom.xml".into());
         if !rel.is_empty() {
             let candidate = current.join(&rel);
+            // relativePath may point at the parent POM file or its directory.
+            if candidate.is_file() {
+                return candidate.parent().map(|p| p.to_path_buf());
+            }
             if candidate.join("pom.xml").is_file() {
                 return Some(candidate);
             }
@@ -1407,5 +1572,163 @@ mod tests {
         .unwrap();
         assert!(effective_surefire_arg_line(&root).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_maven_prefers_mvnw_from_reactor_for_nested_module() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-mvnw-nested-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let module = root.join("services/app");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            r#"<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>platform</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <modules><module>services</module></modules>
+</project>"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("services")).unwrap();
+        std::fs::write(
+            root.join("services/pom.xml"),
+            r#"<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>platform</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>services</artifactId>
+  <packaging>pom</packaging>
+  <modules><module>app</module></modules>
+</project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            module.join("pom.xml"),
+            r#"<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>services</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>app</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("mvnw"), "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(root.join("mvnw")).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(root.join("mvnw"), perms).unwrap();
+        }
+
+        let cmd = resolve_maven_command(&module);
+        assert_eq!(cmd.program, PathBuf::from("./mvnw"));
+        assert_eq!(
+            cmd.cwd.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert!(
+            cmd.project_args.windows(2).any(|w| w[0] == "-pl" && w[1] == "services/app"),
+            "expected -pl services/app, got {:?}",
+            cmd.project_args
+        );
+        assert!(cmd.project_args.iter().any(|a| a == "-am"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn spring_cloud_bom_expands_nested_imports() {
+        let managed = bom_managed_versions(
+            "org.springframework.cloud",
+            "spring-cloud-dependencies",
+            "2023.0.1",
+        );
+        if managed.is_empty() {
+            // ~/.m2 may not have this BOM in CI sandboxes.
+            return;
+        }
+        assert!(
+            managed.contains_key(
+                "org.springframework.cloud:spring-cloud-starter-netflix-eureka-client"
+            ),
+            "nested netflix BOM should manage eureka-client starter; got {} entries",
+            managed.len()
+        );
+        assert!(
+            managed.contains_key("org.springframework.cloud:spring-cloud-commons"),
+            "expected spring-cloud-commons (EnableDiscoveryClient)"
+        );
+    }
+
+    #[test]
+    fn nested_bom_import_resolves_versionless_cloud_dep() {
+        let root = std::env::temp_dir().join(format!(
+            "reaper-nested-bom-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>1.0</version>
+  <properties>
+    <spring-cloud.version>2023.0.1</spring-cloud.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-dependencies</artifactId>
+        <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+    </dependency>
+  </dependencies>
+</project>"#,
+        )
+        .unwrap();
+        let coords = collect_dependency_coordinates(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        if read_m2_pom_text(
+            "org.springframework.cloud",
+            "spring-cloud-dependencies",
+            "2023.0.1",
+        )
+        .is_none()
+        {
+            return;
+        }
+        assert!(
+            coords.iter().any(|(g, a, _)| {
+                g == "org.springframework.cloud"
+                    && a == "spring-cloud-starter-netflix-eureka-client"
+            }),
+            "expected versionless eureka starter resolved via nested BOM imports, got {coords:?}"
+        );
     }
 }

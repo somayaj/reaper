@@ -530,15 +530,47 @@ pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
 }
 
 const JAVA_DIAG_OVERLAY_PREFIX: &str = ".reaper/java-diagnostics/overlay/";
+const JAVA_DIAG_OVERLAY_MARKER: &str = "/.reaper/java-diagnostics/overlay/";
+const DIAG_OVERLAY_MARKER: &str = "/.reaper/diagnostics/overlay/";
 
 /// Map diagnostics overlay copies back to workspace-relative source paths.
+///
+/// Handles both workspace-root overlays (`.reaper/java-diagnostics/overlay/…`) and
+/// module-local ones (`services/foo/.reaper/java-diagnostics/overlay/…`).
 pub fn normalize_workspace_source_path(rel_path: &str) -> String {
     let path = rel_path.replace('\\', "/");
     if let Some(rest) = path.strip_prefix(JAVA_DIAG_OVERLAY_PREFIX) {
         return rest.to_string();
     }
-    if let Some(idx) = path.find(JAVA_DIAG_OVERLAY_PREFIX) {
-        return path[idx + JAVA_DIAG_OVERLAY_PREFIX.len()..].to_string();
+    if let Some(rest) = path.strip_prefix(".reaper/diagnostics/overlay/") {
+        return rest.to_string();
+    }
+    for marker in [JAVA_DIAG_OVERLAY_MARKER, DIAG_OVERLAY_MARKER] {
+        if let Some(idx) = path.find(marker) {
+            let prefix = &path[..idx];
+            let rest = &path[idx + marker.len()..];
+            if prefix.is_empty() {
+                return rest.to_string();
+            }
+            if rest.is_empty() {
+                return prefix.to_string();
+            }
+            return format!("{prefix}/{rest}");
+        }
+    }
+    // Any `{module}/.reaper/…/overlay/{rest}` → `{module}/{rest}`
+    if let Some(reaper_idx) = path.find("/.reaper/") {
+        if let Some(rel_overlay) = path[reaper_idx..].find("/overlay/") {
+            let rest_start = reaper_idx + rel_overlay + "/overlay/".len();
+            let prefix = &path[..reaper_idx];
+            let rest = &path[rest_start..];
+            if !rest.is_empty() {
+                if prefix.is_empty() {
+                    return rest.to_string();
+                }
+                return format!("{prefix}/{rest}");
+            }
+        }
     }
     path
 }
@@ -1254,8 +1286,8 @@ pub use lsp::{
 };
 pub use debug::{
     DebugBreakpoint, DebugCapabilities, DebugState, continue_debug, debug_capabilities,
-    debug_state, evaluate_watch, run_debug_websocket, set_breakpoints, start_debug, step_debug,
-    stop_debug,
+    debug_state, evaluate_hover, evaluate_watch, run_debug_websocket, set_breakpoints, start_debug,
+    step_debug, stop_debug,
 };
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).
@@ -2477,6 +2509,26 @@ mod path_tests {
         assert_eq!(range.line, 2);
         assert_eq!(range.column, 9);
         assert_eq!(range.end_column, 14);
+    }
+
+    #[test]
+    fn normalize_workspace_source_path_strips_root_and_module_overlays() {
+        assert_eq!(
+            normalize_workspace_source_path(
+                ".reaper/java-diagnostics/overlay/services/api/src/main/java/App.java"
+            ),
+            "services/api/src/main/java/App.java"
+        );
+        assert_eq!(
+            normalize_workspace_source_path(
+                "services/api/.reaper/java-diagnostics/overlay/src/main/java/App.java"
+            ),
+            "services/api/src/main/java/App.java"
+        );
+        assert_eq!(
+            normalize_workspace_source_path("services/api/src/main/java/App.java"),
+            "services/api/src/main/java/App.java"
+        );
     }
 
     #[test]

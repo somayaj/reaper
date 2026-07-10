@@ -3552,7 +3552,8 @@ function isNativeSourcePath(path) {
   return lower.endsWith('.c')
     || lower.endsWith('.cpp')
     || lower.endsWith('.cc')
-    || lower.endsWith('.cxx');
+    || lower.endsWith('.cxx')
+    || lower.endsWith('.c++');
 }
 
 function isDockerBuildFile(path) {
@@ -7086,12 +7087,20 @@ function syncBlameButton() {
 
 async function loadBlameForTab(path) {
   if (!state.repo || !path || !state.blameEnabled) return;
+  const blamePath = stripJavaDiagOverlayPath(path);
   try {
-    const lines = await api(repoApi(state.repo, `/workspace/blame?path=${encodeURIComponent(path)}`));
+    const lines = await api(
+      repoApi(state.repo, `/workspace/blame?path=${encodeURIComponent(blamePath)}`),
+    );
     state.blameByPath.set(path, lines);
     if (state.activeTab === path) applyBlameDecorations(path, lines);
   } catch (e) {
-    toast(e.message || 'Blame failed', 'error');
+    const msg = String(e.message || e || 'Blame failed');
+    if (/not a git repository/i.test(msg)) {
+      toast('Blame needs a git repo — this workspace has no .git (init or clone first)', 'info');
+    } else {
+      toast(msg, 'error');
+    }
     setBlameEnabled(false);
   }
 }
@@ -7382,32 +7391,6 @@ function isDebuggablePath(path) {
     || isNativeSourcePath(path);
 }
 
-function debugBreakpointsForPath(path) {
-  if (!path) return [];
-  const lines = state.debugBreakpoints.get(path);
-  return lines ? [...lines].sort((a, b) => a - b) : [];
-}
-
-function allDebugBreakpointsList() {
-  const out = [];
-  for (const [path, lines] of state.debugBreakpoints) {
-    for (const line of lines) out.push({ path, line });
-  }
-  return out;
-}
-
-function toggleBreakpoint(path, line) {
-  if (!path || !line) return;
-  const set = state.debugBreakpoints.get(path) || new Set();
-  if (set.has(line)) set.delete(line);
-  else set.add(line);
-  if (set.size) state.debugBreakpoints.set(path, set);
-  else state.debugBreakpoints.delete(path);
-  renderBreakpointGlyphs();
-  renderDebugBreakpointsList();
-  void syncBreakpointsToServer();
-}
-
 function applyDebugPanelLayout() {
   const dock = $('#debug-dock-right');
   const resizer = $('#debug-right-resizer');
@@ -7452,40 +7435,55 @@ function syncDebugToolbar() {
       ? `Debug ${cap.language} (F6)`
       : cap?.reason || 'Debug (F6)';
   } else if (tbDebug && active) {
-    tbDebug.title = running ? 'Debugging (running)' : stopped ? `Paused: ${state.debugState?.stop_reason || 'breakpoint'}` : 'Debugging';
+    tbDebug.title = 'Restart debug (F6)';
   }
 }
 
 async function refreshDebugCapabilities() {
   const path = state.activeTab;
+  const tbDebug = $('#tb-debug');
   if (!state.repo || !path || !isDebuggablePath(path)) {
     state.debugCapabilities = null;
+    if (tbDebug) {
+      tbDebug.classList.add('hidden');
+      tbDebug.disabled = true;
+    }
     syncDebugToolbar();
     return;
   }
   try {
     const line = state.editor?.getPosition?.()?.lineNumber || 1;
-    state.debugCapabilities = await api(
-      `${repoApi(state.repo, '/workspace/debug/capabilities')}?path=${encodeURIComponent(path)}&line=${line}`,
-    );
+    const content = state.editor?.getValue?.() ?? state.tabContents?.get?.(path);
+    state.debugCapabilities = await api(repoApi(state.repo, '/workspace/debug/capabilities'), {
+      method: 'POST',
+      body: JSON.stringify({ path, line, content }),
+      timeoutMs: 15_000,
+    });
   } catch {
-    state.debugCapabilities = { supported: false, language: 'Unknown', reason: 'Could not check debug support' };
+    // Don't permanently block debug if capabilities check fails.
+    state.debugCapabilities = {
+      supported: true,
+      language: path.endsWith('.java') ? 'Java' : 'Unknown',
+      reason: null,
+    };
   }
-  const tbDebug = $('#tb-debug');
   const runnable = !!state.runTarget?.runnable;
+  const pathLooksJvm = /\.(java|kt|kts)$/i.test(path || '');
   const cap = state.debugCapabilities;
-  const capBlocked = cap != null && cap.supported === false;
+  const capBlocked = cap != null && cap.supported === false && !pathLooksJvm;
   if (tbDebug) {
-    tbDebug.classList.toggle('hidden', !isDebuggablePath(path) || !runnable);
-    tbDebug.disabled = !runnable || state.debugActive || capBlocked;
+    // Show for any debuggable path; don't hide just because run-target is still loading.
+    tbDebug.classList.toggle('hidden', !isDebuggablePath(path));
+    // Keep clickable for Java/Kotlin/Spring even if runnable/capabilities are stale.
+    tbDebug.disabled = capBlocked && !pathLooksJvm && !runnable;
     if (!state.debugActive) {
       tbDebug.title = capBlocked
         ? (cap.reason || 'Debug unavailable')
         : cap?.supported
           ? `Debug ${cap.language || 'program'} (F6)`
-          : runnable
-            ? 'Debug (F6)'
-            : 'Debug unavailable';
+          : 'Debug (F6)';
+    } else {
+      tbDebug.title = 'Restart debug (F6)';
     }
   }
   syncDebugToolbar();
@@ -7527,7 +7525,8 @@ function renderDebugPanel() {
       }).join('');
       stackEl.querySelectorAll('.ij-debug-frame').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const p = btn.dataset.path;
+          const raw = btn.dataset.path;
+          const p = debugFrameWorkspacePath(raw) || raw;
           const line = Number(btn.dataset.line) || 1;
           const col = Number(btn.dataset.column) || 1;
           if (p) void openFileAt(p, line, col);
@@ -7565,6 +7564,7 @@ function renderDebugWatchList() {
 function renderDebugBreakpointsList() {
   const el = $('#debug-breakpoints');
   if (!el) return;
+  compactDebugBreakpointsMap();
   const bps = allDebugBreakpointsList();
   if (!bps.length) {
     el.innerHTML = '<div class="ij-debug-bp-item"><span style="color:var(--ij-text-muted)">Click gutter or press F9</span></div>';
@@ -7593,26 +7593,53 @@ function renderBreakpointGlyphs() {
     options: {
       isWholeLine: false,
       glyphMarginClassName: 'ij-debug-glyph',
-      glyphMarginHoverMessage: { value: 'Breakpoint (click to remove)' },
     },
   }));
   state.debugDecorationIds = state.editor.deltaDecorations(state.debugDecorationIds, decos);
 }
 
+/** Map DAP absolute paths to workspace-relative tab paths. */
+function debugFrameWorkspacePath(path) {
+  if (!path) return null;
+  const viaTerminal = resolveTerminalFilePath(path);
+  if (viaTerminal) return viaTerminal;
+  const normalized = workspaceExplorerPath(path);
+  if (!normalized || isAbsoluteRepoPath(normalized)) return null;
+  return normalized;
+}
+
 function highlightDebugCurrentLine() {
   if (!state.editor || state.debugState?.status !== 'stopped') {
     if (state.debugCurrentLineId != null) {
-      state.debugCurrentLineId = state.editor?.deltaDecorations(state.debugCurrentLineId, []) || [];
+      state.debugCurrentLineId = state.editor?.deltaDecorations(state.debugCurrentLineId || [], []) || [];
     }
     return;
   }
   const frame = state.debugState.frames?.[0];
   if (!frame?.line) return;
-  const path = frame.path;
-  if (path && workspaceExplorerPath(state.activeTab) !== workspaceExplorerPath(path)) return;
+
+  const frameRel = debugFrameWorkspacePath(frame.path);
+  const activeRel = workspaceExplorerPath(state.activeTab);
+  if (frameRel && activeRel && frameRel !== activeRel) {
+    // Open the paused file so the highlight is visible.
+    void openFileAt(frameRel, frame.line, frame.column || 1).then(() => {
+      // Re-apply after the tab switch finishes.
+      if (state.debugState?.status === 'stopped') highlightDebugCurrentLine();
+    });
+    return;
+  }
+
   state.debugCurrentLineId = state.editor.deltaDecorations(state.debugCurrentLineId || [], [{
-    range: new monaco.Range(frame.line, 1, frame.line, 1),
-    options: { isWholeLine: true, className: 'ij-debug-current-line' },
+    range: new monaco.Range(frame.line, 1, frame.line, Number.MAX_SAFE_INTEGER),
+    options: {
+      isWholeLine: true,
+      className: 'ij-debug-current-line',
+      linesDecorationsClassName: 'ij-debug-current-line-margin',
+      overviewRuler: {
+        color: '#c792ea',
+        position: monaco.editor.OverviewRulerLane.Full,
+      },
+    },
   }]);
   state.editor.revealLineInCenter(frame.line);
 }
@@ -7633,12 +7660,19 @@ function applyDebugState(st) {
   const wasStopped = state.debugState?.status === 'stopped';
   state.debugState = st;
   state.debugActive = st.status && st.status !== 'idle' && st.status !== 'terminated';
-  if (st.status === 'terminated') state.debugActive = false;
+  if (st.status === 'terminated' || st.status === 'idle') {
+    state.debugActive = false;
+    state._debugStepping = false;
+    state._debugStarting = false;
+  }
   if (state.debugActive || state.debugPanelOpen) showDebugPanel();
   renderDebugPanel();
   syncDebugToolbar();
   highlightDebugCurrentLine();
-  if (st.status === 'stopped' && !wasStopped) void refreshDebugWatchValues();
+  if (st.status === 'stopped') {
+    state._debugStepping = false;
+    if (!wasStopped) void refreshDebugWatchValues();
+  }
 }
 
 function disconnectDebugWs() {
@@ -7658,7 +7692,9 @@ async function connectDebugWs() {
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.t === 'state' && msg.state) applyDebugState(msg.state);
+      if (msg.t === 'state' && msg.state) {
+        applyDebugState(msg.state);
+      }
       else if (msg.t === 'output' && msg.text) terminalLog(msg.text);
       else if (msg.t === 'message' && msg.text) toast(msg.text, 'info');
     } catch { /* ignore */ }
@@ -7666,34 +7702,132 @@ async function connectDebugWs() {
   ws.onclose = () => {
     if (state.debugWs === ws) state.debugWs = null;
   };
+  // Wait briefly for the socket to open so we don't miss the first stopped event.
+  await new Promise((resolve) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(resolve, 1500);
+    ws.addEventListener('open', () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+    ws.addEventListener('error', () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+  });
 }
 
 async function startDebugSession() {
   if (!state.repo || !state.activeTab) {
-    toast('Open a file first', 'info');
-    return;
-  }
-  if (!state.debugCapabilities?.supported) {
-    toast(state.debugCapabilities?.reason || 'Debugging not available for this file', 'warning');
+    toast('Open a Java file first', 'info');
     return;
   }
   const path = state.activeTab;
+  const pathLooksJava = /\.(java|kt)$/i.test(path || '');
+  if (!isDebuggablePath(path) && !pathLooksJava) {
+    toast(state.debugCapabilities?.reason || 'Debugging not available for this file', 'warning');
+    return;
+  }
+  if (state._debugStarting) {
+    toast('Debug start already in progress…', 'info');
+    return;
+  }
+  state._debugStarting = true;
   const content = state.tabContents.get(path) ?? state.editor?.getValue?.() ?? '';
   const line = state.editor?.getPosition?.()?.lineNumber || 1;
   showDebugPanel();
-  toast('Starting debug session…', 'info');
+  const restarting = !!state.debugActive
+    || state.debugState?.status === 'terminated'
+    || state.debugState?.status === 'stopped'
+    || state.debugState?.status === 'running';
+  toast(restarting ? 'Restarting debug session…' : 'Starting debug session…', 'info');
+  const unlockTimer = setTimeout(() => {
+    if (state._debugStarting) {
+      state._debugStarting = false;
+      toast('Debug start timed out — try again', 'error');
+      syncDebugToolbar();
+    }
+  }, 120_000);
   try {
+    disconnectDebugWs();
+    try {
+      await api(repoApi(state.repo, '/workspace/debug/stop'), {
+        method: 'POST',
+        timeoutMs: 8_000,
+      });
+    } catch {
+      /* start will also stop leftovers */
+    }
+    state.debugActive = false;
+    state._debugStepping = false;
+    state.debugState = {
+      status: 'starting',
+      frames: [],
+      variables: [],
+      breakpoints: state.debugState?.breakpoints || [],
+    };
+    highlightDebugCurrentLine();
+    syncDebugToolbar();
+    if (restarting) await new Promise((r) => setTimeout(r, 1800));
+
     await syncBreakpointsToServer();
-    const st = await api(repoApi(state.repo, '/workspace/debug/start'), {
-      method: 'POST',
-      body: JSON.stringify({ path, content, line }),
-    });
+    await connectDebugWs();
+    let st;
+    try {
+      st = await api(repoApi(state.repo, '/workspace/debug/start'), {
+        method: 'POST',
+        body: JSON.stringify({ path, content, line }),
+        timeoutMs: 180_000,
+      });
+    } catch (e) {
+      // One automatic retry for the common "second start" Java DAP race.
+      if (restarting) {
+        toast('Retrying debug start…', 'info');
+        await new Promise((r) => setTimeout(r, 1500));
+        st = await api(repoApi(state.repo, '/workspace/debug/start'), {
+          method: 'POST',
+          body: JSON.stringify({ path, content, line }),
+          timeoutMs: 180_000,
+        });
+      } else {
+        throw e;
+      }
+    }
     applyDebugState(st);
-    void connectDebugWs();
+    if (st.status === 'running' || st.status === 'starting') {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        try {
+          const cur = await api(repoApi(state.repo, '/workspace/debug/state'), {
+            timeoutMs: 5_000,
+          });
+          applyDebugState(cur);
+          if (cur.status === 'stopped' || cur.status === 'terminated' || cur.status === 'idle') break;
+        } catch {
+          break;
+        }
+      }
+    }
     showTerminal();
-    toast(`Debugging ${st.language || 'program'}`, 'success');
+    const status = state.debugState?.status;
+    if (status === 'stopped') {
+      toast('Paused — use Step Over (F10) for line-by-line', 'success');
+    } else if (status === 'running') {
+      toast('Running — set a breakpoint and restart, or wait for hit', 'info');
+    } else {
+      toast(`Debugging ${st.language || 'program'}`, 'success');
+    }
   } catch (e) {
+    state.debugActive = false;
+    state.debugState = { status: 'idle', frames: [], variables: [], breakpoints: [] };
+    syncDebugToolbar();
     toast(e.message || 'Debug start failed', 'error');
+  } finally {
+    clearTimeout(unlockTimer);
+    state._debugStarting = false;
   }
 }
 
@@ -7711,24 +7845,35 @@ async function stopDebugSession() {
 
 async function debugContinue() {
   if (!state.repo) return;
+  if (state.debugState?.status !== 'stopped') return;
+  state._debugStepping = true;
   try {
-    const st = await api(repoApi(state.repo, '/workspace/debug/continue'), { method: 'POST' });
+    const st = await api(repoApi(state.repo, '/workspace/debug/continue'), {
+      method: 'POST',
+      timeoutMs: 15_000,
+    });
     applyDebugState(st);
   } catch (e) {
     toast(e.message || 'Continue failed', 'error');
+    state._debugStepping = false;
   }
 }
 
 async function debugStep(kind) {
   if (!state.repo) return;
+  if (state._debugStepping) return;
+  if (state.debugState?.status !== 'stopped') return;
+  state._debugStepping = true;
   try {
     const st = await api(repoApi(state.repo, '/workspace/debug/step'), {
       method: 'POST',
       body: JSON.stringify({ kind }),
+      timeoutMs: 8_000,
     });
     applyDebugState(st);
   } catch (e) {
     toast(e.message || 'Step failed', 'error');
+    state._debugStepping = false;
   }
 }
 
@@ -7769,6 +7914,276 @@ async function refreshDebugWatchValues() {
   renderDebugWatchList();
 }
 
+function debugHoverWordAt(model, position) {
+  if (!model || !position) return null;
+  const word = model.getWordAtPosition(position);
+  if (!word?.word) return null;
+  // Skip tiny / non-identifier tokens.
+  if (!/^[A-Za-z_$][\w$]*$/.test(word.word)) return null;
+  return word;
+}
+
+function debugLocalValue(name) {
+  const vars = state.debugState?.variables;
+  if (!Array.isArray(vars) || !name) return null;
+  const exact = vars.find((v) => v?.name === name);
+  if (exact && exact.value != null && exact.value !== '') return String(exact.value);
+  // Java "Fields" scope sometimes prefixes; also match trailing simple name.
+  const loose = vars.find((v) => {
+    const n = v?.name || '';
+    return n === name || n.endsWith('.' + name) || n.endsWith(' ' + name);
+  });
+  if (loose && loose.value != null && loose.value !== '') return String(loose.value);
+  return null;
+}
+
+/** Java DAP refs like `String[0]@8` — empty arrays become `[]`. */
+function parseJavaArrayRefLen(value) {
+  const m = String(value || '').trim().match(/^[\w.$]+\[(\d+)\]@[0-9a-fA-F]+$/);
+  return m ? Number(m[1]) : null;
+}
+
+async function prettyJavaHoverValue(expression, value) {
+  if (value == null || value === '') return value;
+  const len = parseJavaArrayRefLen(value);
+  if (len == null) return value;
+  if (len === 0) return '[]';
+  if (len > 64) return `${value} (len=${len})`;
+  const pretty = await dapEvaluateExpression(`java.util.Arrays.toString(${expression})`);
+  return pretty || value;
+}
+
+/** Methods we must not evaluate on hover (side effects / control flow). */
+const DEBUG_HOVER_METHOD_DENY = new Set([
+  'print', 'println', 'printf', 'write', 'writeln', 'flush', 'close',
+  'exit', 'halt', 'destroy', 'notify', 'notifyall', 'wait',
+  'start', 'stop', 'interrupt', 'join', 'execute', 'submit',
+  'accept', 'foreach', 'run', 'call', 'invoke',
+]);
+
+function debugHoverMethodDenied(name) {
+  if (!name) return true;
+  const lower = name.toLowerCase();
+  if (DEBUG_HOVER_METHOD_DENY.has(lower)) return true;
+  return /^(set|add|remove|put|clear|delete|insert|update|save|send|fire|offer|push|poll)/i.test(name);
+}
+
+function findMatchingParen(line, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    } else if (ch === '"' || ch === "'") {
+      const q = ch;
+      i++;
+      while (i < line.length && line[i] !== q) {
+        if (line[i] === '\\') i++;
+        i++;
+      }
+    }
+  }
+  return -1;
+}
+
+/** Walk left from `from` (inclusive last char of receiver) to expression start. */
+function debugReceiverStart(line, from) {
+  let i = from;
+  while (i >= 0) {
+    while (i >= 0 && /\s/.test(line[i])) i--;
+    if (i < 0) return 0;
+    if (line[i] === ')') {
+      let depth = 0;
+      for (; i >= 0; i--) {
+        if (line[i] === ')') depth++;
+        else if (line[i] === '(') {
+          depth--;
+          if (depth === 0) {
+            i--;
+            break;
+          }
+        } else if (line[i] === '"' || line[i] === "'") {
+          const q = line[i];
+          i--;
+          while (i >= 0 && line[i] !== q) {
+            if (i > 0 && line[i - 1] === '\\') i--;
+            i--;
+          }
+        }
+      }
+      continue;
+    }
+    if (/[\w$]/.test(line[i])) {
+      while (i >= 0 && /[\w$]/.test(line[i])) i--;
+      let j = i;
+      while (j >= 0 && /\s/.test(line[j])) j--;
+      if (j >= 0 && line[j] === '.') {
+        i = j - 1;
+        continue;
+      }
+      return i + 1;
+    }
+    break;
+  }
+  return i + 1;
+}
+
+/**
+ * Resolve what to evaluate under the cursor: a local/field name, or a full
+ * call like `file.exists()` when hovering the method name.
+ */
+function debugHoverExpressionAt(model, position) {
+  const word = debugHoverWordAt(model, position);
+  if (!word) return null;
+  const line = model.getLineContent(position.lineNumber);
+  const methodStart = word.startColumn - 1;
+  const methodEnd = word.endColumn - 1;
+
+  // Ignore words inside string/char literals (e.g. "file exists: " on a println line).
+  if (debugHoverIndexInJavaString(line, methodStart)) {
+    const call = debugHoverFindCallNamed(line, word.word);
+    if (call) return call;
+    return null;
+  }
+
+  let k = methodEnd;
+  while (k < line.length && /\s/.test(line[k])) k++;
+  if (line[k] !== '(') {
+    // Bare name — if the same line has `recv.name(...)`, prefer evaluating the call
+    // (common when occurrence-highlight lands on a non-call token).
+    const call = debugHoverFindCallNamed(line, word.word);
+    if (call && call.expr.includes('.')) return call;
+    return { expr: word.word, label: word.word, kind: 'ident' };
+  }
+
+  if (debugHoverMethodDenied(word.word)) {
+    return { expr: word.word, label: word.word, kind: 'ident' };
+  }
+
+  const close = findMatchingParen(line, k);
+  if (close < 0) return { expr: word.word, label: word.word, kind: 'ident' };
+
+  let start = methodStart;
+  let j = methodStart - 1;
+  while (j >= 0 && /\s/.test(line[j])) j--;
+  if (j >= 0 && line[j] === '.') {
+    start = debugReceiverStart(line, j - 1);
+  }
+
+  const expr = line.slice(start, close + 1).replace(/\s+/g, ' ').trim();
+  if (!expr) return { expr: word.word, label: word.word, kind: 'ident' };
+  return { expr, label: expr, kind: 'call' };
+}
+
+/** True when `idx` lies inside a Java string or char literal on `line`. */
+function debugHoverIndexInJavaString(line, idx) {
+  let inStr = false;
+  let quote = '';
+  for (let i = 0; i < line.length && i <= idx; i++) {
+    const ch = line[i];
+    if (inStr) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) inStr = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inStr = true;
+      quote = ch;
+    }
+  }
+  return inStr;
+}
+
+/** Find `recv.name(...)` on the line (skips string literals). */
+function debugHoverFindCallNamed(line, name) {
+  if (!name || debugHoverMethodDenied(name)) return null;
+  const re = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`);
+  let searchFrom = 0;
+  while (searchFrom < line.length) {
+    const slice = line.slice(searchFrom);
+    const m = slice.match(re);
+    if (!m || m.index == null) return null;
+    const methodStart = searchFrom + m.index;
+    if (debugHoverIndexInJavaString(line, methodStart)) {
+      searchFrom = methodStart + name.length;
+      continue;
+    }
+    const open = methodStart + m[0].length - 1;
+    const close = findMatchingParen(line, open);
+    if (close < 0) return null;
+    let start = methodStart;
+    let j = methodStart - 1;
+    while (j >= 0 && /\s/.test(line[j])) j--;
+    if (j >= 0 && line[j] === '.') {
+      start = debugReceiverStart(line, j - 1);
+    }
+    const expr = line.slice(start, close + 1).replace(/\s+/g, ' ').trim();
+    if (!expr) return null;
+    return { expr, label: expr, kind: 'call' };
+  }
+  return null;
+}
+
+async function dapEvaluateExpression(expression) {
+  if (!state.repo || state.debugState?.status !== 'stopped' || state._debugStepping) return null;
+  const frameId = state.debugState?.frames?.[0]?.id;
+  const tryEval = async (expr, context) => {
+    const res = await api(repoApi(state.repo, '/workspace/debug/evaluate'), {
+      method: 'POST',
+      body: JSON.stringify({
+        expression: expr,
+        context,
+        frame_id: frameId,
+      }),
+      timeoutMs: 4_000,
+    });
+    const value = res?.value;
+    if (value == null || value === '') return null;
+    return String(value);
+  };
+  try {
+    return (
+      (await tryEval(expression, 'watch'))
+      || (await tryEval(expression, 'hover'))
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function evaluateDebugHoverInfo(model, position) {
+  if (state.debugState?.status !== 'stopped') return null;
+  const info = debugHoverExpressionAt(model, position);
+  if (!info) return null;
+
+  if (info.kind === 'ident') {
+    let value = debugLocalValue(info.expr);
+    if (value == null) {
+      value = await dapEvaluateExpression(info.expr)
+        || await dapEvaluateExpression(`this.${info.expr}`);
+    }
+    if (value == null) return null;
+    value = await prettyJavaHoverValue(info.expr, value);
+    return { label: info.label, value };
+  }
+
+  // Method / call expression — evaluate the full call once.
+  let evaluated = await dapEvaluateExpression(info.expr);
+  if (evaluated == null) return null;
+  evaluated = await prettyJavaHoverValue(info.expr, evaluated);
+  return { label: info.label, value: evaluated };
+}
+
+/** Used by monaco-languages hover so the value appears above javadoc (once). */
+async function lookupDebugHoverValue(model, position) {
+  return evaluateDebugHoverInfo(model, position);
+}
+
 function setupDebugEditorHooks(editor) {
   if (!editor || editor.__reaperDebugHooks) return;
   editor.__reaperDebugHooks = true;
@@ -7778,6 +8193,8 @@ function setupDebugEditorHooks(editor) {
     const line = e.target.position?.lineNumber;
     if (line) toggleBreakpoint(state.activeTab, line);
   });
+  // Debug values are injected once via ReaperLang hover (lookupDebugHoverValue).
+  // Do not register a second HoverProvider here — that duplicated `name = value`.
 }
 
 async function openCoverageHtmlReport() {
@@ -9666,8 +10083,13 @@ function setEditorContent(path, content) {
   } finally {
     state.suppressEditorChange = false;
   }
+  // setValue invalidates prior decoration IDs — reset before reapplying.
+  state.debugDecorationIds = [];
+  state.debugCurrentLineId = [];
   applyTestRunDecorations();
   reapplyCoverageForTab(path);
+  renderBreakpointGlyphs();
+  highlightDebugCurrentLine();
   if (state.blameEnabled) {
     const cached = state.blameByPath.get(path);
     if (cached) applyBlameDecorations(path, cached);
@@ -9830,6 +10252,8 @@ function initEditor() {
       openFileAt,
       goToLine,
       isFileDirty: (path) => state.dirty.has(path),
+      lookupDebugHoverValue,
+      isDebugStopped: () => state.debugState?.status === 'stopped',
       getJavaSourceOverlays: (excludePath) => collectJavaDiagnosticOverlays(excludePath),
       getAiInlineComplete: () => getAiInlineCompleteEnabled(),
       getAiInlineProviderAvailable: () => getAiInlineProviderAvailable(),
@@ -11137,16 +11561,103 @@ function normalizeRepoPath(path) {
 /** Map javac overlay copies (`.reaper/java-diagnostics/overlay/…`) to workspace paths. */
 function stripJavaDiagOverlayPath(path) {
   if (!path) return path;
-  const normalized = path.replace(/\\/g, '/');
-  const prefix = '.reaper/java-diagnostics/overlay/';
-  if (normalized.startsWith(prefix)) return normalized.slice(prefix.length);
-  const idx = normalized.indexOf(`/${prefix}`);
-  if (idx >= 0) return normalized.slice(idx + prefix.length + 1);
-  return normalized;
+  let normalized = path.replace(/\\/g, '/');
+  const rootPrefixes = [
+    '.reaper/java-diagnostics/overlay/',
+    '.reaper/diagnostics/overlay/',
+  ];
+  for (const prefix of rootPrefixes) {
+    if (normalized.startsWith(prefix)) {
+      normalized = normalized.slice(prefix.length);
+      break;
+    }
+  }
+  const markers = [
+    '/.reaper/java-diagnostics/overlay/',
+    '/.reaper/diagnostics/overlay/',
+  ];
+  for (const marker of markers) {
+    const idx = normalized.indexOf(marker);
+    if (idx >= 0) {
+      const prefix = normalized.slice(0, idx);
+      const rest = normalized.slice(idx + marker.length);
+      normalized = prefix ? `${prefix}/${rest}` : rest;
+      break;
+    }
+  }
+  // Any `{module}/.reaper/…/overlay/{rest}` → `{module}/{rest}`
+  const reaperIdx = normalized.indexOf('/.reaper/');
+  if (reaperIdx >= 0) {
+    const fromReaper = normalized.slice(reaperIdx);
+    const overlayRel = fromReaper.indexOf('/overlay/');
+    if (overlayRel >= 0) {
+      const prefix = normalized.slice(0, reaperIdx);
+      const rest = normalized.slice(reaperIdx + overlayRel + '/overlay/'.length);
+      if (rest) normalized = prefix ? `${prefix}/${rest}` : rest;
+    }
+  }
+  return normalized.replace(/\/{2,}/g, '/');
 }
 
 function workspaceExplorerPath(path) {
   return normalizeRepoPath(stripJavaDiagOverlayPath(path));
+}
+
+/** Canonical path for breakpoint storage (collapses overlay duplicates). */
+function normalizeDebugBreakpointPath(path) {
+  return workspaceExplorerPath(path);
+}
+
+function debugBreakpointsForPath(path) {
+  if (!path) return [];
+  const key = normalizeDebugBreakpointPath(path);
+  const lines = new Set();
+  for (const [p, set] of state.debugBreakpoints) {
+    if (normalizeDebugBreakpointPath(p) === key) {
+      for (const line of set) lines.add(line);
+    }
+  }
+  return [...lines].sort((a, b) => a - b);
+}
+
+function allDebugBreakpointsList() {
+  const seen = new Set();
+  const out = [];
+  for (const [path, lines] of state.debugBreakpoints) {
+    const norm = normalizeDebugBreakpointPath(path);
+    for (const line of lines) {
+      const id = `${norm}:${line}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ path: norm, line });
+    }
+  }
+  return out;
+}
+
+function compactDebugBreakpointsMap() {
+  const compacted = new Map();
+  for (const [path, lines] of state.debugBreakpoints) {
+    const norm = normalizeDebugBreakpointPath(path);
+    const set = compacted.get(norm) || new Set();
+    for (const line of lines) set.add(line);
+    compacted.set(norm, set);
+  }
+  state.debugBreakpoints = compacted;
+}
+
+function toggleBreakpoint(path, line) {
+  if (!path || !line) return;
+  compactDebugBreakpointsMap();
+  const key = normalizeDebugBreakpointPath(path);
+  const set = state.debugBreakpoints.get(key) || new Set();
+  if (set.has(line)) set.delete(line);
+  else set.add(line);
+  if (set.size) state.debugBreakpoints.set(key, set);
+  else state.debugBreakpoints.delete(key);
+  renderBreakpointGlyphs();
+  renderDebugBreakpointsList();
+  void syncBreakpointsToServer();
 }
 
 function treePathMatchesTab(treePath, tabPath) {
@@ -12275,10 +12786,9 @@ function flushEditorContentSync() {
 
 function activateTab(path, { skipFlush = false } = {}) {
   if (!skipFlush) flushEditorContentSync();
+  // activateTabShell already loads content + breakpoint glyphs; a second
+  // setEditorContent here used to wipe red dots after tab switches.
   activateTabShell(path);
-  if (state.tabContents.has(path)) {
-    setEditorContent(path, state.tabContents.get(path));
-  }
   scheduleRenderTabs({ immediate: true });
 }
 
@@ -14538,7 +15048,10 @@ async function runActive() {
   if (!state.repo || !state.activeTab) return;
   await refreshRunInfo();
   const target = state.runTarget;
-  if (!target || target.mode === 'none') return;
+  if (!target || target.mode === 'none') {
+    toast(target?.reason || 'Nothing to run for this file', 'info');
+    return;
+  }
   if (target.runnable === false && target.mode !== 'project-task') {
     if (target.reason) toast(target.reason, 'error');
     return;
@@ -17273,7 +17786,16 @@ function openTerminal() {
   const wasOpen = state.terminalOpen;
   state.terminalOpen = true;
   applyTerminalDock();
-  mountActiveTerminal({ fresh: true });
+  // Do not remount fresh on every Run/Debug click. A delayed rAF remount races
+  // with ensureCommandTerminalReady and tears down the xterm mid-start, which
+  // made the first click look like a no-op and required a second press.
+  const term = getActiveTerminal();
+  const needsFresh = !term?.xterm || !term.xterm.element?.isConnected;
+  if (!wasOpen || needsFresh) {
+    mountActiveTerminal({ fresh: needsFresh });
+  } else {
+    mountActiveTerminal({ fresh: false });
+  }
 }
 
 function toggleTerminal() {
@@ -18079,8 +18601,7 @@ function bindEvents() {
     }
     if (e.key === 'F6') {
       e.preventDefault();
-      if (state.debugActive) toggleDebugPanel();
-      else void startDebugSession();
+      void startDebugSession();
       return;
     }
     if (e.key === 'F9') {

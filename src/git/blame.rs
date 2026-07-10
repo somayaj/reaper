@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use super::{run_git, GitOutput};
@@ -15,18 +15,54 @@ pub struct BlameLine {
 }
 
 pub fn blame_file(ws: &Path, rel_path: &str) -> Result<Vec<BlameLine>> {
-    let rel_path = rel_path.trim().trim_start_matches('/');
+    let rel_path = normalize_blame_path(rel_path);
     if rel_path.is_empty() {
         bail!("path is required");
     }
+    if !super::is_git_repo(ws) {
+        bail!("This workspace is not a git repository — init or clone a repo to use blame");
+    }
     let out = run_git(
         Some(ws),
-        &["blame", "--line-porcelain", "--", rel_path],
+        &["blame", "--line-porcelain", "--", &rel_path],
     )?;
     if !out.success() {
-        bail!("{}", out.stderr.trim());
+        let err = out.stderr.trim();
+        if err.contains("not a git repository") {
+            bail!("This workspace is not a git repository — init or clone a repo to use blame");
+        }
+        bail!("{err}");
     }
     Ok(parse_blame_porcelain(&out))
+}
+
+/// Strip diagnostic overlay prefixes so blame targets the real workspace file.
+fn normalize_blame_path(rel_path: &str) -> String {
+    let mut p = rel_path
+        .trim()
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    for prefix in [
+        ".reaper/java-diagnostics/overlay/",
+        ".reaper/diagnostics/overlay/",
+    ] {
+        if let Some(rest) = p.strip_prefix(prefix) {
+            p = rest.to_string();
+            break;
+        }
+    }
+    if let Some(idx) = p.find("/.reaper/") {
+        if let Some(overlay) = p[idx..].find("/overlay/") {
+            let prefix = &p[..idx];
+            let rest = &p[idx + overlay + "/overlay/".len()..];
+            p = if prefix.is_empty() {
+                rest.to_string()
+            } else {
+                format!("{prefix}/{rest}")
+            };
+        }
+    }
+    p
 }
 
 fn parse_blame_porcelain(out: &GitOutput) -> Vec<BlameLine> {
@@ -126,5 +162,21 @@ summary tweak
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].author, "Alice");
         assert_eq!(lines[1].commit, "def5678");
+    }
+
+    #[test]
+    fn normalize_blame_strips_overlay_prefix() {
+        assert_eq!(
+            normalize_blame_path(
+                ".reaper/java-diagnostics/overlay/services/app/src/main/java/App.java"
+            ),
+            "services/app/src/main/java/App.java"
+        );
+        assert_eq!(
+            normalize_blame_path(
+                "services/app/.reaper/java-diagnostics/overlay/src/main/java/App.java"
+            ),
+            "services/app/src/main/java/App.java"
+        );
     }
 }

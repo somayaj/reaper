@@ -127,7 +127,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/terminal", get(workspace_terminal_ws))
         .route("/api/repos/{name}/workspace/debug/ws", get(workspace_debug_ws))
         .route("/api/repos/{name}/workspace/debug/state", get(debug_state_handler))
-        .route("/api/repos/{name}/workspace/debug/capabilities", get(debug_capabilities_handler))
+        .route(
+            "/api/repos/{name}/workspace/debug/capabilities",
+            get(debug_capabilities_handler).post(debug_capabilities_post_handler),
+        )
         .route("/api/repos/{name}/workspace/debug/start", post(debug_start_handler))
         .route("/api/repos/{name}/workspace/debug/stop", post(debug_stop_handler))
         .route("/api/repos/{name}/workspace/debug/continue", post(debug_continue_handler))
@@ -1173,6 +1176,15 @@ struct DebugPathQuery {
 }
 
 #[derive(Deserialize)]
+struct DebugCapabilitiesRequest {
+    path: String,
+    #[serde(default = "default_one_u32")]
+    line: u32,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct DebugStartRequest {
     path: String,
     #[serde(default)]
@@ -1197,6 +1209,9 @@ struct DebugEvaluateRequest {
     expression: String,
     #[serde(default)]
     frame_id: Option<i64>,
+    /// "watch" (default) or "hover"
+    #[serde(default)]
+    context: Option<String>,
 }
 
 async fn workspace_debug_ws(
@@ -1239,7 +1254,31 @@ async fn debug_capabilities_handler(
     if path.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "path required");
     }
-    match workspace::debug_capabilities(&ws, &path, q.line.max(1)) {
+    match workspace::debug_capabilities(&ws, &path, q.line.max(1), None) {
+        Ok(cap) => Json(cap).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_capabilities_post_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DebugCapabilitiesRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    match workspace::debug_capabilities(
+        &ws,
+        &path,
+        body.line.max(1),
+        body.content.as_deref(),
+    ) {
         Ok(cap) => Json(cap).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1346,9 +1385,22 @@ async fn debug_evaluate_handler(
     if expr.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "expression required");
     }
-    match workspace::evaluate_watch(&ws, &expr, body.frame_id) {
-        Ok(value) => Json(serde_json::json!({ "value": value })).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let context = body.context.clone();
+    let frame_id = body.frame_id;
+    match tokio::task::spawn_blocking(move || {
+        match context.as_deref() {
+            Some("hover") => workspace::evaluate_hover(&ws, &expr, frame_id),
+            _ => workspace::evaluate_watch(&ws, &expr, frame_id),
+        }
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(serde_json::json!({ "value": value })).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("debug evaluate failed: {e:#}"),
+        ),
     }
 }
 
