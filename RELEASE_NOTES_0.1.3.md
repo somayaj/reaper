@@ -1,4 +1,4 @@
-Reaper 0.1.3 (build 428) — macOS split release.
+Reaper 0.1.3 (build 429) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -9,18 +9,15 @@ Reaper 0.1.3 (build 428) — macOS split release.
 
 Drag Reaper.app to Applications, then launch.
 
-### What's new (build 428)
+### What's new (build 429)
 
-- **C/C++ debugger:** CodeLLDB 1.12 handshake fixed (stdio default); DAP `launch` completes after `configurationDone` so sessions no longer stick on Starting…. CMake Debug prebuild resolves includes and linked sources (e.g. `greeter.hpp`).
-- **Java / Spring Boot debugger:** Maven and Gradle prebuild + jdtls classpath launch; multi-module `projectName` inference; classpath merges resolved jars so SLF4J and Spring Cloud types resolve at debug time.
-- **Breakpoints:** Red gutter dots persist across file tabs (no longer cleared by editor remounts).
-- **Run:** Opening the terminal for Run no longer remounts xterm on every click (first-click no-op race fixed).
-- **Maven:** Nested BOM import expansion and wrapper/`-pl` handling for multi-module projects.
+- **Debug prebuild:** Gradle no longer forces `--rerun-tasks` on every start (incremental `classes` with debug symbols). Prebuild timeout raised to 500s; UI `/debug/start` budget raised to 540s so multi-module Spring Boot projects can finish compiling.
 
-### Earlier in 0.1.3 (build 427)
+### Earlier in 0.1.3 (build 428)
 
-- **Project open:** Workspace open no longer blocks the server — heavy profile detection and indexing run on background threads so projects load reliably.
-- **JDK navigation:** `java.lang.String`, `java.util.List`, and other JDK types resolve via extracted JDK sources; warm extract kicks off during splash for Maven and Gradle projects.
-- **Paste:** Form fields use native WKWebView paste again — no floating Paste button on every input.
+- **C/C++ debugger:** CodeLLDB 1.12 handshake fixed; DAP `launch` completes after `configurationDone`. CMake Debug prebuild resolves includes and linked sources.
+- **Java / Spring Boot debugger:** Maven and Gradle prebuild + jdtls classpath launch; multi-module `projectName` inference.
+- **Breakpoints:** Red gutter dots persist across file tabs.
+- **Run:** Terminal no longer remounts xterm on every Run click.
 
 **Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run `scripts/eject-reaper-dmgs.sh`.

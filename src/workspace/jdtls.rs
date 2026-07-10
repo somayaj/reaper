@@ -116,7 +116,7 @@ pub fn java_debug_via_jdtls_available() -> bool {
 }
 
 /// Cap for resolveMainClass / classpath during debug start. Keep well under the
-/// frontend's 180s `/debug/start` timeout — Maven prebuild + DAP launch still follow.
+/// frontend's 540s `/debug/start` timeout — Maven/Gradle prebuild + DAP launch still follow.
 const JAVA_DEBUG_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Resolved Java launch metadata from jdtls (main class, Eclipse project name, classpaths).
