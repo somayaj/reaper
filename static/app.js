@@ -466,7 +466,7 @@ const state = {
   agentDock: localStorage.getItem(AGENT_DOCK_KEY) || 'left',
   terminalDock: localStorage.getItem(TERMINAL_DOCK_KEY) || 'bottom',
   dockerLogsOpen: false,
-  dockerLogsDock: localStorage.getItem(DOCKER_LOGS_DOCK_KEY) || 'bottom',
+  dockerLogsDock: localStorage.getItem(DOCKER_LOGS_DOCK_KEY) || 'right',
   buildTasksDock: localStorage.getItem(BUILD_TASKS_DOCK_KEY) || 'right',
   packageManifestDock: localStorage.getItem(PACKAGE_MANIFEST_DOCK_KEY) || 'right',
   dockerLogsStreaming: false,
@@ -474,6 +474,8 @@ const state = {
   dockerLogsModulePath: null,
   dockerLogsLabel: '',
   dockerLogsAutoScroll: true,
+  dockerContainers: [],
+  dockerSelectedId: null,
   terminalOpen: false,
   terminalMountSync: false,
   terminals: [],
@@ -5019,7 +5021,7 @@ const PALETTE_COMMANDS = [
   { id: 'debug-panel', label: 'Debug panel', run: () => toggleDebugPanel(), needsRepo: true },
   { id: 'db-viewer', label: 'Database', run: () => showDbViewerPanel(), needsRepo: true },
   { id: 'git-viewer', label: 'Git Console', run: () => showGitViewerPanel(), needsRepo: true },
-  { id: 'docker-logs', label: 'Docker logs', run: () => showDockerLogsPanel(), needsRepo: true },
+  { id: 'docker-logs', label: 'Docker', run: () => showDockerLogsPanel(), needsRepo: true },
   { id: 'build-tasks', label: 'Build tasks', run: () => showBuildTasksPanel(), needsRepo: true },
   { id: 'package-manifest', label: 'Package manifest', run: () => showPackageManifestPanel(), needsRepo: true },
   { id: 'sidebar', label: 'Toggle sidebar', run: () => toggleSidebar() },
@@ -8438,6 +8440,332 @@ function initGitViewerResize() {
   });
 }
 
+const DOCKER_CONSOLE_QUICK = [
+  { id: 'up', label: 'Up', cmd: 'compose up -d', compose: true, title: 'docker compose up -d' },
+  { id: 'down', label: 'Down', cmd: 'compose down', compose: true, title: 'docker compose down' },
+  { id: 'ps', label: 'Ps', cmd: 'compose ps', compose: true, title: 'docker compose ps' },
+  { id: 'build', label: 'Build', cmd: 'compose build', compose: true, title: 'docker compose build' },
+  { id: 'logs', label: 'Follow', cmd: 'compose logs -f --tail=100', compose: true, stream: true, title: 'docker compose logs -f' },
+  { id: 'refresh', label: 'Refresh', action: 'refresh', title: 'Refresh container list' },
+];
+
+function dockerComposeShell(args) {
+  const a = String(args || '').trim();
+  return `if docker compose version >/dev/null 2>&1; then docker compose ${a}; `
+    + `elif command -v docker-compose >/dev/null 2>&1; then docker-compose ${a}; `
+    + `else docker compose ${a}; fi`;
+}
+
+function parseDockerConsoleArgs(input) {
+  const trimmed = String(input || '').trim();
+  if (!trimmed) return [];
+  return splitShellArgs(trimmed.replace(/^docker\s+/i, ''));
+}
+
+function dockerConsoleCwd() {
+  const modulePath = state.dockerLogsModulePath
+    || dockerLogsComposeModulePath()
+    || findDockerLogsFollowCommand()?.modulePath
+    || null;
+  if (modulePath) return buildTaskWorkdir(modulePath);
+  return undefined;
+}
+
+function syncDockerConsoleSubtitle() {
+  const modulePath = state.dockerLogsModulePath
+    || dockerLogsComposeModulePath()
+    || findDockerLogsFollowCommand()?.modulePath
+    || null;
+  state.dockerLogsModulePath = modulePath;
+  const subtitleEl = $('#docker-logs-subtitle');
+  if (!subtitleEl) return;
+  if (modulePath) {
+    const cwd = buildTaskWorkdir(modulePath);
+    subtitleEl.textContent = cwd ? `${modulePath} · ${cwd}` : modulePath;
+  } else {
+    subtitleEl.textContent = 'No compose project detected';
+  }
+}
+
+function renderDockerConsoleQuick() {
+  const bar = $('#docker-console-quick');
+  if (!bar) return;
+  const hasCompose = !!(state.dockerLogsModulePath
+    || dockerLogsComposeModulePath()
+    || findDockerLogsFollowCommand());
+  bar.innerHTML = DOCKER_CONSOLE_QUICK.map((item) => {
+    const disabled = item.compose && !hasCompose ? ' disabled' : '';
+    const title = escapeHtml(item.title || item.label);
+    return `<button type="button" class="ij-docker-console-quick-btn" data-docker-quick="${escapeHtml(item.id)}" title="${title}"${disabled}>${escapeHtml(item.label)}</button>`;
+  }).join('');
+  bar.querySelectorAll('.ij-docker-console-quick-btn').forEach((btn) => {
+    btn.addEventListener('click', () => void runDockerConsoleQuick(btn.dataset.dockerQuick));
+  });
+}
+
+async function runDockerConsoleQuick(id) {
+  const item = DOCKER_CONSOLE_QUICK.find((q) => q.id === id);
+  if (!item) return;
+  if (item.action === 'refresh') {
+    await refreshDockerContainers();
+    return;
+  }
+  const input = $('#docker-console-command');
+  if (input && item.cmd) input.value = item.cmd;
+  await runDockerConsoleCommand(item.cmd, { stream: !!item.stream });
+}
+
+function setDockerContainerSelection(id) {
+  state.dockerSelectedId = id || null;
+  $$('.ij-docker-container-row').forEach((row) => {
+    row.classList.toggle('is-selected', row.dataset.containerId === state.dockerSelectedId);
+  });
+  const has = !!state.dockerSelectedId;
+  ['btn-docker-container-start', 'btn-docker-container-stop', 'btn-docker-container-restart', 'btn-docker-container-logs']
+    .forEach((sid) => {
+      const el = $(`#${sid}`);
+      if (el) el.disabled = !has;
+    });
+}
+
+function renderDockerContainersList(containers) {
+  const el = $('#docker-containers-list');
+  if (!el) return;
+  state.dockerContainers = containers || [];
+  if (!state.dockerContainers.length) {
+    el.innerHTML = '<div class="ij-docker-containers-empty">No containers — run Refresh or compose Up</div>';
+    setDockerContainerSelection(null);
+    return;
+  }
+  el.innerHTML = state.dockerContainers.map((c) => {
+    const selected = c.id === state.dockerSelectedId ? ' is-selected' : '';
+    return `<button type="button" class="ij-docker-container-row${selected}" role="option" data-container-id="${escapeHtml(c.id)}" title="${escapeHtml(c.name)}">
+      <span class="ij-docker-container-name">${escapeHtml(c.name)}</span>
+      <span class="ij-docker-container-image">${escapeHtml(c.image)}</span>
+      <span class="ij-docker-container-status">${escapeHtml(c.status)}</span>
+    </button>`;
+  }).join('');
+  el.querySelectorAll('.ij-docker-container-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      setDockerContainerSelection(row.dataset.containerId);
+      void followSelectedDockerContainerLogs();
+    });
+  });
+  if (state.dockerSelectedId && !state.dockerContainers.some((c) => c.id === state.dockerSelectedId)) {
+    setDockerContainerSelection(null);
+  } else {
+    setDockerContainerSelection(state.dockerSelectedId);
+  }
+}
+
+function parseDockerPsJsonLines(text) {
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const row = JSON.parse(trimmed);
+      const id = String(row.ID || row.Id || '').trim();
+      if (!id) continue;
+      const name = String(row.Names || row.Name || id).replace(/^\//, '').split(',')[0];
+      out.push({
+        id,
+        name,
+        image: String(row.Image || ''),
+        status: String(row.Status || row.State || ''),
+        ports: String(row.Ports || ''),
+        state: String(row.State || ''),
+      });
+    } catch { /* skip bad line */ }
+  }
+  return out;
+}
+
+async function collectShellOutput(command, cwd) {
+  const res = await fetch(repoApi(state.repo, '/workspace/shell'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, cwd: cwd || undefined }),
+  });
+  if (!res.ok) {
+    let errMsg = res.statusText;
+    try {
+      const err = await res.json();
+      errMsg = err.error || errMsg;
+    } catch { /* ignore */ }
+    throw new Error(errMsg);
+  }
+  let text = '';
+  const exitCode = await consumeExecStreamToCallback(res, (chunk) => { text += chunk; });
+  return { text, exitCode };
+}
+
+async function refreshDockerContainers() {
+  if (!state.repo) return;
+  updateDockerLogsStatus('Listing…');
+  try {
+    const { text, exitCode } = await collectShellOutput(
+      "docker ps -a --format '{{json .}}'",
+      dockerConsoleCwd(),
+    );
+    if (exitCode !== 0) {
+      renderDockerContainersList([]);
+      updateDockerLogsStatus(`docker ps exit ${exitCode}`);
+      const meta = $('#docker-console-output-meta');
+      if (meta) {
+        meta.textContent = `exit ${exitCode}`;
+        meta.classList.add('is-error');
+      }
+      appendDockerLogsText(text || '\n(docker ps failed — is Docker running?)\n');
+      return;
+    }
+    renderDockerContainersList(parseDockerPsJsonLines(text));
+    updateDockerLogsStatus(`${state.dockerContainers.length} container(s)`);
+  } catch (e) {
+    renderDockerContainersList([]);
+    updateDockerLogsStatus('Error');
+    toast(e.message || 'docker ps failed', 'error');
+  }
+}
+
+async function runSelectedDockerContainerAction(action) {
+  const id = state.dockerSelectedId;
+  if (!id) {
+    toast('Select a container first', 'info');
+    return;
+  }
+  const name = state.dockerContainers.find((c) => c.id === id)?.name || id;
+  if (action === 'logs') {
+    await followSelectedDockerContainerLogs();
+    return;
+  }
+  const cmd = `docker ${action} ${shellQuoteDocker(id)}`;
+  const input = $('#docker-console-command');
+  if (input) input.value = `${action} ${name}`;
+  await runDockerConsoleCommand(cmd, { raw: true });
+  await refreshDockerContainers();
+}
+
+async function followSelectedDockerContainerLogs() {
+  const id = state.dockerSelectedId;
+  if (!id) return;
+  const name = state.dockerContainers.find((c) => c.id === id)?.name || id;
+  const input = $('#docker-console-command');
+  if (input) input.value = `logs -f --tail=200 ${name}`;
+  await startDockerLogsStream(
+    `docker logs -f --tail=200 ${shellQuoteDocker(id)}`,
+    dockerConsoleCwd(),
+    { label: `logs · ${name}`, modulePath: state.dockerLogsModulePath },
+  );
+}
+
+function shellQuoteDocker(value) {
+  const s = String(value || '');
+  if (/^[A-Za-z0-9._:/-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function setDockerConsoleOutputMeta(text, { error = false } = {}) {
+  const meta = $('#docker-console-output-meta');
+  if (!meta) return;
+  meta.textContent = text || '';
+  meta.classList.toggle('is-error', !!error);
+}
+
+async function runDockerConsoleCommand(commandText, { stream = false, raw = false } = {}) {
+  if (!state.repo) {
+    toast('Select a repository first', 'error');
+    return;
+  }
+  let shellCmd;
+  let display;
+  if (raw) {
+    shellCmd = String(commandText || '').trim();
+    display = shellCmd.replace(/^docker\s+/i, '');
+  } else {
+    const args = parseDockerConsoleArgs(commandText ?? $('#docker-console-command')?.value);
+    if (!args.length) {
+      toast('Enter a docker command', 'info');
+      return;
+    }
+    display = args.join(' ');
+    const input = $('#docker-console-command');
+    if (input) input.value = display;
+    localStorage.setItem(`reaper-docker-cmd-${state.repo}`, display);
+    // Prefer compose wrapper when first token is "compose"
+    if (args[0] === 'compose') {
+      shellCmd = dockerComposeShell(args.slice(1).join(' '));
+    } else {
+      shellCmd = `docker ${display}`;
+    }
+    stream = stream || /\blogs\b/.test(display) && /(^|\s)-f(\s|$)/.test(` ${display} `);
+  }
+  if (!shellCmd) return;
+
+  syncDockerConsoleSubtitle();
+  const cwd = dockerConsoleCwd();
+  const runBtn = $('#btn-docker-console-run');
+  if (runBtn) runBtn.disabled = true;
+
+  if (stream) {
+    try {
+      await startDockerLogsStream(shellCmd, cwd, {
+        label: display || 'docker',
+        modulePath: state.dockerLogsModulePath,
+      });
+    } finally {
+      if (runBtn) runBtn.disabled = false;
+    }
+    return;
+  }
+
+  await stopDockerLogsStream();
+  clearDockerLogsOutput();
+  setDockerLogsControlsStreaming(true);
+  updateDockerLogsStatus('Running…', { live: true });
+  setDockerConsoleOutputMeta('');
+  const started = performance.now();
+  const ac = new AbortController();
+  state.dockerLogsAbortController = ac;
+  try {
+    const res = await fetch(repoApi(state.repo, '/workspace/shell'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: shellCmd, cwd: cwd || undefined }),
+      signal: ac.signal,
+    });
+    if (!res.ok) {
+      let errMsg = res.statusText;
+      try {
+        const err = await res.json();
+        errMsg = err.error || errMsg;
+      } catch { /* ignore */ }
+      throw new Error(errMsg);
+    }
+    const exitCode = await consumeExecStreamToCallback(res, appendDockerLogsText);
+    const ms = Math.round(performance.now() - started);
+    setDockerConsoleOutputMeta(`exit ${exitCode} · ${ms} ms`, { error: exitCode !== 0 });
+    updateDockerLogsStatus(exitCode === 0 ? 'Done' : `Exited ${exitCode}`);
+    if (/\b(up|down|start|stop|restart|rm|kill)\b/.test(display || shellCmd)) {
+      await refreshDockerContainers();
+    }
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      updateDockerLogsStatus('Stopped');
+      setDockerConsoleOutputMeta('stopped');
+    } else {
+      appendDockerLogsText(`\nerror: ${e.message || e}\n`);
+      updateDockerLogsStatus('Error');
+      setDockerConsoleOutputMeta('error', { error: true });
+      toast(e.message || 'Docker command failed', 'error');
+    }
+  } finally {
+    state.dockerLogsAbortController = null;
+    setDockerLogsControlsStreaming(false);
+    if (runBtn) runBtn.disabled = false;
+  }
+}
+
 function isDockerLogsBuildTask(buildTool, taskCommand) {
   return buildTool === 'docker' && /\blogs\b/.test(String(taskCommand || ''));
 }
@@ -8475,14 +8803,14 @@ function findDockerLogsFollowCommand() {
 }
 
 function setDockerLogsMeta(label, modulePath) {
-  state.dockerLogsLabel = label || 'docker compose logs';
+  state.dockerLogsLabel = label || 'Docker';
   state.dockerLogsModulePath = modulePath || null;
   const titleEl = $('#docker-logs-title');
   const subtitleEl = $('#docker-logs-subtitle');
-  if (titleEl) titleEl.textContent = state.dockerLogsLabel;
+  if (titleEl) titleEl.textContent = 'Docker';
   if (subtitleEl) {
     const cwd = modulePath ? buildTaskWorkdir(modulePath) : '';
-    subtitleEl.textContent = cwd ? `${modulePath} · ${cwd || '.'}` : (modulePath || '');
+    subtitleEl.textContent = cwd ? `${modulePath} · ${cwd || '.'}` : (modulePath || state.dockerLogsLabel || '');
   }
 }
 
@@ -8510,9 +8838,9 @@ function clearDockerLogsOutput() {
 function setDockerLogsControlsStreaming(streaming) {
   state.dockerLogsStreaming = streaming;
   const stopBtn = $('#btn-docker-logs-stop');
-  const followBtn = $('#btn-docker-logs-follow');
+  const runBtn = $('#btn-docker-console-run');
   if (stopBtn) stopBtn.disabled = !streaming;
-  if (followBtn) followBtn.disabled = streaming;
+  if (runBtn) runBtn.disabled = streaming;
 }
 
 async function stopDockerLogsStream() {
@@ -8688,13 +9016,23 @@ function setDockerLogsDock(dock) {
 function openDockerLogsPanel() {
   if (state.dockerLogsDock === 'left') {
     switchPanel('docker-logs');
-    return;
+  } else {
+    state.dockerLogsOpen = true;
+    applyDockerLogsDock();
   }
-  state.dockerLogsOpen = true;
-  applyDockerLogsDock();
+  syncDockerConsoleSubtitle();
+  renderDockerConsoleQuick();
+  const saved = state.repo && localStorage.getItem(`reaper-docker-cmd-${state.repo}`);
+  const input = $('#docker-console-command');
+  if (input && saved && !input.value.trim()) input.value = saved;
+  void refreshDockerContainers();
 }
 
 function showDockerLogsPanel() {
+  if (!state.repo) {
+    toast('Select a repository first', 'error');
+    return;
+  }
   openDockerLogsPanel();
 }
 
@@ -18131,7 +18469,7 @@ function switchPanel(name) {
     history: 'Git Log',
     terminal: 'Terminal',
     agent: 'Agent',
-    'docker-logs': 'Docker logs',
+    'docker-logs': 'Docker',
   };
   $('#sidebar-title').textContent = titles[name] || name;
   $$('#sidebar > .panel').forEach((p) => {
@@ -18294,7 +18632,21 @@ function bindEvents() {
   $('#btn-docker-logs-close')?.addEventListener('click', hideDockerLogsPanel);
   $('#btn-docker-logs-stop')?.addEventListener('click', () => void stopDockerLogsStream());
   $('#btn-docker-logs-clear')?.addEventListener('click', clearDockerLogsOutput);
-  $('#btn-docker-logs-follow')?.addEventListener('click', () => void followDockerLogsFromPanel());
+  $('#btn-docker-console-run')?.addEventListener('click', () => void runDockerConsoleCommand());
+  $('#btn-docker-containers-refresh')?.addEventListener('click', () => void refreshDockerContainers());
+  $('#btn-docker-container-start')?.addEventListener('click', () => void runSelectedDockerContainerAction('start'));
+  $('#btn-docker-container-stop')?.addEventListener('click', () => void runSelectedDockerContainerAction('stop'));
+  $('#btn-docker-container-restart')?.addEventListener('click', () => void runSelectedDockerContainerAction('restart'));
+  $('#btn-docker-container-logs')?.addEventListener('click', () => void runSelectedDockerContainerAction('logs'));
+  $('#docker-console-command')?.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void runDockerConsoleCommand();
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void runDockerConsoleCommand();
+    }
+  });
   $$('[data-docker-logs-dock]').forEach((btn) => {
     btn.addEventListener('click', () => setDockerLogsDock(btn.dataset.dockerLogsDock));
   });

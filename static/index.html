@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="429" />
+  <meta name="reaper-ui-build" content="430" />
   <meta name="reaper-app-version" content="0.1.3" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=429" />
+  <link rel="stylesheet" href="/logo-animated.css?v=430" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=429" />
-  <link rel="stylesheet" href="/logo-animated.css?v=429" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=429" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=430" />
+  <link rel="stylesheet" href="/logo-animated.css?v=430" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=430" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=429"></script>
-  <script src="/launch-splash.js?v=429"></script>
+  <script src="/logo.js?v=430"></script>
+  <script src="/launch-splash.js?v=430"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -201,7 +201,7 @@
             <button type="button" class="ij-menu-item" data-action="panel-coverage">Coverage report</button>
             <button type="button" class="ij-menu-item" data-action="panel-db-viewer">Database</button>
             <button type="button" class="ij-menu-item" data-action="panel-git-viewer">Git Console</button>
-            <button type="button" class="ij-menu-item" data-action="panel-docker-logs">Docker logs</button>
+            <button type="button" class="ij-menu-item" data-action="panel-docker-logs">Docker</button>
             <button type="button" class="ij-menu-item" data-action="panel-build-tasks">Build tasks</button>
             <button type="button" class="ij-menu-item" data-action="panel-package-manifest">Package manifest</button>
             <div class="ij-menu-sep"></div>
@@ -213,7 +213,7 @@
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-left">Dock left</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-right">Dock right</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="agent-dock-bottom">Dock bottom</button>
-            <div class="ij-menu-heading">Docker logs position</div>
+            <div class="ij-menu-heading">Docker position</div>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-left">Dock left</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-right">Dock right</button>
             <button type="button" class="ij-menu-item ij-menu-checkable" data-action="docker-logs-dock-bottom">Dock bottom</button>
@@ -474,26 +474,46 @@
         <div id="terminal-xterm-host" class="ij-terminal-xterm-host flex-1 min-h-0 min-w-0"></div>
       </div>
 
-      <div id="panel-docker-logs" class="panel hidden flex-1 flex flex-col min-h-0 ij-docker-logs-panel">
+      <div id="panel-docker-logs" class="panel hidden flex-1 flex flex-col min-h-0 ij-docker-logs-panel ij-docker-console-panel">
         <div class="ij-docker-logs-toolbar">
           <div class="ij-docker-logs-heading min-w-0">
-            <span id="docker-logs-title" class="ij-docker-logs-title">Docker logs</span>
+            <span id="docker-logs-title" class="ij-docker-logs-title">Docker</span>
             <span id="docker-logs-subtitle" class="ij-docker-logs-subtitle"></span>
             <span id="docker-logs-status" class="ij-docker-logs-status" aria-live="polite"></span>
           </div>
           <div class="ij-docker-logs-toolbar-actions">
-            <button type="button" id="btn-docker-logs-follow" class="ij-docker-logs-action-btn" title="Follow all services (docker compose logs -f)">Follow</button>
-            <button type="button" id="btn-docker-logs-stop" class="ij-docker-logs-action-btn" title="Stop log stream" disabled>Stop</button>
-            <button type="button" id="btn-docker-logs-clear" class="ij-docker-logs-action-btn" title="Clear log output">Clear</button>
-            <div class="ij-docker-logs-dock-group" role="group" aria-label="Docker logs position">
+            <button type="button" id="btn-docker-logs-stop" class="ij-docker-logs-action-btn" title="Stop running command / log stream" disabled>Stop</button>
+            <button type="button" id="btn-docker-logs-clear" class="ij-docker-logs-action-btn" title="Clear output">Clear</button>
+            <div class="ij-docker-logs-dock-group" role="group" aria-label="Docker panel position">
               <button type="button" data-docker-logs-dock="left" class="docker-logs-dock-btn" title="Dock left">Left</button>
               <button type="button" data-docker-logs-dock="right" class="docker-logs-dock-btn" title="Dock right">Right</button>
               <button type="button" data-docker-logs-dock="bottom" class="docker-logs-dock-btn" title="Dock bottom">Bottom</button>
             </div>
-            <button type="button" id="btn-docker-logs-close" class="ij-docker-logs-icon-btn" title="Close Docker logs panel">×</button>
+            <button type="button" id="btn-docker-logs-close" class="ij-docker-logs-icon-btn" title="Close Docker panel">×</button>
           </div>
         </div>
-        <pre id="docker-logs-output" class="ij-docker-logs-output panel-scroll flex-1 min-h-0" aria-label="Docker log output"></pre>
+        <div id="docker-console-quick" class="ij-docker-console-quick panel-scroll" role="toolbar" aria-label="Docker quick actions"></div>
+        <div class="ij-docker-console-command-row">
+          <span class="ij-docker-console-prompt" aria-hidden="true">docker</span>
+          <input id="docker-console-command" type="text" class="ij-docker-console-command" placeholder="compose up -d" autocomplete="off" spellcheck="false" aria-label="Docker command arguments" />
+          <button type="button" id="btn-docker-console-run" class="ij-docker-console-run-btn" title="Run command (⌘Enter)">Run</button>
+        </div>
+        <div class="ij-docker-console-container-bar">
+          <span class="ij-docker-console-section-label">Containers</span>
+          <div class="ij-docker-console-container-actions">
+            <button type="button" id="btn-docker-containers-refresh" class="ij-docker-logs-action-btn" title="Refresh docker ps">Refresh</button>
+            <button type="button" id="btn-docker-container-start" class="ij-docker-logs-action-btn" title="Start selected" disabled>Start</button>
+            <button type="button" id="btn-docker-container-stop" class="ij-docker-logs-action-btn" title="Stop selected" disabled>Stop</button>
+            <button type="button" id="btn-docker-container-restart" class="ij-docker-logs-action-btn" title="Restart selected" disabled>Restart</button>
+            <button type="button" id="btn-docker-container-logs" class="ij-docker-logs-action-btn" title="Follow logs for selected" disabled>Logs</button>
+          </div>
+        </div>
+        <div id="docker-containers-list" class="ij-docker-containers-list panel-scroll" role="listbox" aria-label="Docker containers"></div>
+        <div class="ij-docker-console-output-head">
+          <span class="ij-docker-console-output-title">Output</span>
+          <span id="docker-console-output-meta" class="ij-docker-console-output-meta"></span>
+        </div>
+        <pre id="docker-logs-output" class="ij-docker-logs-output panel-scroll flex-1 min-h-0" aria-label="Docker output"></pre>
       </div>
 
       <div id="panel-agent" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden h-full">
@@ -1483,9 +1503,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=429"></script>
-  <script src="/monaco-languages.js?v=429" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=430"></script>
+  <script src="/monaco-languages.js?v=430" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=429"></script>
+  <script src="/app.js?v=430"></script>
 </body>
 </html>

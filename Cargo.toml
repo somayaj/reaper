@@ -1,6 +1,6 @@
 [package]
 name = "reaper"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Reaper — local git host and developer studio"
 authors = ["Asha Somayajula"]
