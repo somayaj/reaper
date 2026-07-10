@@ -12,7 +12,7 @@ Drag Reaper.app to Applications, then launch.
 ### What's new
 
 - **Docker Console:** View menu → Docker. Container list (`docker ps`), live logs, compose quick actions (Up / Down / Ps / Build / Follow), per-container Start / Stop / Restart / Logs, and a freeform `docker …` command bar (same idea as Git Console).
-- **Docker logs fix (build 431):** Output pane keeps visible height; container/`docker ps` commands no longer depend on a compose project cwd; `docker logs` stderr is captured so live lines show up.
+- **Docker logs fix (build 431–432):** Output pane keeps visible height; container/`docker ps` commands no longer depend on a compose project cwd; `docker logs` stderr is captured. Build **432** loads a finite log tail first, then follows via XHR streaming so WKWebView shows live lines.
 
 ### Also in recent 0.1.3 builds
 
