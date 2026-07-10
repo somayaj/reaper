@@ -42,6 +42,7 @@ mod quick_fix;
 mod coverage;
 mod db_viewer;
 mod run_project;
+mod debug;
 mod spring_props;
 pub mod secret_scan;
 mod symbols;
@@ -1250,6 +1251,11 @@ pub use quick_fix::{
 pub use jdtls::JdtlsCodeAction;
 pub use lsp::{
     FileTextEdits, PathRename, ReferenceLocation, RenameRange, SignatureHelp, WorkspaceRenameResult,
+};
+pub use debug::{
+    DebugBreakpoint, DebugCapabilities, DebugState, continue_debug, debug_capabilities,
+    debug_state, evaluate_watch, run_debug_websocket, set_breakpoints, start_debug, step_debug,
+    stop_debug,
 };
 
 /// Ensure Homebrew and common developer tools are on PATH (GUI .app launches).

@@ -10,6 +10,10 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
+echo "== Vendoring debug adapters (arm64 + x86_64) =="
+"$ROOT/scripts/vendor-all-debug-adapters-macos.sh"
+
+echo ""
 echo "== Apple Silicon (arm64) =="
 "$ROOT/scripts/build-macos-dmg.sh"
 

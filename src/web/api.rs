@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::git;
 use crate::repos::{
     self, CreateRepoRequest, ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest,
-    PublishToGitHubRequest, import_local_repo, import_repo, link_remote, metadata, publish_to_github,
-    push_preview, push_to_remote, sync_bare_from_workspace, sync_from_remote,
+    PublishRequest, PublishToGitHubRequest, import_local_repo, import_repo, link_remote, metadata,
+    publish_to_github, publish_to_remote, push_preview, push_to_remote, sync_bare_from_workspace,
+    sync_from_remote,
 };
 use crate::agent as git_agent;
 use crate::state::AppState;
@@ -109,6 +110,11 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/conflict", get(conflict_stages_handler))
         .route("/api/repos/{name}/workspace/conflict/resolve", post(conflict_resolve_handler))
         .route("/api/repos/{name}/workspace/conflict/continue", post(conflict_continue_handler))
+        .route("/api/repos/{name}/workspace/conflict/abort", post(conflict_abort_handler))
+        .route("/api/repos/{name}/workspace/blame", get(workspace_blame_handler))
+        .route("/api/repos/{name}/workspace/rebase/plan", get(rebase_plan_handler))
+        .route("/api/repos/{name}/workspace/rebase/start", post(rebase_start_handler))
+        .route("/api/repos/{name}/workspace/cherry-pick", post(cherry_pick_handler))
         .route("/api/repos/{name}/workspace/commit/{hash}/diff", get(commit_diff_handler))
         .route("/api/repos/{name}/workspace/commit/suggest", post(suggest_commit_message_handler))
         .route("/api/repos/{name}/workspace/secrets/scan", post(scan_secrets_handler))
@@ -119,6 +125,15 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/shell/cd", post(workspace_shell_cd))
         .route("/api/repos/{name}/workspace/exec/cancel", post(cancel_workspace_exec_handler))
         .route("/api/repos/{name}/workspace/terminal", get(workspace_terminal_ws))
+        .route("/api/repos/{name}/workspace/debug/ws", get(workspace_debug_ws))
+        .route("/api/repos/{name}/workspace/debug/state", get(debug_state_handler))
+        .route("/api/repos/{name}/workspace/debug/capabilities", get(debug_capabilities_handler))
+        .route("/api/repos/{name}/workspace/debug/start", post(debug_start_handler))
+        .route("/api/repos/{name}/workspace/debug/stop", post(debug_stop_handler))
+        .route("/api/repos/{name}/workspace/debug/continue", post(debug_continue_handler))
+        .route("/api/repos/{name}/workspace/debug/step", post(debug_step_handler))
+        .route("/api/repos/{name}/workspace/debug/breakpoints", post(debug_breakpoints_handler))
+        .route("/api/repos/{name}/workspace/debug/evaluate", post(debug_evaluate_handler))
         .route("/api/repos/{name}/workspace/java/info", get(java_main_info))
         .route("/api/repos/{name}/workspace/java/run", post(run_java_main_handler))
         .route("/api/repos/{name}/workspace/sql/run", post(run_sql_file_handler))
@@ -334,9 +349,9 @@ async fn push_remote_handler(
 async fn publish_github_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    Json(body): Json<PublishToGitHubRequest>,
+    Json(body): Json<PublishRequest>,
 ) -> impl IntoResponse {
-    match publish_to_github(&state.config, &state.settings, &name, body).await {
+    match publish_to_remote(&state.config, &state.settings, &name, body).await {
         Ok(result) => Json(result).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -419,8 +434,10 @@ async fn open_workspace(
         if let Err(e) = settings.set_last_repo(&name) {
             tracing::warn!("Could not persist last opened repo {name}: {e:#}");
         }
-        let profile = workspace::detect_project_profile(&ws).unwrap_or_default();
         project_index_jobs.on_open(&name, &ws);
+        let profile = project_index_jobs
+            .cached_profile(&name)
+            .unwrap_or_else(|| workspace::detect_project_profile(&ws).unwrap_or_default());
         let index_status = project_index_jobs.status(&name);
         let uses_jdtls = workspace::workspace_uses_jdtls(&ws, &profile);
         let jdtls_ready = workspace::jdtls_workspace_ready(&ws);
@@ -798,6 +815,109 @@ async fn conflict_continue_handler(
     }
 }
 
+async fn conflict_abort_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let merge = workspace::conflict::merge_state(&ws);
+    let result = match merge.kind.as_deref() {
+        Some("rebase") => git::abort_rebase(&ws),
+        Some("cherry-pick") => git::abort_cherry_pick(&ws),
+        _ => git::run_git(Some(&ws), &["merge", "--abort"]),
+    };
+    match result {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct BlameQuery {
+    path: String,
+}
+
+async fn workspace_blame_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<BlameQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match git::blame_file(&ws, q.path.trim()) {
+        Ok(lines) => Json(lines).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RebasePlanQuery {
+    onto: String,
+    limit: Option<usize>,
+}
+
+async fn rebase_plan_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<RebasePlanQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let limit = q.limit.unwrap_or(100).min(200);
+    match git::log_rebase_range(&ws, q.onto.trim(), limit) {
+        Ok(commits) => Json(commits).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RebaseStartRequest {
+    onto: String,
+    steps: Vec<git::RebaseStep>,
+}
+
+async fn rebase_start_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<RebaseStartRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match git::start_interactive_rebase(&ws, body.onto.trim(), &body.steps) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CherryPickRequest {
+    hash: String,
+}
+
+async fn cherry_pick_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<CherryPickRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match git::cherry_pick(&ws, body.hash.trim()) {
+        Ok(out) => git_response(out),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 #[derive(Deserialize)]
 struct CommitRequest {
     message: String,
@@ -1043,6 +1163,193 @@ async fn workspace_terminal_ws(
             tracing::warn!("terminal session ended: {e:#}");
         }
     })
+}
+
+#[derive(Deserialize)]
+struct DebugPathQuery {
+    path: String,
+    #[serde(default = "default_one_u32")]
+    line: u32,
+}
+
+#[derive(Deserialize)]
+struct DebugStartRequest {
+    path: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default = "default_one_u32")]
+    line: u32,
+}
+
+#[derive(Deserialize)]
+struct DebugBreakpointsRequest {
+    breakpoints: Vec<workspace::DebugBreakpoint>,
+}
+
+#[derive(Deserialize)]
+struct DebugStepRequest {
+    #[serde(default)]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct DebugEvaluateRequest {
+    expression: String,
+    #[serde(default)]
+    frame_id: Option<i64>,
+}
+
+async fn workspace_debug_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let workspace_path = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = workspace::run_debug_websocket(socket, &workspace_path).await {
+            tracing::warn!("debug websocket ended: {e:#}");
+        }
+    })
+}
+
+async fn debug_state_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    Json(workspace::debug_state(&ws)).into_response()
+}
+
+async fn debug_capabilities_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<DebugPathQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = q.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    match workspace::debug_capabilities(&ws, &path, q.line.max(1)) {
+        Ok(cap) => Json(cap).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_start_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DebugStartRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let path = body.path.trim().to_string();
+    if path.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "path required");
+    }
+    let ws_clone = ws.clone();
+    let content = body.content;
+    let line = body.line.max(1);
+    match tokio::task::spawn_blocking(move || {
+        workspace::start_debug(&ws_clone, &path, content.as_deref(), line)
+    })
+    .await
+    {
+        Ok(Ok(st)) => Json(st).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("debug start failed: {e:#}"),
+        ),
+    }
+}
+
+async fn debug_stop_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::stop_debug(&ws) {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_continue_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::continue_debug(&ws) {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_step_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DebugStepRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::step_debug(&ws, &body.kind) {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_breakpoints_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DebugBreakpointsRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match workspace::set_breakpoints(&ws, body.breakpoints) {
+        Ok(st) => Json(st).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn debug_evaluate_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<DebugEvaluateRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let expr = body.expression.trim().to_string();
+    if expr.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "expression required");
+    }
+    match workspace::evaluate_watch(&ws, &expr, body.frame_id) {
+        Ok(value) => Json(serde_json::json!({ "value": value })).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 async fn java_main_info(

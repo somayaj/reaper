@@ -19,6 +19,9 @@ env -u CARGO_TARGET_DIR cargo build --release \
   --target x86_64-apple-darwin \
   --target-dir "$ROOT/target"
 
+echo "Vendoring debug adapters for arm64 + x86_64…"
+"$ROOT/scripts/vendor-all-debug-adapters-macos.sh" || true
+
 echo "Creating universal reaper binary…"
 lipo -create -output "$ROOT/target/reaper-universal" "$ARM_BIN" "$INTEL_BIN"
 lipo -info "$ROOT/target/reaper-universal"
@@ -38,6 +41,7 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 REAPER_UNIVERSAL=1 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
 REAPER_UNIVERSAL=1 "$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
 "$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
+REAPER_UNIVERSAL=1 "$ROOT/scripts/copy-bundled-debug-adapters.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then

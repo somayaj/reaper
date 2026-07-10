@@ -544,8 +544,22 @@ const state = {
   fileCoverage: new Map(),
   coverageDecorationIds: [],
   coverageInlineEnabled: true,
+  blameEnabled: false,
+  blameDecorationIds: [],
+  blameByPath: new Map(),
+  rebaseMode: false,
+  rebaseSteps: [],
   coveragePanelOpen: false,
   coverageReport: null,
+  debugPanelOpen: false,
+  debugActive: false,
+  debugState: { status: 'idle', frames: [], variables: [], breakpoints: [] },
+  debugBreakpoints: new Map(),
+  debugWatch: [],
+  debugCapabilities: null,
+  debugWs: null,
+  debugDecorationIds: [],
+  debugCurrentLineId: null,
   dbViewerPanelOpen: false,
   gitViewerPanelOpen: false,
   gitViewerLastResult: null,
@@ -671,16 +685,30 @@ async function prepareForSave() {
 
 async function api(path, opts = {}) {
   if (!opts.allowDuringSave) await waitForSaveGate();
-  const { allowDuringSave: _allowDuringSave, ...fetchOpts } = opts;
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...fetchOpts.headers },
-    ...fetchOpts,
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) throw new Error(data?.error || res.statusText);
-  return data;
+  const { allowDuringSave: _allowDuringSave, timeoutMs = 120_000, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timer = timeoutMs > 0
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  try {
+    const res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json', ...fetchOpts.headers },
+      signal: controller.signal,
+      ...fetchOpts,
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    if (!res.ok) throw new Error(data?.error || res.statusText);
+    return data;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Request timed out (${Math.round(timeoutMs / 1000)}s): ${path}`);
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function repoApi(name, suffix = '') {
@@ -790,6 +818,8 @@ function setCompleteDebugStatus(msg) {
   console.log('[Reaper complete]', line);
 }
 
+let globalLoadingSafetyTimer = null;
+
 function setGlobalLoading(on, text = 'Loading…') {
   const overlay = $('#loading-overlay');
   const label = $('#loading-text');
@@ -800,6 +830,17 @@ function setGlobalLoading(on, text = 'Loading…') {
   logo?.classList.toggle('hidden', on);
   overlay?.classList.toggle('hidden', !on);
   overlay?.classList.toggle('flex', on);
+  if (globalLoadingSafetyTimer) {
+    clearTimeout(globalLoadingSafetyTimer);
+    globalLoadingSafetyTimer = null;
+  }
+  if (on) {
+    globalLoadingSafetyTimer = setTimeout(() => {
+      globalLoadingSafetyTimer = null;
+      setGlobalLoading(false);
+      toast('Opening project is taking longer than expected — showing partial UI', 'warning');
+    }, 90_000);
+  }
 }
 
 /** Apply theme backdrop once the IDE shell is ready to show. */
@@ -900,7 +941,7 @@ function setPublishModalState({ busy = false, status = '', error = '' } = {}) {
   const cancelBtn = $('#publish-modal-cancel');
   const submitBtn = $('#btn-publish-submit');
   const overlay = $('#publish-modal-overlay');
-  const busyLabel = 'Publishing to GitHub…';
+  const busyLabel = 'Publishing to remote…';
 
   if (errEl) {
     errEl.textContent = error;
@@ -917,7 +958,7 @@ function setPublishModalState({ busy = false, status = '', error = '' } = {}) {
     submitBtn.disabled = busy;
     submitBtn.textContent = busy ? busyLabel : 'Publish';
   }
-  ['#publish-github-repo', 'input[name="create"]', 'input[name="private"]'].forEach((sel) => {
+  ['#publish-remote-url', '#publish-host', 'input[name="create"]', 'input[name="private"]'].forEach((sel) => {
     const input = $(sel);
     if (input) input.disabled = busy;
   });
@@ -1311,7 +1352,14 @@ function openRepoInNewWindow(repoName) {
   return true;
 }
 
+function isWelcomeVisible() {
+  const empty = $('#empty-state');
+  return !!(empty && !empty.classList.contains('hidden'));
+}
+
 function shouldOpenRepoInNewWindow(repoName) {
+  // From the welcome screen (no file open), always load in this window.
+  if (isWelcomeVisible() || !state.activeTab) return false;
   return !!(
     repoName
     && state.repo
@@ -4956,16 +5004,18 @@ const PALETTE_COMMANDS = [
   { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
   { id: 'change-all', label: 'Change All Occurrences', kbd: '⌘⌃G', run: () => runEditorMonacoAction('reaper.changeAllOccurrences'), needsTab: true },
   { id: 'run', label: 'Run', kbd: 'F5', run: runActive, needsRun: true },
+  { id: 'debug', label: 'Debug', kbd: 'F6', run: () => void startDebugSession(), needsRun: true },
   { id: 'commit', label: 'Commit…', run: () => switchPanel('git'), needsRepo: true },
   { id: 'pull', label: 'Pull', run: syncPull, needsRepo: true },
   { id: 'push', label: 'Push to remote', run: pushRemote, needsRepo: true },
-  { id: 'publish', label: 'Publish to GitHub…', run: showPublishModal, needsRepo: true },
+  { id: 'publish', label: 'Publish to remote…', run: showPublishModal, needsRepo: true },
   { id: 'repo-info', label: 'Repository details', run: showRepoInfoModal, needsRepo: true },
   { id: 'explorer', label: 'Show Project', kbd: 'Alt+1', run: () => switchPanel('explorer') },
   { id: 'git-panel', label: 'Show Commit', kbd: 'Alt+9', run: () => switchPanel('git') },
   { id: 'terminal', label: 'Show Terminal', run: () => showTerminal() },
   { id: 'terminal-new', label: 'New Terminal', kbd: '⌘⇧`', run: () => newTerminal(), needsRepo: true },
   { id: 'coverage', label: 'Coverage report', run: () => showCoveragePanel(), needsRepo: true },
+  { id: 'debug-panel', label: 'Debug panel', run: () => toggleDebugPanel(), needsRepo: true },
   { id: 'db-viewer', label: 'Database', run: () => showDbViewerPanel(), needsRepo: true },
   { id: 'git-viewer', label: 'Git Console', run: () => showGitViewerPanel(), needsRepo: true },
   { id: 'docker-logs', label: 'Docker logs', run: () => showDockerLogsPanel(), needsRepo: true },
@@ -7003,6 +7053,69 @@ function toggleCoverageInline() {
   setCoverageInlineEnabled(!getCoverageInlineEnabled());
 }
 
+function clearBlameDecorations() {
+  if (!state.editor || !window.monaco) return;
+  state.blameDecorationIds = state.editor.deltaDecorations(state.blameDecorationIds ?? [], []);
+}
+
+function setBlameEnabled(enabled) {
+  state.blameEnabled = enabled;
+  const btn = $('#tb-blame');
+  if (btn) {
+    btn.classList.toggle('is-active', enabled);
+    btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    btn.title = enabled ? 'Hide git blame in gutter' : 'Show git blame in gutter';
+  }
+  if (!enabled) {
+    clearBlameDecorations();
+    return;
+  }
+  if (state.activeTab) void loadBlameForTab(state.activeTab);
+}
+
+function toggleBlameInline() {
+  setBlameEnabled(!state.blameEnabled);
+}
+
+function syncBlameButton() {
+  const btn = $('#tb-blame');
+  if (!btn) return;
+  const show = Boolean(state.repo && state.activeTab);
+  btn.classList.toggle('hidden', !show);
+}
+
+async function loadBlameForTab(path) {
+  if (!state.repo || !path || !state.blameEnabled) return;
+  try {
+    const lines = await api(repoApi(state.repo, `/workspace/blame?path=${encodeURIComponent(path)}`));
+    state.blameByPath.set(path, lines);
+    if (state.activeTab === path) applyBlameDecorations(path, lines);
+  } catch (e) {
+    toast(e.message || 'Blame failed', 'error');
+    setBlameEnabled(false);
+  }
+}
+
+function applyBlameDecorations(path, lines) {
+  if (!state.blameEnabled || !state.editor || !window.monaco || state.activeTab !== path) return;
+  const decorations = (lines || []).map((entry) => {
+    const author = entry.author || '?';
+    const initials = authorInitials(author);
+    const hover = `**${escapeHtml(author)}** · ${escapeHtml(entry.date || '')}\n\n\`${escapeHtml((entry.commit || '').slice(0, 7))}\` ${escapeHtml(entry.summary || '')}`;
+    return {
+      range: new monaco.Range(entry.line, 1, entry.line, 1),
+      options: {
+        isWholeLine: false,
+        glyphMarginClassName: 'ij-blame-glyph',
+        glyphMarginHoverMessage: { value: hover },
+        lineDecorationsClassName: 'ij-blame-line',
+        hoverMessage: { value: hover },
+      },
+    };
+  });
+  state.blameDecorationIds = state.editor.deltaDecorations(state.blameDecorationIds ?? [], decorations);
+}
+
 function syncCoverageInlineButton() {
   const btn = $('#tb-coverage-inline');
   const panelBtn = $('#btn-coverage-toggle-inline');
@@ -7255,6 +7368,418 @@ function toggleCoveragePanel() {
   else showCoveragePanel();
 }
 
+// --- Debugger ---
+
+function isDebuggablePath(path) {
+  if (!path) return false;
+  return path.endsWith('.py') || path.endsWith('.pyw')
+    || path.endsWith('.go')
+    || path.endsWith('.rs')
+    || path.endsWith('.js') || path.endsWith('.mjs') || path.endsWith('.cjs')
+    || path.endsWith('.ts') || path.endsWith('.tsx')
+    || path.endsWith('.java')
+    || path.endsWith('.kt') || path.endsWith('.kts')
+    || isNativeSourcePath(path);
+}
+
+function debugBreakpointsForPath(path) {
+  if (!path) return [];
+  const lines = state.debugBreakpoints.get(path);
+  return lines ? [...lines].sort((a, b) => a - b) : [];
+}
+
+function allDebugBreakpointsList() {
+  const out = [];
+  for (const [path, lines] of state.debugBreakpoints) {
+    for (const line of lines) out.push({ path, line });
+  }
+  return out;
+}
+
+function toggleBreakpoint(path, line) {
+  if (!path || !line) return;
+  const set = state.debugBreakpoints.get(path) || new Set();
+  if (set.has(line)) set.delete(line);
+  else set.add(line);
+  if (set.size) state.debugBreakpoints.set(path, set);
+  else state.debugBreakpoints.delete(path);
+  renderBreakpointGlyphs();
+  renderDebugBreakpointsList();
+  void syncBreakpointsToServer();
+}
+
+function applyDebugPanelLayout() {
+  const dock = $('#debug-dock-right');
+  const resizer = $('#debug-right-resizer');
+  const open = state.debugPanelOpen;
+  dock?.classList.toggle('hidden', !open);
+  resizer?.classList.toggle('hidden', !open);
+}
+
+function showDebugPanel() {
+  state.debugPanelOpen = true;
+  applyDebugPanelLayout();
+  renderDebugPanel();
+}
+
+function hideDebugPanel() {
+  state.debugPanelOpen = false;
+  applyDebugPanelLayout();
+}
+
+function toggleDebugPanel() {
+  if (state.debugPanelOpen) hideDebugPanel();
+  else showDebugPanel();
+}
+
+function syncDebugToolbar() {
+  const tbDebug = $('#tb-debug');
+  const controls = $('#debug-controls');
+  const active = state.debugActive;
+  const status = state.debugState?.status;
+  const stopped = status === 'stopped';
+  const running = status === 'running' || status === 'starting';
+  controls?.classList.toggle('hidden', !active);
+  tbDebug?.classList.toggle('is-active', active);
+  $('#tb-debug-continue')?.toggleAttribute('disabled', !stopped);
+  $('#tb-debug-step-over')?.toggleAttribute('disabled', !stopped);
+  $('#tb-debug-step-in')?.toggleAttribute('disabled', !stopped);
+  $('#tb-debug-step-out')?.toggleAttribute('disabled', !stopped);
+  $('#tb-debug-stop')?.toggleAttribute('disabled', !active);
+  if (tbDebug && !active) {
+    const cap = state.debugCapabilities;
+    tbDebug.title = cap?.supported
+      ? `Debug ${cap.language} (F6)`
+      : cap?.reason || 'Debug (F6)';
+  } else if (tbDebug && active) {
+    tbDebug.title = running ? 'Debugging (running)' : stopped ? `Paused: ${state.debugState?.stop_reason || 'breakpoint'}` : 'Debugging';
+  }
+}
+
+async function refreshDebugCapabilities() {
+  const path = state.activeTab;
+  if (!state.repo || !path || !isDebuggablePath(path)) {
+    state.debugCapabilities = null;
+    syncDebugToolbar();
+    return;
+  }
+  try {
+    const line = state.editor?.getPosition?.()?.lineNumber || 1;
+    state.debugCapabilities = await api(
+      `${repoApi(state.repo, '/workspace/debug/capabilities')}?path=${encodeURIComponent(path)}&line=${line}`,
+    );
+  } catch {
+    state.debugCapabilities = { supported: false, language: 'Unknown', reason: 'Could not check debug support' };
+  }
+  const tbDebug = $('#tb-debug');
+  const runnable = !!state.runTarget?.runnable;
+  const cap = state.debugCapabilities;
+  const capBlocked = cap != null && cap.supported === false;
+  if (tbDebug) {
+    tbDebug.classList.toggle('hidden', !isDebuggablePath(path) || !runnable);
+    tbDebug.disabled = !runnable || state.debugActive || capBlocked;
+    if (!state.debugActive) {
+      tbDebug.title = capBlocked
+        ? (cap.reason || 'Debug unavailable')
+        : cap?.supported
+          ? `Debug ${cap.language || 'program'} (F6)`
+          : runnable
+            ? 'Debug (F6)'
+            : 'Debug unavailable';
+    }
+  }
+  syncDebugToolbar();
+}
+
+function renderDebugPanel() {
+  const st = state.debugState || {};
+  const subtitle = $('#debug-panel-subtitle');
+  if (subtitle) {
+    const parts = [];
+    if (st.language) parts.push(st.language);
+    if (st.adapter) parts.push(st.adapter);
+    subtitle.textContent = parts.join(' · ');
+  }
+  const statusEl = $('#debug-panel-status');
+  if (statusEl) {
+    const label = {
+      idle: 'Not debugging',
+      starting: 'Starting…',
+      running: 'Running',
+      stopped: st.stop_reason ? `Paused (${st.stop_reason})` : 'Paused',
+      terminated: 'Session ended',
+    }[st.status] || st.status || '';
+    statusEl.textContent = st.message || label;
+    statusEl.className = `ij-debug-status${st.status === 'running' || st.status === 'starting' ? ' is-running' : ''}${st.status === 'stopped' ? ' is-stopped' : ''}${st.status === 'terminated' ? ' is-terminated' : ''}`;
+  }
+  const stackEl = $('#debug-callstack');
+  if (stackEl) {
+    const frames = st.frames || [];
+    if (!frames.length) {
+      stackEl.innerHTML = '<div class="ij-debug-frame"><span class="ij-debug-frame-name" style="color:var(--ij-text-muted)">No stack frames</span></div>';
+    } else {
+      stackEl.innerHTML = frames.map((f, i) => {
+        const loc = f.path ? `${f.path.split('/').pop()}${f.line ? `:${f.line}` : ''}` : '';
+        return `<button type="button" class="ij-debug-frame${i === 0 ? ' is-active' : ''}" data-frame-id="${f.id}" data-path="${escapeHtml(f.path || '')}" data-line="${f.line || 1}" data-column="${f.column || 1}">
+          <span class="ij-debug-frame-name">${escapeHtml(f.name || 'frame')}</span>
+          <span class="ij-debug-frame-loc">${escapeHtml(loc)}</span>
+        </button>`;
+      }).join('');
+      stackEl.querySelectorAll('.ij-debug-frame').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const p = btn.dataset.path;
+          const line = Number(btn.dataset.line) || 1;
+          const col = Number(btn.dataset.column) || 1;
+          if (p) void openFileAt(p, line, col);
+        });
+      });
+    }
+  }
+  const varsEl = $('#debug-variables');
+  if (varsEl) {
+    const vars = st.variables || [];
+    varsEl.innerHTML = vars.length
+      ? vars.map((v) => `<div class="ij-debug-var"><span class="ij-debug-var-name">${escapeHtml(v.name)}</span><span class="ij-debug-var-value">${escapeHtml(v.value || '')}</span></div>`).join('')
+      : '<div class="ij-debug-var"><span class="ij-debug-var-name" style="color:var(--ij-text-muted)">—</span></div>';
+  }
+  renderDebugWatchList();
+  renderDebugBreakpointsList();
+  highlightDebugCurrentLine();
+  syncDebugToolbar();
+}
+
+function renderDebugWatchList() {
+  const el = $('#debug-watch-list');
+  if (!el) return;
+  if (!state.debugWatch.length) {
+    el.innerHTML = '<div class="ij-debug-watch-item"><span style="color:var(--ij-text-muted)">Add an expression</span></div>';
+    return;
+  }
+  el.innerHTML = state.debugWatch.map((w, i) => `
+    <div class="ij-debug-watch-item" data-watch-idx="${i}">
+      <span class="ij-debug-var-name">${escapeHtml(w.expr)}</span>
+      <span class="ij-debug-var-value">${escapeHtml(w.value ?? '…')}</span>
+    </div>`).join('');
+}
+
+function renderDebugBreakpointsList() {
+  const el = $('#debug-breakpoints');
+  if (!el) return;
+  const bps = allDebugBreakpointsList();
+  if (!bps.length) {
+    el.innerHTML = '<div class="ij-debug-bp-item"><span style="color:var(--ij-text-muted)">Click gutter or press F9</span></div>';
+    return;
+  }
+  el.innerHTML = bps.map((bp) => `
+    <button type="button" class="ij-debug-bp-item" data-path="${escapeHtml(bp.path)}" data-line="${bp.line}">
+      <span class="ij-debug-bp-line">${bp.line}</span>
+      <span class="ij-debug-bp-path">${escapeHtml(bp.path)}</span>
+    </button>`).join('');
+  el.querySelectorAll('.ij-debug-bp-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = btn.dataset.path;
+      const line = Number(btn.dataset.line);
+      if (p && line) void openFileAt(p, line, 1);
+    });
+  });
+}
+
+function renderBreakpointGlyphs() {
+  if (!state.editor) return;
+  const path = state.activeTab;
+  const lines = debugBreakpointsForPath(path);
+  const decos = lines.map((line) => ({
+    range: new monaco.Range(line, 1, line, 1),
+    options: {
+      isWholeLine: false,
+      glyphMarginClassName: 'ij-debug-glyph',
+      glyphMarginHoverMessage: { value: 'Breakpoint (click to remove)' },
+    },
+  }));
+  state.debugDecorationIds = state.editor.deltaDecorations(state.debugDecorationIds, decos);
+}
+
+function highlightDebugCurrentLine() {
+  if (!state.editor || state.debugState?.status !== 'stopped') {
+    if (state.debugCurrentLineId != null) {
+      state.debugCurrentLineId = state.editor?.deltaDecorations(state.debugCurrentLineId, []) || [];
+    }
+    return;
+  }
+  const frame = state.debugState.frames?.[0];
+  if (!frame?.line) return;
+  const path = frame.path;
+  if (path && workspaceExplorerPath(state.activeTab) !== workspaceExplorerPath(path)) return;
+  state.debugCurrentLineId = state.editor.deltaDecorations(state.debugCurrentLineId || [], [{
+    range: new monaco.Range(frame.line, 1, frame.line, 1),
+    options: { isWholeLine: true, className: 'ij-debug-current-line' },
+  }]);
+  state.editor.revealLineInCenter(frame.line);
+}
+
+async function syncBreakpointsToServer() {
+  if (!state.repo) return;
+  try {
+    const res = await api(repoApi(state.repo, '/workspace/debug/breakpoints'), {
+      method: 'POST',
+      body: JSON.stringify({ breakpoints: allDebugBreakpointsList() }),
+    });
+    if (res) state.debugState = { ...state.debugState, ...res };
+  } catch { /* ignore when no session */ }
+}
+
+function applyDebugState(st) {
+  if (!st) return;
+  const wasStopped = state.debugState?.status === 'stopped';
+  state.debugState = st;
+  state.debugActive = st.status && st.status !== 'idle' && st.status !== 'terminated';
+  if (st.status === 'terminated') state.debugActive = false;
+  if (state.debugActive || state.debugPanelOpen) showDebugPanel();
+  renderDebugPanel();
+  syncDebugToolbar();
+  highlightDebugCurrentLine();
+  if (st.status === 'stopped' && !wasStopped) void refreshDebugWatchValues();
+}
+
+function disconnectDebugWs() {
+  if (!state.debugWs) return;
+  try { state.debugWs.close(); } catch { /* ignore */ }
+  state.debugWs = null;
+}
+
+async function connectDebugWs() {
+  if (!state.repo) return;
+  const base = await ensureLoopbackWsBase();
+  if (!base) return;
+  disconnectDebugWs();
+  const url = `${base}${repoApi(state.repo, '/workspace/debug/ws')}`;
+  const ws = new WebSocket(url);
+  state.debugWs = ws;
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.t === 'state' && msg.state) applyDebugState(msg.state);
+      else if (msg.t === 'output' && msg.text) terminalLog(msg.text);
+      else if (msg.t === 'message' && msg.text) toast(msg.text, 'info');
+    } catch { /* ignore */ }
+  };
+  ws.onclose = () => {
+    if (state.debugWs === ws) state.debugWs = null;
+  };
+}
+
+async function startDebugSession() {
+  if (!state.repo || !state.activeTab) {
+    toast('Open a file first', 'info');
+    return;
+  }
+  if (!state.debugCapabilities?.supported) {
+    toast(state.debugCapabilities?.reason || 'Debugging not available for this file', 'warning');
+    return;
+  }
+  const path = state.activeTab;
+  const content = state.tabContents.get(path) ?? state.editor?.getValue?.() ?? '';
+  const line = state.editor?.getPosition?.()?.lineNumber || 1;
+  showDebugPanel();
+  toast('Starting debug session…', 'info');
+  try {
+    await syncBreakpointsToServer();
+    const st = await api(repoApi(state.repo, '/workspace/debug/start'), {
+      method: 'POST',
+      body: JSON.stringify({ path, content, line }),
+    });
+    applyDebugState(st);
+    void connectDebugWs();
+    showTerminal();
+    toast(`Debugging ${st.language || 'program'}`, 'success');
+  } catch (e) {
+    toast(e.message || 'Debug start failed', 'error');
+  }
+}
+
+async function stopDebugSession() {
+  if (!state.repo) return;
+  try {
+    const st = await api(repoApi(state.repo, '/workspace/debug/stop'), { method: 'POST' });
+    applyDebugState(st);
+    disconnectDebugWs();
+    highlightDebugCurrentLine();
+  } catch (e) {
+    toast(e.message || 'Stop failed', 'error');
+  }
+}
+
+async function debugContinue() {
+  if (!state.repo) return;
+  try {
+    const st = await api(repoApi(state.repo, '/workspace/debug/continue'), { method: 'POST' });
+    applyDebugState(st);
+  } catch (e) {
+    toast(e.message || 'Continue failed', 'error');
+  }
+}
+
+async function debugStep(kind) {
+  if (!state.repo) return;
+  try {
+    const st = await api(repoApi(state.repo, '/workspace/debug/step'), {
+      method: 'POST',
+      body: JSON.stringify({ kind }),
+    });
+    applyDebugState(st);
+  } catch (e) {
+    toast(e.message || 'Step failed', 'error');
+  }
+}
+
+async function addDebugWatch(expr) {
+  const trimmed = (expr || '').trim();
+  if (!trimmed || !state.repo) return;
+  const entry = { expr: trimmed, value: '…' };
+  state.debugWatch.push(entry);
+  renderDebugWatchList();
+  if (state.debugState?.status === 'stopped') {
+    try {
+      const res = await api(repoApi(state.repo, '/workspace/debug/evaluate'), {
+        method: 'POST',
+        body: JSON.stringify({ expression: trimmed }),
+      });
+      entry.value = res?.value ?? '';
+      renderDebugWatchList();
+    } catch (e) {
+      entry.value = e.message || 'error';
+      renderDebugWatchList();
+    }
+  }
+}
+
+async function refreshDebugWatchValues() {
+  if (!state.repo || state.debugState?.status !== 'stopped') return;
+  for (const w of state.debugWatch) {
+    try {
+      const res = await api(repoApi(state.repo, '/workspace/debug/evaluate'), {
+        method: 'POST',
+        body: JSON.stringify({ expression: w.expr }),
+      });
+      w.value = res?.value ?? '';
+    } catch (e) {
+      w.value = e.message || 'error';
+    }
+  }
+  renderDebugWatchList();
+}
+
+function setupDebugEditorHooks(editor) {
+  if (!editor || editor.__reaperDebugHooks) return;
+  editor.__reaperDebugHooks = true;
+  editor.onMouseDown((e) => {
+    if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
+    if (!state.activeTab || !isDebuggablePath(state.activeTab)) return;
+    const line = e.target.position?.lineNumber;
+    if (line) toggleBreakpoint(state.activeTab, line);
+  });
+}
+
 async function openCoverageHtmlReport() {
   const path = state.coverageReport?.html_report_path;
   if (!path || !state.repo) {
@@ -7308,7 +7833,7 @@ const GIT_VIEWER_QUICK = [
 ];
 
 const GIT_MUTATING_SUBCOMMANDS = new Set([
-  'add', 'commit', 'checkout', 'pull', 'push', 'fetch', 'merge', 'rebase', 'stash',
+  'add', 'commit', 'checkout', 'pull', 'push', 'fetch', 'merge', 'rebase', 'cherry-pick', 'stash',
   'reset', 'switch', 'restore', 'clean', 'mv', 'rm',
 ]);
 
@@ -9143,6 +9668,14 @@ function setEditorContent(path, content) {
   }
   applyTestRunDecorations();
   reapplyCoverageForTab(path);
+  if (state.blameEnabled) {
+    const cached = state.blameByPath.get(path);
+    if (cached) applyBlameDecorations(path, cached);
+    else void loadBlameForTab(path);
+  } else {
+    clearBlameDecorations();
+  }
+  syncBlameButton();
   applyEditorReadOnlyForPath(path);
   if (path?.endsWith('.java') && state.repo) {
     void fetchAndApplyCoverage(path);
@@ -9277,6 +9810,7 @@ function initEditor() {
       overviewRulerLanes: 2,
     });
     setupDiagnosticNavigation(state.editor);
+    setupDebugEditorHooks(state.editor);
     try {
       if (window.__reaperLangBundleError) {
         throw new Error('monaco-languages.js failed to load (check console for parse errors)');
@@ -9448,7 +9982,11 @@ let repoSelectToken = 0;
 /** Repo metadata, tree, git, history, and README after workspace/open (spinner already dismissed). */
 async function hydrateRepoWorkspace(name, opened, token) {
   try {
-    const detail = await api(repoApi(name));
+    const detailP = api(repoApi(name), { allowDuringSave: true });
+    await refreshTree({ resetExpanded: true });
+    if (token !== repoSelectToken) return;
+
+    const detail = await detailP;
     if (token !== repoSelectToken) return;
     state.branches = normalizeBranchList(detail.branches);
     state.defaultBranch = resolveDefaultBranch(
@@ -9461,35 +9999,48 @@ async function hydrateRepoWorkspace(name, opened, token) {
     updateRepoInfo(detail);
     updateAgentUi();
     updateHeaderBrand();
-    await refreshTree({ resetExpanded: true });
-    if (token !== repoSelectToken) return;
-    await refreshGitStatus();
-    if (token !== repoSelectToken) return;
-    await refreshHistory();
-    if (token !== repoSelectToken) return;
+
+    // Show the project shell as soon as the tree is ready.
+    $('#empty-state')?.classList.add('hidden');
+    syncWelcomeLayout();
+    updateMenuState();
+    setGlobalLoading(false);
+
     if (opened?.jdtls?.warming) {
       terminalLog('Starting Java language server…');
     } else if (opened?.jdtls?.ready) {
       terminalLog('Java language server ready');
     }
-    await openFile('README.md', { silent: true });
+
+    void refreshGitStatus().catch((err) => {
+      console.warn('[Reaper] git status during open', err);
+    });
+    void refreshHistory().catch((err) => {
+      console.warn('[Reaper] git history during open', err);
+    });
+
+    await openInitialWorkspaceFile();
     if (token !== repoSelectToken) return;
     terminalLog(`Opened workspace: ${name}`);
-    if (state.activeTab) {
-      $('#empty-state')?.classList.add('hidden');
-    } else {
-      $('#empty-state')?.classList.remove('hidden');
-    }
-    syncWelcomeLayout();
-    updateMenuState();
     void warmCursorSession(name);
   } catch (err) {
     if (token !== repoSelectToken) return;
     console.warn('[Reaper] repo hydrate failed', err);
     toast(err.message || 'Failed to load project files', 'warning');
+    $('#empty-state')?.classList.add('hidden');
+    syncWelcomeLayout();
   } finally {
     setGlobalLoading(false);
     dismissLaunchSplashNow();
+  }
+}
+
+async function openInitialWorkspaceFile() {
+  await openFile('README.md', { silent: true });
+  if (state.activeTab) return;
+  for (const fallback of ['pom.xml', 'build.gradle', 'build.gradle.kts']) {
+    await openFile(fallback, { silent: true });
+    if (state.activeTab) break;
   }
 }
 
@@ -9515,6 +10066,10 @@ async function selectRepoOnce(name, token) {
     hidePackageManifestPanel();
     hideDbViewerPanel();
     hideGitViewerPanel();
+    hideDebugPanel();
+    disconnectDebugWs();
+    state.debugActive = false;
+    state.debugState = { status: 'idle', frames: [], variables: [], breakpoints: [] };
     state.buildTasksTree = null;
     state.packageManifestView = null;
     state.dbQueryResult = null;
@@ -9528,7 +10083,11 @@ async function selectRepoOnce(name, token) {
       setGlobalLoading(true, `Opening ${name}…`);
       loaderOn = true;
     }
-    const opened = await api(repoApi(name, '/workspace/open'), { method: 'POST' });
+    const opened = await api(repoApi(name, '/workspace/open'), {
+      method: 'POST',
+      allowDuringSave: true,
+      timeoutMs: 90_000,
+    });
     if (token !== repoSelectToken) return;
 
     state.repo = name;
@@ -9683,7 +10242,7 @@ function updateRepoInfo(detail) {
       ${s.remote_configured ? '' : '<p class="text-[11px] text-git-modified">Add a PAT for this host in <button type="button" id="repo-info-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>'}
     </div>` : ''}
     <div class="flex flex-col gap-2">
-      <button id="btn-publish-github" type="button" class="w-full py-2 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10">Publish to GitHub</button>
+      <button id="btn-publish-github" type="button" class="w-full py-2 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10">Publish to remote</button>
       ${s.remote_url ? '<button id="btn-push-remote" type="button" class="w-full py-2 text-xs rounded border border-surface-700 text-gray-300 hover:bg-surface-800">Push to remote</button>' : ''}
     </div>
     <div class="space-y-2">
@@ -9826,19 +10385,44 @@ async function browseLocalRepoFolder() {
   }
 }
 
+function syncPublishHostUi() {
+  const host = $('#publish-host')?.value || 'github.com';
+  const label = $('#publish-remote-label');
+  const input = $('#publish-remote-url');
+  const createWrap = $('#publish-create-wrap');
+  const createLabel = $('#publish-create-label');
+  const custom = host === 'custom';
+  if (label) label.textContent = custom ? 'HTTPS remote URL' : 'Repository';
+  if (input) {
+    input.placeholder = custom
+      ? 'https://gitlab.com/group/project.git'
+      : host === 'gitlab.com'
+        ? 'group/project or https://gitlab.com/group/project.git'
+        : host === 'bitbucket.org'
+          ? 'workspace/repo or https://bitbucket.org/workspace/repo.git'
+          : 'owner/repo or https://github.com/owner/repo';
+  }
+  if (createWrap) createWrap.classList.toggle('hidden', custom);
+  if (createLabel) {
+    const hostName = custom ? 'remote' : host.replace('.com', '');
+    createLabel.textContent = `Create repository on ${hostName} if it does not exist`;
+  }
+}
+
 function showPublishModal() {
   if (!state.repo) {
     toast('Select a repository first', 'info');
     return;
   }
-  const nameInput = $('#publish-github-repo');
+  const nameInput = $('#publish-remote-url');
   if (nameInput && !nameInput.value && !state.repo.includes('/')) {
-    nameInput.placeholder = `your-github-user/${state.repo}`;
+    nameInput.placeholder = `your-user/${state.repo}`;
   }
+  syncPublishHostUi();
   setPublishModalState({ busy: false, status: '', error: '' });
   $('#publish-modal-overlay')?.classList.remove('hidden');
   $('#publish-modal-overlay')?.classList.add('flex');
-  $('#publish-github-repo')?.focus();
+  $('#publish-remote-url')?.focus();
 }
 
 function hidePublishModal() {
@@ -9945,20 +10529,27 @@ async function importLocalRepo() {
   }
 }
 
-async function publishToGitHub(e) {
+async function publishToRemote(e) {
   e.preventDefault();
   if (!state.repo || state.publishBusy) return;
-  if (!(await hasGitHubPat())) {
-    toast('Add a GitHub PAT in Settings → Git hosts', 'error');
+  const fd = new FormData(e.target);
+  const hostSel = String(fd.get('host') || 'github.com');
+  const remoteUrl = String(fd.get('remote_url') || '').trim();
+  const host = hostSel === 'custom' ? (hostFromUrl(remoteUrl) || '') : hostSel;
+  if (!remoteUrl) {
+    toast('Enter a repository slug or HTTPS URL', 'error');
+    return;
+  }
+  if (host && !(await hasPatForHost(host))) {
+    toast(`Add a PAT for ${host} in Settings → Git hosts`, 'error');
     showSettingsModal('git');
     return;
   }
-  const fd = new FormData(e.target);
-  const githubRepo = String(fd.get('github_repo') || '').trim();
-  setPublishModalState({ busy: true, status: 'Creating GitHub repo and pushing — this can take a minute…', error: '' });
+  setPublishModalState({ busy: true, status: 'Linking remote and pushing — this can take a minute…', error: '' });
   try {
     const body = {
-      github_repo: githubRepo,
+      remote_url: remoteUrl,
+      host: hostSel === 'custom' ? undefined : hostSel,
       create: fd.get('create') === 'on',
       private: fd.get('private') === 'on',
     };
@@ -9969,6 +10560,7 @@ async function publishToGitHub(e) {
     setPublishModalState({ busy: false });
     hidePublishModal();
     e.target.reset();
+    syncPublishHostUi();
     const detail = await api(repoApi(state.repo));
     updateRepoInfo(detail);
     await loadRepos();
@@ -11669,6 +12261,8 @@ function activateTabShell(path) {
   void revealFileInExplorer(path);
   updateTreeBackButton();
   updateConflictUi();
+  renderBreakpointGlyphs();
+  highlightDebugCurrentLine();
 }
 
 function flushEditorContentSync() {
@@ -13293,6 +13887,7 @@ function updateRunButtons() {
   updateRollbackButton();
   updateProjectReloadButton();
   syncCoverageInlineButton();
+  void refreshDebugCapabilities();
 }
 
 function primaryJavaNavTarget(content) {
@@ -14561,9 +15156,9 @@ async function refreshHistory() {
   if (!state.repo) return;
   const commits = await api(`${repoApi(state.repo, '/log')}?limit=50`);
   const list = $('#commit-history');
-  const header = $('#commit-log-header');
-  if (header) {
-    header.textContent = commits.length
+  const headerTitle = $('#commit-log-title');
+  if (headerTitle) {
+    headerTitle.textContent = commits.length
       ? `Git Log — ${commits.length} commit${commits.length === 1 ? '' : 's'}`
       : 'Git Log';
   }
@@ -14581,6 +15176,7 @@ async function refreshHistory() {
     const fullHash = escapeHtml(c.hash);
     const active = state.selectedCommitHash === c.hash ? ' active' : '';
     return `
+    <div class="ij-commit-item-wrap">
     <button type="button" class="ij-commit-item${active}" data-hash="${fullHash}" data-subject="${title}" title="${hash} · ${author} · ${escapeHtml(c.date || '')}">
       <div class="ij-commit-rail" aria-hidden="true">
         <span class="ij-commit-dot"></span>
@@ -14597,13 +15193,156 @@ async function refreshHistory() {
           <time class="ij-commit-date">${escapeHtml(when)}</time>
         </div>
       </div>
-    </button>`;
+    </button>
+    <button type="button" class="ij-commit-action" data-action="cherry-pick" data-hash="${fullHash}" title="Cherry-pick this commit">Cherry-pick</button>
+    </div>`;
   }).join('');
   list.querySelectorAll('.ij-commit-item').forEach((btn) => {
     btn.addEventListener('click', () => {
       showCommitDiff(btn.dataset.hash, btn.dataset.subject);
     });
   });
+  list.querySelectorAll('.ij-commit-action[data-action="cherry-pick"]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await cherryPickCommit(btn.dataset.hash);
+    });
+  });
+}
+
+async function cherryPickCommit(hash) {
+  if (!state.repo || !hash) return;
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/cherry-pick'), {
+      method: 'POST',
+      body: JSON.stringify({ hash }),
+    });
+    terminalLog(out.stdout || out.stderr || `Cherry-picked ${hash.slice(0, 7)}`);
+    if (out.exit_code !== 0) {
+      toast(out.stderr?.trim() || 'Cherry-pick needs attention', 'error');
+    } else {
+      toast(`Cherry-picked ${hash.slice(0, 7)}`, 'success');
+    }
+    await refreshGitStatus();
+    await refreshTree();
+    await refreshHistory();
+  } catch (e) {
+    toast(e.message || 'Cherry-pick failed', 'error');
+  }
+}
+
+function showRebasePanel() {
+  state.rebaseMode = true;
+  $('#rebase-panel')?.classList.remove('hidden');
+  $('#commit-history')?.classList.add('hidden');
+  const onto = $('#rebase-onto');
+  if (onto && !onto.value) onto.value = state.gitBranch || 'main';
+}
+
+function hideRebasePanel() {
+  state.rebaseMode = false;
+  state.rebaseSteps = [];
+  $('#rebase-panel')?.classList.add('hidden');
+  $('#commit-history')?.classList.remove('hidden');
+  const steps = $('#rebase-steps');
+  if (steps) steps.innerHTML = '';
+  $('#btn-rebase-start')?.setAttribute('disabled', 'disabled');
+}
+
+async function loadRebasePlan() {
+  if (!state.repo) return;
+  const onto = ($('#rebase-onto')?.value || '').trim();
+  if (!onto) {
+    toast('Enter a branch or commit to rebase onto', 'error');
+    return;
+  }
+  try {
+    const commits = await api(`${repoApi(state.repo, '/workspace/rebase/plan')}?onto=${encodeURIComponent(onto)}&limit=100`);
+    state.rebaseSteps = commits.map((c) => ({
+      hash: c.hash,
+      subject: c.subject,
+      action: 'pick',
+    }));
+    renderRebaseSteps();
+    $('#btn-rebase-start')?.removeAttribute('disabled');
+  } catch (e) {
+    toast(e.message || 'Could not load rebase plan', 'error');
+  }
+}
+
+function renderRebaseSteps() {
+  const el = $('#rebase-steps');
+  if (!el) return;
+  if (!state.rebaseSteps.length) {
+    el.innerHTML = '<p class="ij-sbs-empty">No commits to rebase</p>';
+    return;
+  }
+  el.innerHTML = state.rebaseSteps.map((step, idx) => `
+    <div class="ij-rebase-step">
+      <select class="ij-rebase-action" data-idx="${idx}" aria-label="Rebase action">
+        <option value="pick"${step.action === 'pick' ? ' selected' : ''}>pick</option>
+        <option value="squash"${step.action === 'squash' ? ' selected' : ''}>squash</option>
+        <option value="fixup"${step.action === 'fixup' ? ' selected' : ''}>fixup</option>
+        <option value="reword"${step.action === 'reword' ? ' selected' : ''}>reword</option>
+        <option value="edit"${step.action === 'edit' ? ' selected' : ''}>edit</option>
+        <option value="drop"${step.action === 'drop' ? ' selected' : ''}>drop</option>
+      </select>
+      <code class="ij-rebase-hash">${escapeHtml(step.hash.slice(0, 7))}</code>
+      <span class="ij-rebase-subject">${escapeHtml(step.subject || '')}</span>
+    </div>
+  `).join('');
+  el.querySelectorAll('.ij-rebase-action').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const i = Number(sel.dataset.idx);
+      if (state.rebaseSteps[i]) state.rebaseSteps[i].action = sel.value;
+    });
+  });
+}
+
+async function startInteractiveRebase() {
+  if (!state.repo || !state.rebaseSteps.length) return;
+  const onto = ($('#rebase-onto')?.value || '').trim();
+  if (!onto) return;
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/rebase/start'), {
+      method: 'POST',
+      body: JSON.stringify({
+        onto,
+        steps: state.rebaseSteps.map((s) => ({
+          hash: s.hash,
+          action: s.action,
+          subject: s.subject,
+        })),
+      }),
+    });
+    terminalLog(out.stdout || out.stderr || 'Rebase started');
+    hideRebasePanel();
+    switchPanel('git');
+    if (out.exit_code !== 0) {
+      toast(out.stderr?.trim() || 'Rebase needs attention', 'error');
+    } else {
+      toast('Rebase complete', 'success');
+    }
+    await refreshGitStatus();
+    await refreshTree();
+    await refreshHistory();
+  } catch (e) {
+    toast(e.message || 'Rebase failed', 'error');
+  }
+}
+
+async function abortMerge() {
+  if (!state.repo) return;
+  try {
+    const out = await api(repoApi(state.repo, '/workspace/conflict/abort'), { method: 'POST' });
+    terminalLog(out.stdout || out.stderr || 'Operation aborted');
+    await refreshGitStatus();
+    await refreshTree();
+    await refreshHistory();
+    toast('Operation aborted', 'success');
+  } catch (e) {
+    toast(e.message || 'Abort failed', 'error');
+  }
 }
 
 async function followAgentFileChanges(status) {
@@ -16981,11 +17720,31 @@ function bindEvents() {
   $('#status-diagnostics')?.addEventListener('click', jumpToNextDiagnostic);
   $('#status-coverage')?.addEventListener('click', () => toggleCoveragePanel());
   $('#tb-coverage-inline')?.addEventListener('click', () => toggleCoverageInline());
+  $('#tb-blame')?.addEventListener('click', () => toggleBlameInline());
+  $('#btn-git-rebase')?.addEventListener('click', () => showRebasePanel());
+  $('#btn-rebase-load')?.addEventListener('click', () => loadRebasePlan());
+  $('#btn-rebase-start')?.addEventListener('click', () => startInteractiveRebase());
+  $('#btn-rebase-cancel')?.addEventListener('click', () => hideRebasePanel());
+  $('#publish-host')?.addEventListener('change', () => syncPublishHostUi());
   $('#btn-coverage-toggle-inline')?.addEventListener('click', () => toggleCoverageInline());
   $('#btn-coverage-close')?.addEventListener('click', hideCoveragePanel);
   $('#btn-coverage-refresh')?.addEventListener('click', () => void refreshCoveragePanel(state.activeTab));
   $('#btn-coverage-run')?.addEventListener('click', () => void runActiveFileWithCoverage());
   $('#btn-coverage-open-html')?.addEventListener('click', () => void openCoverageHtmlReport());
+  $('#btn-debug-close')?.addEventListener('click', hideDebugPanel);
+  $('#tb-debug')?.addEventListener('click', () => void startDebugSession());
+  $('#tb-debug-continue')?.addEventListener('click', () => void debugContinue());
+  $('#tb-debug-step-over')?.addEventListener('click', () => void debugStep('over'));
+  $('#tb-debug-step-in')?.addEventListener('click', () => void debugStep('in'));
+  $('#tb-debug-step-out')?.addEventListener('click', () => void debugStep('out'));
+  $('#tb-debug-stop')?.addEventListener('click', () => void stopDebugSession());
+  $('#debug-watch-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const input = $('#debug-watch-input');
+    const expr = input?.value || '';
+    if (input) input.value = '';
+    void addDebugWatch(expr);
+  });
   $('#btn-db-viewer-close')?.addEventListener('click', hideDbViewerPanel);
   $('#btn-db-viewer-refresh')?.addEventListener('click', () => void refreshDbViewerPanel());
   $('#btn-db-viewer-connect')?.addEventListener('click', () => void saveDbConnection());
@@ -17079,7 +17838,7 @@ function bindEvents() {
   $('#file-modal-cancel').addEventListener('click', hideFileModal);
   $('#new-repo-form').addEventListener('submit', createRepo);
   $('#clone-repo-form')?.addEventListener('submit', cloneRepo);
-  $('#publish-repo-form')?.addEventListener('submit', publishToGitHub);
+  $('#publish-repo-form')?.addEventListener('submit', publishToRemote);
   $('#new-file-form').addEventListener('submit', createFile);
   $('#btn-save')?.addEventListener('click', saveFile);
   $('#tb-save')?.addEventListener('click', saveFile);
@@ -17165,6 +17924,7 @@ function bindEvents() {
   });
   $('#btn-mark-conflict-resolved')?.addEventListener('click', () => markConflictResolved());
   $('#btn-continue-merge')?.addEventListener('click', () => continueMerge());
+  $('#btn-abort-merge')?.addEventListener('click', () => abortMerge());
   $('#btn-agent-retry')?.addEventListener('click', restartBridge);
   $$('[data-agent-dock]').forEach((btn) => {
     btn.addEventListener('click', () => setAgentDock(btn.dataset.agentDock));
@@ -17313,7 +18073,38 @@ function bindEvents() {
     }
     if (e.key === 'F5') {
       e.preventDefault();
-      runActive();
+      if (state.debugActive && state.debugState?.status === 'stopped') void debugContinue();
+      else runActive();
+      return;
+    }
+    if (e.key === 'F6') {
+      e.preventDefault();
+      if (state.debugActive) toggleDebugPanel();
+      else void startDebugSession();
+      return;
+    }
+    if (e.key === 'F9') {
+      if (!isFormField(document.activeElement) && state.activeTab && isDebuggablePath(state.activeTab)) {
+        e.preventDefault();
+        const line = state.editor?.getPosition?.()?.lineNumber || 1;
+        toggleBreakpoint(state.activeTab, line);
+      }
+      return;
+    }
+    if (e.key === 'F10') {
+      if (state.debugActive && state.debugState?.status === 'stopped') {
+        e.preventDefault();
+        void debugStep('over');
+      }
+      return;
+    }
+    if (e.key === 'F11') {
+      if (state.debugActive && state.debugState?.status === 'stopped') {
+        e.preventDefault();
+        if (e.shiftKey) void debugStep('out');
+        else void debugStep('in');
+      }
+      return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'w') {
       e.preventDefault();
@@ -17461,7 +18252,7 @@ async function init() {
   }
   void syncGitBackgroundFetchSetting();
   if (repoToOpen && state.repos.some((r) => r.name === repoToOpen)) {
-    await selectRepo(repoToOpen);
+    void selectRepo(repoToOpen);
   } else if (!state.repo) {
     showNoRepoFileTree();
   }

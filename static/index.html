@@ -98,33 +98,6 @@
   </div>
   <script src="/logo.js?v=427"></script>
   <script src="/launch-splash.js?v=427"></script>
-  <script>
-    (function () {
-      function prefetchStartupIndex() {
-        function openRepo(name) {
-          if (!name) return;
-          fetch('/api/repos/' + encodeURIComponent(name) + '/workspace/open', { method: 'POST' })
-            .catch(function () {});
-        }
-        var fromUrl = new URLSearchParams(window.location.search).get('repo');
-        if (fromUrl && fromUrl.trim()) {
-          openRepo(fromUrl.trim());
-          return;
-        }
-        fetch('/api/settings/general')
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (g) {
-            openRepo(g && (g.default_repo || g.last_repo));
-          })
-          .catch(function () {});
-      }
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', prefetchStartupIndex);
-      } else {
-        prefetchStartupIndex();
-      }
-    })();
-  </script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -199,7 +172,7 @@
             </button>
             <button type="button" class="ij-menu-item" data-action="publish" disabled>
               <span class="ij-menu-icon" data-icon="gitPublish"></span>
-              <span class="ij-menu-label">Publish to GitHub…</span>
+              <span class="ij-menu-label">Publish to remote…</span>
             </button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="repo-info" disabled>
@@ -419,7 +392,10 @@
             <strong id="merge-banner-title">Merge in progress</strong>
             <span id="merge-banner-detail"></span>
           </div>
-          <button id="btn-continue-merge" type="button" class="ij-merge-continue-btn">Complete merge</button>
+          <div class="ij-merge-banner-actions">
+            <button id="btn-abort-merge" type="button" class="ij-merge-abort-btn">Abort</button>
+            <button id="btn-continue-merge" type="button" class="ij-merge-continue-btn">Complete merge</button>
+          </div>
         </div>
         <div id="commit-panel-header" class="ij-commit-panel-header shrink-0">
           <div>
@@ -459,7 +435,23 @@
       </div>
 
       <div id="panel-history" class="panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
-        <div id="commit-log-header" class="ij-commit-log-header shrink-0">Git Log</div>
+        <div id="commit-log-header" class="ij-commit-log-header shrink-0 ij-commit-log-header--actions">
+          <span id="commit-log-title">Git Log</span>
+          <div class="ij-commit-log-actions">
+            <button type="button" id="btn-git-rebase" class="ij-commit-log-btn" title="Interactive rebase">Rebase…</button>
+          </div>
+        </div>
+        <div id="rebase-panel" class="ij-rebase-panel hidden shrink-0">
+          <div class="ij-rebase-toolbar">
+            <label class="ij-rebase-label">Onto
+              <input id="rebase-onto" type="text" class="ij-rebase-input" placeholder="main" spellcheck="false" />
+            </label>
+            <button type="button" id="btn-rebase-load" class="ij-commit-log-btn">Load</button>
+            <button type="button" id="btn-rebase-start" class="ij-commit-log-btn ij-commit-log-btn--primary" disabled>Start rebase</button>
+            <button type="button" id="btn-rebase-cancel" class="ij-commit-log-btn">Cancel</button>
+          </div>
+          <div id="rebase-steps" class="ij-rebase-steps panel-scroll"></div>
+        </div>
         <div id="commit-history" class="ij-commit-log flex-1 overflow-auto panel-scroll min-h-0"></div>
       </div>
 
@@ -620,6 +612,19 @@
         <button id="tb-run" disabled title="Run (F5)" class="ij-toolbar-btn run" type="button" aria-label="Run">
           <svg class="ij-toolbar-run-icon" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
         </button>
+        <button id="tb-debug" disabled title="Debug (F6)" class="ij-toolbar-btn ij-toolbar-btn-debug hidden" type="button" aria-label="Debug">
+          <svg class="ij-toolbar-debug-icon" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 3h6l1 4h3l-2 4 2 4h-3l-1 4H9l-1-4H5l2-4-2-4h3l1-4z"/>
+            <path stroke-linecap="round" d="M12 9v6M9 12h6"/>
+          </svg>
+        </button>
+        <div id="debug-controls" class="ij-debug-controls hidden" role="toolbar" aria-label="Debug controls">
+          <button id="tb-debug-continue" type="button" class="ij-debug-ctrl-btn" title="Continue (F5)" aria-label="Continue">▶</button>
+          <button id="tb-debug-step-over" type="button" class="ij-debug-ctrl-btn" title="Step over (F10)" aria-label="Step over">↷</button>
+          <button id="tb-debug-step-in" type="button" class="ij-debug-ctrl-btn" title="Step into (F11)" aria-label="Step into">↓</button>
+          <button id="tb-debug-step-out" type="button" class="ij-debug-ctrl-btn" title="Step out (⇧F11)" aria-label="Step out">↑</button>
+          <button id="tb-debug-stop" type="button" class="ij-debug-ctrl-btn ij-debug-ctrl-stop" title="Stop debugging" aria-label="Stop debugging">■</button>
+        </div>
         <button id="tb-save" disabled title="Save (⌘S)" class="ij-toolbar-btn" type="button">
           <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
         </button>
@@ -632,6 +637,7 @@
         <button id="tb-coverage-inline" type="button" class="ij-toolbar-btn ij-toolbar-cov-toggle hidden" aria-pressed="true" aria-label="Coverage highlighting in editor" title="Hide covered / uncovered line highlighting in editor">
           <span class="ij-toolbar-cov-icon" aria-hidden="true">◔</span>
         </button>
+        <button id="tb-blame" type="button" class="ij-toolbar-btn hidden" aria-pressed="false" aria-label="Git blame in gutter" title="Show git blame in gutter">Blame</button>
         <button id="tb-reload-project" disabled title="Reload Maven project" class="ij-toolbar-btn hidden" type="button" aria-label="Reload Maven project">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a9 9 0 0115.5-2.5M20 15a9 9 0 01-15.5 2.5"/></svg>
         </button>
@@ -757,6 +763,41 @@
       <div class="ij-coverage-footer">
         <button type="button" id="btn-coverage-run" class="ij-coverage-footer-btn" title="Compile, run matching tests, and refresh JaCoCo">Run with coverage</button>
         <button type="button" id="btn-coverage-open-html" class="ij-coverage-footer-btn hidden">Open HTML report</button>
+      </div>
+    </aside>
+
+    <!-- Debugger (right) -->
+    <div id="debug-right-resizer" class="ij-sidebar-resizer hidden" title="Drag to resize debug panel"></div>
+    <aside id="debug-dock-right" class="hidden flex flex-col shrink-0 min-h-0 ij-debug-dock" aria-label="Debugger">
+      <div class="ij-debug-header">
+        <div class="min-w-0">
+          <span class="ij-debug-title">Debug</span>
+          <span id="debug-panel-subtitle" class="ij-debug-subtitle"></span>
+        </div>
+        <div class="ij-debug-header-actions">
+          <button type="button" id="btn-debug-close" class="ij-debug-icon-btn" title="Close debug panel">×</button>
+        </div>
+      </div>
+      <div id="debug-panel-status" class="ij-debug-status" role="status"></div>
+      <div class="ij-debug-section">
+        <div class="ij-debug-section-title">Call stack</div>
+        <div id="debug-callstack" class="ij-debug-callstack panel-scroll"></div>
+      </div>
+      <div class="ij-debug-section">
+        <div class="ij-debug-section-title">Variables</div>
+        <div id="debug-variables" class="ij-debug-variables panel-scroll"></div>
+      </div>
+      <div class="ij-debug-section ij-debug-section-watch">
+        <div class="ij-debug-section-title">Watch</div>
+        <div id="debug-watch-list" class="ij-debug-watch-list panel-scroll"></div>
+        <form id="debug-watch-form" class="ij-debug-watch-form">
+          <input id="debug-watch-input" type="text" class="ij-debug-watch-input" placeholder="Expression…" autocomplete="off" spellcheck="false" aria-label="Watch expression" />
+          <button type="submit" class="ij-debug-watch-add">+</button>
+        </form>
+      </div>
+      <div class="ij-debug-section ij-debug-section-bp">
+        <div class="ij-debug-section-title">Breakpoints</div>
+        <div id="debug-breakpoints" class="ij-debug-breakpoints panel-scroll"></div>
       </div>
     </aside>
 
@@ -1002,22 +1043,31 @@
     </div>
   </div>
 
-  <!-- Publish to GitHub modal -->
+  <!-- Publish to remote modal -->
   <div id="publish-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
     <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
       <div class="px-6 pt-6 pb-4">
-        <h3 class="text-lg font-semibold text-white">Publish to GitHub</h3>
-        <p class="text-xs text-gray-500 mt-1">Create a GitHub repo, link it, and push your current branch</p>
+        <h3 class="text-lg font-semibold text-white">Publish to remote</h3>
+        <p class="text-xs text-gray-500 mt-1">Link a remote host and push your current branch</p>
       </div>
       <form id="publish-repo-form" class="px-6 pb-2 space-y-4">
         <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">GitHub repository</label>
-          <input id="publish-github-repo" name="github_repo" required placeholder="owner/repo or https://github.com/owner/repo" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Host</label>
+          <select id="publish-host" name="host" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-accent-ring">
+            <option value="github.com">GitHub</option>
+            <option value="gitlab.com">GitLab</option>
+            <option value="bitbucket.org">Bitbucket</option>
+            <option value="custom">Other (HTTPS URL)</option>
+          </select>
         </div>
-        <p class="text-[11px] text-gray-600">Uses your GitHub PAT from <button type="button" id="publish-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
-        <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5" id="publish-remote-label">Repository</label>
+          <input id="publish-remote-url" name="remote_url" required placeholder="owner/repo or https://github.com/owner/repo" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        </div>
+        <p class="text-[11px] text-gray-600">Uses your PAT from <button type="button" id="publish-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
+        <label id="publish-create-wrap" class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
           <input type="checkbox" name="create" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
-          Create repository on GitHub if it does not exist
+          <span id="publish-create-label">Create repository if it does not exist</span>
         </label>
         <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
           <input type="checkbox" name="private" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />

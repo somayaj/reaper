@@ -13,6 +13,9 @@ env -u CARGO_TARGET_DIR cargo build --release \
   --target x86_64-apple-darwin \
   --target-dir "$ROOT/target"
 
+echo "Vendoring debug adapters for x86_64…"
+REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/vendor-debug-adapters-macos.sh" || true
+
 echo "Assembling Reaper.app (Intel)…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" \
@@ -32,6 +35,7 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
 REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
 "$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
+REAPER_MACOS_ARCH=x86_64 "$ROOT/scripts/copy-bundled-debug-adapters.sh" "$APP"
 
 GJF_BIN="$APP/Contents/Resources/google-java-format/google-java-format"
 GJF_JAR="$APP/Contents/Resources/google-java-format/google-java-format-all-deps.jar"

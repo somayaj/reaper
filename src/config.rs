@@ -204,6 +204,70 @@ pub fn bundled_jdtls() -> Option<PathBuf> {
     None
 }
 
+/// Root directory for debug adapters shipped inside Reaper.app (or dev resources).
+pub fn bundled_debug_adapters_dir() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(mac_os) = exe.parent() {
+            let resources = mac_os.join("../Resources");
+            let arch = crate::platform::macos_host_arch();
+            for candidate in [
+                resources.join(format!("debug-adapters-{arch}")),
+                resources.join("debug-adapters"),
+            ] {
+                if candidate.join("js-debug").is_dir() {
+                    return Some(candidate.canonicalize().unwrap_or(candidate));
+                }
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "resources/debug-adapters-macos-{}",
+        crate::platform::macos_host_arch()
+    ));
+    if dev.join("js-debug").is_dir() {
+        return Some(dev);
+    }
+    None
+}
+
+pub fn bundled_js_debug_dap() -> Option<PathBuf> {
+    bundled_debug_adapters_dir().map(|d| d.join("js-debug/src/dapDebugServer.js"))
+}
+
+pub fn bundled_delve() -> Option<PathBuf> {
+    bundled_debug_adapters_dir().map(|d| d.join("delve/bin/dlv"))
+}
+
+pub fn bundled_codelldb() -> Option<PathBuf> {
+    bundled_debug_adapters_dir().map(|d| d.join("codelldb/adapter/codelldb"))
+}
+
+pub fn bundled_debugpy_dir() -> Option<PathBuf> {
+    bundled_debug_adapters_dir().and_then(|d| {
+        let dir = d.join("debugpy");
+        if dir.join("debugpy").is_dir() {
+            Some(dir)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn bundled_java_debug_plugin_jar() -> Option<PathBuf> {
+    let dir = bundled_debug_adapters_dir()?.join("java-debug/server");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_string_lossy();
+        if name.starts_with("com.microsoft.java.debug.plugin-") && name.ends_with(".jar") {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn valid_segment(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64

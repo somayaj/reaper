@@ -8,13 +8,43 @@ A local **developer git studio** built in Rust. Host bare repositories over HTTP
 - **Visual editor** — file tree, syntax-highlighted Monaco editor, tabs, diff panel
 - **Private remotes** — import from GitHub, GitLab, Bitbucket, Azure DevOps, or any HTTPS host using a PAT
 - **Source control** — staged/unstaged changes, commit & push from the UI
+- **Git workflow** — inline blame in the gutter, interactive rebase, cherry-pick from commit log, merge abort, publish to GitHub/GitLab/Bitbucket or any HTTPS remote
 - **Git terminal** — run whitelisted git commands against the workspace
 - **Commit history** — browse recent commits per repository
+- **Debugger** — breakpoints (glyph margin or F9), watch expressions, call stack, variables, and step controls (F5/F10/F11) for Python, Go, Rust, C/C++, JavaScript/TypeScript, Java, and Kotlin via DAP adapters
 - **Build & run** — Gradle, Maven, Spring Boot, and native C/C++ (CMake) from toolbar or gutter
 - **C/C++ & languages** — Monaco editor with clangd navigation, 25+ languages, editor regression suite
 - **Package manifest** — dockable panel for Cargo, npm, Ruby, Go, and CMake dependencies
 - **Database viewer** — schema browser for project databases
 - **Test coverage** — JaCoCo widgets on Java test files
+
+### Debugger
+
+Reaper includes a built-in debugger with a dockable panel and toolbar controls:
+
+- **Breakpoints** — click the glyph margin or press **F9**
+- **Call stack** — click a frame to jump to source
+- **Variables** — locals at the current pause point
+- **Watch** — evaluate expressions while stopped
+- **Controls** — **F6** start debug, **F5** continue, **F10** step over, **F11** step in, **⇧F11** step out
+
+Supported when the matching DAP adapter is installed:
+
+| Language | Adapter |
+|----------|---------|
+| Python | `debugpy` (bundled in Reaper.app; needs `python3` on PATH) |
+| Go | `delve` (bundled in Reaper.app) |
+| C / C++ / Rust | `codelldb` (bundled in Reaper.app) |
+| JavaScript / TypeScript | `js-debug` (bundled in Reaper.app; uses bundled Node) |
+| Java / Kotlin | Bundled jdtls + java-debug plugin (or VS Code Java Debug extension) |
+
+macOS DMG builds run `scripts/vendor-debug-adapters-macos.sh` automatically and copy adapters into `Reaper.app/Contents/Resources/debug-adapters/`. For local `cargo run`, vendor once with:
+
+```bash
+./scripts/vendor-debug-adapters-macos.sh
+```
+
+The debug button in the editor toolbar shows a tooltip if debugging is unavailable for the active file.
 
 ## Requirements
 

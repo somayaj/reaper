@@ -373,8 +373,8 @@ const READONLY_SUBCOMMANDS: &[&str] = &[
 const WORKSPACE_SUBCOMMANDS: &[&str] = &[
     "status", "log", "branch", "show", "diff", "tag", "remote", "rev-parse", "describe",
     "shortlog", "blame", "ls-tree", "cat-file", "rev-list", "name-rev", "for-each-ref",
-    "add", "commit", "checkout", "pull", "push", "fetch", "merge", "rebase", "stash",
-    "reset", "switch", "restore", "clean", "mv", "rm",
+    "add", "commit", "checkout", "pull", "push", "fetch", "merge", "rebase", "cherry-pick",
+    "stash", "reset", "switch", "restore", "clean", "mv", "rm",
 ];
 
 fn validate_git_args(args: &[String]) -> Result<()> {

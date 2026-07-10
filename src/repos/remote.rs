@@ -25,6 +25,20 @@ pub struct PublishToGitHubRequest {
     pub private: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PublishRequest {
+    #[serde(default)]
+    pub remote_url: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub create: bool,
+    #[serde(default)]
+    pub private: bool,
+    #[serde(default)]
+    pub github_repo: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct PublishResult {
     pub remote_url: String,
@@ -167,26 +181,58 @@ pub fn import_repo(
 }
 
 fn parse_github_target(input: &str) -> Result<(String, String)> {
+    parse_host_repo_target("github.com", input)
+}
+
+fn parse_host_repo_target(default_host: &str, input: &str) -> Result<(String, String)> {
     let trimmed = input.trim();
-    if trimmed.contains("github.com") {
+    if trimmed.contains("://") {
         let clean = normalize_remote_url(trimmed)?;
         let host = host_from_url(&clean)?;
-        if host != "github.com" {
-            bail!("only github.com URLs are supported for publish");
+        if host != default_host && !host.ends_with(&format!(".{default_host}")) {
+            bail!("expected {default_host} URL, got {host}");
         }
-        let url = Url::parse(&clean).context("invalid github URL")?;
+        let url = Url::parse(&clean).context("invalid remote URL")?;
         let path = url.path().trim_start_matches('/').trim_end_matches(".git");
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-        if parts.len() != 2 {
-            bail!("use owner/repo or a github.com URL");
+        if parts.len() < 2 {
+            bail!("use owner/repo or a full HTTPS URL");
         }
-        return Ok((parts[0].to_string(), parts[1].to_string()));
+        let owner = parts[0].to_string();
+        let repo = parts[parts.len() - 1].to_string();
+        return Ok((owner, repo));
     }
     let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() != 2 {
-        bail!("use owner/repo or a github.com URL");
+        bail!("use owner/repo or a full HTTPS URL");
     }
     Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
+fn resolve_publish_target(req: &PublishRequest) -> Result<(String, String)> {
+    if let Some(legacy) = req.github_repo.as_deref().filter(|s| !s.trim().is_empty()) {
+        let (owner, repo) = parse_github_target(legacy)?;
+        return Ok(("github.com".into(), format!("https://github.com/{owner}/{repo}.git")));
+    }
+    let host = req
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("github.com");
+    let raw = req
+        .remote_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("remote URL is required"))?;
+    if raw.contains("://") {
+        let clean = normalize_remote_url(raw)?;
+        let resolved_host = host_from_url(&clean)?;
+        return Ok((resolved_host, clean));
+    }
+    let (owner, repo) = parse_host_repo_target(host, raw)?;
+    Ok((host.to_string(), format!("https://{host}/{owner}/{repo}.git")))
 }
 
 async fn ensure_github_repo(
@@ -262,24 +308,145 @@ async fn ensure_github_repo(
     bail!("github create failed ({}): {body}", status);
 }
 
-pub async fn publish_to_github(
+async fn ensure_gitlab_repo(token: &str, namespace: &str, repo: &str, private: bool) -> Result<bool> {
+    let client = reqwest::Client::new();
+    let encoded = format!("{namespace}%2F{repo}");
+    let existing = client
+        .get(format!("https://gitlab.com/api/v4/projects/{encoded}"))
+        .header("PRIVATE-TOKEN", token)
+        .send()
+        .await
+        .context("gitlab api request failed")?;
+    if existing.status().is_success() {
+        return Ok(false);
+    }
+    let create = client
+        .post("https://gitlab.com/api/v4/projects")
+        .header("PRIVATE-TOKEN", token)
+        .json(&serde_json::json!({
+            "name": repo,
+            "path": repo,
+            "namespace_path": namespace,
+            "visibility": if private { "private" } else { "public" },
+        }))
+        .send()
+        .await
+        .context("gitlab create repo failed")?;
+    let status = create.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    let body = create.text().await.unwrap_or_default();
+    if body.contains("has already been taken") {
+        return Ok(false);
+    }
+    bail!("gitlab create failed ({}): {body}", status);
+}
+
+async fn ensure_bitbucket_repo(
+    token: &str,
+    workspace: &str,
+    repo: &str,
+    private: bool,
+) -> Result<bool> {
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {token}");
+    let existing = client
+        .get(format!(
+            "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .context("bitbucket api request failed")?;
+    if existing.status().is_success() {
+        return Ok(false);
+    }
+    let create = client
+        .post(format!(
+            "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}"
+        ))
+        .header("Authorization", &auth)
+        .json(&serde_json::json!({
+            "scm": "git",
+            "is_private": private,
+        }))
+        .send()
+        .await
+        .context("bitbucket create repo failed")?;
+    let status = create.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    let body = create.text().await.unwrap_or_default();
+    if body.contains("already exists") {
+        return Ok(false);
+    }
+    bail!("bitbucket create failed ({}): {body}", status);
+}
+
+pub async fn publish_to_remote(
     config: &Config,
     settings: &SettingsStore,
     name: &str,
-    req: PublishToGitHubRequest,
+    req: PublishRequest,
 ) -> Result<PublishResult> {
     if !config.repo_exists(name) {
         bail!("repository not found");
     }
 
-    let (owner, repo) = parse_github_target(&req.github_repo)?;
-    let clean = format!("https://github.com/{owner}/{repo}.git");
+    let (host, clean) = resolve_publish_target(&req)?;
     let token = settings
-        .token_for_host("github.com")
-        .ok_or_else(|| anyhow::anyhow!("no PAT configured for github.com"))?;
+        .token_for_host(&host)
+        .ok_or_else(|| anyhow::anyhow!("no PAT configured for {host}"))?;
 
     let created = if req.create {
-        ensure_github_repo(&token, &owner, &repo, req.private).await?
+        match host.as_str() {
+            "github.com" => {
+                let slug = req
+                    .remote_url
+                    .as_deref()
+                    .or(req.github_repo.as_deref())
+                    .context("remote URL is required")?;
+                let (owner, repo) = parse_github_target(slug)?;
+                ensure_github_repo(&token, &owner, &repo, req.private).await?
+            }
+            h if h.contains("gitlab") => {
+                let slug = req
+                    .remote_url
+                    .as_deref()
+                    .context("remote URL is required")?;
+                let (namespace, repo) = if slug.contains("://") {
+                    let url = Url::parse(&clean).context("invalid gitlab URL")?;
+                    let path = url
+                        .path()
+                        .trim_start_matches('/')
+                        .trim_end_matches(".git");
+                    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+                    if parts.len() < 2 {
+                        bail!("use group/repo or a full GitLab HTTPS URL");
+                    }
+                    (
+                        parts[parts.len() - 2].to_string(),
+                        parts[parts.len() - 1].to_string(),
+                    )
+                } else {
+                    parse_host_repo_target("gitlab.com", slug)?
+                };
+                ensure_gitlab_repo(&token, &namespace, &repo, req.private).await?
+            }
+            h if h.contains("bitbucket") => {
+                let slug = req
+                    .remote_url
+                    .as_deref()
+                    .context("remote URL is required")?;
+                let (workspace, repo) = parse_host_repo_target("bitbucket.org", slug)?;
+                ensure_bitbucket_repo(&token, &workspace, &repo, req.private).await?
+            }
+            other => bail!(
+                "automatic repo creation is not supported for {other}; create the repo manually and uncheck Create"
+            ),
+        }
     } else {
         false
     };
@@ -302,6 +469,27 @@ pub async fn publish_to_github(
         stderr: out.stderr,
         exit_code: out.exit_code,
     })
+}
+
+pub async fn publish_to_github(
+    config: &Config,
+    settings: &SettingsStore,
+    name: &str,
+    req: PublishToGitHubRequest,
+) -> Result<PublishResult> {
+    publish_to_remote(
+        config,
+        settings,
+        name,
+        PublishRequest {
+            remote_url: Some(req.github_repo.clone()),
+            host: Some("github.com".into()),
+            create: req.create,
+            private: req.private,
+            github_repo: Some(req.github_repo),
+        },
+    )
+    .await
 }
 
 pub fn link_remote(
