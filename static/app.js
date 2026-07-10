@@ -8604,9 +8604,10 @@ async function refreshDockerContainers() {
   if (!state.repo) return;
   updateDockerLogsStatus('Listing…');
   try {
+    // docker ps is global — do not require compose project cwd
     const { text, exitCode } = await collectShellOutput(
       "docker ps -a --format '{{json .}}'",
-      dockerConsoleCwd(),
+      undefined,
     );
     if (exitCode !== 0) {
       renderDockerContainersList([]);
@@ -8624,6 +8625,7 @@ async function refreshDockerContainers() {
   } catch (e) {
     renderDockerContainersList([]);
     updateDockerLogsStatus('Error');
+    appendDockerLogsText(`\nerror: ${e.message || e}\n`);
     toast(e.message || 'docker ps failed', 'error');
   }
 }
@@ -8652,9 +8654,10 @@ async function followSelectedDockerContainerLogs() {
   const name = state.dockerContainers.find((c) => c.id === id)?.name || id;
   const input = $('#docker-console-command');
   if (input) input.value = `logs -f --tail=200 ${name}`;
+  // Container logs by id are global; merge stderr (docker logs writes there).
   await startDockerLogsStream(
-    `docker logs -f --tail=200 ${shellQuoteDocker(id)}`,
-    dockerConsoleCwd(),
+    `docker logs -f --tail=200 ${shellQuoteDocker(id)} 2>&1`,
+    undefined,
     { label: `logs · ${name}`, modulePath: state.dockerLogsModulePath },
   );
 }
@@ -8703,13 +8706,20 @@ async function runDockerConsoleCommand(commandText, { stream = false, raw = fals
   if (!shellCmd) return;
 
   syncDockerConsoleSubtitle();
-  const cwd = dockerConsoleCwd();
+  // Compose needs the project directory; plain docker (ps/logs/start/…) does not.
+  const needsComposeCwd = raw
+    ? /\bcompose\b/.test(shellCmd)
+    : (parseDockerConsoleArgs(display)[0] === 'compose');
+  const cwd = needsComposeCwd ? dockerConsoleCwd() : undefined;
   const runBtn = $('#btn-docker-console-run');
   if (runBtn) runBtn.disabled = true;
 
   if (stream) {
     try {
-      await startDockerLogsStream(shellCmd, cwd, {
+      const streamCmd = needsComposeCwd || /\s2>&1\s*$/.test(shellCmd)
+        ? shellCmd
+        : `${shellCmd} 2>&1`;
+      await startDockerLogsStream(streamCmd, cwd, {
         label: display || 'docker',
         modulePath: state.dockerLogsModulePath,
       });
@@ -8760,8 +8770,10 @@ async function runDockerConsoleCommand(commandText, { stream = false, raw = fals
       toast(e.message || 'Docker command failed', 'error');
     }
   } finally {
-    state.dockerLogsAbortController = null;
-    setDockerLogsControlsStreaming(false);
+    if (state.dockerLogsAbortController === ac) {
+      state.dockerLogsAbortController = null;
+      setDockerLogsControlsStreaming(false);
+    }
     if (runBtn) runBtn.disabled = false;
   }
 }
@@ -8824,6 +8836,7 @@ function updateDockerLogsStatus(text, { live = false } = {}) {
 function appendDockerLogsText(text) {
   const out = $('#docker-logs-output');
   if (!out || !text) return;
+  out.classList.remove('is-waiting');
   out.textContent += text;
   if (state.dockerLogsAutoScroll) {
     out.scrollTop = out.scrollHeight;
@@ -8832,7 +8845,10 @@ function appendDockerLogsText(text) {
 
 function clearDockerLogsOutput() {
   const out = $('#docker-logs-output');
-  if (out) out.textContent = '';
+  if (out) {
+    out.textContent = '';
+    out.classList.remove('is-waiting');
+  }
 }
 
 function setDockerLogsControlsStreaming(streaming) {
@@ -8844,8 +8860,9 @@ function setDockerLogsControlsStreaming(streaming) {
 }
 
 async function stopDockerLogsStream() {
-  state.dockerLogsAbortController?.abort();
+  const ac = state.dockerLogsAbortController;
   state.dockerLogsAbortController = null;
+  ac?.abort();
   if (state.repo && state.dockerLogsStreaming) {
     try {
       await fetch(repoApi(state.repo, '/workspace/exec/cancel'), { method: 'POST' });
@@ -8856,6 +8873,7 @@ async function stopDockerLogsStream() {
 }
 
 async function consumeExecStreamToCallback(res, onChunk) {
+  if (!res.body) return -1;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let sseBuffer = '';
@@ -8870,10 +8888,14 @@ async function consumeExecStreamToCallback(res, onChunk) {
     for (const part of parts) {
       const line = part.split('\n').find((l) => l.startsWith('data: '));
       if (!line) continue;
-      const event = JSON.parse(line.slice(6));
+      let event;
+      try {
+        event = JSON.parse(line.slice(6));
+      } catch {
+        continue;
+      }
       if (event.text) onChunk(event.text);
       if (event.t === 'exit' && event.code != null) exitCode = event.code;
-      if (event.t === 'error' && event.text) onChunk(event.text);
     }
   }
   return exitCode;
@@ -8886,6 +8908,9 @@ async function startDockerLogsStream(command, cwd, { label, modulePath } = {}) {
   clearDockerLogsOutput();
   setDockerLogsControlsStreaming(true);
   updateDockerLogsStatus('Streaming…', { live: true });
+  setDockerConsoleOutputMeta(label || 'streaming');
+  const out = $('#docker-logs-output');
+  if (out) out.classList.add('is-waiting');
 
   const ac = new AbortController();
   state.dockerLogsAbortController = ac;
@@ -8905,24 +8930,31 @@ async function startDockerLogsStream(command, cwd, { label, modulePath } = {}) {
       throw new Error(errMsg);
     }
     const exitCode = await consumeExecStreamToCallback(res, appendDockerLogsText);
+    if (state.dockerLogsAbortController !== ac) return;
     if (exitCode === 130) {
       updateDockerLogsStatus('Stopped');
     } else if (exitCode !== 0) {
       updateDockerLogsStatus(`Exited ${exitCode}`);
+      setDockerConsoleOutputMeta(`exit ${exitCode}`, { error: true });
     } else {
       updateDockerLogsStatus('Done');
     }
   } catch (e) {
+    if (state.dockerLogsAbortController !== ac && e?.name === 'AbortError') return;
     if (e?.name === 'AbortError') {
       updateDockerLogsStatus('Stopped');
     } else {
       appendDockerLogsText(`\nerror: ${e.message || e}\n`);
       updateDockerLogsStatus('Error');
+      setDockerConsoleOutputMeta('error', { error: true });
       toast(e.message || 'Docker logs failed', 'error');
     }
   } finally {
-    state.dockerLogsAbortController = null;
-    setDockerLogsControlsStreaming(false);
+    if (state.dockerLogsAbortController === ac) {
+      state.dockerLogsAbortController = null;
+      setDockerLogsControlsStreaming(false);
+      $('#docker-logs-output')?.classList.remove('is-waiting');
+    }
   }
 }
 

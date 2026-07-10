@@ -8297,7 +8297,7 @@ main { background: var(--ij-bg); }
   padding: 6px 8px;
   border-bottom: 1px solid var(--ij-border);
   max-height: 72px;
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-quick-btn {
@@ -8326,14 +8326,14 @@ main { background: var(--ij-bg); }
   gap: 6px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--ij-border);
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-prompt {
   font-family: var(--ij-mono, ui-monospace, monospace);
   font-size: 11px;
   color: var(--ij-text-muted, #888);
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-command {
@@ -8362,7 +8362,7 @@ main { background: var(--ij-bg); }
   background: color-mix(in srgb, var(--ij-accent, #4a9eff) 22%, var(--ij-panel));
   color: var(--ij-text-bright, #eee);
   cursor: pointer;
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-run-btn:hover:not(:disabled) {
@@ -8381,7 +8381,7 @@ main { background: var(--ij-bg); }
   gap: 8px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--ij-border);
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-section-label {
@@ -8399,10 +8399,10 @@ main { background: var(--ij-bg); }
 }
 
 .ij-docker-containers-list {
-  max-height: 140px;
+  max-height: min(140px, 22vh);
   overflow: auto;
   border-bottom: 1px solid var(--ij-border);
-  shrink: 0;
+  flex-shrink: 0;
   background: color-mix(in srgb, var(--ij-panel) 94%, black);
 }
 
@@ -8458,7 +8458,7 @@ main { background: var(--ij-bg); }
   gap: 8px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--ij-border);
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-console-output-title {
@@ -8487,7 +8487,7 @@ main { background: var(--ij-bg); }
   padding: 6px 8px;
   border-bottom: 1px solid var(--ij-border);
   background: color-mix(in srgb, var(--ij-panel) 92%, black);
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-logs-heading {
@@ -8534,7 +8534,7 @@ main { background: var(--ij-bg); }
   display: flex;
   align-items: center;
   gap: 4px;
-  shrink: 0;
+  flex-shrink: 0;
 }
 
 .ij-docker-logs-action-btn,
@@ -8597,6 +8597,8 @@ main { background: var(--ij-bg); }
 }
 
 .ij-docker-logs-output {
+  flex: 1 1 0%;
+  min-height: 4rem;
   margin: 0;
   padding: 8px 10px;
   font-family: var(--ij-mono, ui-monospace, Menlo, Monaco, Consolas, monospace);
@@ -8608,13 +8610,18 @@ main { background: var(--ij-bg); }
   white-space: pre-wrap;
   word-break: break-word;
   overflow: auto;
-  min-height: 0;
 }
 
 .ij-docker-logs-output:empty::before {
-  content: 'Run a Docker logs task from Build tasks, or click Follow to stream compose logs.';
+  content: 'Select a container or run Follow to stream logs.';
   color: var(--ij-text-muted, #666);
   font-style: italic;
+}
+
+.ij-docker-logs-output.is-waiting:empty::before {
+  content: 'Waiting for log lines…';
+  font-style: normal;
+  color: var(--ij-accent, #7eb8da);
 }
 
 #docker-logs-dock-right {
@@ -8636,6 +8643,8 @@ main { background: var(--ij-bg); }
 #docker-logs-dock-right #panel-docker-logs,
 #docker-logs-dock-bottom #panel-docker-logs {
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 #docker-logs-dock-bottom .ij-dock-resize-handle {
