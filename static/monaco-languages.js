@@ -7004,25 +7004,69 @@
         const range = wordRangeAt(model, position);
         const path = resolveEditorPath(helpers, model);
         const lang = model.getLanguageId();
-        if (lang === 'cpp' || lang === 'c') return null;
         const markers = markersAtEditorPosition(model, position);
+
+        const attachDebugValue = async (hoverResult) => {
+          if (!helpers.isDebugStopped?.() || !helpers.lookupDebugHoverValue) {
+            return hoverResult;
+          }
+          let info = null;
+          try {
+            info = await helpers.lookupDebugHoverValue(model, position);
+          } catch {
+            info = null;
+          }
+          // Back-compat: older helper returned a plain string.
+          if (typeof info === 'string') {
+            const word = model.getWordAtPosition(position);
+            info = word?.word ? { label: word.word, value: info } : null;
+          }
+          if (!info?.value) return hoverResult;
+          const label = String(info.label || '').replace(/`/g, '\\`');
+          const safe = String(info.value).replace(/`/g, '\\`');
+          const debugLine = {
+            value: label ? `**${label}** = \`${safe}\`` : `\`${safe}\``,
+          };
+          const word = model.getWordAtPosition(position);
+          const wordRange = word
+            ? new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn,
+            )
+            : range;
+          if (!hoverResult) {
+            return { range: wordRange, contents: [debugLine] };
+          }
+          return {
+            ...hoverResult,
+            range: hoverResult.range || wordRange,
+            contents: [debugLine, ...(hoverResult.contents || [])],
+          };
+        };
+
+        // C/C++ use dedicated providers for docs; still attach debug values here.
+        if (lang === 'cpp' || lang === 'c') {
+          return attachDebugValue(null);
+        }
 
         if (langForPath(path) === 'sql' && model.getLanguageId() === 'sql') {
           if (markers.length) {
-            return hoverResultForMarkers(model, position, markers, range);
+            return attachDebugValue(hoverResultForMarkers(model, position, markers, range));
           }
           const sqlInfo = lookupSqlHover(helpers, model, position);
-          if (!sqlInfo) return null;
+          if (!sqlInfo) return attachDebugValue(null);
           const html = hoverHtmlFromInfo(sqlInfo);
-          if (!html) return null;
-          return {
+          if (!html) return attachDebugValue(null);
+          return attachDebugValue({
             range: sqlInfo.range || range,
             contents: [{
               value: html,
               supportHtml: true,
               isTrusted: true,
             }],
-          };
+          });
         }
 
         // Merge symbol docs with diagnostics when both apply (Java, etc.).
@@ -7031,39 +7075,39 @@
             if (hoverInfoHasContent(symInfo)) {
               const html = buildEditorHoverHtml(symInfo, markers);
               if (html) {
-                return {
+                return attachDebugValue({
                   range,
                   contents: [{
                     value: html,
                     supportHtml: true,
                     isTrusted: true,
                   }],
-                };
+                });
               }
             }
-            return hoverResultForMarkers(model, position, markers, range);
+            return attachDebugValue(hoverResultForMarkers(model, position, markers, range));
           });
         }
 
         return lookupSymbolHover(helpers, model, position).then((symInfo) => {
-          if (!hoverInfoHasContent(symInfo)) return null;
+          if (!hoverInfoHasContent(symInfo)) return attachDebugValue(null);
           const html = buildEditorHoverHtml(symInfo, []);
           if (!html) {
             const md = hoverMarkdownFromInfo(symInfo);
-            if (!md) return null;
-            return {
+            if (!md) return attachDebugValue(null);
+            return attachDebugValue({
               range,
               contents: [{ value: md, isTrusted: true }],
-            };
+            });
           }
-          return {
+          return attachDebugValue({
             range,
             contents: [{
               value: html,
               supportHtml: true,
               isTrusted: true,
             }],
-          };
+          });
         });
       },
     });

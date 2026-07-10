@@ -1870,23 +1870,65 @@ pub fn native_run_uses_cmake(ws: &Path, rel_path: &str) -> bool {
 }
 
 pub fn native_cmake_run_command(ws: &Path, rel_path: &str) -> Result<Option<String>> {
+    let Some(plan) = native_cmake_debug_launch(ws, rel_path)? else {
+        return Ok(None);
+    };
+    // Run uses a Release-friendly configure (no forced Debug) for normal execution speed.
+    let run_prebuild = plan
+        .prebuild
+        .replace(" -DCMAKE_BUILD_TYPE=Debug", "")
+        .replace(" --config Debug", "");
+    Ok(Some(format!(
+        "{run_prebuild} && ./{}",
+        plan.program_rel
+    )))
+}
+
+/// CMake configure + Debug build for debugger prebuild (includes, libs, linked sources).
+#[derive(Debug, Clone)]
+pub struct NativeCmakeDebugLaunch {
+    pub prebuild: String,
+    /// Workspace-relative path to the built executable (e.g. `build/cpp_proj`).
+    pub program_rel: String,
+    pub cwd: PathBuf,
+}
+
+pub fn native_cmake_debug_launch(
+    ws: &Path,
+    rel_path: &str,
+) -> Result<Option<NativeCmakeDebugLaunch>> {
     let Some((dir, _manifest)) = find_nearest_manifest(ws, rel_path, &["CMakeLists.txt"])? else {
         return Ok(None);
     };
     let cmake_text = std::fs::read_to_string(dir.join("CMakeLists.txt"))
         .with_context(|| format!("read {}", dir.join("CMakeLists.txt").display()))?;
-    let Some(target) = cmake_executable_for_source(&cmake_text, rel_path) else {
+    let source_in_project = {
+        let abs = ws.join(rel_path);
+        abs.strip_prefix(&dir)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| rel_path.replace('\\', "/"))
+    };
+    let Some(target) = cmake_executable_for_source(&cmake_text, &source_in_project)
+        .or_else(|| cmake_executable_for_source(&cmake_text, rel_path))
+    else {
         return Ok(None);
     };
     let project_rel = gradle::rel_path_for(ws, &dir)?;
     let (build_dir, source_dir) = if project_rel.is_empty() {
         ("build".to_string(), ".".to_string())
     } else {
-        (format!("{project_rel}/build"), project_rel)
+        (format!("{project_rel}/build"), project_rel.clone())
     };
-    Ok(Some(format!(
-        "cmake -B {build_dir} -S {source_dir} && cmake --build {build_dir} --target {target} && ./{build_dir}/{target}"
-    )))
+    let program_rel = format!("{build_dir}/{target}");
+    let prebuild = format!(
+        "cmake -B {build_dir} -S {source_dir} -DCMAKE_BUILD_TYPE=Debug \
+&& cmake --build {build_dir} --target {target} --config Debug"
+    );
+    Ok(Some(NativeCmakeDebugLaunch {
+        prebuild,
+        program_rel,
+        cwd: ws.to_path_buf(),
+    }))
 }
 
 pub fn cmake_executable_for_source(cmake_text: &str, source_rel: &str) -> Option<String> {
@@ -1960,8 +2002,10 @@ fn native_single_file_run_command(rel_path: &str, is_cpp: bool) -> String {
     } else {
         ""
     };
+    // Common layout: headers in include/, sources in src/.
+    let includes = "-Iinclude -Isrc -I.";
     format!(
-        "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} -o {out} {quoted} && ./{out}"
+        "mkdir -p .reaper && {compiler} {std_flag}{lang_flag} {includes} -o {out} {quoted} && ./{out}"
     )
 }
 
@@ -2474,6 +2518,13 @@ target_link_libraries(cpp_proj PRIVATE cpp_proj_lib)
             .expect("cmake run");
         assert!(cmd.contains("--target cpp_proj"));
         assert!(cmd.contains("./build/cpp_proj"));
+
+        let dbg = native_cmake_debug_launch(&tmp, "src/main.cpp")
+            .unwrap()
+            .expect("cmake debug");
+        assert!(dbg.prebuild.contains("CMAKE_BUILD_TYPE=Debug"));
+        assert!(dbg.prebuild.contains("--target cpp_proj"));
+        assert_eq!(dbg.program_rel, "build/cpp_proj");
         let _ = fs::remove_dir_all(&tmp);
     }
 }

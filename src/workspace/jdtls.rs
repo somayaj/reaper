@@ -115,7 +115,9 @@ pub fn java_debug_via_jdtls_available() -> bool {
     is_enabled() && java_debug_plugin_jar().is_some()
 }
 
-const JAVA_DEBUG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cap for resolveMainClass / classpath during debug start. Keep well under the
+/// frontend's 180s `/debug/start` timeout — Maven prebuild + DAP launch still follow.
+const JAVA_DEBUG_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Resolved Java launch metadata from jdtls (main class, Eclipse project name, classpaths).
 #[derive(Debug, Clone)]
@@ -128,7 +130,11 @@ pub struct JavaLaunchArgs {
     pub cwd: PathBuf,
 }
 
-/// Build workspace, resolve main class + classpaths via jdtls for a DAP launch request.
+/// Resolve main class + classpaths via jdtls for a DAP launch request.
+///
+/// Skips `vscode.java.buildWorkspace` — that command can take minutes and, combined
+/// with holding the global jdtls session lock, was a common cause of `/debug/start`
+/// hanging until the UI timed out. Callers should run Maven/Gradle prebuild first.
 pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) -> Result<JavaLaunchArgs> {
     if !java_debug_via_jdtls_available() {
         bail!("Java debug via jdtls is not available");
@@ -136,12 +142,13 @@ pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) 
     let ws = ws
         .canonicalize()
         .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    tracing::info!("java debug: preparing launch for {main_class}");
     warm_workspace(&ws)?;
     let deadline = Instant::now() + JAVA_DEBUG_TIMEOUT;
 
-    let _ = lsp_execute_command(&ws, "vscode.java.buildWorkspace", json!([]), deadline);
-
-    let resolve_uri = if let Some(rel) = rel_path.filter(|p| p.ends_with(".java")) {
+    let resolve_uri = if let Some(rel) = rel_path.filter(|p| {
+        p.ends_with(".java") || p.ends_with(".kt") || p.ends_with(".kts")
+    }) {
         let abs = ws.join(rel);
         if abs.is_file() {
             file_uri(&abs)?
@@ -151,25 +158,66 @@ pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) 
     } else {
         file_uri(&ws)?
     };
-    let mains = lsp_execute_command(
+    let mains = match lsp_execute_command(
         &ws,
         "vscode.java.resolveMainClass",
         json!([resolve_uri]),
         deadline,
-    )?;
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("resolveMainClass failed, retrying: {e:#}");
+            std::thread::sleep(Duration::from_millis(1200));
+            lsp_execute_command(
+                &ws,
+                "vscode.java.resolveMainClass",
+                json!([resolve_uri]),
+                Instant::now() + JAVA_DEBUG_TIMEOUT,
+            )?
+        }
+    };
     let (resolved_main, project_name) = pick_java_main_resolution(&mains, main_class)?;
+    // Java Debug Server requires projectName for evaluate/hover; jdtls often omits it
+    // for multi-module Maven/Gradle — fall back to artifactId / module folder name.
+    let project_name = project_name
+        .filter(|s| !s.is_empty())
+        .or_else(|| infer_java_debug_project_name(&ws, rel_path));
 
-    let classpaths = resolve_java_classpaths(&ws, &resolved_main, project_name.as_deref(), deadline)?;
+    let classpaths = match resolve_java_classpaths(
+        &ws,
+        &resolved_main,
+        project_name.as_deref(),
+        deadline,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("resolveClasspath failed, retrying: {e:#}");
+            std::thread::sleep(Duration::from_millis(1200));
+            resolve_java_classpaths(
+                &ws,
+                &resolved_main,
+                project_name.as_deref(),
+                Instant::now() + JAVA_DEBUG_TIMEOUT,
+            )?
+        }
+    };
     let (module_paths, class_paths) = parse_java_classpath_result(&classpaths)?;
     if class_paths.is_empty() && module_paths.is_empty() {
         bail!(
             "jdtls could not resolve a classpath for {resolved_main}; \
-             wait for Maven/Gradle import to finish and ensure the project is compiled"
+             wait for Maven/Gradle import to finish and ensure the project is compiled \
+             (Spring Boot apps need dependencies on the classpath)"
         );
     }
 
-    let java_exec = resolve_java_executable(&ws, &resolved_main, project_name.as_deref(), deadline)?;
     let cwd = java_launch_cwd(&ws, rel_path);
+    // Drop Eclipse/jdtls `bin/` outputs (they embed `Unresolved compilation problem`
+    // stubs) and put Gradle/Maven `build/classes` / `target/classes` first.
+    let class_paths = prefer_build_tool_classpath(&ws, rel_path, class_paths);
+    // jdtls resolveClasspath is often incomplete for multi-module / BOM projects —
+    // merge Reaper's resolved Maven/Gradle dependency JARs (slf4j, Spring Cloud, …).
+    let class_paths = merge_build_tool_dependency_jars(&ws, rel_path, class_paths);
+    let java_exec = resolve_java_executable(&ws, &resolved_main, project_name.as_deref(), deadline)?;
 
     Ok(JavaLaunchArgs {
         main_class: resolved_main,
@@ -192,6 +240,159 @@ fn java_launch_cwd(ws: &Path, rel_path: Option<&str>) -> PathBuf {
         return root;
     }
     ws.to_path_buf()
+}
+
+/// Eclipse/jdtls project name for DAP launch — needed for evaluate (`file.isAbsolute()` etc.).
+fn infer_java_debug_project_name(ws: &Path, rel_path: Option<&str>) -> Option<String> {
+    let rel = rel_path?;
+    if let Ok(Some(root)) = super::maven::find_maven_root(ws, rel) {
+        if let Ok(coords) = super::maven::maven_module_coords(&root) {
+            if !coords.artifact_id.is_empty() {
+                return Some(coords.artifact_id);
+            }
+        }
+        return root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+    }
+    if let Ok(Some(root)) = super::gradle::find_gradle_root(ws, rel) {
+        if let Ok(Some(module)) =
+            super::gradle::find_gradle_module_for_source_file(ws, rel, &super::gradle::find_gradle_wrapper_root(&root))
+        {
+            // jdtls uses the leaf project name (e.g. `gateway-service`), not `:services:gateway`.
+            let leaf = module
+                .rsplit([':', '/'])
+                .find(|s| !s.is_empty())
+                .unwrap_or(module.as_str());
+            if !leaf.is_empty() {
+                return Some(leaf.to_string());
+            }
+        }
+        return root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+    }
+    None
+}
+
+/// Prefer Gradle/Maven output dirs and strip Eclipse `bin/` folders that cause
+/// `java.lang.Error: Unresolved compilation problem` at runtime.
+fn prefer_build_tool_classpath(
+    ws: &Path,
+    rel_path: Option<&str>,
+    class_paths: Vec<String>,
+) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    let mut roots = Vec::new();
+    if let Some(rel) = rel_path {
+        if let Ok(Some(root)) = super::gradle::find_gradle_root(ws, rel) {
+            roots.push(root);
+        }
+        if let Ok(Some(root)) = super::maven::find_maven_root(ws, rel) {
+            if !roots.iter().any(|r| r == &root) {
+                roots.push(root);
+            }
+        }
+    }
+    if roots.is_empty() {
+        roots.push(ws.to_path_buf());
+    }
+
+    for root in &roots {
+        // Stale ECJ output must not remain on disk next to Gradle classes.
+        let _ = std::fs::remove_dir_all(root.join("bin"));
+        for rel in [
+            "build/classes/java/main",
+            "build/resources/main",
+            "build/classes/kotlin/main",
+            "build/classes/java/test",
+            "target/classes",
+            "target/test-classes",
+        ] {
+            let p = root.join(rel);
+            if p.is_dir() {
+                let s = p.display().to_string();
+                if seen.insert(s.clone()) {
+                    out.push(s);
+                }
+            }
+        }
+    }
+
+    for p in class_paths {
+        let rewritten = rewrite_eclipse_output_to_build_tool(&p).unwrap_or(p);
+        if is_eclipse_compiler_output(&rewritten) {
+            continue;
+        }
+        if seen.insert(rewritten.clone()) {
+            out.push(rewritten);
+        }
+    }
+    out
+}
+
+/// Append JARs / output dirs from Reaper's Maven/Gradle classpath cache so runtime
+/// has transitive deps (e.g. `org.slf4j.LoggerFactory` for `@Slf4j`).
+fn merge_build_tool_dependency_jars(
+    ws: &Path,
+    rel_path: Option<&str>,
+    mut class_paths: Vec<String>,
+) -> Vec<String> {
+    let Some(rel) = rel_path else {
+        return class_paths;
+    };
+    let Ok(Some(project_root)) = super::classpath::project_build_root(ws, rel) else {
+        return class_paths;
+    };
+    let content = std::fs::read_to_string(ws.join(rel)).unwrap_or_default();
+    let extra = super::classpath::resolve_javac_classpath_for_file(&project_root, rel, &content);
+    let mut seen: std::collections::HashSet<String> = class_paths.iter().cloned().collect();
+    for p in extra {
+        if !p.exists() {
+            continue;
+        }
+        let s = p.display().to_string();
+        if seen.insert(s.clone()) {
+            class_paths.push(s);
+        }
+    }
+    class_paths
+}
+
+fn is_eclipse_compiler_output(path: &str) -> bool {
+    let n = path.replace('\\', "/").to_ascii_lowercase();
+    n.contains("/.metadata/")
+        || n.contains("/bin/default")
+        || n.contains("/bin/main")
+        || n.contains("/bin/test")
+        || n.ends_with("/bin")
+}
+
+fn rewrite_eclipse_output_to_build_tool(path: &str) -> Option<String> {
+    let n = path.replace('\\', "/");
+    for (eclipse, gradle) in [
+        ("/bin/default", "build/classes/java/main"),
+        ("/bin/main", "build/classes/java/main"),
+        ("/bin/test", "build/classes/java/test"),
+    ] {
+        if let Some(idx) = n.find(eclipse) {
+            let root = &n[..idx];
+            let candidate = format!("{root}/{gradle}");
+            if std::path::Path::new(&candidate).is_dir() {
+                return Some(candidate);
+            }
+            let maven = format!("{root}/target/classes");
+            if eclipse != "/bin/test" && std::path::Path::new(&maven).is_dir() {
+                return Some(maven);
+            }
+        }
+    }
+    None
 }
 
 fn resolve_java_classpaths(
@@ -2022,7 +2223,11 @@ fn ingest_notification(ws: &Path, msg: &Value) {
     let Ok(ws_canon) = ws.canonicalize() else {
         return;
     };
-    let Ok(mut map) = SESSIONS.lock() else {
+    // MUST use try_lock: wait_for_id / wait_for_service_ready are often called while
+    // the caller already holds SESSIONS (lsp_request, lsp_execute_command, warm).
+    // A blocking lock here self-deadlocks the moment jdtls emits publishDiagnostics
+    // mid-request — which hung `/debug/start` for the full frontend timeout.
+    let Ok(mut map) = SESSIONS.try_lock() else {
         return;
     };
     if let Some(session) = map.get_mut(&ws_canon) {
@@ -2856,5 +3061,59 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn eclipse_bin_outputs_are_detected_and_rewritten() {
+        assert!(is_eclipse_compiler_output("/proj/bin/default"));
+        assert!(is_eclipse_compiler_output("/proj/bin"));
+        assert!(!is_eclipse_compiler_output("/proj/build/classes/java/main"));
+        assert!(!is_eclipse_compiler_output("/proj/target/classes"));
+
+        let root = std::env::temp_dir().join(format!("reaper-cp-rewrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let gradle_out = root.join("build/classes/java/main");
+        std::fs::create_dir_all(&gradle_out).unwrap();
+        let rewritten = rewrite_eclipse_output_to_build_tool(
+            &root.join("bin/default").display().to_string(),
+        );
+        assert_eq!(rewritten.as_deref(), Some(gradle_out.display().to_string().as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prefer_build_tool_classpath_puts_gradle_first() {
+        let root = std::env::temp_dir().join(format!("reaper-cp-prefer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let gradle_out = root.join("build/classes/java/main");
+        let bin = root.join("bin/default");
+        std::fs::create_dir_all(&gradle_out).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(root.join("src/main/java")).unwrap();
+        std::fs::write(root.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        std::fs::write(
+            root.join("src/main/java/App.java"),
+            "class App { public static void main(String[] a) {} }\n",
+        )
+        .unwrap();
+
+        let jar = root.join("lib.jar");
+        std::fs::write(&jar, "x").unwrap();
+        let result = prefer_build_tool_classpath(
+            &root,
+            Some("src/main/java/App.java"),
+            vec![
+                bin.display().to_string(),
+                jar.display().to_string(),
+            ],
+        );
+        assert!(
+            result.first().is_some_and(|p| p.contains("build/classes/java/main")),
+            "gradle output should be first: {result:?}"
+        );
+        assert!(result.iter().any(|p| p.ends_with("lib.jar")));
+        assert!(!result.iter().any(|p| p.contains("/bin")));
+        assert!(!bin.exists(), "eclipse bin/ should be scrubbed");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
