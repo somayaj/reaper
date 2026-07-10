@@ -19,9 +19,10 @@ use crate::process_registry;
 use crate::workspace;
 
 const REQ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Java DAP launch must stay well under the frontend's 180s `/debug/start` budget.
+/// Java DAP launch must stay well under the frontend's 540s `/debug/start` budget.
 const JAVA_REQ_TIMEOUT: Duration = Duration::from_secs(30);
-const PREBUILD_TIMEOUT: Duration = Duration::from_secs(45);
+/// Gradle/Maven multi-module compiles can take several minutes on cold daemons.
+const PREBUILD_TIMEOUT: Duration = Duration::from_secs(500);
 
 struct DebugSession {
     ws_path: PathBuf,

@@ -569,9 +569,9 @@ fn find_js_debug_adapter(ws: &Path) -> Result<AdapterSpec> {
 }
 
 fn gradle_debug_classes_cmd(gradlew: &str, module: &str) -> String {
-    // Force recompile with full debug info (lines, vars, source).
-    let debug_flags =
-        "--rerun-tasks -Dorg.gradle.caching=false -Dorg.gradle.java.compile.options.debug=true";
+    // Incremental compile with debug symbols. Avoid --rerun-tasks: multi-module
+    // Spring projects routinely exceed a minute on a forced full rebuild.
+    let debug_flags = "-Dorg.gradle.java.compile.options.debug=true";
     if module.is_empty() {
         format!("{gradlew} classes -x test {debug_flags}")
     } else {
@@ -1023,10 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn gradle_debug_classes_forces_rerun_and_debug_symbols() {
+    fn gradle_debug_classes_keeps_debug_symbols_without_forced_rerun() {
         let cmd = gradle_debug_classes_cmd("./gradlew", "");
-        assert!(cmd.contains("--rerun-tasks"));
-        assert!(cmd.contains("org.gradle.caching=false"));
+        assert!(!cmd.contains("--rerun-tasks"));
+        assert!(!cmd.contains("org.gradle.caching=false"));
         assert!(cmd.contains("org.gradle.java.compile.options.debug=true"));
         assert!(cmd.contains("classes -x test"));
     }

@@ -7750,7 +7750,7 @@ async function startDebugSession() {
       toast('Debug start timed out — try again', 'error');
       syncDebugToolbar();
     }
-  }, 120_000);
+  }, 560_000);
   try {
     disconnectDebugWs();
     try {
@@ -7780,7 +7780,7 @@ async function startDebugSession() {
       st = await api(repoApi(state.repo, '/workspace/debug/start'), {
         method: 'POST',
         body: JSON.stringify({ path, content, line }),
-        timeoutMs: 180_000,
+        timeoutMs: 540_000,
       });
     } catch (e) {
       // One automatic retry for the common "second start" Java DAP race.
@@ -7790,7 +7790,7 @@ async function startDebugSession() {
         st = await api(repoApi(state.repo, '/workspace/debug/start'), {
           method: 'POST',
           body: JSON.stringify({ path, content, line }),
-          timeoutMs: 180_000,
+          timeoutMs: 540_000,
         });
       } else {
         throw e;
