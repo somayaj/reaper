@@ -8286,6 +8286,199 @@ main { background: var(--ij-bg); }
   min-height: 0;
 }
 
+.ij-docker-console-panel {
+  gap: 0;
+}
+
+.ij-docker-console-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ij-border);
+  max-height: 72px;
+  shrink: 0;
+}
+
+.ij-docker-console-quick-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--ij-border);
+  background: color-mix(in srgb, var(--ij-panel) 85%, white 4%);
+  color: var(--ij-text);
+  cursor: pointer;
+}
+
+.ij-docker-console-quick-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ij-accent, #4a9eff) 50%, var(--ij-border));
+  color: var(--ij-text-bright, #eee);
+}
+
+.ij-docker-console-quick-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ij-docker-console-command-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ij-border);
+  shrink: 0;
+}
+
+.ij-docker-console-prompt {
+  font-family: var(--ij-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ij-text-muted, #888);
+  shrink: 0;
+}
+
+.ij-docker-console-command {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--ij-mono, ui-monospace, monospace);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-input-bg, color-mix(in srgb, var(--ij-panel) 80%, black));
+  color: var(--ij-text);
+}
+
+.ij-docker-console-command:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--ij-accent, #4a9eff) 60%, var(--ij-border));
+}
+
+.ij-docker-console-run-btn {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 3px;
+  border: 1px solid var(--ij-border);
+  background: color-mix(in srgb, var(--ij-accent, #4a9eff) 22%, var(--ij-panel));
+  color: var(--ij-text-bright, #eee);
+  cursor: pointer;
+  shrink: 0;
+}
+
+.ij-docker-console-run-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ij-accent, #4a9eff) 35%, var(--ij-panel));
+}
+
+.ij-docker-console-run-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ij-docker-console-container-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ij-border);
+  shrink: 0;
+}
+
+.ij-docker-console-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ij-text-muted, #888);
+}
+
+.ij-docker-console-container-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ij-docker-containers-list {
+  max-height: 140px;
+  overflow: auto;
+  border-bottom: 1px solid var(--ij-border);
+  shrink: 0;
+  background: color-mix(in srgb, var(--ij-panel) 94%, black);
+}
+
+.ij-docker-container-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--ij-border) 70%, transparent);
+  background: transparent;
+  color: var(--ij-text);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: var(--ij-mono, ui-monospace, monospace);
+}
+
+.ij-docker-container-row:hover {
+  background: color-mix(in srgb, var(--ij-accent, #4a9eff) 10%, transparent);
+}
+
+.ij-docker-container-row.is-selected {
+  background: color-mix(in srgb, var(--ij-accent, #4a9eff) 18%, transparent);
+}
+
+.ij-docker-container-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ij-text-bright, #eee);
+}
+
+.ij-docker-container-image,
+.ij-docker-container-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ij-text-muted, #888);
+}
+
+.ij-docker-containers-empty {
+  padding: 10px 8px;
+  font-size: 10px;
+  color: var(--ij-text-muted, #888);
+}
+
+.ij-docker-console-output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ij-border);
+  shrink: 0;
+}
+
+.ij-docker-console-output-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ij-text-muted, #888);
+}
+
+.ij-docker-console-output-meta {
+  font-size: 10px;
+  color: var(--ij-text-muted, #777);
+  font-family: var(--ij-mono, ui-monospace, monospace);
+}
+
+.ij-docker-console-output-meta.is-error {
+  color: color-mix(in srgb, #e06c75 80%, white);
+}
+
 .ij-docker-logs-toolbar {
   display: flex;
   align-items: center;
