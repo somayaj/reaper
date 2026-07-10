@@ -15,6 +15,9 @@ fi
 echo "Building release binary…"
 env -u CARGO_TARGET_DIR cargo build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target"
 
+echo "Vendoring debug adapters for $(uname -m)…"
+REAPER_MACOS_ARCH="${REAPER_MACOS_ARCH:-$(uname -m)}" "$ROOT/scripts/vendor-debug-adapters-macos.sh" || true
+
 echo "Assembling Reaper.app…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/static" "$APP/Contents/Resources/cursor-bridge" "$APP/Contents/Resources/gradle" "$APP/Contents/Resources/gradle/wrapper"
@@ -30,6 +33,7 @@ cp "$ROOT/packaging/macos/Info.plist" "$APP/Contents/Info.plist"
 "$ROOT/scripts/copy-bundled-node.sh" "$APP"
 "$ROOT/scripts/copy-bundled-jdk.sh" "$APP"
 "$ROOT/scripts/copy-bundled-jdtls.sh" "$APP"
+"$ROOT/scripts/copy-bundled-debug-adapters.sh" "$APP"
 
 if [[ ! -f "$ROOT/packaging/macos/Reaper.icns" ]] \
   || [[ "$ROOT/static/logo-icon.svg" -nt "$ROOT/packaging/macos/Reaper.icns" ]]; then

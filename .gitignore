@@ -14,6 +14,7 @@
 /resources/node-macos-*/
 /resources/jdk-macos-*/
 /resources/jdtls/
+/resources/debug-adapters-macos-*/
 /resources/.cache/
 .reaper/
 dist/

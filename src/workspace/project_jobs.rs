@@ -62,6 +62,15 @@ impl ProjectIndexJobs {
         status
     }
 
+    /// Profile from a prior open/prefetch, if indexing already started for this repo.
+    pub fn cached_profile(&self, repo: &str) -> Option<ProjectProfile> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(repo).map(|e| e.profile.clone()))
+            .filter(|p| !p.languages.is_empty() || !p.indexers.is_empty())
+    }
+
     /// Scan the repo and start background indexers (called when a workspace opens).
     pub fn on_open(&self, repo: &str, ws: &Path) {
         if classpath::is_java_indexable_workspace(ws) {

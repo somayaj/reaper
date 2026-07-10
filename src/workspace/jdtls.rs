@@ -102,6 +102,246 @@ pub fn is_enabled() -> bool {
     }
 }
 
+/// Path to the Microsoft java-debug Eclipse plugin JAR (bundled or VS Code extension).
+pub fn java_debug_plugin_jar() -> Option<PathBuf> {
+    if let Some(jar) = crate::config::bundled_java_debug_plugin_jar() {
+        return Some(jar);
+    }
+    find_vscode_java_debug_plugin_jar()
+}
+
+/// True when jdtls can host an in-process Java DAP session via the bundled plugin.
+pub fn java_debug_via_jdtls_available() -> bool {
+    is_enabled() && java_debug_plugin_jar().is_some()
+}
+
+const JAVA_DEBUG_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Resolved Java launch metadata from jdtls (main class, Eclipse project name, classpaths).
+#[derive(Debug, Clone)]
+pub struct JavaLaunchArgs {
+    pub main_class: String,
+    pub project_name: Option<String>,
+    pub class_paths: Vec<String>,
+    pub module_paths: Vec<String>,
+    pub java_exec: Option<String>,
+    pub cwd: PathBuf,
+}
+
+/// Build workspace, resolve main class + classpaths via jdtls for a DAP launch request.
+pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) -> Result<JavaLaunchArgs> {
+    if !java_debug_via_jdtls_available() {
+        bail!("Java debug via jdtls is not available");
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    warm_workspace(&ws)?;
+    let deadline = Instant::now() + JAVA_DEBUG_TIMEOUT;
+
+    let _ = lsp_execute_command(&ws, "vscode.java.buildWorkspace", json!([]), deadline);
+
+    let resolve_uri = if let Some(rel) = rel_path.filter(|p| p.ends_with(".java")) {
+        let abs = ws.join(rel);
+        if abs.is_file() {
+            file_uri(&abs)?
+        } else {
+            file_uri(&ws)?
+        }
+    } else {
+        file_uri(&ws)?
+    };
+    let mains = lsp_execute_command(
+        &ws,
+        "vscode.java.resolveMainClass",
+        json!([resolve_uri]),
+        deadline,
+    )?;
+    let (resolved_main, project_name) = pick_java_main_resolution(&mains, main_class)?;
+
+    let classpaths = resolve_java_classpaths(&ws, &resolved_main, project_name.as_deref(), deadline)?;
+    let (module_paths, class_paths) = parse_java_classpath_result(&classpaths)?;
+    if class_paths.is_empty() && module_paths.is_empty() {
+        bail!(
+            "jdtls could not resolve a classpath for {resolved_main}; \
+             wait for Maven/Gradle import to finish and ensure the project is compiled"
+        );
+    }
+
+    let java_exec = resolve_java_executable(&ws, &resolved_main, project_name.as_deref(), deadline)?;
+    let cwd = java_launch_cwd(&ws, rel_path);
+
+    Ok(JavaLaunchArgs {
+        main_class: resolved_main,
+        project_name,
+        class_paths,
+        module_paths,
+        java_exec,
+        cwd,
+    })
+}
+
+fn java_launch_cwd(ws: &Path, rel_path: Option<&str>) -> PathBuf {
+    let Some(rel) = rel_path else {
+        return ws.to_path_buf();
+    };
+    if let Ok(Some(root)) = super::gradle::find_gradle_root(ws, rel) {
+        return root;
+    }
+    if let Ok(Some(root)) = super::maven::find_maven_root(ws, rel) {
+        return root;
+    }
+    ws.to_path_buf()
+}
+
+fn resolve_java_classpaths(
+    ws: &Path,
+    main_class: &str,
+    project_name: Option<&str>,
+    deadline: Instant,
+) -> Result<Value> {
+    let mut attempts: Vec<Value> = Vec::new();
+    if let Some(name) = project_name.filter(|s| !s.is_empty()) {
+        attempts.push(json!([main_class, name]));
+    }
+    // java-debug always reads arguments[0] and arguments[1]; never send a 1-element array.
+    attempts.push(json!([main_class, ""]));
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, args) in attempts.iter().enumerate() {
+        match lsp_execute_command(ws, "vscode.java.resolveClasspath", args.clone(), deadline) {
+            Ok(result) => {
+                let (module_paths, class_paths) = parse_java_classpath_result(&result)?;
+                if !class_paths.is_empty() || !module_paths.is_empty() || idx + 1 == attempts.len() {
+                    return Ok(result);
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let retryable = is_jdtls_index_bounds_error(&msg)
+                    || msg.contains("not a valid java project")
+                    || msg.contains("isn't unique in the workspace");
+                if retryable && idx + 1 < attempts.len() {
+                    tracing::debug!("resolveClasspath retry after: {msg}");
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("resolveClasspath failed")))
+}
+
+fn resolve_java_executable(
+    ws: &Path,
+    main_class: &str,
+    project_name: Option<&str>,
+    deadline: Instant,
+) -> Result<Option<String>> {
+    let mut attempts: Vec<Value> = Vec::new();
+    if let Some(name) = project_name.filter(|s| !s.is_empty()) {
+        attempts.push(json!([main_class, name]));
+    }
+    attempts.push(json!([main_class, ""]));
+
+    for (idx, args) in attempts.iter().enumerate() {
+        match lsp_execute_command(ws, "vscode.java.resolveJavaExecutable", args.clone(), deadline) {
+            Ok(result) => {
+                if let Some(path) = result
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                {
+                    return Ok(Some(path));
+                }
+                if idx + 1 == attempts.len() {
+                    return Ok(None);
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if is_jdtls_index_bounds_error(&msg) && idx + 1 < attempts.len() {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn is_jdtls_index_bounds_error(msg: &str) -> bool {
+    msg.contains("index out of bounds")
+        || msg.contains("IndexOutOfBounds")
+        || msg.contains("out of bounds for length")
+}
+
+fn format_jdtls_error(err: &Value) -> String {
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown jdtls error");
+    let data = err
+        .get("data")
+        .and_then(|v| v.get("message"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != message);
+    match data {
+        Some(detail) => format!("jdtls: {message} ({detail})"),
+        None => format!("jdtls: {message}"),
+    }
+}
+
+/// Ask jdtls to start the Java debug adapter and return its DAP TCP port.
+pub fn start_java_debug_port(ws: &Path) -> Result<u16> {
+    if !java_debug_via_jdtls_available() {
+        bail!("Java debug via jdtls is not available (jdtls or java-debug plugin missing)");
+    }
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    warm_workspace(&ws)?;
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    match lsp_execute_command(&ws, "vscode.java.startDebugSession", json!([]), deadline) {
+        Ok(result) => {
+            tracing::debug!("java debug port response: {}", result);
+            parse_java_debug_port(&result)
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("startDebugSession") || msg.contains("delegateCommandHandler") {
+                tracing::info!("restarting jdtls to load java-debug bundle");
+                restart_workspace(&ws)?;
+                let result = lsp_execute_command(
+                    &ws,
+                    "vscode.java.startDebugSession",
+                    json!([]),
+                    deadline,
+                )?;
+                tracing::debug!("java debug port response after restart: {}", result);
+                return parse_java_debug_port(&result);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Drop and recreate the jdtls session (e.g. after adding debug bundles).
+pub fn restart_workspace(ws: &Path) -> Result<()> {
+    let ws = ws
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", ws.display()))?;
+    {
+        let mut map = SESSIONS.lock().expect("jdtls sessions");
+        if let Some(mut session) = map.remove(&ws) {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+    }
+    warm_workspace(&ws)
+}
+
 /// Start jdtls when a Java workspace opens.
 pub fn warm_workspace(ws: &Path) -> Result<()> {
     if !is_enabled() {
@@ -1064,6 +1304,7 @@ fn initialize_session(child: &mut Child, root_uri: &str, ws: &Path) -> Result<()
                 "workspaceFolders": [
                     { "uri": root_uri, "name": folder_name }
                 ],
+                "initializationOptions": jdtls_initialization_options(),
                 "capabilities": {
                     "workspace": {
                         "workspaceFolders": true
@@ -1227,6 +1468,190 @@ fn project_settings_probe_path(ws: &Path) -> String {
         }
     }
     ".".to_string()
+}
+
+fn jdtls_initialization_options() -> Value {
+    let mut opts = json!({});
+    if let Some(jar) = java_debug_plugin_jar() {
+        opts["bundles"] = json!([jar.display().to_string()]);
+    }
+    opts
+}
+
+fn find_vscode_java_debug_plugin_jar() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    for root in [
+        format!("{home}/.cursor/extensions"),
+        format!("{home}/.vscode/extensions"),
+    ] {
+        let dir = PathBuf::from(&root);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("vscjava.vscode-java-debug") {
+                continue;
+            }
+            let server = entry.path().join("server");
+            let Ok(jars) = std::fs::read_dir(&server) else {
+                continue;
+            };
+            for jar in jars.flatten() {
+                let path = jar.path();
+                let fname = path.file_name()?.to_string_lossy();
+                if fname.starts_with("com.microsoft.java.debug.plugin-") && fname.ends_with(".jar") {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_java_debug_port(result: &Value) -> Result<u16> {
+    if let Some(port) = result.as_u64().and_then(|p| u16::try_from(p).ok()) {
+        return Ok(port);
+    }
+    if let Some(port) = result.as_i64().and_then(|p| u16::try_from(p).ok()) {
+        return Ok(port);
+    }
+    if let Some(port) = result.get("port").and_then(|v| v.as_u64()).and_then(|p| u16::try_from(p).ok())
+    {
+        return Ok(port);
+    }
+    bail!("unexpected java debug port response: {result}");
+}
+
+fn pick_java_main_resolution(items: &Value, target: &str) -> Result<(String, Option<String>)> {
+    let entries = items
+        .as_array()
+        .context("resolveMainClass response must be an array")?;
+    if entries.is_empty() {
+        if target.is_empty() {
+            bail!("no runnable main class found in workspace");
+        }
+        return Ok((target.to_string(), None));
+    }
+
+    let target_base = target.rsplit('/').next().unwrap_or(target);
+    for entry in entries {
+        let main = entry
+            .get("mainClass")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if main == target
+            || main.ends_with(&format!(".{target_base}"))
+            || main.rsplit('/').next().unwrap_or(main) == target_base
+        {
+            let project = entry
+                .get("projectName")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            return Ok((main.to_string(), project));
+        }
+    }
+
+    if entries.len() == 1 {
+        let entry = &entries[0];
+        let main = entry
+            .get("mainClass")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .context("resolveMainClass entry missing mainClass")?;
+        let project = entry
+            .get("projectName")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return Ok((main.to_string(), project));
+    }
+
+    if !target.is_empty() {
+        return Ok((target.to_string(), None));
+    }
+
+    bail!("multiple main classes in workspace; open the file with public static void main")
+}
+
+fn parse_java_classpath_result(result: &Value) -> Result<(Vec<String>, Vec<String>)> {
+    let arr = result
+        .as_array()
+        .context("resolveClasspath response must be an array")?;
+    let module_paths = arr
+        .first()
+        .map(parse_string_array)
+        .unwrap_or_default();
+    let class_paths = arr
+        .get(1)
+        .map(parse_string_array)
+        .unwrap_or_default();
+    Ok((module_paths, class_paths))
+}
+
+fn parse_string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+
+fn lsp_execute_command(
+    ws: &Path,
+    command: &str,
+    arguments: Value,
+    deadline: Instant,
+) -> Result<Value> {
+    let mut map = SESSIONS.lock().expect("jdtls sessions");
+    purge_stale_sessions(&mut map);
+
+    if !session_alive(map.get_mut(ws)) {
+        map.remove(ws);
+        let mut child = spawn_jdtls(ws)?;
+        let root_uri = file_uri(ws)?;
+        initialize_session(&mut child, &root_uri, ws)?;
+        let now = Instant::now();
+        map.insert(ws.to_path_buf(), new_jdtls_session(child, now));
+    }
+
+    let session = map.get_mut(ws).context("jdtls session")?;
+    session.last_used = Instant::now();
+
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let stdin = session.child.stdin.as_mut().context("jdtls stdin")?;
+    let stdout = session.child.stdout.as_mut().context("jdtls stdout")?;
+    write_message(
+        stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "workspace/executeCommand",
+            "params": {
+                "command": command,
+                "arguments": arguments,
+            }
+        }),
+    )?;
+    let result = wait_for_id(stdout, id, deadline, Some(ws));
+    if result.is_err() {
+        if let Some(mut session) = map.remove(ws) {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+    }
+    result
 }
 
 fn configure_workspace(stdin: &mut impl Write, ws: &Path) -> Result<()> {
@@ -1559,7 +1984,7 @@ fn wait_for_id(r: &mut impl Read, id: u64, deadline: Instant, ws: Option<&Path>)
         }
         if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
             if let Some(err) = msg.get("error") {
-                bail!("jdtls error: {err}");
+                bail!("{}", format_jdtls_error(err));
             }
             return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
         }

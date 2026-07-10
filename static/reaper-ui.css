@@ -1765,6 +1765,83 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   color: var(--ij-run-hover);
 }
 
+.ij-toolbar-btn-debug {
+  color: #c792ea;
+}
+
+.ij-toolbar-btn-debug svg {
+  width: 15px;
+  height: 15px;
+}
+
+.ij-toolbar-btn-debug:hover:not(:disabled),
+.ij-toolbar-btn-debug.is-active {
+  background: color-mix(in srgb, #c792ea 18%, transparent);
+  color: #e0b0ff;
+}
+
+.ij-toolbar-btn-debug.is-active {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #c792ea 45%, transparent);
+}
+
+.ij-debug-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 2px;
+  padding-left: 6px;
+  border-left: 1px solid var(--ij-border);
+}
+
+.ij-debug-ctrl-btn {
+  width: 24px;
+  height: 22px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ij-text-muted, #888);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ij-debug-ctrl-btn:hover:not(:disabled) {
+  color: #c792ea;
+  border-color: color-mix(in srgb, #c792ea 35%, var(--ij-border));
+  background: color-mix(in srgb, #c792ea 12%, transparent);
+}
+
+.ij-debug-ctrl-stop:hover:not(:disabled) {
+  color: #f07178;
+  border-color: color-mix(in srgb, #f07178 35%, var(--ij-border));
+}
+
+.ij-debug-ctrl-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ij-debug-glyph {
+  width: 10px !important;
+  height: 10px !important;
+  margin-left: 6px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #f07178;
+  box-shadow: 0 0 0 1px color-mix(in srgb, #f07178 40%, #000);
+  cursor: pointer;
+}
+
+.ij-debug-glyph.is-disabled {
+  background: transparent;
+  box-shadow: none;
+  border: 2px solid color-mix(in srgb, #f07178 55%, transparent);
+}
+
+.ij-debug-current-line {
+  background: color-mix(in srgb, #c792ea 22%, transparent) !important;
+}
+
 @keyframes ij-bulb-flicker {
   0%, 100% {
     opacity: 0.9;
@@ -5357,6 +5434,158 @@ main { background: var(--ij-bg); }
   font-variant-numeric: tabular-nums;
 }
 
+.ij-commit-log-header--actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ij-commit-log-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ij-commit-log-btn {
+  padding: 2px 8px;
+  border-radius: var(--ij-radius, 4px);
+  border: 1px solid var(--ij-border);
+  background: var(--ij-panel);
+  color: var(--ij-text-dim);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ij-commit-log-btn:hover {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-text);
+}
+
+.ij-commit-log-btn--primary {
+  border-color: color-mix(in srgb, var(--ij-accent) 45%, var(--ij-border));
+  color: var(--ij-accent);
+}
+
+.ij-commit-item-wrap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: stretch;
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.ij-commit-item-wrap .ij-commit-item {
+  grid-column: 1;
+}
+
+.ij-commit-action {
+  align-self: center;
+  padding: 2px 6px;
+  border: 1px solid var(--ij-border);
+  border-radius: var(--ij-radius, 4px);
+  background: transparent;
+  color: var(--ij-text-dim);
+  font-size: 10px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.ij-commit-item-wrap:hover .ij-commit-action,
+.ij-commit-item-wrap:focus-within .ij-commit-action {
+  opacity: 1;
+}
+
+.ij-commit-action:hover {
+  color: var(--ij-accent);
+  border-color: color-mix(in srgb, var(--ij-accent) 40%, var(--ij-border));
+}
+
+.ij-rebase-panel {
+  border-bottom: 1px solid var(--ij-border);
+  background: var(--ij-panel-header);
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ij-rebase-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ij-border);
+}
+
+.ij-rebase-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ij-text-dim);
+}
+
+.ij-rebase-input {
+  width: 8rem;
+  padding: 3px 6px;
+  border: 1px solid var(--ij-border);
+  border-radius: var(--ij-radius, 4px);
+  background: var(--ij-bg);
+  color: var(--ij-text);
+  font-size: 11px;
+  font-family: var(--ij-font-mono, ui-monospace, monospace);
+}
+
+.ij-rebase-steps {
+  overflow: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ij-rebase-step {
+  display: grid;
+  grid-template-columns: 5.5rem 4rem 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.ij-rebase-action {
+  padding: 2px 4px;
+  border: 1px solid var(--ij-border);
+  border-radius: var(--ij-radius, 4px);
+  background: var(--ij-bg);
+  color: var(--ij-text);
+  font-size: 10px;
+  font-family: var(--ij-font-mono, ui-monospace, monospace);
+}
+
+.ij-rebase-hash {
+  color: var(--ij-text-dim);
+  font-size: 10px;
+}
+
+.ij-rebase-subject {
+  color: var(--ij-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monaco-editor .ij-blame-line {
+  background: color-mix(in srgb, var(--ij-accent) 6%, transparent);
+}
+
+.monaco-editor .ij-blame-glyph::before {
+  content: '◎';
+  color: var(--ij-text-dim);
+  font-size: 9px;
+}
+
 .ij-commit-diff-panel {
   background: var(--ij-bg);
 }
@@ -5395,6 +5624,27 @@ main { background: var(--ij-bg); }
 .ij-merge-banner-text strong {
   color: var(--ij-deleted);
   font-size: 11px;
+}
+
+.ij-merge-banner-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ij-merge-abort-btn {
+  padding: 4px 10px;
+  border-radius: var(--ij-radius, 4px);
+  border: 1px solid var(--ij-border);
+  background: transparent;
+  color: var(--ij-text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ij-merge-abort-btn:hover {
+  color: var(--ij-deleted);
+  border-color: color-mix(in srgb, var(--ij-deleted) 35%, var(--ij-border));
 }
 
 .ij-merge-continue-btn {
@@ -6960,6 +7210,197 @@ main { background: var(--ij-bg); }
   color: var(--ij-text-muted, #666);
   word-break: break-all;
   line-height: 1.4;
+}
+
+.ij-debug-dock {
+  width: var(--ij-debug-right-w, 320px);
+  min-width: 260px;
+  max-width: 480px;
+  border-left: 1px solid var(--ij-border);
+  font-family: var(--ij-ui-font-family, var(--ij-mono));
+  font-size: var(--ij-ui-font-size, 11px);
+}
+
+.ij-debug-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ij-border);
+  background: color-mix(in srgb, var(--ij-panel) 90%, #c792ea 10%);
+  shrink: 0;
+}
+
+.ij-debug-title {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ij-text-bright);
+}
+
+.ij-debug-subtitle {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--ij-text-muted, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.ij-debug-header-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.ij-debug-icon-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ij-text-muted, #888);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ij-debug-icon-btn:hover {
+  color: #c792ea;
+  border-color: color-mix(in srgb, #c792ea 35%, var(--ij-border));
+}
+
+.ij-debug-status {
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--ij-text-muted, #888);
+  border-bottom: 1px solid var(--ij-border);
+  shrink: 0;
+}
+
+.ij-debug-status.is-running { color: #82aaff; }
+.ij-debug-status.is-stopped { color: #c792ea; }
+.ij-debug-status.is-terminated { color: #f07178; }
+
+.ij-debug-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--ij-border);
+}
+
+.ij-debug-section-title {
+  padding: 5px 10px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ij-text-muted, #888);
+  background: color-mix(in srgb, var(--ij-panel) 96%, #c792ea 4%);
+  shrink: 0;
+}
+
+.ij-debug-callstack,
+.ij-debug-variables,
+.ij-debug-watch-list,
+.ij-debug-breakpoints {
+  max-height: 140px;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.ij-debug-frame,
+.ij-debug-var,
+.ij-debug-watch-item,
+.ij-debug-bp-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 10px;
+  line-height: 1.35;
+  cursor: default;
+}
+
+.ij-debug-frame {
+  cursor: pointer;
+}
+
+.ij-debug-frame:hover,
+.ij-debug-frame.is-active {
+  background: color-mix(in srgb, #c792ea 14%, transparent);
+}
+
+.ij-debug-frame-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ij-text-bright);
+}
+
+.ij-debug-frame-loc {
+  color: var(--ij-text-muted, #888);
+  font-size: 9px;
+  shrink: 0;
+}
+
+.ij-debug-var-name {
+  color: #82aaff;
+  min-width: 72px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ij-debug-var-value {
+  flex: 1;
+  color: #c3e88d;
+  word-break: break-all;
+}
+
+.ij-debug-watch-form {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  shrink: 0;
+}
+
+.ij-debug-watch-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: var(--ij-surface-850, var(--ij-panel));
+  color: var(--ij-text-bright);
+  font-size: 10px;
+  font-family: inherit;
+}
+
+.ij-debug-watch-add {
+  width: 24px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: transparent;
+  color: #c792ea;
+  cursor: pointer;
+}
+
+.ij-debug-bp-line {
+  color: #f07178;
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+}
+
+.ij-debug-bp-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ij-text-muted, #888);
 }
 
 .ij-db-viewer-dock {

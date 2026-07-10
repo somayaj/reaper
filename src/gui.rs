@@ -218,6 +218,7 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
             Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
                 if let Some((window, _)) = webviews.get(&window_id) {
                     window.set_visible(true);
+                    window.set_focus();
                 }
             }
             Event::UserEvent(UserEvent::ToggleFullscreen(window_id)) => {

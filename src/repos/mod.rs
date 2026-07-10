@@ -2,10 +2,9 @@ pub mod metadata;
 mod remote;
 
 pub use remote::{
-    ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishToGitHubRequest,
-    import_local_repo, import_repo, link_remote, publish_to_github, push_preview, push_to_remote,
-    sync_bare_from_workspace,
-    sync_from_remote,
+    ImportLocalRepoRequest, ImportRepoRequest, LinkRemoteRequest, PublishRequest,
+    PublishToGitHubRequest, import_local_repo, import_repo, link_remote, publish_to_github,
+    publish_to_remote, push_preview, push_to_remote, sync_bare_from_workspace, sync_from_remote,
 };
 
 use std::path::Path;
