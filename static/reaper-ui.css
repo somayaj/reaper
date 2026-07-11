@@ -3548,6 +3548,17 @@ main { background: var(--ij-bg); }
 
 .ij-quickfix-popover.hidden { display: none; }
 
+.ij-quickfix-heading {
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ij-text-muted, #6c707e);
+  user-select: none;
+  pointer-events: none;
+}
+
 .ij-quickfix-item {
   display: block;
   width: 100%;

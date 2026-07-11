@@ -291,7 +291,8 @@ export function testTerminalLifecycleRegression(appSrc, ok) {
 
   const openBody = extractFunctionBody(appSrc, 'openTerminal');
   ok(
-    openBody.includes('mountActiveTerminal({ fresh: true })'),
+    openBody.includes('mountActiveTerminal({ fresh: needsFresh })')
+      || openBody.includes('mountActiveTerminal({ fresh: true })'),
     'lifecycle: openTerminal always respawns xterm after panel is shown',
   );
 

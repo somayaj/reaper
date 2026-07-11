@@ -191,32 +191,46 @@ pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) 
     ) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("resolveClasspath failed, retrying: {e:#}");
-            std::thread::sleep(Duration::from_millis(1200));
-            resolve_java_classpaths(
-                &ws,
-                &resolved_main,
-                project_name.as_deref(),
-                Instant::now() + JAVA_DEBUG_TIMEOUT,
-            )?
+            // Plain Java often has no Eclipse project — allow empty resolve and
+            // fall through to `.reaper/java-out` from the javac prebuild.
+            let java_out = ws.join(".reaper/java-out");
+            if java_out.is_dir() {
+                tracing::warn!(
+                    "resolveClasspath failed; using .reaper/java-out for plain Java: {e:#}"
+                );
+                json!([[], [java_out.display().to_string()]])
+            } else {
+                tracing::warn!("resolveClasspath failed, retrying: {e:#}");
+                std::thread::sleep(Duration::from_millis(1200));
+                resolve_java_classpaths(
+                    &ws,
+                    &resolved_main,
+                    project_name.as_deref(),
+                    Instant::now() + JAVA_DEBUG_TIMEOUT,
+                )?
+            }
         }
     };
-    let (module_paths, class_paths) = parse_java_classpath_result(&classpaths)?;
-    if class_paths.is_empty() && module_paths.is_empty() {
-        bail!(
-            "jdtls could not resolve a classpath for {resolved_main}; \
-             wait for Maven/Gradle import to finish and ensure the project is compiled \
-             (Spring Boot apps need dependencies on the classpath)"
-        );
-    }
+    let (module_paths, mut class_paths) = parse_java_classpath_result(&classpaths)?;
 
     let cwd = java_launch_cwd(&ws, rel_path);
     // Drop Eclipse/jdtls `bin/` outputs (they embed `Unresolved compilation problem`
     // stubs) and put Gradle/Maven `build/classes` / `target/classes` first.
-    let class_paths = prefer_build_tool_classpath(&ws, rel_path, class_paths);
+    // Also prefer Reaper's plain-java `.reaper/java-out` from javac prebuild.
+    class_paths = prefer_build_tool_classpath(&ws, rel_path, class_paths);
     // jdtls resolveClasspath is often incomplete for multi-module / BOM projects —
     // merge Reaper's resolved Maven/Gradle dependency JARs (slf4j, Spring Cloud, …).
-    let class_paths = merge_build_tool_dependency_jars(&ws, rel_path, class_paths);
+    class_paths = merge_build_tool_dependency_jars(&ws, rel_path, class_paths);
+    class_paths = ensure_plain_java_out_on_classpath(&ws, class_paths);
+    if class_paths.is_empty() && module_paths.is_empty() {
+        bail!(
+            "jdtls could not resolve a classpath for {resolved_main}; \
+             wait for Maven/Gradle import to finish and ensure the project is compiled \
+             (Spring Boot apps need dependencies on the classpath). \
+             For plain Java (no Maven/Gradle), Debug compiles to .reaper/java-out — \
+             check that javac succeeded."
+        );
+    }
     let java_exec = resolve_java_executable(&ws, &resolved_main, project_name.as_deref(), deadline)?;
 
     Ok(JavaLaunchArgs {
@@ -303,8 +317,19 @@ fn prefer_build_tool_classpath(
         roots.push(ws.to_path_buf());
     }
 
+    // Plain Java Run/Debug compile into `.reaper/java-out` — put it first so DAP
+    // launches against real javac output instead of empty/stripped Eclipse bin/.
+    let java_out = ws.join(".reaper/java-out");
+    if java_out.is_dir() {
+        let s = java_out.display().to_string();
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+
     for root in &roots {
         // Stale ECJ output must not remain on disk next to Gradle classes.
+        // For plain Java (no Maven/Gradle), still remove bin/ — we use java-out instead.
         let _ = std::fs::remove_dir_all(root.join("bin"));
         for rel in [
             "build/classes/java/main",
@@ -334,6 +359,20 @@ fn prefer_build_tool_classpath(
         }
     }
     out
+}
+
+/// Ensure plain-java javac output is on the DAP classpath even when jdtls returned [].
+fn ensure_plain_java_out_on_classpath(ws: &Path, mut class_paths: Vec<String>) -> Vec<String> {
+    let java_out = ws.join(".reaper/java-out");
+    if !java_out.is_dir() {
+        return class_paths;
+    }
+    let s = java_out.display().to_string();
+    if class_paths.iter().any(|p| p == &s) {
+        return class_paths;
+    }
+    class_paths.insert(0, s);
+    class_paths
 }
 
 /// Append JARs / output dirs from Reaper's Maven/Gradle classpath cache so runtime
@@ -909,6 +948,20 @@ pub fn code_actions(
     content: &str,
     only: &[&str],
 ) -> Result<Vec<JdtlsCodeAction>> {
+    code_actions_in_range(ws, rel_path, line, column, content, only, None)
+}
+
+/// Like [`code_actions`], but uses an explicit selection range when provided
+/// (needed for extract method / extract variable over a selection).
+pub fn code_actions_in_range(
+    ws: &Path,
+    rel_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    only: &[&str],
+    selection: Option<(u32, u32, u32, u32)>,
+) -> Result<Vec<JdtlsCodeAction>> {
     if !is_enabled() || !is_jdtls_path(rel_path) {
         return Ok(Vec::new());
     }
@@ -922,7 +975,7 @@ pub fn code_actions(
     let uri = file_uri(&abs_file)?;
     let deadline = Instant::now() + QUERY_TIMEOUT;
     let result = match query_code_actions(
-        &ws, rel_path, &uri, line, column, content, only, deadline,
+        &ws, rel_path, &uri, line, column, content, only, selection, deadline,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -930,7 +983,25 @@ pub fn code_actions(
             return Ok(Vec::new());
         }
     };
-    Ok(parse_code_actions(&ws, &result))
+    let Some(items) = result.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut resolved_items = Vec::with_capacity(items.len());
+    for item in items {
+        let needs_resolve = code_action_needs_resolve(&ws, item);
+        if needs_resolve {
+            match resolve_code_action(&ws, rel_path, &uri, content, item.clone(), deadline) {
+                Ok(resolved) => resolved_items.push(resolved),
+                Err(e) => {
+                    tracing::debug!("jdtls codeAction/resolve failed: {e:#}");
+                    resolved_items.push(item.clone());
+                }
+            }
+        } else {
+            resolved_items.push(item.clone());
+        }
+    }
+    Ok(parse_code_actions(&ws, &Value::Array(resolved_items)))
 }
 
 pub fn signature_help(
@@ -1174,10 +1245,12 @@ fn query_code_actions(
     column: u32,
     content: &str,
     only: &[&str],
+    selection: Option<(u32, u32, u32, u32)>,
     deadline: Instant,
 ) -> Result<Value> {
-    let (start_line, start_col, end_line, end_col) = word_range(content, line, column)
-        .unwrap_or((line, column, line, column));
+    let (start_line, start_col, end_line, end_col) = selection.unwrap_or_else(|| {
+        word_range(content, line, column).unwrap_or((line, column, line, column))
+    });
     let start = lsp_position(start_line, start_col);
     let end = lsp_position(end_line, end_col);
     let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
@@ -1203,6 +1276,43 @@ fn query_code_actions(
             })
         },
         true,
+    )
+}
+
+fn code_action_needs_resolve(ws: &Path, item: &Value) -> bool {
+    // Commands without an edit still need resolve when jdtls deferred the WorkspaceEdit.
+    let Some(edit) = item.get("edit") else {
+        return item.get("command").is_some() || item.get("data").is_some();
+    };
+    match lsp::parse_workspace_edit(ws, edit) {
+        Ok(edits) => edits.is_empty(),
+        Err(_) => true,
+    }
+}
+
+fn resolve_code_action(
+    ws: &Path,
+    rel_path: &str,
+    uri: &str,
+    content: &str,
+    action: Value,
+    deadline: Instant,
+) -> Result<Value> {
+    lsp_request_with_retry(
+        ws,
+        rel_path,
+        uri,
+        content,
+        deadline,
+        move |id| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "codeAction/resolve",
+                "params": action.clone()
+            })
+        },
+        false,
     )
 }
 
@@ -1521,10 +1631,16 @@ fn initialize_session(child: &mut Child, root_uri: &str, ws: &Path) -> Result<()
                                     "valueSet": [
                                         "quickfix",
                                         "refactor",
+                                        "refactor.extract",
+                                        "refactor.inline",
+                                        "refactor.rewrite",
                                         "source",
                                         "source.organizeImports"
                                     ]
                                 }
+                            },
+                            "resolveSupport": {
+                                "properties": ["edit"]
                             }
                         },
                         "signatureHelp": {
@@ -2268,9 +2384,11 @@ fn parse_lsp_diagnostic(
         .unwrap_or("")
         .to_string();
     let severity = match diag.get("severity").and_then(|v| v.as_u64()) {
+        Some(1) => "error",
         Some(2) => "warning",
-        Some(3) | Some(4) => "warning",
-        _ => "error",
+        Some(3) => "info",
+        Some(4) => "hint",
+        _ => "warning",
     }
     .to_string();
     Some(super::diagnostics::Diagnostic {
@@ -2281,6 +2399,7 @@ fn parse_lsp_diagnostic(
         end_column,
         message,
         severity,
+        source: Some("jdtls".into()),
     })
 }
 
@@ -3006,6 +3125,65 @@ mod tests {
         assert!(
             actions.iter().any(|a| !a.edits.is_empty()),
             "organize imports should offer edits for unused java.util.List"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn jdtls_refactor_code_actions_regression() {
+        let Some(ws) = setup_regression_workspace() else {
+            return;
+        };
+        let actions = code_actions(
+            &ws,
+            REGRESSION_REL,
+            GREET_USAGE_LINE,
+            GREET_USAGE_COL,
+            REGRESSION_SOURCE,
+            &[
+                "refactor",
+                "refactor.extract",
+                "refactor.inline",
+                "refactor.rewrite",
+                "source",
+            ],
+        )
+        .expect("refactor codeAction query");
+        // jdtls may return zero actions depending on cursor/context; when it does
+        // return any, each must carry multi-file-capable edits (not dropped).
+        for action in &actions {
+            assert!(
+                !action.edits.is_empty(),
+                "resolved refactor action {:?} must include edits",
+                action.title
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn workspace_rename_prefers_jdtls_when_ready() {
+        let Some(ws) = setup_regression_workspace() else {
+            return;
+        };
+        assert!(workspace_ready(&ws), "jdtls should be ready");
+        let result = crate::workspace::workspace_rename(
+            &ws,
+            REGRESSION_REL,
+            GREET_USAGE_LINE,
+            GREET_USAGE_COL,
+            REGRESSION_SOURCE,
+            "sayHello",
+        )
+        .expect("rename");
+        assert!(
+            !result.edits.is_empty(),
+            "ready jdtls rename should produce semantic edits"
+        );
+        assert!(
+            result.edits.iter().any(|e| e.path.ends_with("App.java")),
+            "expected App.java edits: {:?}",
+            result.edits.iter().map(|e| &e.path).collect::<Vec<_>>(),
         );
         let _ = std::fs::remove_dir_all(&ws);
     }

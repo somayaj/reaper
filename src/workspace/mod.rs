@@ -1943,23 +1943,28 @@ pub fn workspace_rename(
     new_name: &str,
 ) -> Result<WorkspaceRenameResult> {
     let path_rename = java_class_file_rename_candidate(from_path, line, column, content, new_name);
-    // Text fallback finds all word occurrences across the build; jdtls rename can
-    // return partial edits or block while indexing.
+    // Prefer semantic jdtls rename when the language server is ready; fall back to
+    // whole-project word replace only when jdtls is cold or returns nothing.
+    if is_java_source_path(from_path) && jdtls::workspace_ready(ws) {
+        match jdtls::rename_symbol(ws, from_path, line, column, content, new_name) {
+            Ok(edits) if !edits.is_empty() => {
+                return Ok(WorkspaceRenameResult {
+                    edits,
+                    path_rename,
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!("jdtls rename failed, falling back to text rename: {e:#}");
+            }
+        }
+    }
     let fallback = rename_word_fallback(ws, from_path, line, column, content, new_name);
     if !fallback.is_empty() {
         return Ok(WorkspaceRenameResult {
             edits: fallback,
             path_rename,
         });
-    }
-    if is_java_source_path(from_path) && jdtls::workspace_ready(ws) {
-        let edits = jdtls::rename_symbol(ws, from_path, line, column, content, new_name)?;
-        if !edits.is_empty() {
-            return Ok(WorkspaceRenameResult {
-                edits,
-                path_rename,
-            });
-        }
     }
     if languages::is_c_like_path(from_path) {
         let edits = clangd::rename_symbol(ws, from_path, line, column, content, new_name)?;
@@ -2054,7 +2059,19 @@ pub fn java_code_actions(
     content: &str,
     only: &[&str],
 ) -> Result<Vec<JdtlsCodeAction>> {
-    jdtls::code_actions(ws, from_path, line, column, content, only)
+    java_code_actions_in_range(ws, from_path, line, column, content, only, None)
+}
+
+pub fn java_code_actions_in_range(
+    ws: &Path,
+    from_path: &str,
+    line: u32,
+    column: u32,
+    content: &str,
+    only: &[&str],
+    selection: Option<(u32, u32, u32, u32)>,
+) -> Result<Vec<JdtlsCodeAction>> {
+    jdtls::code_actions_in_range(ws, from_path, line, column, content, only, selection)
 }
 
 pub fn jdtls_code_actions_as_quick_fixes(
@@ -2402,6 +2419,10 @@ mod path_tests {
         let service = "public class Service {\n    GatewayController controller;\n}\n";
         std::fs::write(root.join("GatewayController.java"), gateway).unwrap();
         std::fs::write(root.join("Service.java"), service).unwrap();
+        assert!(
+            !jdtls::workspace_ready(&root),
+            "cold workspace must not have a ready jdtls session"
+        );
         let result = workspace_rename(&root, "GatewayController.java", 1, 14, gateway, "ApiGateway")
             .expect("rename");
         let edits = result.edits;

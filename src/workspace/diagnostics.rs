@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use super::exec::{run_command, run_shell_argv, run_tool_command};
 use super::java_diagnostics;
+use super::jdtls;
 use super::safe_join;
 
 const OVERLAY_PREFIX: &str = ".reaper/diagnostics/overlay/";
@@ -19,6 +20,9 @@ pub struct Diagnostic {
     pub end_column: Option<u32>,
     pub message: String,
     pub severity: String,
+    /// Origin of the diagnostic (e.g. `"jdtls"`). Javac diagnostics omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,11 +192,64 @@ pub fn diagnose_file(
             // and paints incorrect squiggles while the next javac run is in flight.
             return Ok(FileDiagnosticsResult::cancelled());
         }
+        let mut diagnostics = diagnostics;
+        merge_jdtls_diagnostics(ws, rel_path, content, &mut diagnostics);
         return Ok(FileDiagnosticsResult::ready(diagnostics));
     }
     Ok(FileDiagnosticsResult::ready(check_file(
         ws, rel_path, content, overlays, scope,
     )?))
+}
+
+/// Merge jdtls `publishDiagnostics` as non-replacing hints alongside javac.
+/// Javac remains the source of truth for compile errors; jdtls adds warnings/hints
+/// that do not duplicate an existing javac diagnostic on the same line.
+fn merge_jdtls_diagnostics(
+    ws: &Path,
+    rel_path: &str,
+    content: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !jdtls::workspace_ready(ws) {
+        return;
+    }
+    let Ok(jdtls_diags) = jdtls::typing_diagnostics(ws, rel_path, content) else {
+        return;
+    };
+    if jdtls_diags.is_empty() {
+        return;
+    }
+    let javac_lines: std::collections::HashSet<u32> =
+        diagnostics.iter().map(|d| d.line).collect();
+    let javac_keys: std::collections::HashSet<(u32, String)> = diagnostics
+        .iter()
+        .map(|d| (d.line, normalize_diag_message(&d.message)))
+        .collect();
+    for mut d in jdtls_diags {
+        let key = (d.line, normalize_diag_message(&d.message));
+        if javac_keys.contains(&key) {
+            continue;
+        }
+        // Skip jdtls errors on lines javac already flagged — avoid double squiggles.
+        if javac_lines.contains(&d.line) && d.severity == "error" {
+            continue;
+        }
+        // Never elevate jdtls above warning when merging with javac results.
+        if d.severity == "error" {
+            d.severity = "warning".into();
+        }
+        d.source = Some("jdtls".into());
+        diagnostics.push(d);
+    }
+}
+
+fn normalize_diag_message(message: &str) -> String {
+    message
+        .lines()
+        .next()
+        .unwrap_or(message)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn base_name_is(lower_path: &str, name: &str) -> bool {
@@ -536,6 +593,7 @@ fn diag(path: &str, line: u32, column: u32, message: impl Into<String>, severity
         end_column: None,
         message: message.into(),
         severity: severity.to_string(),
+        source: None,
     }
 }
 

@@ -1751,6 +1751,7 @@ fn parse_diagnostic_line(line: &str, ws: &Path) -> Option<Diagnostic> {
         end_column: None,
         message: message.trim().to_string(),
         severity: severity.to_string(),
+        source: None,
     })
 }
 
@@ -1895,6 +1896,7 @@ fn local_missing_import_type_diags(
                     declared.iter().next().map(String::as_str).unwrap_or("file")
                 ),
                 severity: "error".to_string(),
+                source: None,
             });
         }
     }
@@ -1997,6 +1999,7 @@ fn local_file_class_name_diags(rel_path: &str, content: &str) -> Vec<Diagnostic>
                     decl.name, decl.name
                 ),
                 severity: "error".to_string(),
+                source: None,
             }
         })
         .collect()

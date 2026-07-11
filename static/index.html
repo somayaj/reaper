@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="432" />
+  <meta name="reaper-ui-build" content="451" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=432" />
+  <link rel="stylesheet" href="/logo-animated.css?v=451" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=432" />
-  <link rel="stylesheet" href="/logo-animated.css?v=432" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=432" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=451" />
+  <link rel="stylesheet" href="/logo-animated.css?v=451" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=451" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=432"></script>
-  <script src="/launch-splash.js?v=432"></script>
+  <script src="/logo.js?v=451"></script>
+  <script src="/launch-splash.js?v=451"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -534,6 +534,7 @@
             <button id="btn-agent-clear" title="New conversation" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 4v16m8-8H4"/></svg>
             </button>
+            <button type="button" id="btn-agent-close" class="p-1 rounded text-gray-500 hover:text-accent hover:bg-surface-800 transition-colors text-base leading-none px-1.5" title="Close agent panel" aria-label="Close agent panel">×</button>
           </div>
         </div>
 
@@ -1503,9 +1504,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=432"></script>
-  <script src="/monaco-languages.js?v=432" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=451"></script>
+  <script src="/monaco-languages.js?v=451" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=432"></script>
+  <script src="/app.js?v=451"></script>
 </body>
 </html>

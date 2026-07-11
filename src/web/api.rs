@@ -2717,6 +2717,12 @@ struct JavaCodeActionsBody {
     content: String,
     #[serde(default)]
     only: Vec<String>,
+    /// Optional selection end (1-based). When set with `line`/`column` as the start,
+    /// jdtls receives the full selection range (extract method/variable).
+    #[serde(default)]
+    end_line: Option<u32>,
+    #[serde(default)]
+    end_column: Option<u32>,
 }
 
 async fn workspace_java_references(
@@ -2797,13 +2803,20 @@ async fn workspace_java_code_actions(
     } else {
         body.only.iter().map(String::as_str).collect()
     };
-    match workspace::java_code_actions(
+    let selection = match (body.end_line, body.end_column) {
+        (Some(end_line), Some(end_column)) => {
+            Some((body.line, body.column, end_line, end_column))
+        }
+        _ => None,
+    };
+    match workspace::java_code_actions_in_range(
         &ws,
         body.path.trim(),
         body.line,
         body.column,
         &body.content,
         &only,
+        selection,
     ) {
         Ok(actions) => Json(actions).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),

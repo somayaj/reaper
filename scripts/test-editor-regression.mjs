@@ -2651,8 +2651,14 @@ function testJavaCompilerErrorRegression(appSrc) {
     'backend: diagnostics API exposes cancelled javac separately from results',
   );
   ok(
-    !diagnosticsSrc.includes('typing_diagnostics'),
+    diagnosticsSrc.includes('Do not fall back to jdtls publishDiagnostics')
+      && /if cancelled \{[\s\S]*?return Ok\(FileDiagnosticsResult::cancelled\(\)\)/.test(diagnosticsSrc),
     'backend: cancelled full javac does not fall back to stale jdtls diagnostics',
+  );
+  ok(
+    diagnosticsSrc.includes('fn merge_jdtls_diagnostics')
+      && diagnosticsSrc.includes('typing_diagnostics'),
+    'backend: merges jdtls publishDiagnostics alongside javac when not cancelled',
   );
   ok(
     javaInflightSrc.includes('content_fingerprint')

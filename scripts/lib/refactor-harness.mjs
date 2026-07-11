@@ -46,6 +46,7 @@ export function testRefactorRegression(
   ok(appSrc.includes('runEditorMonacoAction'), 'refactor: editor action runner in app.js');
   ok(appSrc.includes("'find-usages'"), 'refactor: find usages in command palette');
   ok(appSrc.includes("'rename-symbol'"), 'refactor: rename in command palette');
+  ok(appSrc.includes("'java-refactor'"), 'refactor: Java Refactor… in command palette');
   ok(appSrc.includes("'change-all'"), 'refactor: change all in command palette');
 
   ok(langSrc.includes('reaper.changeAllOccurrences'), 'refactor: change all monaco action');
@@ -91,15 +92,40 @@ export function testRefactorRegression(
 
   const renameFn = extractRustFnBody(modRsSrc, 'workspace_rename');
   ok(
-    renameFn.includes('rename_word_fallback')
-      && renameFn.indexOf('rename_word_fallback')
-        < (renameFn.indexOf('jdtls::rename_symbol') === -1
-          ? Infinity
-          : renameFn.indexOf('jdtls::rename_symbol')),
-    'refactor: workspace_rename prefers text fallback before jdtls',
+    renameFn.includes('jdtls::rename_symbol')
+      && renameFn.includes('rename_word_fallback')
+      && renameFn.indexOf('jdtls::rename_symbol')
+        < renameFn.indexOf('rename_word_fallback'),
+    'refactor: workspace_rename prefers jdtls when ready before text fallback',
   );
   ok(renameFn.includes('java_class_file_rename_candidate'), 'refactor: java class rename includes file rename');
   ok(renameFn.includes('WorkspaceRenameResult'), 'refactor: workspace_rename returns path rename metadata');
+
+  ok(langSrc.includes('reaper.javaRefactor'), 'refactor: Monaco Java Refactor action');
+  ok(langSrc.includes('runJavaRefactor'), 'refactor: runJavaRefactor helper');
+  ok(
+    langSrc.includes('refactor.extract')
+      && langSrc.includes('/workspace/java/code-actions'),
+    'refactor: Java refactor requests jdtls refactor/source kinds',
+  );
+  ok(
+    langSrc.includes('applyJavaWorkspaceEdits')
+      && extractFunctionBody(langSrc, 'runJavaRefactor').includes('applyJavaWorkspaceEdits'),
+    'refactor: Java refactor applies workspace edits',
+  );
+  ok(
+    extractFunctionBody(langSrc, 'runJavaRefactor').includes('getScrolledVisiblePosition'),
+    'refactor: Java refactor picker anchors near cursor',
+  );
+  ok(
+    langSrc.includes("contextMenuGroupId: '1_modification'"),
+    'refactor: Java Refactor uses Monaco 1_modification context group',
+  );
+  ok(
+    appSrc.includes('showRefactorStaircaseMenu')
+      && appSrc.includes('ij-cascade-step'),
+    'refactor: staircase cascading refactor picker',
+  );
 
   ok(langSrc.includes('RENAME_FETCH_TIMEOUT_MS'), 'refactor: rename fetch timeout');
   ok(langSrc.includes('DEFINITION_FETCH_TIMEOUT_MS'), 'refactor: definition fetch timeout');
