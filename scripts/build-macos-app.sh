@@ -63,6 +63,8 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 if [[ -n "$VERSION" ]]; then
   sed -i '' "s/name=\"reaper-app-version\" content=\"[^\"]*\"/name=\"reaper-app-version\" content=\"$VERSION\"/" \
     "$APP/Contents/Resources/static/index.html"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist" >/dev/null
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist" >/dev/null
 fi
 
 cp "$ROOT/gradle/reaper-classpath.init.gradle" "$APP/Contents/Resources/gradle/"

@@ -596,7 +596,7 @@ fn java_compile_prebuild(
     project: &crate::workspace::run_project::RunProjectInfo,
 ) -> Option<(PathBuf, String)> {
     if !project.has_project {
-        return None;
+        return plain_java_javac_prebuild(ws, rel_path);
     }
     match project.build_tool.as_str() {
         "gradle" => {
@@ -620,8 +620,74 @@ fn java_compile_prebuild(
             };
             Some((cmd.cwd, maven_debug_compile_cmd(&program, &pl_suffix)))
         }
-        _ => None,
+        // Unknown build tool — still try single-file javac so Debug isn't empty.
+        _ => plain_java_javac_prebuild(ws, rel_path),
     }
+}
+
+/// Compile a plain `.java` file (no Maven/Gradle) into `.reaper/java-out` with debug symbols.
+/// Mirrors Run's `javac -d .reaper/java-out` path so Debug has classes on the classpath.
+fn plain_java_javac_prebuild(ws: &Path, rel_path: &str) -> Option<(PathBuf, String)> {
+    if !rel_path.ends_with(".java") {
+        return None;
+    }
+    let rel = rel_path.replace('\\', "/");
+    let javac = crate::jdk::javac_path()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "javac".into());
+    // -g: lines,vars,source so locals/watch work (same idea as Maven debuglevel).
+    let cmd = format!(
+        "mkdir -p .reaper/java-out && {} -g -d .reaper/java-out -encoding UTF-8 {}",
+        shell_quote(&javac),
+        shell_quote(&rel)
+    );
+    Some((ws.to_path_buf(), cmd))
+}
+
+/// DAP launch when jdtls classpath resolve fails but we already compiled to `.reaper/java-out`.
+pub fn plain_java_launch_fallback(
+    ws: &Path,
+    main_class: &str,
+    rel_path: &str,
+    stop_on_entry: bool,
+) -> Option<Value> {
+    if gradle::find_gradle_root(ws, rel_path)
+        .ok()
+        .flatten()
+        .is_some()
+        || maven::find_maven_root(ws, rel_path).ok().flatten().is_some()
+    {
+        return None;
+    }
+    let out = ws.join(".reaper/java-out");
+    if !out.is_dir() {
+        return None;
+    }
+    let project_name = ws
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app")
+        .to_string();
+    let mut launch = json!({
+        "type": "java",
+        "request": "launch",
+        "mainClass": main_class,
+        "classPaths": [out.display().to_string()],
+        "modulePaths": [],
+        "cwd": ws.display().to_string(),
+        "projectName": project_name,
+        "stopOnEntry": stop_on_entry,
+        "console": "internalConsole",
+        "shortenCommandLine": "auto",
+    });
+    if let Ok(home) = crate::jdk::effective_java_home() {
+        let java = home.join("bin/java");
+        if java.is_file() {
+            launch["javaExec"] = json!(java.display().to_string());
+        }
+    }
+    Some(launch)
 }
 
 fn java_launch_plan(
@@ -706,7 +772,7 @@ fn java_launch_from_jdtls(
     Ok(launch)
 }
 
-/// Resolve classpaths via jdtls after Maven/Gradle prebuild.
+/// Resolve classpaths via jdtls after Maven/Gradle (or plain javac) prebuild.
 pub fn finalize_java_launch_plan(plan: &mut LaunchPlan, ws: &Path, rel_path: &str) -> Result<()> {
     if !plan.use_jdtls_java {
         return Ok(());
@@ -729,13 +795,38 @@ pub fn finalize_java_launch_plan(plan: &mut LaunchPlan, ws: &Path, rel_path: &st
             Ok(())
         }
         Err(e) => {
+            if let Some(fallback) =
+                plain_java_launch_fallback(ws, &main_class, rel_path, stop_on_entry)
+            {
+                tracing::warn!(
+                    "java launch resolve failed for plain project; using .reaper/java-out: {e:#}"
+                );
+                plan.launch = fallback;
+                return Ok(());
+            }
             // Large Spring Boot projects often need a beat after `classes`/`compile`
             // before jdtls can resolve the classpath.
             tracing::warn!("java launch resolve failed, retrying once: {e:#}");
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            plan.launch = java_launch_from_jdtls(ws, &main_class, rel_path, stop_on_entry)
-                .with_context(|| format!("after prebuild: {e:#}"))?;
-            Ok(())
+            match java_launch_from_jdtls(ws, &main_class, rel_path, stop_on_entry) {
+                Ok(launch) => {
+                    plan.launch = launch;
+                    Ok(())
+                }
+                Err(e2) => {
+                    if let Some(fallback) =
+                        plain_java_launch_fallback(ws, &main_class, rel_path, stop_on_entry)
+                    {
+                        tracing::warn!(
+                            "java launch retry failed; using .reaper/java-out: {e2:#}"
+                        );
+                        plan.launch = fallback;
+                        Ok(())
+                    } else {
+                        Err(e2).with_context(|| format!("after prebuild: {e:#}"))
+                    }
+                }
+            }
         }
     }
 }
@@ -1029,6 +1120,71 @@ mod tests {
         assert!(!cmd.contains("org.gradle.caching=false"));
         assert!(cmd.contains("org.gradle.java.compile.options.debug=true"));
         assert!(cmd.contains("classes -x test"));
+    }
+
+    #[test]
+    fn plain_java_javac_prebuild_uses_debug_symbols() {
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-plain-java-debug-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let rel = "src/Hello.java";
+        std::fs::write(
+            dir.join(rel),
+            "public class Hello { public static void main(String[] a) {} }\n",
+        )
+        .unwrap();
+        let project = crate::workspace::run_project::RunProjectInfo::default();
+        let (cwd, cmd) = java_compile_prebuild(&dir, rel, &project).expect("plain prebuild");
+        assert_eq!(cwd, dir);
+        assert!(cmd.contains(".reaper/java-out"), "{cmd}");
+        assert!(cmd.contains(" -g "), "{cmd}");
+        assert!(cmd.contains("src/Hello.java") || cmd.contains("'src/Hello.java'"), "{cmd}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_java_launch_fallback_uses_java_out() {
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-plain-java-fallback-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".reaper/java-out")).unwrap();
+        let launch =
+            plain_java_launch_fallback(&dir, "Hello", "src/Hello.java", true).expect("fallback");
+        assert_eq!(launch["mainClass"], "Hello");
+        assert_eq!(launch["stopOnEntry"], true);
+        let cps = launch["classPaths"].as_array().unwrap();
+        assert!(
+            cps.iter()
+                .any(|v| v.as_str().is_some_and(|s| s.contains(".reaper/java-out"))),
+            "{launch}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_java_launch_fallback_skips_maven_projects() {
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-plain-java-skip-maven-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/main/java")).unwrap();
+        std::fs::create_dir_all(dir.join(".reaper/java-out")).unwrap();
+        std::fs::write(
+            dir.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion>
+            <groupId>t</groupId><artifactId>t</artifactId><version>1</version></project>"#,
+        )
+        .unwrap();
+        assert!(
+            plain_java_launch_fallback(&dir, "t.App", "src/main/java/App.java", true).is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

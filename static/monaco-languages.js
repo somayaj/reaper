@@ -1437,7 +1437,7 @@
   }
 
   /**
-   * Cursor after a natural line boundary for the active language.
+   * Caret after a natural line boundary for the active language.
    * Whitespace-only lines are not paused (empty-line templates / AI still apply).
    */
   function shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber, column) {
@@ -5873,6 +5873,117 @@
     }
   }
 
+  const JAVA_REFACTOR_KINDS = [
+    'refactor',
+    'refactor.extract',
+    'refactor.inline',
+    'refactor.rewrite',
+    'source',
+  ];
+
+  function isJavaEditorPath(helpers, model) {
+    const path = resolveEditorPath(helpers, model) || '';
+    return path.toLowerCase().endsWith('.java');
+  }
+
+  async function runJavaRefactor(editor, helpers) {
+    const model = editor.getModel();
+    if (!model || !isJavaEditorPath(helpers, model)) return;
+    const sel = editor.getSelection();
+    const pos = sel && !sel.isEmpty()
+      ? { lineNumber: sel.startLineNumber, column: sel.startColumn }
+      : editor.getPosition();
+    if (!pos) return;
+    const extra = { only: JAVA_REFACTOR_KINDS };
+    if (sel && !sel.isEmpty()) {
+      extra.end_line = sel.endLineNumber;
+      extra.end_column = sel.endColumn;
+    }
+    const cursorAnchor = (() => {
+      try {
+        const coords = editor.getScrolledVisiblePosition(pos);
+        const dom = editor.getDomNode();
+        if (!coords || !dom) return null;
+        const rect = dom.getBoundingClientRect();
+        const left = rect.left + coords.left;
+        const top = rect.top + coords.top;
+        return {
+          left,
+          top,
+          bottom: top + (coords.height || 16),
+          right: left + 1,
+          width: 1,
+          height: coords.height || 16,
+          getBoundingClientRect() {
+            return {
+              left: this.left,
+              top: this.top,
+              bottom: this.bottom,
+              right: this.right,
+              width: this.width,
+              height: this.height,
+            };
+          },
+        };
+      } catch {
+        return null;
+      }
+    })();
+    try {
+      helpers.hideQuickFixMenu?.();
+      const actions = await withNavigationBusy(helpers, 'Loading refactorings…', async () => (
+        await postWorkspaceLsp(helpers, model, pos, '/workspace/java/code-actions', extra)
+      )) || [];
+      const actionable = (actions || []).filter((a) => a?.edits?.length);
+      if (!actionable.length) {
+        if (helpers.isJdtlsReady && !helpers.isJdtlsReady()) {
+          helpers.toast?.('Java language server still indexing…', 'info');
+        } else {
+          helpers.toast?.('No refactorings available here', 'info');
+        }
+        return;
+      }
+      helpers.markJdtlsReady?.();
+      const menuItems = actionable.map((a) => ({
+        title: a.title || 'Refactor',
+        provider: 'local',
+        edits: a.edits,
+        kind: a.kind,
+      }));
+      const applyPicked = async (picked) => {
+        try {
+          const changed = await helpers.applyJavaWorkspaceEdits?.(picked.edits);
+          helpers.toast?.(
+            changed
+              ? `Applied: ${picked.title || 'Refactor'} (${changed} file${changed === 1 ? '' : 's'})`
+              : 'No changes from refactoring',
+            changed ? 'success' : 'info',
+          );
+          if (changed) {
+            (helpers.refreshDiagnosticsAfterFix || helpers.scheduleDiagnostics)?.();
+          }
+        } catch (err) {
+          helpers.toast?.(err?.message || 'Refactor failed', 'error');
+        }
+      };
+      if (menuItems.length === 1) {
+        await applyPicked(menuItems[0]);
+        return;
+      }
+      if (helpers.showRefactorStaircaseMenu) {
+        helpers.showRefactorStaircaseMenu(menuItems, (picked) => {
+          void applyPicked(picked);
+        }, cursorAnchor);
+      } else {
+        helpers.showQuickFixMenu?.(menuItems, (picked) => {
+          void applyPicked(picked);
+        }, cursorAnchor);
+      }
+    } catch (err) {
+      helpers.toast?.(err?.message || 'Refactor failed', 'error');
+    }
+  }
+
   async function runRename(editor, helpers) {
     const model = editor.getModel();
     const pos = editor.getPosition();
@@ -9265,13 +9376,27 @@
     });
 
     editor.addAction({
+      id: 'reaper.javaRefactor',
+      label: 'Refactor…',
+      keybindings: [
+        monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyR,
+      ],
+      precondition: 'editorLangId == java',
+      // Use Monaco's numbered modification group so this sits after Navigation,
+      // not as the first context-menu section (plain "modification" sorts first).
+      contextMenuGroupId: '1_modification',
+      contextMenuOrder: 1.5,
+      run: () => runJavaRefactor(editor, helpers),
+    });
+
+    editor.addAction({
       id: 'reaper.organizeImports',
       label: 'Organize Imports',
       keybindings: [
         monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyO,
       ],
-      contextMenuGroupId: 'modification',
-      contextMenuOrder: 1.5,
+      contextMenuGroupId: '1_modification',
+      contextMenuOrder: 2.0,
       run: () => runJavaOrganizeImports(editor, helpers),
     });
 

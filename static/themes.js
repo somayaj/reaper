@@ -491,6 +491,7 @@
     getMonacoThemeId,
     syncMonacoOverflowWidgetTheme,
     initThemes,
+    listThemes: () => THEMES.map((t) => ({ id: t.id, label: t.label, dark: t.dark })),
   };
 
   if (document.readyState === 'loading') {

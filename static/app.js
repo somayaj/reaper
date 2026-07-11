@@ -590,6 +590,7 @@ const state = {
   anthropicConfigured: false,
   javaLanguageLevel: 17,
   languageContext: null,
+  jdtlsReady: false,
   geminiModel: 'gemini-3.5-flash',
   pendingCommitSuggest: false,
   commitSuggestInFlight: false,
@@ -1388,9 +1389,15 @@ function requestRepoSelection(repoName, { revertSelect = true } = {}) {
 
 function updateWindowTitle() {
   const project = state.repo || '';
-  document.title = project ? `Reaper — ${project}` : 'Reaper';
   const el = $('#window-title-project');
   if (el) el.textContent = project;
+  // Live screenshot capture uses the window title as a ready signal.
+  if (window.__reaperCapturePhase === 'busy' || window.__reaperCapturePhase === 'ready') {
+    const id = window.__reaperDemoNavId || '';
+    document.title = `Reaper · ${window.__reaperCapturePhase}:${id}`;
+    return;
+  }
+  document.title = project ? `Reaper — ${project}` : 'Reaper';
 }
 
 function getInitialRepoFromUrl() {
@@ -1409,15 +1416,65 @@ function shouldShowWelcomeShowcase() {
 async function applyCaptureDemoFromUrl() {
   const params = new URLSearchParams(window.location.search);
   if (!params.has('capture')) return;
+  window.__reaperCaptureDone = false;
   dismissLaunchSplashNow();
-  await new Promise((r) => setTimeout(r, 1500));
+  // Product-demo default: Deep Navy (override with ?theme=…).
+  window.ReaperThemes?.applyTheme?.(params.get('theme') || 'navy');
+  await new Promise((r) => setTimeout(r, 800));
   const mode = params.get('capture');
+  const hold = async (ms) => { await new Promise((r) => setTimeout(r, ms)); };
+
+  const wantRepo = params.get('repo')?.trim();
+  if (wantRepo) {
+    for (let i = 0; i < 60 && state.repo !== wantRepo; i++) await hold(250);
+    await hold(600);
+  }
+
+  const seedDebugStopped = (filePath) => {
+    const file = filePath || state.activeTab || 'OrderController.java';
+    const short = file.split('/').pop() || file;
+    state.debugActive = true;
+    state.debugPanelOpen = true;
+    state.debugCapabilities = { supported: true, language: 'Java', adapter: 'java' };
+    state.debugState = {
+      status: 'stopped',
+      stop_reason: 'breakpoint',
+      language: 'Java',
+      adapter: 'Java Debug',
+      message: null,
+      frames: [
+        { id: 1, name: 'create', path: file, line: 22, column: 5 },
+        { id: 2, name: 'invoke0', path: 'jdk.internal.reflect.NativeMethodAccessorImpl', line: 77, column: 1 },
+        { id: 3, name: 'doFilter', path: 'org.apache.catalina.core.ApplicationFilterChain', line: 168, column: 1 },
+      ],
+      variables: [
+        { name: 'this', value: `${short.replace('.java', '')}@4a3f2c1` },
+        { name: 'request', value: 'CreateOrderRequest(sku="SKU-1", qty=2)' },
+        { name: 'orderService', value: 'OrderService@1b2c3d4' },
+        { name: 'id', value: '"ord-1001"' },
+      ],
+    };
+    state.debugWatch = [
+      { expr: 'request.qty()', value: '2' },
+      { expr: 'orderService', value: 'OrderService@1b2c3d4' },
+    ];
+    const key = normalizeDebugBreakpointPath(file);
+    state.debugBreakpoints = new Map([[key, new Set([18, 22, 31])]]);
+    applyDebugPanelLayout();
+    renderDebugPanel();
+    renderBreakpointGlyphs();
+    $('#tb-debug')?.classList.remove('hidden');
+    syncDebugToolbar();
+  };
+
+  try {
   if (mode === 'file') {
     const path = params.get('path')?.trim();
     if (path && state.repo) await openFile(path, { silent: true });
-    await new Promise((r) => setTimeout(r, 3500));
+    await hold(Number(params.get('hold') || 3500));
     return;
   }
+
   if (mode === 'panel') {
     const panel = params.get('panel');
     if (panel === 'agent') {
@@ -1425,27 +1482,436 @@ async function applyCaptureDemoFromUrl() {
       else switchPanel('agent');
     } else if (panel === 'terminal') {
       showTerminal();
+    } else if (panel === 'coverage') {
+      showCoveragePanel();
+      await hold(800);
+      await refreshCoveragePanel(state.activeTab);
+    } else if (panel === 'debug') {
+      showDebugPanel();
+    } else if (panel === 'db' || panel === 'db-viewer') {
+      showDbViewerPanel();
+    } else if (panel === 'git-viewer' || panel === 'git-console') {
+      showGitViewerPanel();
+    } else if (panel === 'docker' || panel === 'docker-logs') {
+      showDockerLogsPanel();
+    } else if (panel === 'build-tasks') {
+      showBuildTasksPanel();
+    } else if (panel === 'package-manifest') {
+      showPackageManifestPanel();
     } else if (panel) {
       switchPanel(panel);
     }
-    await new Promise((r) => setTimeout(r, panel === 'history' ? 3000 : 2000));
+    await hold(Number(params.get('hold') || (panel === 'history' || panel === 'build-tasks' ? 3500 : 2200)));
     return;
   }
+
   if (mode === 'feature') {
     const feature = params.get('feature');
+    const path = params.get('path')?.trim();
+    if (path && state.repo) {
+      await openFile(path, { silent: true });
+      await hold(1500);
+    }
+
     if (feature === 'build-tasks') {
       showBuildTasksPanel();
-      await new Promise((r) => setTimeout(r, 5000));
+      await hold(5000);
+    } else if (feature === 'package-manifest') {
+      showPackageManifestPanel();
+      await hold(3000);
     } else if (feature === 'search') {
       showSearchEverywhere(params.get('q') || 'Order');
-      await new Promise((r) => setTimeout(r, 2500));
+      await hold(2500);
     } else if (feature === 'palette') {
       showPalette();
-      await new Promise((r) => setTimeout(r, 1500));
+      await hold(2000);
     } else if (feature === 'go-to-class') {
       showGoToClass(params.get('q') || 'Order');
-      await new Promise((r) => setTimeout(r, 2500));
+      await hold(2500);
+    } else if (feature === 'go-to-line') {
+      showGoToLine();
+      await hold(2000);
+    } else if (feature === 'branch') {
+      showBranchPicker();
+      await hold(2500);
+    } else if (feature === 'repo-info') {
+      await showRepoInfoModal();
+      await hold(2500);
+    } else if (feature === 'publish') {
+      showPublishModal();
+      await hold(2200);
+    } else if (feature === 'clone' || feature === 'import') {
+      showCloneModal();
+      await hold(2200);
+    } else if (feature === 'new-repo') {
+      showModal();
+      await hold(2000);
+    } else if (feature === 'new-file') {
+      showFileModal();
+      await hold(2000);
+    } else if (feature === 'settings') {
+      await showSettingsModal(params.get('tab') || 'git');
+      await hold(2500);
+    } else if (feature === 'theme' || feature === 'theme-select') {
+      const themeId = params.get('theme') || 'navy';
+      window.ReaperThemes?.applyTheme?.(themeId);
+      await hold(400);
+      document.getElementById('reaper-capture-theme-panel')?.remove();
+      const themes = window.ReaperThemes?.listThemes?.() || [
+        { id: 'darcula', label: 'Darcula (Classic)' },
+        { id: 'charcoal', label: 'Charcoal Dark' },
+        { id: 'navy', label: 'Deep Navy' },
+        { id: 'blueblack', label: 'Blue & Black' },
+        { id: 'offwhite', label: 'Off-White Light' },
+        { id: 'mono', label: 'Black & White' },
+      ];
+      const active = window.ReaperThemes?.getStoredTheme?.() || themeId;
+      const panel = document.createElement('div');
+      panel.id = 'reaper-capture-theme-panel';
+      panel.setAttribute('role', 'listbox');
+      panel.setAttribute('aria-label', 'Color theme');
+      panel.style.cssText = [
+        'position:fixed', 'right:24px', 'bottom:48px', 'z-index:2147483646',
+        'min-width:260px', 'padding:10px 0',
+        'background:var(--ij-panel,#2b2d30)', 'color:var(--ij-text,#bcbec4)',
+        'border:1px solid var(--ij-border,#3a3f4b)', 'border-radius:10px',
+        'box-shadow:0 12px 32px rgba(0,0,0,.45)',
+        'font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+      ].join(';');
+      panel.innerHTML = `<div style="padding:4px 14px 10px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;opacity:.7">Color theme</div>${
+        themes.map((t) => {
+          const on = t.id === active;
+          return `<div role="option" aria-selected="${on ? 'true' : 'false'}" style="padding:8px 14px;display:flex;justify-content:space-between;gap:16px;${on ? 'background:rgba(110,181,255,.16);color:#fff' : ''}">
+            <span>${String(t.label || t.id).replace(/</g, '&lt;')}</span>
+            ${on ? '<span style="opacity:.85">✓</span>' : ''}
+          </div>`;
+        }).join('')
+      }`;
+      document.body.appendChild(panel);
+      $('#theme-select')?.focus();
+      await hold(2800);
+    } else if (feature === 'theme-cycle') {
+      const ids = (params.get('themes') || 'navy,darcula,charcoal,blueblack,offwhite,mono').split(',').map((s) => s.trim()).filter(Boolean);
+      for (const id of ids) {
+        window.ReaperThemes?.applyTheme?.(id);
+        await hold(900);
+      }
+      window.ReaperThemes?.applyTheme?.('navy');
+    } else if (feature === 'coverage') {
+      showCoveragePanel();
+      await hold(500);
+      const covPath = state.activeTab;
+      const summary = await refreshCoveragePanel(covPath);
+      if (covPath && state.repo) {
+        try {
+          const cov = await api(
+            `${repoApi(state.repo, '/workspace/coverage')}?path=${encodeURIComponent(stripJavaDiagOverlayPath(covPath))}`,
+          );
+          if (cov?.lines?.length) {
+            applyCoverageDecorations(covPath, cov);
+            updateCoverageStatus(cov);
+          }
+        } catch { /* panel still shows report */ }
+      }
+      if (!summary?.files?.length && !summary?.totals) {
+        renderCoveragePanel({
+          project_root: state.repo,
+          query_path: covPath,
+          totals: { lines: { covered: 42, missed: 18, total: 60, rate: 0.7 }, branches: { covered: 8, missed: 4, total: 12, rate: 0.67 } },
+          current_file: { path: covPath, name: (covPath || '').split('/').pop(), lines: { covered: 18, missed: 6, total: 24, rate: 0.75 } },
+          files: [
+            { path: covPath, name: (covPath || 'File.java').split('/').pop(), lines: { covered: 18, missed: 6, total: 24, rate: 0.75 } },
+          ],
+          report_path: 'target/site/jacoco/jacoco.xml',
+        });
+      }
+      await hold(3200);
+    } else if (feature === 'debug' || feature === 'debug-stopped') {
+      seedDebugStopped(path || state.activeTab);
+      if (state.editor && state.debugState.frames?.[0]?.line) {
+        state.editor.setPosition({ lineNumber: state.debugState.frames[0].line, column: 1 });
+        highlightDebugCurrentLine();
+      }
+      await hold(3200);
+    } else if (feature === 'debug-panel') {
+      state.debugActive = false;
+      state.debugState = { status: 'idle', frames: [], variables: [], breakpoints: [] };
+      showDebugPanel();
+      $('#tb-debug')?.classList.remove('hidden');
+      syncDebugToolbar();
+      await hold(2500);
+    } else if (feature === 'debug-controls' || feature === 'debug-toolbar') {
+      seedDebugStopped(path || state.activeTab);
+      await hold(2800);
+    } else if (feature === 'debug-breakpoints') {
+      const file = path || state.activeTab;
+      const key = normalizeDebugBreakpointPath(file);
+      state.debugBreakpoints = new Map([[key, new Set([12, 18, 22, 31, 40])]]);
+      state.debugPanelOpen = true;
+      applyDebugPanelLayout();
+      renderDebugBreakpointsList();
+      renderBreakpointGlyphs();
+      showDebugPanel();
+      $('#tb-debug')?.classList.remove('hidden');
+      await hold(2800);
+    } else if (feature === 'debug-watch') {
+      seedDebugStopped(path || state.activeTab);
+      state.debugWatch = [
+        { expr: 'request.qty()', value: '2' },
+        { expr: 'id', value: '"ord-1001"' },
+        { expr: 'orderService.getClass().getSimpleName()', value: '"OrderService"' },
+      ];
+      renderDebugWatchList();
+      await hold(2800);
+    } else if (feature === 'db' || feature === 'db-viewer') {
+      showDbViewerPanel();
+      await hold(2800);
+    } else if (feature === 'git-viewer' || feature === 'git-console') {
+      showGitViewerPanel();
+      await hold(2800);
+    } else if (feature === 'docker' || feature === 'docker-logs') {
+      showDockerLogsPanel();
+      await hold(2800);
+    } else if (feature === 'blame') {
+      if (!state.blameEnabled) $('#tb-blame')?.click();
+      await hold(2500);
+    } else if (feature === 'ai-fix' || feature === 'quickfix') {
+      const pop = $('#ai-quickfix-popover');
+      if (pop) {
+        pop.classList.remove('hidden', 'ij-cascade-popover');
+        pop.innerHTML = [
+          '<button type="button" class="ij-quickfix-item">AI: Suggest fix</button>',
+          '<button type="button" class="ij-quickfix-item">Local: Organize imports</button>',
+          '<button type="button" class="ij-quickfix-item">Local: Create method</button>',
+        ].join('');
+        positionPopoverNearAnchor(pop, aiFixMenuAnchor());
+      }
+      await hold(2500);
+    } else if (feature === 'refactor') {
+      let menuItems = [];
+      try {
+        const pos = state.editor?.getPosition?.();
+        if (state.repo && pos && state.activeTab) {
+          const body = {
+            path: stripJavaDiagOverlayPath(state.activeTab),
+            line: pos.lineNumber,
+            column: pos.column,
+            only: ['refactor', 'refactor.extract', 'refactor.inline', 'refactor.rewrite', 'source'],
+          };
+          const actions = await api(repoApi(state.repo, '/workspace/java/code-actions'), {
+            method: 'POST',
+            body: JSON.stringify(body),
+            timeoutMs: 20_000,
+          });
+          menuItems = (actions || [])
+            .filter((a) => a?.title)
+            .slice(0, 12)
+            .map((a) => ({
+              title: a.title || 'Refactor',
+              provider: 'local',
+              edits: a.edits?.length ? a.edits : [{ path: 'demo', range: {}, newText: '' }],
+              kind: a.kind,
+            }));
+        }
+      } catch { /* fall through */ }
+      if (!menuItems.length) {
+        menuItems = [
+          { title: 'Extract Method', kind: 'refactor.extract.function', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Extract Variable', kind: 'refactor.extract.variable', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Extract Constant', kind: 'refactor.extract.constant', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Inline Variable', kind: 'refactor.inline', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Inline Method', kind: 'refactor.inline', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Convert anonymous to nested', kind: 'refactor.rewrite', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+          { title: 'Organize Imports', kind: 'source.organizeImports', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+        ];
+      }
+      showRefactorStaircaseMenu(menuItems, () => {}, aiFixMenuAnchor());
+      await hold(3200);
+    } else if (feature === 'rename') {
+      void showRenamePrompt({ title: 'Rename', subtitle: 'Symbol', value: 'orderService' });
+      await hold(2200);
+    } else if (feature === 'find-usages') {
+      showJavaReferences([
+        { path: path || 'OrderController.java', line: 12, preview: 'orderService.create(order)' },
+        { path: path || 'OrderService.java', line: 40, preview: 'public Order create(Order order)' },
+      ], 'Find Usages');
+      await hold(2500);
+    } else if (feature === 'rebase') {
+      switchPanel('history');
+      showRebasePanel();
+      await hold(2500);
+    } else if (feature === 'font') {
+      await showSettingsModal('appearance');
+      $('#settings-editor-font-size')?.focus();
+      await hold(2500);
+    } else if (feature === 'toolbar') {
+      $('#tb-debug')?.classList.remove('hidden');
+      $('#tb-blame')?.classList.remove('hidden');
+      await hold(2000);
+    } else if (feature === 'push') {
+      try {
+        await showPushModal();
+      } catch { /* preview may fail without remote */ }
+      // Seed a visible push preview if the live preview is empty/failed.
+      const body = $('#push-modal-body');
+      if (body && (!body.innerHTML || body.innerHTML.includes('Loading') || body.innerHTML.length < 40)) {
+        body.innerHTML = `
+          <div class="ij-push-preview">
+            <p class="ij-push-summary"><strong>main</strong> → <code>origin/main</code> · 2 commits ahead</p>
+            <ul class="ij-push-file-list panel-scroll">
+              <li>M  services/order-service/.../OrderController.java</li>
+              <li>A  services/order-service/.../OrderService.java</li>
+            </ul>
+          </div>`;
+        $('#push-modal-overlay')?.classList.remove('hidden');
+        $('#push-modal-overlay')?.classList.add('flex');
+        const confirm = $('#push-modal-confirm');
+        if (confirm) { confirm.disabled = false; confirm.textContent = 'Push'; }
+      }
+      await hold(2800);
+    } else if (feature === 'diff') {
+      showDiffInMainArea('OrderController.java', [
+        '--- a/OrderController.java',
+        '+++ b/OrderController.java',
+        '@@ -20,7 +20,10 @@',
+        ' @RequiredArgsConstructor',
+        ' public class OrderController {',
+        '-    private final OrderService orderService;',
+        '+    private final OrderService orderService;',
+        '+',
+        '+    /** Create a new order. */',
+        '     @PostMapping',
+        '     public ResponseEntity<ApiResponse<OrderResponse>> create(',
+      ].join('\n'));
+      await hold(2800);
+    } else if (feature === 'conflict') {
+      const sample = [
+        'package com.example.order.web;',
+        '',
+        'public class OrderController {',
+        '<<<<<<< HEAD',
+        '    private final OrderService orderService;',
+        '=======',
+        '    private final OrderService orders;',
+        '>>>>>>> feature/rename',
+        '}',
+      ].join('\n');
+      const conflictPath = path || state.activeTab || 'OrderController.java';
+      if (state.editor) {
+        state.editor.setValue(sample);
+        state.conflictFiles = new Set([conflictPath]);
+        state.conflictPanelHidden = false;
+        updateConflictUi();
+      }
+      await hold(3000);
+    } else if (feature === 'secrets') {
+      const findings = [
+        { path: '.env', line: 2, reason: 'AWS access key pattern' },
+        { path: 'config/secrets.yml', line: 8, reason: 'Private key block' },
+      ];
+      await showPushModal().catch(() => {});
+      const body = $('#push-modal-body');
+      if (body) {
+        body.innerHTML = `${renderSecretWarningsHtml(findings)}
+          <div class="ij-push-preview" style="margin-top:12px">
+            <p class="ij-push-summary">Review secrets before push</p>
+          </div>`;
+        $('#push-modal-overlay')?.classList.remove('hidden');
+        $('#push-modal-overlay')?.classList.add('flex');
+      }
+      await hold(2800);
+    } else if (feature === 'import-local' || feature === 'clone-local') {
+      showCloneModal('local');
+      await hold(2500);
+    } else if (feature === 'repo-picker' || feature === 'open-repo') {
+      showRepoPicker();
+      await hold(2200);
+    } else if (feature === 'inline-complete' || feature === 'ghost-text') {
+      document.getElementById('reaper-capture-ghost')?.remove();
+      const ghost = document.createElement('div');
+      ghost.id = 'reaper-capture-ghost';
+      ghost.setAttribute('aria-label', 'Inline AI completion');
+      ghost.style.cssText = [
+        'position:fixed', 'left:42%', 'top:38%', 'z-index:2147483645',
+        'font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace',
+        'color:rgba(180,190,200,.55)', 'pointer-events:none',
+        'background:rgba(20,28,40,.72)', 'padding:10px 14px', 'border-radius:8px',
+        'border:1px solid rgba(110,181,255,.25)', 'max-width:420px',
+      ].join(';');
+      ghost.innerHTML = '<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.7;margin-bottom:6px">Inline completion</div>'
+        + '<span style="color:#c8cdd3">return orderService.create(request);</span>';
+      document.body.appendChild(ghost);
+      await hold(2800);
+    } else if (feature === 'format') {
+      toast('Reformatted OrderController.java', 'success');
+      await hold(2200);
+    } else if (feature === 'organize-imports') {
+      showRefactorStaircaseMenu([
+        { title: 'Organize Imports', kind: 'source.organizeImports', edits: [{ path: 'demo', range: {}, newText: '' }], provider: 'local' },
+      ], () => {}, aiFixMenuAnchor());
+      await hold(2500);
+    } else if (feature === 'run' || feature === 'gutter-run') {
+      $('#tb-run')?.classList.remove('hidden');
+      $('#tb-debug')?.classList.remove('hidden');
+      if ($('#tb-run')) $('#tb-run').disabled = false;
+      showTerminal();
+      try {
+        terminalLog('> ./gradlew :order-service:bootRun\n');
+        terminalLog('BUILD SUCCESSFUL in 4s\n');
+        terminalLog('Started OrderServiceApplication in 2.1 seconds\n');
+      } catch { /* ignore */ }
+      await hold(2800);
+    } else if (feature === 'cherry-pick') {
+      switchPanel('history');
+      await hold(800);
+      // Ensure cherry-pick actions are visible in the log list.
+      const list = $('#commit-history');
+      if (list && !list.innerHTML.includes('cherry-pick')) {
+        list.innerHTML = `
+          <div class="ij-commit-row">
+            <div class="ij-commit-meta"><code>a1b2c3d</code> · main · 2 hours ago</div>
+            <div class="ij-commit-msg">Add order create endpoint</div>
+            <button type="button" class="ij-commit-action" data-action="cherry-pick">Cherry-pick</button>
+          </div>
+          <div class="ij-commit-row">
+            <div class="ij-commit-meta"><code>d4e5f6a</code> · main · yesterday</div>
+            <div class="ij-commit-msg">Wire OrderService</div>
+            <button type="button" class="ij-commit-action" data-action="cherry-pick">Cherry-pick</button>
+          </div>`;
+      }
+      await hold(2800);
+    } else if (feature === 'agent-providers' || feature === 'multi-provider') {
+      if (state.agentDock !== 'left') toggleAgent();
+      else switchPanel('agent');
+      await hold(400);
+      document.getElementById('reaper-capture-providers')?.remove();
+      const panel = document.createElement('div');
+      panel.id = 'reaper-capture-providers';
+      panel.style.cssText = [
+        'position:fixed', 'right:28px', 'top:120px', 'z-index:2147483646',
+        'min-width:240px', 'padding:10px 0',
+        'background:var(--ij-panel,#2b2d30)', 'color:var(--ij-text,#bcbec4)',
+        'border:1px solid var(--ij-border,#3a3f4b)', 'border-radius:10px',
+        'box-shadow:0 12px 32px rgba(0,0,0,.45)',
+        'font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+      ].join(';');
+      panel.innerHTML = `<div style="padding:4px 14px 10px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;opacity:.7">Agent provider</div>
+        <div style="padding:8px 14px;background:rgba(110,181,255,.16);color:#fff;display:flex;justify-content:space-between"><span>Cursor agent</span><span>✓</span></div>
+        <div style="padding:8px 14px">Gemini agent</div>
+        <div style="padding:8px 14px">Claude (Anthropic)</div>`;
+      document.body.appendChild(panel);
+      await hold(2800);
+    } else if (feature === 'terminal-bottom') {
+      setTerminalDock('bottom');
+      showTerminal();
+      await hold(2500);
+    } else if (feature === 'jdk' || feature === 'toolchain') {
+      await showSettingsModal('compilers');
+      await hold(2500);
     }
+  }
+  } finally {
+    window.__reaperCaptureDone = true;
   }
 }
 
@@ -5006,6 +5472,7 @@ const PALETTE_COMMANDS = [
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
   { id: 'find-usages', label: 'Find Usages', kbd: 'Alt+F7', run: () => runEditorMonacoAction('reaper.findUsages'), needsTab: true },
   { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
+  { id: 'java-refactor', label: 'Refactor…', kbd: '⇧⌥R', run: () => runEditorMonacoAction('reaper.javaRefactor'), needsTab: true },
   { id: 'change-all', label: 'Change All Occurrences', kbd: '⌘⌃G', run: () => runEditorMonacoAction('reaper.changeAllOccurrences'), needsTab: true },
   { id: 'run', label: 'Run', kbd: 'F5', run: runActive, needsRun: true },
   { id: 'debug', label: 'Debug', kbd: 'F6', run: () => void startDebugSession(), needsRun: true },
@@ -10721,6 +11188,8 @@ function initEditor() {
       getCursorInlineAvailable: () => state.cursorConfigured && state.cursorBridgeOk,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
+      isJdtlsReady: () => !!state.jdtlsReady,
+      markJdtlsReady: () => { state.jdtlsReady = true; },
       getActiveTabContent: () => {
         if (!state.activeTab) return '';
         return state.tabContents.get(state.activeTab) ?? state.editor?.getModel()?.getValue() ?? '';
@@ -10732,6 +11201,7 @@ function initEditor() {
       runWithNavigationBusy,
       showNavigationResult,
       showQuickFixMenu,
+      showRefactorStaircaseMenu,
       hideQuickFixMenu,
       isQuickFixMenuOpen,
       scheduleDiagnostics: () => scheduleDiagnostics(),
@@ -10891,9 +11361,13 @@ async function hydrateRepoWorkspace(name, opened, token) {
     setGlobalLoading(false);
 
     if (opened?.jdtls?.warming) {
+      state.jdtlsReady = false;
       terminalLog('Starting Java language server…');
     } else if (opened?.jdtls?.ready) {
+      state.jdtlsReady = true;
       terminalLog('Java language server ready');
+    } else {
+      state.jdtlsReady = !!opened?.jdtls?.ready;
     }
 
     void refreshGitStatus().catch((err) => {
@@ -11033,6 +11507,7 @@ function showNoRepoFileTree() {
 
 function resetUI() {
   state.treeNavAnchor = null;
+  state.jdtlsReady = false;
   resetTerminalCwds();
   updateTreeBackButton();
   stopProjectIndexPolling();
@@ -13541,7 +14016,11 @@ function updateDiagnosticsStatusBar(path, diags) {
 
 function hideQuickFixMenu() {
   const pop = $('#ai-quickfix-popover');
-  if (pop) pop.classList.add('hidden');
+  if (pop) {
+    pop.classList.add('hidden');
+    pop.classList.remove('ij-cascade-popover');
+    pop.innerHTML = '';
+  }
 }
 
 function isQuickFixMenuOpen() {
@@ -13558,10 +14037,38 @@ function quickFixMenuLabel(f) {
   return `${src}: ${title}`;
 }
 
+function positionPopoverNearAnchor(pop, anchorEl) {
+  const anchor = anchorEl || aiFixMenuAnchor();
+  if (!pop || !anchor) return;
+  const rect = typeof anchor.getBoundingClientRect === 'function'
+    ? anchor.getBoundingClientRect()
+    : {
+        left: Number(anchor.left) || 8,
+        top: Number(anchor.top) || 8,
+        bottom: Number(anchor.bottom ?? ((Number(anchor.top) || 8) + (Number(anchor.height) || 16))),
+        right: Number(anchor.right ?? ((Number(anchor.left) || 8) + 1)),
+        width: Number(anchor.width) || 1,
+        height: Number(anchor.height) || 16,
+      };
+  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 260))}px`;
+  if (rect.top < 72) {
+    pop.style.top = `${rect.bottom + 6}px`;
+  } else {
+    pop.style.top = `${rect.top - 8}px`;
+    requestAnimationFrame(() => {
+      const popRect = pop.getBoundingClientRect();
+      pop.style.top = `${Math.max(8, rect.top - popRect.height - 6)}px`;
+      if (parseFloat(pop.style.top) < 8) {
+        pop.style.top = `${rect.bottom + 6}px`;
+      }
+    });
+  }
+}
+
 function showQuickFixMenu(fixes, onPick, anchorEl) {
   const pop = $('#ai-quickfix-popover');
-  const anchor = anchorEl || aiFixMenuAnchor();
   if (!pop || !fixes?.length) return;
+  pop.classList.remove('ij-cascade-popover');
   pop.innerHTML = fixes.map((f, i) => {
     const title = quickFixMenuLabel(f);
     const loading = f?.provider === 'loading' || !f?.edits?.length;
@@ -13571,28 +14078,81 @@ function showQuickFixMenu(fixes, onPick, anchorEl) {
     return `<button type="button" class="ij-quickfix-item" data-idx="${i}">${title}</button>`;
   }).join('');
   pop.classList.remove('hidden');
-  if (anchor) {
-    const rect = anchor.getBoundingClientRect();
-    pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 240))}px`;
-    if (rect.top < 72) {
-      pop.style.top = `${rect.bottom + 6}px`;
-    } else {
-      pop.style.top = `${rect.top - 8}px`;
-      requestAnimationFrame(() => {
-        const popRect = pop.getBoundingClientRect();
-        pop.style.top = `${Math.max(8, rect.top - popRect.height - 6)}px`;
-        if (parseFloat(pop.style.top) < 8) {
-          pop.style.top = `${rect.bottom + 6}px`;
-        }
-      });
-    }
-  }
+  positionPopoverNearAnchor(pop, anchorEl);
   pop.querySelectorAll('.ij-quickfix-item:not(.ij-quickfix-item--loading)').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const fix = fixes[Number(btn.dataset.idx)];
       hideQuickFixMenu();
       if (fix?.edits?.length) onPick(fix);
+    });
+  });
+}
+
+/** Group jdtls refactor actions for the picker (Extract → …). */
+function refactorMenuCategory(item) {
+  const kind = String(item?.kind || '').toLowerCase();
+  const title = String(item?.title || '');
+  if (kind.startsWith('refactor.extract') || /\bextract\b/i.test(title)) return 'Extract';
+  if (kind.startsWith('refactor.inline') || /\binline\b/i.test(title)) return 'Inline';
+  if (kind.startsWith('refactor.rewrite') || /change signature|convert|rewrite/i.test(title)) return 'Rewrite';
+  if (kind.startsWith('source')) return 'Source';
+  if (kind.startsWith('refactor')) return 'Refactor';
+  return 'More';
+}
+
+const REFACTOR_MENU_ORDER = ['Extract', 'Inline', 'Rewrite', 'Refactor', 'Source', 'More'];
+
+/**
+ * Refactor picker: flat list with section headings (same chrome as quick-fix).
+ * Click an action to apply — no nested / cascading panels.
+ */
+function showRefactorStaircaseMenu(items, onPick, anchorEl) {
+  const pop = $('#ai-quickfix-popover');
+  if (!pop || !items?.length) return;
+
+  const groups = new Map();
+  for (const item of items) {
+    const cat = refactorMenuCategory(item);
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(item);
+  }
+  const categories = REFACTOR_MENU_ORDER.filter((c) => groups.has(c));
+  if (!categories.length) return;
+
+  if (items.length === 1) {
+    onPick(items[0]);
+    return;
+  }
+
+  // Flat list — skip headings when everything is one category.
+  const flatOnly = categories.length === 1;
+  const rows = [];
+  for (const cat of categories) {
+    if (!flatOnly) {
+      rows.push({ type: 'heading', label: cat });
+    }
+    for (const item of groups.get(cat)) {
+      rows.push({ type: 'item', item });
+    }
+  }
+
+  pop.classList.remove('ij-cascade-popover');
+  pop.innerHTML = rows.map((row, i) => {
+    if (row.type === 'heading') {
+      return `<div class="ij-quickfix-heading">${String(row.label).replace(/</g, '&lt;')}</div>`;
+    }
+    const title = String(row.item.title || 'Refactor').replace(/</g, '&lt;');
+    return `<button type="button" class="ij-quickfix-item" data-row="${i}">${title}</button>`;
+  }).join('');
+  pop.classList.remove('hidden');
+  positionPopoverNearAnchor(pop, anchorEl);
+  pop.querySelectorAll('.ij-quickfix-item[data-row]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = rows[Number(btn.dataset.row)];
+      hideQuickFixMenu();
+      if (row?.type === 'item' && row.item?.edits?.length) onPick(row.item);
     });
   });
 }
@@ -13929,8 +14489,11 @@ function applyDiagnostics(path, diags) {
     ...diagnosticMarkerSpan(model, d),
     severity: d.severity === 'warning'
       ? monaco.MarkerSeverity.Warning
-      : monaco.MarkerSeverity.Error,
+      : (d.severity === 'info' || d.severity === 'hint')
+        ? monaco.MarkerSeverity.Info
+        : monaco.MarkerSeverity.Error,
     message: d.message,
+    source: d.source || undefined,
   }));
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
   updateDiagnosticsStatusBar(path, diags);
@@ -18352,6 +18915,16 @@ function toggleAgent() {
   }
 }
 
+function closeAgent() {
+  if (state.agentDock === 'left') {
+    if (state.activePanel === 'agent') switchPanel('explorer');
+    return;
+  }
+  if (!state.agentOpen) return;
+  state.agentOpen = false;
+  applyAgentDock();
+}
+
 async function clearAgentSession() {
   if (state.repo) {
     try {
@@ -19247,7 +19820,12 @@ async function init() {
   }
   void syncGitBackgroundFetchSetting();
   if (repoToOpen && state.repos.some((r) => r.name === repoToOpen)) {
-    void selectRepo(repoToOpen);
+    // Capture/demo URLs must wait for the workspace — otherwise screenshots are empty/stale chrome.
+    if (new URLSearchParams(window.location.search).has('capture')) {
+      await selectRepo(repoToOpen);
+    } else {
+      void selectRepo(repoToOpen);
+    }
   } else if (!state.repo) {
     showNoRepoFileTree();
   }
@@ -19260,6 +19838,118 @@ async function init() {
       await loadCursorStatus();
     }
   }, 3000);
+  startDemoNavPoller();
+}
+
+/** Close leftover capture chrome so the next demo shot starts clean. */
+function dismissCaptureChrome() {
+  try { hidePalette(); } catch { /* ignore */ }
+  try { hideSearchEverywhere(); } catch { /* ignore */ }
+  try { hideGoToClass(); } catch { /* ignore */ }
+  try { hideGoToLine(); } catch { /* ignore */ }
+  try { hideJavaReferences(); } catch { /* ignore */ }
+  try { hideRenamePrompt(null); } catch { /* ignore */ }
+  try { hideBranchPicker(); } catch { /* ignore */ }
+  try { hideRepoPicker(); } catch { /* ignore */ }
+  try { hideSettingsModal(); } catch { /* ignore */ }
+  try { hideModal(); } catch { /* ignore */ }
+  try { hideCloneModal(); } catch { /* ignore */ }
+  try { hidePublishModal(); } catch { /* ignore */ }
+  try { hidePushModal(); } catch { /* ignore */ }
+  try { hideRepoInfoModal(); } catch { /* ignore */ }
+  try { hideQuickFixMenu(); } catch { /* ignore */ }
+  try { hideCoveragePanel(); } catch { /* ignore */ }
+  try { setGlobalLoading(false); } catch { /* ignore */ }
+  try { setMainView('editor'); } catch { /* ignore */ }
+  document.getElementById('reaper-capture-theme-panel')?.remove();
+  document.getElementById('reaper-capture-ghost')?.remove();
+  document.getElementById('reaper-capture-providers')?.remove();
+}
+
+/**
+ * Soft-navigate for live macOS screenshots (no full reload → no splash).
+ * Signals readiness via POST http://127.0.0.1:17923 (capture sidecar) and document.title.
+ */
+async function signalDemoCapture(id, phase) {
+  window.__reaperDemoNavId = id;
+  window.__reaperCapturePhase = phase;
+  document.title = `Reaper · ${phase}:${id}`;
+  try {
+    await fetch('http://127.0.0.1:17923/demo-capture-status', {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, phase, t: Date.now() }),
+    });
+  } catch { /* sidecar only runs during live capture */ }
+}
+
+async function applyDemoNav(rawUrl, id) {
+  const next = new URL(rawUrl, window.location.href);
+  history.replaceState(null, '', `${next.pathname}${next.search}${next.hash}`);
+  window.__reaperCaptureDone = false;
+  await signalDemoCapture(id, 'busy');
+  dismissLaunchSplashNow();
+  dismissCaptureChrome();
+
+  const params = new URLSearchParams(next.search);
+  const norepo = params.has('norepo');
+  const wantRepo = params.get('repo')?.trim() || null;
+
+  try {
+    if (norepo) {
+      if (state.repo) await selectRepo('');
+      window.ReaperThemes?.applyTheme?.(params.get('theme') || 'navy');
+      renderWelcome();
+      $('#empty-state')?.classList.remove('hidden');
+      syncWelcomeLayout();
+      if (!params.has('capture')) {
+        await new Promise((r) => setTimeout(r, 1400));
+        window.__reaperCaptureDone = true;
+      }
+    } else if (wantRepo && state.repo !== wantRepo) {
+      await selectRepo(wantRepo);
+      await new Promise((r) => setTimeout(r, 700));
+    }
+
+    if (params.has('capture')) {
+      await applyCaptureDemoFromUrl();
+    } else if (!window.__reaperCaptureDone) {
+      window.ReaperThemes?.applyTheme?.(params.get('theme') || 'navy');
+      await new Promise((r) => setTimeout(r, 1200));
+      window.__reaperCaptureDone = true;
+    }
+  } catch (err) {
+    console.error('[demo-nav]', err);
+    window.__reaperCaptureDone = true;
+  } finally {
+    await signalDemoCapture(id, 'ready');
+  }
+}
+
+/** Poll /demo-nav.json so the live macOS app can be driven for screenshot capture. */
+function startDemoNavPoller() {
+  let lastId = null;
+  let busy = false;
+  const tick = async () => {
+    if (busy) return;
+    try {
+      const res = await fetch(`/demo-nav.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const id = data?.id;
+      const url = String(data?.url || '').trim();
+      if (!id || !url || id === lastId) return;
+      lastId = id;
+      busy = true;
+      // Soft nav keeps the WKWebView alive — location.assign was capturing the splash.
+      await applyDemoNav(url, id);
+    } catch { /* ignore */ } finally {
+      busy = false;
+    }
+  };
+  setInterval(tick, 400);
+  void tick();
 }
 
 init().catch(async (e) => {
