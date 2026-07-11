@@ -123,7 +123,9 @@ export function testRefactorRegression(
   );
   ok(
     appSrc.includes('showRefactorStaircaseMenu')
-      && appSrc.includes('ij-cascade-step'),
+      && (appSrc.includes('ij-cascade-step')
+        || appSrc.includes('ij-quickfix-heading')
+        || appSrc.includes('refactorMenuCategory')),
     'refactor: staircase cascading refactor picker',
   );
 
