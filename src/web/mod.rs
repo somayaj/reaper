@@ -1,5 +1,6 @@
 mod api;
 mod agent;
+mod anthropic_chat;
 mod cursor;
 mod custom_protocol;
 mod gemini_chat;
@@ -67,6 +68,7 @@ pub fn router(state: AppState) -> Router {
         .merge(api::routes())
         .merge(cursor::routes())
         .merge(gemini_chat::routes())
+        .merge(anthropic_chat::routes())
         .merge(settings::routes())
         .merge(ui_preferences::routes())
         .merge(git_http::routes())
