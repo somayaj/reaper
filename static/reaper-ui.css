@@ -8692,6 +8692,11 @@ main { background: var(--ij-bg); }
   border-color: color-mix(in srgb, #d97757 22%, var(--ij-border));
 }
 
+.agent-msg-assistant.agent-provider-bedrock {
+  background: color-mix(in srgb, #ff9900 6%, var(--ij-agent-assistant-bg));
+  border-color: color-mix(in srgb, #ff9900 22%, var(--ij-border));
+}
+
 .agent-msg-label {
   color: var(--ij-text-dim);
   font-weight: 600;
@@ -8715,6 +8720,10 @@ main { background: var(--ij-bg); }
 
 .agent-msg-label-anthropic {
   color: color-mix(in srgb, #d97757 70%, var(--ij-text-bright));
+}
+
+.agent-msg-label-bedrock {
+  color: color-mix(in srgb, #ff9900 75%, var(--ij-text-bright));
 }
 
 .agent-msg-system {
