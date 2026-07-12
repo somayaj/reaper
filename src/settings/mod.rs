@@ -93,6 +93,10 @@ pub struct GeminiSettingsView {
 #[derive(Debug, Serialize)]
 pub struct AnthropicSettingsView {
     pub configured: bool,
+    /// Anthropic API key present (Claude agent tab).
+    pub api_configured: bool,
+    /// Bedrock Mantle key or AWS IAM credentials present (Bedrock agent tab).
+    pub bedrock_configured: bool,
     pub masked: Option<String>,
     pub model: String,
     pub backend: String,
@@ -877,21 +881,25 @@ impl SettingsStore {
         self.save(&guard)
     }
 
+    pub fn claude_api_configured(&self) -> bool {
+        self.anthropic_api_key().is_some()
+    }
+
+    pub fn bedrock_configured(&self) -> bool {
+        self.bedrock_api_key().is_some()
+            || std::env::var("AWS_ACCESS_KEY_ID")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            || std::env::var("AWS_PROFILE")
+                .ok()
+                .filter(|p| !p.is_empty())
+                .is_some()
+    }
+
+    /// True when either Claude API or Bedrock credentials are available.
     pub fn anthropic_configured(&self) -> bool {
-        match self.anthropic_backend().as_str() {
-            "bedrock" => {
-                self.bedrock_api_key().is_some()
-                    || std::env::var("AWS_ACCESS_KEY_ID")
-                        .ok()
-                        .filter(|k| !k.is_empty())
-                        .is_some()
-                    || std::env::var("AWS_PROFILE")
-                        .ok()
-                        .filter(|p| !p.is_empty())
-                        .is_some()
-            }
-            _ => self.anthropic_api_key().is_some(),
-        }
+        self.claude_api_configured() || self.bedrock_configured()
     }
 
     pub fn anthropic_view(&self) -> AnthropicSettingsView {
@@ -932,6 +940,8 @@ impl SettingsStore {
 
         AnthropicSettingsView {
             configured: self.anthropic_configured(),
+            api_configured: self.claude_api_configured(),
+            bedrock_configured: self.bedrock_configured(),
             masked,
             model: self.anthropic_model(),
             backend: self.anthropic_backend(),

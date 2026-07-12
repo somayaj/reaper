@@ -23,6 +23,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/api/settings/anthropic/model", patch(set_anthropic_model))
         .route("/api/settings/anthropic/backend", patch(set_anthropic_backend))
+        .route("/api/settings/bedrock/models", get(list_bedrock_models))
         .route("/api/settings/cursor", get(get_cursor).put(set_cursor).delete(clear_cursor))
         .route("/api/settings/cursor/model", patch(set_cursor_model))
         .route("/api/settings/cursor/mode", patch(set_cursor_mode))
@@ -183,6 +184,26 @@ async fn set_anthropic(
     Json(state.settings.anthropic_view()).into_response()
 }
 
+async fn list_bedrock_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let region = state.settings.bedrock_region();
+    let mantle = state.settings.bedrock_api_key().is_some();
+    match crate::agent::list_bedrock_models(&region, mantle).await {
+        Ok(models) => Json(serde_json::json!({
+            "region": region,
+            "source": if mantle && models.iter().any(|m| m.kind == "mantle")
+                && !models.iter().any(|m| m.kind != "mantle")
+            {
+                "mantle"
+            } else {
+                "aws"
+            },
+            "models": models,
+        }))
+        .into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 #[derive(Deserialize)]
 struct SetAnthropicModelRequest {
     model: String,
@@ -221,10 +242,30 @@ async fn set_anthropic_backend(
     Json(state.settings.anthropic_view()).into_response()
 }
 
-async fn clear_anthropic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let _ = state.settings.clear_anthropic_api_key();
-    let _ = state.settings.clear_bedrock_api_key();
+async fn clear_anthropic(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ClearAnthropicQuery>,
+) -> impl IntoResponse {
+    let target = q.target.as_deref().unwrap_or("all").trim().to_ascii_lowercase();
+    match target.as_str() {
+        "api" | "claude" => {
+            let _ = state.settings.clear_anthropic_api_key();
+        }
+        "bedrock" => {
+            let _ = state.settings.clear_bedrock_api_key();
+        }
+        _ => {
+            let _ = state.settings.clear_anthropic_api_key();
+            let _ = state.settings.clear_bedrock_api_key();
+        }
+    }
     Json(state.settings.anthropic_view()).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct ClearAnthropicQuery {
+    /// `api` | `bedrock` | `all` (default)
+    target: Option<String>,
 }
 
 async fn get_cursor(State(state): State<Arc<AppState>>) -> impl IntoResponse {

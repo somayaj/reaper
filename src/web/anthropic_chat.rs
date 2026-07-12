@@ -10,7 +10,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde::Deserialize;
 
-use crate::agent::{AnthropicClient, ClaudeBackend, anthropic_client_from_settings};
+use crate::agent::{AnthropicClient, ClaudeBackend, anthropic_client_for_backend};
 use crate::settings::{normalize_anthropic_model, normalize_bedrock_model};
 use crate::state::AppState;
 use crate::workspace;
@@ -19,6 +19,8 @@ use crate::workspace;
 struct ChatBody {
     prompt: String,
     model: Option<String>,
+    /// Force `"api"` or `"bedrock"` for this chat (agent tab selection).
+    backend: Option<String>,
 }
 
 struct StreamContext {
@@ -52,13 +54,27 @@ async fn anthropic_chat(
         return api_error(StatusCode::BAD_REQUEST, "prompt required");
     }
 
-    let mut client = match anthropic_client_from_settings(&state.settings) {
+    let requested_backend = body
+        .backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+
+    let mut client = match anthropic_client_for_backend(&state.settings, requested_backend) {
         Some(c) => c,
         None => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Claude not configured; open Settings → Claude or set REAPER_ANTHROPIC_API_KEY / Bedrock credentials",
-            );
+            let hint = match requested_backend {
+                Some("bedrock") => {
+                    "Bedrock not configured; open Settings → AI → Bedrock or set REAPER_BEDROCK_API_KEY / AWS credentials"
+                }
+                Some("api") => {
+                    "Claude API not configured; open Settings → AI → Claude or set REAPER_ANTHROPIC_API_KEY"
+                }
+                _ => {
+                    "Claude/Bedrock not configured; open Settings → AI or set REAPER_ANTHROPIC_API_KEY / Bedrock credentials"
+                }
+            };
+            return api_error(StatusCode::BAD_REQUEST, hint);
         }
     };
 
@@ -67,7 +83,9 @@ async fn anthropic_chat(
     }
 
     if let Some(model) = body.model.filter(|m| !m.trim().is_empty()) {
-        let backend = ClaudeBackend::parse(&state.settings.anthropic_backend());
+        let backend = requested_backend
+            .map(ClaudeBackend::parse)
+            .unwrap_or_else(|| ClaudeBackend::parse(&state.settings.anthropic_backend()));
         client = match backend {
             ClaudeBackend::Api => {
                 let api_key = match state.settings.anthropic_api_key() {
@@ -81,11 +99,19 @@ async fn anthropic_chat(
                 };
                 AnthropicClient::new_api(api_key, normalize_anthropic_model(&model))
             }
-            ClaudeBackend::Bedrock => AnthropicClient::new_bedrock(
-                normalize_bedrock_model(&model),
-                state.settings.bedrock_region(),
-                state.settings.bedrock_api_key(),
-            ),
+            ClaudeBackend::Bedrock => {
+                if !state.settings.bedrock_configured() {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "Bedrock not configured",
+                    );
+                }
+                AnthropicClient::new_bedrock(
+                    normalize_bedrock_model(&model),
+                    state.settings.bedrock_region(),
+                    state.settings.bedrock_api_key(),
+                )
+            }
         };
     }
 

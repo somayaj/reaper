@@ -1,6 +1,6 @@
 [package]
 name = "reaper"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Reaper — local git host and developer studio"
 authors = ["Asha Somayajula"]
@@ -34,6 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 portable-pty = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 aws-config = { version = "1.9.0", features = ["behavior-version-latest"] }
+aws-sdk-bedrock = "1.148.0"
 aws-sdk-bedrockruntime = "1.136.0"
 
 [target.'cfg(unix)'.dependencies]

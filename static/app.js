@@ -307,12 +307,16 @@ const ANTHROPIC_MODELS = [
   { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku' },
 ];
 
-const BEDROCK_MODELS = [
+const BEDROCK_MODELS_FALLBACK = [
   { id: 'anthropic.claude-3-5-sonnet-20241022-v2:0', label: 'Claude 3.5 Sonnet v2 (Bedrock)' },
   { id: 'anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku (Bedrock)' },
   { id: 'anthropic.claude-3-opus-20240229-v1:0', label: 'Claude 3 Opus (Bedrock)' },
   { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5 (US profile)' },
 ];
+
+function bedrockModelsForSelect() {
+  return state.bedrockModels?.length ? state.bedrockModels : BEDROCK_MODELS_FALLBACK;
+}
 
 const CURSOR_MODEL_DEFAULT = 'composer-2.5';
 
@@ -377,7 +381,7 @@ async function reconcileCursorModelSelection() {
 }
 
 /** Registered chat agents — add providers here as backends land. */
-const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic'];
+const AGENT_PROVIDER_ORDER = ['cursor', 'gemini', 'anthropic', 'bedrock'];
 
 const REAPER_RELEASES_BASE = 'https://github.com/reaper-org/releases/releases';
 
@@ -449,30 +453,50 @@ const AGENT_PROVIDERS = {
     capabilities: { readOnly: true },
     isConfigured: () => state.anthropicConfigured,
     isReady: () => state.anthropicConfigured,
-    welcome: () => {
-      const backend = state.anthropicBackend === 'bedrock' ? 'Bedrock' : 'Anthropic API';
-      return `Ask Claude (${backend}) to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.`;
-    },
+    welcome: () => 'Ask Claude (Anthropic API) to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.',
     placeholder: 'Ask Claude… (Enter to send)',
-    emptyReply: () => 'No response from Claude. Check your API key / Bedrock settings in Settings → AI.',
+    emptyReply: () => 'No response from Claude. Check your API key in Settings → AI → Claude.',
     hintWhenReady: 'Claude agent — read-only Q&A · Enter to send',
     messageLabel: 'Claude agent',
     labelClass: 'agent-msg-label-anthropic',
-    models: () => (state.anthropicBackend === 'bedrock' ? BEDROCK_MODELS : ANTHROPIC_MODELS),
-    currentModel: () => (state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel),
+    models: () => ANTHROPIC_MODELS,
+    currentModel: () => state.anthropicModel,
     setModel: (id) => setAnthropicAgentModel(id),
-    statusText: () => {
-      const model = state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel;
-      const backend = state.anthropicBackend === 'bedrock' ? 'Bedrock' : 'API';
-      return `Claude (${backend}) · ${model}`;
-    },
+    statusText: () => `Claude · ${state.anthropicModel}`,
     chatPath: '/anthropic/chat',
     stopPath: null,
     chatBody: (prompt) => ({
       prompt,
-      model: state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel,
+      model: state.anthropicModel,
+      backend: 'api',
     }),
     notConfiguredHint: 'Configure Claude in Settings → AI (⌘,)',
+  },
+  bedrock: {
+    id: 'bedrock',
+    label: 'Bedrock',
+    settingsTab: 'ai',
+    capabilities: { readOnly: true },
+    isConfigured: () => state.bedrockConfigured,
+    isReady: () => state.bedrockConfigured,
+    welcome: () => 'Ask Claude on Amazon Bedrock to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.',
+    placeholder: 'Ask Bedrock… (Enter to send)',
+    emptyReply: () => 'No response from Bedrock. Check Mantle key / AWS credentials in Settings → AI → Bedrock.',
+    hintWhenReady: 'Bedrock agent — read-only Q&A · Enter to send',
+    messageLabel: 'Bedrock agent',
+    labelClass: 'agent-msg-label-bedrock',
+    models: () => bedrockModelsForSelect(),
+    currentModel: () => state.bedrockModelId,
+    setModel: (id) => setBedrockAgentModel(id),
+    statusText: () => `Bedrock · ${state.bedrockModelId}`,
+    chatPath: '/anthropic/chat',
+    stopPath: null,
+    chatBody: (prompt) => ({
+      prompt,
+      model: state.bedrockModelId,
+      backend: 'bedrock',
+    }),
+    notConfiguredHint: 'Configure Bedrock in Settings → AI (⌘,)',
   },
 };
 
@@ -612,6 +636,10 @@ const state = {
   conflictPanelHidden: false,
   geminiConfigured: false,
   anthropicConfigured: false,
+  bedrockConfigured: false,
+  bedrockModels: [],
+  bedrockModelsSource: null,
+  bedrockModelsError: null,
   anthropicBackend: 'api',
   anthropicModel: 'claude-sonnet-4-5',
   bedrockModelId: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -1323,6 +1351,7 @@ function getAiInlineProviderAvailable() {
   if (state.cursorConfigured && state.cursorBridgeOk) return true;
   if (state.geminiConfigured) return true;
   if (state.anthropicConfigured) return true;
+  if (state.bedrockConfigured) return true;
   return false;
 }
 
@@ -1926,7 +1955,8 @@ async function applyCaptureDemoFromUrl() {
       panel.innerHTML = `<div style="padding:4px 14px 10px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;opacity:.7">Agent provider</div>
         <div style="padding:8px 14px;background:rgba(110,181,255,.16);color:#fff;display:flex;justify-content:space-between"><span>Cursor agent</span><span>✓</span></div>
         <div style="padding:8px 14px">Gemini agent</div>
-        <div style="padding:8px 14px">Claude (Anthropic)</div>`;
+        <div style="padding:8px 14px">Claude (Anthropic)</div>
+        <div style="padding:8px 14px">Bedrock</div>`;
       document.body.appendChild(panel);
       await hold(2800);
     } else if (feature === 'terminal-bottom') {
@@ -3144,17 +3174,7 @@ async function clearGeminiKeyFromSettings() {
   }
 }
 
-function anthropicModelsForBackend(backend) {
-  return backend === 'bedrock' ? BEDROCK_MODELS : ANTHROPIC_MODELS;
-}
-
-function syncAnthropicBackendUi(backend) {
-  const isBedrock = backend === 'bedrock';
-  $('#settings-anthropic-api-fields')?.classList.toggle('hidden', isBedrock);
-  $('#settings-bedrock-fields')?.classList.toggle('hidden', !isBedrock);
-}
-
-function populateAnthropicModelSelects() {
+function populateAnthropicModelSelects(cfg = null) {
   const apiSel = $('#settings-anthropic-model');
   if (apiSel && !apiSel.options.length) {
     apiSel.innerHTML = ANTHROPIC_MODELS.map(
@@ -3162,19 +3182,24 @@ function populateAnthropicModelSelects() {
     ).join('');
   }
   const bedSel = $('#settings-bedrock-model');
-  if (bedSel && !bedSel.options.length) {
-    bedSel.innerHTML = BEDROCK_MODELS.map(
-      (m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label)}</option>`,
+  if (bedSel) {
+    const models = bedrockModelsForSelect();
+    const current = cfg?.bedrock_model_id || state.bedrockModelId || models[0]?.id;
+    bedSel.innerHTML = models.map(
+      (m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label || m.id)}</option>`,
     ).join('');
+    if (current && ![...bedSel.options].some((o) => o.value === current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = `${current} (saved)`;
+      bedSel.appendChild(opt);
+    }
+    if (current) bedSel.value = current;
   }
 }
 
 function syncAnthropicModelSelects(cfg) {
-  populateAnthropicModelSelects();
-  const backend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
-  const backendSel = $('#settings-anthropic-backend');
-  if (backendSel) backendSel.value = backend;
-  syncAnthropicBackendUi(backend);
+  populateAnthropicModelSelects(cfg);
 
   const apiSel = $('#settings-anthropic-model');
   if (apiSel) {
@@ -3188,61 +3213,123 @@ function syncAnthropicModelSelects(cfg) {
     apiSel.value = current;
   }
 
-  const bedSel = $('#settings-bedrock-model');
-  if (bedSel) {
-    const current = cfg.bedrock_model_id || BEDROCK_MODELS[0].id;
-    if (![...bedSel.options].some((o) => o.value === current)) {
-      const opt = document.createElement('option');
-      opt.value = current;
-      opt.textContent = `${current} (custom)`;
-      bedSel.appendChild(opt);
-    }
-    bedSel.value = current;
-  }
-
   const regionEl = $('#settings-bedrock-region');
   if (regionEl) regionEl.value = cfg.bedrock_region || 'us-east-1';
+}
+
+async function refreshBedrockModels({ silent = false } = {}) {
+  const statusHint = $('#settings-bedrock-models-hint');
+  try {
+    const data = await api('/api/settings/bedrock/models');
+    const list = Array.isArray(data.models) ? data.models : [];
+    state.bedrockModels = list.map((m) => ({
+      id: m.id,
+      label: m.label || m.id,
+      provider: m.provider,
+      kind: m.kind,
+    }));
+    state.bedrockModelsSource = data.source || null;
+    state.bedrockModelsError = null;
+    if (statusHint) {
+      const n = state.bedrockModels.length;
+      const src = data.source === 'mantle'
+        ? 'Mantle key — Claude models only. Add AWS credentials for the full Bedrock catalog.'
+        : `Loaded ${n} text/chat model${n === 1 ? '' : 's'} from AWS (${data.region || state.bedrockRegion}).`;
+      statusHint.textContent = src;
+      statusHint.className = 'text-[11px] text-gray-500';
+    }
+    populateAnthropicModelSelects({
+      bedrock_model_id: state.bedrockModelId,
+      bedrock_region: state.bedrockRegion,
+    });
+    refreshAgentProviderUi();
+    if (!silent) toast(`Loaded ${state.bedrockModels.length} Bedrock models`, 'success');
+  } catch (err) {
+    state.bedrockModelsError = err.message || String(err);
+    if (statusHint) {
+      statusHint.textContent = state.bedrockModelsError;
+      statusHint.className = 'text-[11px] text-red-400';
+    }
+    if (!silent) toast(state.bedrockModelsError, 'error');
+  }
 }
 
 async function loadAnthropicSettingsSection() {
   const statusEl = $('#settings-anthropic-status');
   const form = $('#settings-anthropic-form');
   const changeBtn = $('#settings-anthropic-change-key');
-  if (!statusEl) return;
+  const bedStatus = $('#settings-bedrock-status');
+  const bedForm = $('#settings-bedrock-form');
+  const bedChange = $('#settings-bedrock-change-key');
+  if (!statusEl && !bedStatus) return;
   try {
     const cfg = await api('/api/settings/anthropic');
-    state.anthropicConfigured = !!cfg.configured;
+    state.anthropicConfigured = cfg.api_configured != null
+      ? !!cfg.api_configured
+      : !!cfg.masked;
+    state.bedrockConfigured = cfg.bedrock_configured != null
+      ? !!cfg.bedrock_configured
+      : !!(cfg.bedrock_masked);
     state.anthropicBackend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
     state.anthropicModel = cfg.model || 'claude-sonnet-4-5';
-    state.bedrockModelId = cfg.bedrock_model_id || BEDROCK_MODELS[0].id;
+    state.bedrockModelId = cfg.bedrock_model_id || BEDROCK_MODELS_FALLBACK[0].id;
     state.bedrockRegion = cfg.bedrock_region || 'us-east-1';
-    ensureAiInlineCompleteDefault(cfg.configured || state.geminiConfigured || state.cursorConfigured);
+    ensureAiInlineCompleteDefault(
+      state.anthropicConfigured || state.bedrockConfigured || state.geminiConfigured || state.cursorConfigured,
+    );
     syncAnthropicModelSelects(cfg);
     refreshAgentProviderUi();
-
-    if (cfg.configured) {
-      const backendLabel = cfg.backend === 'bedrock' ? 'Bedrock' : 'Anthropic API';
-      statusEl.innerHTML = `<span class="ok">Claude via ${backendLabel} is enabled</span>`;
-      form?.classList.add('hidden');
-      changeBtn?.classList.remove('hidden');
-    } else {
-      statusEl.innerHTML = '<span class="warn">Add an Anthropic API key or Bedrock credentials for Claude</span>';
-      form?.classList.remove('hidden');
-      changeBtn?.classList.add('hidden');
+    if (state.bedrockConfigured) {
+      void refreshBedrockModels({ silent: true });
     }
-    const clearBtn = $('#settings-anthropic-clear');
-    const removable = cfg.source === 'settings' || !!cfg.bedrock_masked;
-    clearBtn?.toggleAttribute('disabled', !cfg.configured && !cfg.bedrock_masked);
-    if (clearBtn) {
-      clearBtn.title = cfg.configured && cfg.source && cfg.source !== 'settings'
-        ? `Key may be set via ${cfg.source}`
-        : '';
+
+    if (statusEl) {
+      if (state.anthropicConfigured) {
+        statusEl.innerHTML = '<span class="ok">Claude (Anthropic API) is enabled</span>';
+        form?.classList.add('hidden');
+        changeBtn?.classList.remove('hidden');
+      } else {
+        statusEl.innerHTML = '<span class="warn">Add an Anthropic API key for the Claude agent</span>';
+        form?.classList.remove('hidden');
+        changeBtn?.classList.add('hidden');
+      }
+      const clearBtn = $('#settings-anthropic-clear');
+      clearBtn?.toggleAttribute('disabled', !state.anthropicConfigured || (cfg.source && cfg.source !== 'settings'));
+      if (clearBtn) {
+        clearBtn.title = cfg.configured && cfg.source && cfg.source !== 'settings'
+          ? `Key may be set via ${cfg.source}`
+          : '';
+      }
+    }
+
+    if (bedStatus) {
+      if (state.bedrockConfigured) {
+        const via = cfg.bedrock_masked ? 'Mantle API key' : 'AWS credentials';
+        bedStatus.innerHTML = `<span class="ok">Bedrock is enabled (${via})</span>`;
+        if (cfg.bedrock_masked) {
+          bedForm?.classList.add('hidden');
+          bedChange?.classList.remove('hidden');
+        } else {
+          bedForm?.classList.remove('hidden');
+          bedChange?.classList.add('hidden');
+        }
+      } else {
+        bedStatus.innerHTML = '<span class="warn">Add a Mantle key or configure AWS credentials for Bedrock</span>';
+        bedForm?.classList.remove('hidden');
+        bedChange?.classList.add('hidden');
+      }
+      const bedClear = $('#settings-bedrock-clear');
+      bedClear?.toggleAttribute('disabled', !cfg.bedrock_masked);
     }
   } catch (err) {
-    statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+    if (statusEl) statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+    if (bedStatus) bedStatus.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
     state.anthropicConfigured = false;
+    state.bedrockConfigured = false;
     form?.classList.remove('hidden');
     changeBtn?.classList.add('hidden');
+    bedForm?.classList.remove('hidden');
+    bedChange?.classList.add('hidden');
     refreshAgentProviderUi();
   }
 }
@@ -3253,20 +3340,21 @@ function showAnthropicKeyForm() {
   $('#settings-anthropic-key')?.focus();
 }
 
+function showBedrockKeyForm() {
+  $('#settings-bedrock-form')?.classList.remove('hidden');
+  $('#settings-bedrock-change-key')?.classList.add('hidden');
+  $('#settings-bedrock-key')?.focus();
+}
+
 async function saveAnthropicFromSettings(e) {
   e?.preventDefault();
-  const backend = $('#settings-anthropic-backend')?.value || 'api';
   const apiKey = $('#settings-anthropic-key')?.value.trim();
-  const bedrockKey = $('#settings-bedrock-key')?.value.trim();
   const body = {
-    backend,
+    backend: 'api',
     model: $('#settings-anthropic-model')?.value || undefined,
-    bedrock_model_id: $('#settings-bedrock-model')?.value || undefined,
-    bedrock_region: $('#settings-bedrock-region')?.value.trim() || undefined,
   };
   if (apiKey) body.api_key = apiKey;
-  if (bedrockKey) body.bedrock_api_key = bedrockKey;
-  if (backend === 'api' && !apiKey && !state.anthropicConfigured) {
+  if (!apiKey && !state.anthropicConfigured) {
     toast('Enter an Anthropic API key', 'error');
     $('#settings-anthropic-key')?.focus();
     return;
@@ -3277,7 +3365,6 @@ async function saveAnthropicFromSettings(e) {
       body: JSON.stringify(body),
     });
     if ($('#settings-anthropic-key')) $('#settings-anthropic-key').value = '';
-    if ($('#settings-bedrock-key')) $('#settings-bedrock-key').value = '';
     await loadAnthropicSettingsSection();
     toast('Claude settings saved', 'success');
   } catch (err) {
@@ -3285,59 +3372,83 @@ async function saveAnthropicFromSettings(e) {
   }
 }
 
-async function clearAnthropicFromSettings() {
+async function saveBedrockFromSettings(e) {
+  e?.preventDefault();
+  const bedrockKey = $('#settings-bedrock-key')?.value.trim();
+  const body = {
+    backend: 'bedrock',
+    bedrock_model_id: $('#settings-bedrock-model')?.value || undefined,
+    bedrock_region: $('#settings-bedrock-region')?.value.trim() || undefined,
+  };
+  if (bedrockKey) body.bedrock_api_key = bedrockKey;
   try {
-    if (!confirm('Remove saved Anthropic / Bedrock API keys?')) return;
-    await api('/api/settings/anthropic', { method: 'DELETE' });
+    await api('/api/settings/anthropic', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+    if ($('#settings-bedrock-key')) $('#settings-bedrock-key').value = '';
     await loadAnthropicSettingsSection();
-    toast('Claude keys removed', 'success');
+    toast('Bedrock settings saved', 'success');
   } catch (err) {
     toast(err.message, 'error');
   }
 }
 
-async function saveAnthropicBackendFromSettings() {
-  const backend = $('#settings-anthropic-backend')?.value || 'api';
+async function clearAnthropicFromSettings() {
   try {
-    const cfg = await api('/api/settings/anthropic/backend', {
-      method: 'PATCH',
-      body: JSON.stringify({ backend }),
-    });
-    state.anthropicBackend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
-    syncAnthropicModelSelects(cfg);
-    refreshAgentProviderUi();
-    toast(`Claude backend set to ${cfg.backend === 'bedrock' ? 'Bedrock' : 'Anthropic API'}`, 'success');
+    if (!confirm('Remove saved Anthropic API key?')) return;
+    await api('/api/settings/anthropic?target=api', { method: 'DELETE' });
+    await loadAnthropicSettingsSection();
+    toast('Claude API key removed', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function clearBedrockFromSettings() {
+  try {
+    if (!confirm('Remove saved Bedrock Mantle API key?')) return;
+    await api('/api/settings/anthropic?target=bedrock', { method: 'DELETE' });
+    await loadAnthropicSettingsSection();
+    toast('Bedrock Mantle key removed', 'success');
   } catch (err) {
     toast(err.message, 'error');
   }
 }
 
 async function saveAnthropicModelFromSettings() {
-  const backend = $('#settings-anthropic-backend')?.value || 'api';
   try {
-    if (backend === 'bedrock') {
-      const model = $('#settings-bedrock-model')?.value;
-      const region = $('#settings-bedrock-region')?.value.trim();
-      const cfg = await api('/api/settings/anthropic', {
-        method: 'PUT',
-        body: JSON.stringify({
-          backend: 'bedrock',
-          bedrock_model_id: model || undefined,
-          bedrock_region: region || undefined,
-        }),
-      });
-      state.bedrockModelId = cfg.bedrock_model_id || model;
-      state.bedrockRegion = cfg.bedrock_region || region || 'us-east-1';
-      toast(`Bedrock model set to ${state.bedrockModelId}`, 'success');
-    } else {
-      const model = $('#settings-anthropic-model')?.value;
-      const cfg = await api('/api/settings/anthropic/model', {
-        method: 'PATCH',
-        body: JSON.stringify({ model }),
-      });
-      state.anthropicModel = cfg.model || model;
-      toast(`Claude model set to ${state.anthropicModel}`, 'success');
-    }
+    const model = $('#settings-anthropic-model')?.value;
+    const cfg = await api('/api/settings/anthropic/model', {
+      method: 'PATCH',
+      body: JSON.stringify({ model }),
+    });
+    state.anthropicModel = cfg.model || model;
+    toast(`Claude model set to ${state.anthropicModel}`, 'success');
+    refreshAgentProviderUi();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function saveBedrockModelFromSettings() {
+  try {
+    const model = $('#settings-bedrock-model')?.value;
+    const region = $('#settings-bedrock-region')?.value.trim();
+    const cfg = await api('/api/settings/anthropic', {
+      method: 'PUT',
+      body: JSON.stringify({
+        backend: 'bedrock',
+        bedrock_model_id: model || undefined,
+        bedrock_region: region || undefined,
+      }),
+    });
+    state.bedrockModelId = cfg.bedrock_model_id || model;
+    state.bedrockRegion = cfg.bedrock_region || region || 'us-east-1';
+    state.bedrockConfigured = cfg.bedrock_configured != null
+      ? !!cfg.bedrock_configured
+      : state.bedrockConfigured;
+    toast(`Bedrock model set to ${state.bedrockModelId}`, 'success');
     refreshAgentProviderUi();
   } catch (err) {
     toast(err.message, 'error');
@@ -3345,27 +3456,30 @@ async function saveAnthropicModelFromSettings() {
 }
 
 async function setAnthropicAgentModel(modelId) {
-  if (!modelId) return;
-  const isBedrock = state.anthropicBackend === 'bedrock';
-  if (isBedrock && modelId === state.bedrockModelId) return;
-  if (!isBedrock && modelId === state.anthropicModel) return;
-  if (isBedrock) state.bedrockModelId = modelId;
-  else state.anthropicModel = modelId;
+  if (!modelId || modelId === state.anthropicModel) return;
+  state.anthropicModel = modelId;
   updateAgentUi();
   try {
-    if (isBedrock) {
-      const cfg = await api('/api/settings/anthropic', {
-        method: 'PUT',
-        body: JSON.stringify({ backend: 'bedrock', bedrock_model_id: modelId }),
-      });
-      state.bedrockModelId = cfg.bedrock_model_id || modelId;
-    } else {
-      const cfg = await api('/api/settings/anthropic/model', {
-        method: 'PATCH',
-        body: JSON.stringify({ model: modelId }),
-      });
-      state.anthropicModel = cfg.model || modelId;
-    }
+    const cfg = await api('/api/settings/anthropic/model', {
+      method: 'PATCH',
+      body: JSON.stringify({ model: modelId }),
+    });
+    state.anthropicModel = cfg.model || modelId;
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function setBedrockAgentModel(modelId) {
+  if (!modelId || modelId === state.bedrockModelId) return;
+  state.bedrockModelId = modelId;
+  updateAgentUi();
+  try {
+    const cfg = await api('/api/settings/anthropic', {
+      method: 'PUT',
+      body: JSON.stringify({ backend: 'bedrock', bedrock_model_id: modelId }),
+    });
+    state.bedrockModelId = cfg.bedrock_model_id || modelId;
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -11443,6 +11557,7 @@ function initEditor() {
       getCursorConfigured: () => state.cursorConfigured,
       getCursorInlineAvailable: () => state.cursorConfigured && state.cursorBridgeOk,
       getAnthropicConfigured: () => state.anthropicConfigured,
+      getBedrockConfigured: () => state.bedrockConfigured,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
       isJdtlsReady: () => !!state.jdtlsReady,
@@ -18768,6 +18883,9 @@ async function setAgentProvider(provider) {
   state.agentProvider = provider;
   refreshAgentProviderUi();
   updateAgentUi();
+  if (provider === 'bedrock' && !state.bedrockModels.length) {
+    void refreshBedrockModels({ silent: true });
+  }
 }
 
 function updateAgentUi() {
@@ -19789,10 +19907,13 @@ function bindEvents() {
   $('#settings-anthropic-form')?.addEventListener('submit', saveAnthropicFromSettings);
   $('#settings-anthropic-clear')?.addEventListener('click', clearAnthropicFromSettings);
   $('#settings-anthropic-change-key')?.addEventListener('click', showAnthropicKeyForm);
-  $('#settings-anthropic-backend')?.addEventListener('change', saveAnthropicBackendFromSettings);
   $('#settings-anthropic-model')?.addEventListener('change', saveAnthropicModelFromSettings);
-  $('#settings-bedrock-model')?.addEventListener('change', saveAnthropicModelFromSettings);
-  $('#settings-bedrock-region')?.addEventListener('change', saveAnthropicModelFromSettings);
+  $('#settings-bedrock-form')?.addEventListener('submit', saveBedrockFromSettings);
+  $('#settings-bedrock-clear')?.addEventListener('click', clearBedrockFromSettings);
+  $('#settings-bedrock-change-key')?.addEventListener('click', showBedrockKeyForm);
+  $('#settings-bedrock-model')?.addEventListener('change', saveBedrockModelFromSettings);
+  $('#settings-bedrock-region')?.addEventListener('change', saveBedrockModelFromSettings);
+  $('#settings-bedrock-refresh-models')?.addEventListener('click', () => refreshBedrockModels());
   populateAnthropicModelSelects();
   $('#btn-sync').addEventListener('click', syncPull);
   $('#btn-nav-commit')?.addEventListener('click', () => {

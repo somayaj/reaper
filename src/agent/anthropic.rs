@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeBackend {
@@ -162,10 +161,13 @@ impl AnthropicClient {
     ) -> Result<String> {
         match self.backend {
             ClaudeBackend::Api => self.chat_api(system, history, prompt, false).await,
-            ClaudeBackend::Bedrock if self.bedrock_api_key.is_some() => {
+            ClaudeBackend::Bedrock
+                if self.bedrock_api_key.is_some()
+                    && crate::agent::is_anthropic_bedrock_model(&self.model) =>
+            {
                 self.chat_mantle(system, history, prompt, false).await
             }
-            ClaudeBackend::Bedrock => self.chat_bedrock_runtime(system, history, prompt).await,
+            ClaudeBackend::Bedrock => self.chat_bedrock_converse(system, history, prompt).await,
         }
     }
 
@@ -177,11 +179,16 @@ impl AnthropicClient {
     ) -> Result<reqwest::Response> {
         match self.backend {
             ClaudeBackend::Api => self.stream_api(system, history, prompt).await,
-            ClaudeBackend::Bedrock if self.bedrock_api_key.is_some() => {
+            ClaudeBackend::Bedrock
+                if self.bedrock_api_key.is_some()
+                    && crate::agent::is_anthropic_bedrock_model(&self.model) =>
+            {
                 self.stream_mantle(system, history, prompt).await
             }
             ClaudeBackend::Bedrock => {
-                bail!("bedrock IAM mode uses non-streaming chat; caller should use chat_with_history")
+                bail!(
+                    "Bedrock Converse (IAM / non-Claude models) uses non-streaming chat; caller should use chat_with_history"
+                )
             }
         }
     }
@@ -189,7 +196,10 @@ impl AnthropicClient {
     pub fn uses_streaming(&self) -> bool {
         match self.backend {
             ClaudeBackend::Api => true,
-            ClaudeBackend::Bedrock => self.bedrock_api_key.is_some(),
+            ClaudeBackend::Bedrock => {
+                self.bedrock_api_key.is_some()
+                    && crate::agent::is_anthropic_bedrock_model(&self.model)
+            }
         }
     }
 
@@ -381,52 +391,65 @@ impl AnthropicClient {
         Ok(resp)
     }
 
-    async fn chat_bedrock_runtime(
+    async fn chat_bedrock_converse(
         &self,
         system: &str,
         history: &[(String, String)],
         prompt: &str,
     ) -> Result<String> {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlock, ConversationRole, Message, SystemContentBlock,
+        };
+
         let region = self.bedrock_region.clone();
         let model_id = self.model.clone();
-        let messages = Self::messages_from_history(history, prompt);
-        let body = json!({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 8192,
-            "system": system,
-            "messages": messages.iter().map(|m| json!({
-                "role": m.role,
-                "content": m.content,
-            })).collect::<Vec<_>>(),
-        });
+
+        let mut messages: Vec<Message> = Vec::new();
+        for (role, text) in history {
+            let role = if role == "model" || role == "assistant" {
+                ConversationRole::Assistant
+            } else {
+                ConversationRole::User
+            };
+            messages.push(
+                Message::builder()
+                    .role(role)
+                    .content(ContentBlock::Text(text.clone()))
+                    .build()
+                    .context("build bedrock history message")?,
+            );
+        }
+        messages.push(
+            Message::builder()
+                .role(ConversationRole::User)
+                .content(ContentBlock::Text(prompt.to_string()))
+                .build()
+                .context("build bedrock user message")?,
+        );
 
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region))
             .load()
             .await;
         let client = aws_sdk_bedrockruntime::Client::new(&config);
-        let resp = client
-            .invoke_model()
-            .model_id(model_id)
-            .content_type("application/json")
-            .accept("application/json")
-            .body(aws_sdk_bedrockruntime::primitives::Blob::new(
-                body.to_string().into_bytes(),
-            ))
-            .send()
-            .await
-            .context("bedrock invoke_model failed")?;
-
-        let bytes = resp.body.as_ref();
-        let parsed: MessagesResponse =
-            serde_json::from_slice(bytes).context("parse bedrock invoke response")?;
-        if let Some(err) = parsed.error {
-            bail!(
-                "bedrock error: {}",
-                err.message.unwrap_or_else(|| "unknown".into())
-            );
+        let mut req = client.converse().model_id(model_id).set_messages(Some(messages));
+        if !system.trim().is_empty() {
+            req = req.system(SystemContentBlock::Text(system.to_string()));
         }
-        Self::extract_text(&parsed).ok_or_else(|| anyhow::anyhow!("empty bedrock response"))
+        let resp = req.send().await.context("bedrock converse failed")?;
+
+        let mut out = String::new();
+        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = resp.output() {
+            for block in msg.content() {
+                if let ContentBlock::Text(t) = block {
+                    out.push_str(t);
+                }
+            }
+        }
+        if out.is_empty() {
+            bail!("empty bedrock converse response");
+        }
+        Ok(out)
     }
 
     pub async fn suggest_inline_completion(&self, context: &str) -> Result<String> {

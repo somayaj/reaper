@@ -1,10 +1,12 @@
 mod anthropic;
 mod anthropic_chat;
+mod bedrock_models;
 mod gemini;
 mod gemini_chat;
 
 pub use anthropic::{AnthropicClient, ClaudeBackend};
 pub use anthropic_chat::AnthropicChatStore;
+pub use bedrock_models::{BedrockModelInfo, is_anthropic_bedrock_model, list_bedrock_models};
 pub use gemini::GeminiClient;
 pub use gemini_chat::GeminiChatStore;
 
@@ -404,19 +406,49 @@ async fn try_inline_via_anthropic(
 }
 
 pub fn anthropic_client_from_settings(settings: &SettingsStore) -> Option<AnthropicClient> {
-    if !settings.anthropic_configured() {
-        return None;
-    }
-    match ClaudeBackend::parse(&settings.anthropic_backend()) {
+    anthropic_client_for_backend(settings, None)
+}
+
+/// Build a Claude client for the requested backend (`"api"` / `"bedrock"`), or the
+/// saved backend when `backend` is `None`. Explicit requests do not fall back.
+pub fn anthropic_client_for_backend(
+    settings: &SettingsStore,
+    backend: Option<&str>,
+) -> Option<AnthropicClient> {
+    let explicit = backend.is_some();
+    let requested = backend
+        .map(ClaudeBackend::parse)
+        .unwrap_or_else(|| ClaudeBackend::parse(&settings.anthropic_backend()));
+
+    match requested {
         ClaudeBackend::Api => {
-            let api_key = settings.anthropic_api_key()?;
-            Some(AnthropicClient::new_api(api_key, settings.anthropic_model()))
+            if let Some(api_key) = settings.anthropic_api_key() {
+                return Some(AnthropicClient::new_api(api_key, settings.anthropic_model()));
+            }
+            if !explicit && settings.bedrock_configured() {
+                return Some(AnthropicClient::new_bedrock(
+                    settings.bedrock_model_id(),
+                    settings.bedrock_region(),
+                    settings.bedrock_api_key(),
+                ));
+            }
+            None
         }
-        ClaudeBackend::Bedrock => Some(AnthropicClient::new_bedrock(
-            settings.bedrock_model_id(),
-            settings.bedrock_region(),
-            settings.bedrock_api_key(),
-        )),
+        ClaudeBackend::Bedrock => {
+            if settings.bedrock_configured() {
+                return Some(AnthropicClient::new_bedrock(
+                    settings.bedrock_model_id(),
+                    settings.bedrock_region(),
+                    settings.bedrock_api_key(),
+                ));
+            }
+            if !explicit {
+                if let Some(api_key) = settings.anthropic_api_key() {
+                    return Some(AnthropicClient::new_api(api_key, settings.anthropic_model()));
+                }
+            }
+            None
+        }
     }
 }
 
