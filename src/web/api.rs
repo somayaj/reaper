@@ -2647,30 +2647,58 @@ async fn workspace_quick_fixes(
         Ok(f) => f,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    if path.ends_with(".java") {
-        if let Some(diag) = body.diagnostics.first() {
-            if let Ok(jdtls) = workspace::jdtls_code_actions_as_quick_fixes(
-                &ws,
-                path,
-                diag.line,
-                diag.column,
-                &body.content,
+
+    // Overlap jdtls (Java) with AI so Cursor/Gemini are not blocked on LSP sync.
+    let content = body.content.clone();
+    let diagnostics = body.diagnostics.clone();
+    let path_owned = path.to_string();
+    let ws_jdtls = ws.clone();
+    let jdtls_fut = async move {
+        if !path_owned.ends_with(".java") {
+            return Vec::new();
+        }
+        let Some(diag) = diagnostics.first() else {
+            return Vec::new();
+        };
+        let line = diag.line;
+        let column = diag.column;
+        let jdtls = tokio::task::spawn_blocking(move || {
+            workspace::jdtls_code_actions_as_quick_fixes(
+                &ws_jdtls,
+                &path_owned,
+                line,
+                column,
+                &content,
                 &["quickfix"],
-            ) {
-                workspace::merge_quick_fixes(&mut fixes, jdtls);
+            )
+            .unwrap_or_default()
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(4), jdtls).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::warn!("jdtls quick fix join failed: {e:#}");
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!("jdtls quick fix timed out after 4s");
+                Vec::new()
             }
         }
-    }
-    match git_agent::suggest_ai_quick_fixes(
+    };
+
+    let ai_fut = git_agent::suggest_ai_quick_fixes(
         &state.settings,
         &ws,
         path,
         &body.content,
         &body.diagnostics,
         Some(&state.cursor_bridge),
-    )
-    .await
-    {
+    );
+
+    let (jdtls_fixes, ai_result) = tokio::join!(jdtls_fut, ai_fut);
+    workspace::merge_quick_fixes(&mut fixes, jdtls_fixes);
+
+    match ai_result {
         Ok(ai) => {
             let ai = workspace::filter_ai_import_fixes(
                 &ws,

@@ -299,6 +299,21 @@ const GEMINI_MODELS = [
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)' },
 ];
 
+const ANTHROPIC_MODELS = [
+  { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (default)' },
+  { id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
+  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+  { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
+  { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku' },
+];
+
+const BEDROCK_MODELS = [
+  { id: 'anthropic.claude-3-5-sonnet-20241022-v2:0', label: 'Claude 3.5 Sonnet v2 (Bedrock)' },
+  { id: 'anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku (Bedrock)' },
+  { id: 'anthropic.claude-3-opus-20240229-v1:0', label: 'Claude 3 Opus (Bedrock)' },
+  { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5 (US profile)' },
+];
+
 const CURSOR_MODEL_DEFAULT = 'composer-2.5';
 
 function cursorModelsForSelect() {
@@ -431,24 +446,33 @@ const AGENT_PROVIDERS = {
     id: 'anthropic',
     label: 'Claude',
     settingsTab: 'ai',
-    comingSoon: true,
     capabilities: { readOnly: true },
-    isConfigured: () => false,
-    isReady: () => false,
-    welcome: () => 'Claude agent is coming soon — Anthropic API key support is on the way.',
-    placeholder: 'Claude agent — coming soon',
-    emptyReply: () => 'No response from Claude.',
-    hintWhenReady: 'Claude agent — coming soon',
+    isConfigured: () => state.anthropicConfigured,
+    isReady: () => state.anthropicConfigured,
+    welcome: () => {
+      const backend = state.anthropicBackend === 'bedrock' ? 'Bedrock' : 'Anthropic API';
+      return `Ask Claude (${backend}) to explain code, brainstorm designs, or draft snippets. It does not edit files or run commands.`;
+    },
+    placeholder: 'Ask Claude… (Enter to send)',
+    emptyReply: () => 'No response from Claude. Check your API key / Bedrock settings in Settings → AI.',
+    hintWhenReady: 'Claude agent — read-only Q&A · Enter to send',
     messageLabel: 'Claude agent',
     labelClass: 'agent-msg-label-anthropic',
-    models: () => [],
-    currentModel: () => '',
-    setModel: () => {},
-    statusText: () => 'Claude — coming soon',
+    models: () => (state.anthropicBackend === 'bedrock' ? BEDROCK_MODELS : ANTHROPIC_MODELS),
+    currentModel: () => (state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel),
+    setModel: (id) => setAnthropicAgentModel(id),
+    statusText: () => {
+      const model = state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel;
+      const backend = state.anthropicBackend === 'bedrock' ? 'Bedrock' : 'API';
+      return `Claude (${backend}) · ${model}`;
+    },
     chatPath: '/anthropic/chat',
     stopPath: null,
-    chatBody: () => ({}),
-    notConfiguredHint: 'Claude agent — coming soon',
+    chatBody: (prompt) => ({
+      prompt,
+      model: state.anthropicBackend === 'bedrock' ? state.bedrockModelId : state.anthropicModel,
+    }),
+    notConfiguredHint: 'Configure Claude in Settings → AI (⌘,)',
   },
 };
 
@@ -588,6 +612,10 @@ const state = {
   conflictPanelHidden: false,
   geminiConfigured: false,
   anthropicConfigured: false,
+  anthropicBackend: 'api',
+  anthropicModel: 'claude-sonnet-4-5',
+  bedrockModelId: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+  bedrockRegion: 'us-east-1',
   javaLanguageLevel: 17,
   languageContext: null,
   jdtlsReady: false,
@@ -2840,7 +2868,7 @@ async function clearCompilerFromSettings(id) {
 }
 
 async function loadSettingsModal() {
-  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadCompilersSettingsSection()]);
+  await Promise.all([loadPatTokensList(), loadCursorSettingsSection(), loadGeminiSettingsSection(), loadAnthropicSettingsSection(), loadCompilersSettingsSection()]);
   loadAppearanceSettingsSection();
   loadAgentFontSettingsSection();
   switchSettingsTab(settingsTab);
@@ -3111,6 +3139,233 @@ async function clearGeminiKeyFromSettings() {
       out.configured ? 'Saved key removed; environment key still active' : 'Gemini API key removed',
       out.configured ? 'info' : 'success',
     );
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function anthropicModelsForBackend(backend) {
+  return backend === 'bedrock' ? BEDROCK_MODELS : ANTHROPIC_MODELS;
+}
+
+function syncAnthropicBackendUi(backend) {
+  const isBedrock = backend === 'bedrock';
+  $('#settings-anthropic-api-fields')?.classList.toggle('hidden', isBedrock);
+  $('#settings-bedrock-fields')?.classList.toggle('hidden', !isBedrock);
+}
+
+function populateAnthropicModelSelects() {
+  const apiSel = $('#settings-anthropic-model');
+  if (apiSel && !apiSel.options.length) {
+    apiSel.innerHTML = ANTHROPIC_MODELS.map(
+      (m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label)}</option>`,
+    ).join('');
+  }
+  const bedSel = $('#settings-bedrock-model');
+  if (bedSel && !bedSel.options.length) {
+    bedSel.innerHTML = BEDROCK_MODELS.map(
+      (m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.label)}</option>`,
+    ).join('');
+  }
+}
+
+function syncAnthropicModelSelects(cfg) {
+  populateAnthropicModelSelects();
+  const backend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
+  const backendSel = $('#settings-anthropic-backend');
+  if (backendSel) backendSel.value = backend;
+  syncAnthropicBackendUi(backend);
+
+  const apiSel = $('#settings-anthropic-model');
+  if (apiSel) {
+    const current = cfg.model || 'claude-sonnet-4-5';
+    if (![...apiSel.options].some((o) => o.value === current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = `${current} (custom)`;
+      apiSel.appendChild(opt);
+    }
+    apiSel.value = current;
+  }
+
+  const bedSel = $('#settings-bedrock-model');
+  if (bedSel) {
+    const current = cfg.bedrock_model_id || BEDROCK_MODELS[0].id;
+    if (![...bedSel.options].some((o) => o.value === current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = `${current} (custom)`;
+      bedSel.appendChild(opt);
+    }
+    bedSel.value = current;
+  }
+
+  const regionEl = $('#settings-bedrock-region');
+  if (regionEl) regionEl.value = cfg.bedrock_region || 'us-east-1';
+}
+
+async function loadAnthropicSettingsSection() {
+  const statusEl = $('#settings-anthropic-status');
+  const form = $('#settings-anthropic-form');
+  const changeBtn = $('#settings-anthropic-change-key');
+  if (!statusEl) return;
+  try {
+    const cfg = await api('/api/settings/anthropic');
+    state.anthropicConfigured = !!cfg.configured;
+    state.anthropicBackend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
+    state.anthropicModel = cfg.model || 'claude-sonnet-4-5';
+    state.bedrockModelId = cfg.bedrock_model_id || BEDROCK_MODELS[0].id;
+    state.bedrockRegion = cfg.bedrock_region || 'us-east-1';
+    ensureAiInlineCompleteDefault(cfg.configured || state.geminiConfigured || state.cursorConfigured);
+    syncAnthropicModelSelects(cfg);
+    refreshAgentProviderUi();
+
+    if (cfg.configured) {
+      const backendLabel = cfg.backend === 'bedrock' ? 'Bedrock' : 'Anthropic API';
+      statusEl.innerHTML = `<span class="ok">Claude via ${backendLabel} is enabled</span>`;
+      form?.classList.add('hidden');
+      changeBtn?.classList.remove('hidden');
+    } else {
+      statusEl.innerHTML = '<span class="warn">Add an Anthropic API key or Bedrock credentials for Claude</span>';
+      form?.classList.remove('hidden');
+      changeBtn?.classList.add('hidden');
+    }
+    const clearBtn = $('#settings-anthropic-clear');
+    const removable = cfg.source === 'settings' || !!cfg.bedrock_masked;
+    clearBtn?.toggleAttribute('disabled', !cfg.configured && !cfg.bedrock_masked);
+    if (clearBtn) {
+      clearBtn.title = cfg.configured && cfg.source && cfg.source !== 'settings'
+        ? `Key may be set via ${cfg.source}`
+        : '';
+    }
+  } catch (err) {
+    statusEl.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
+    state.anthropicConfigured = false;
+    form?.classList.remove('hidden');
+    changeBtn?.classList.add('hidden');
+    refreshAgentProviderUi();
+  }
+}
+
+function showAnthropicKeyForm() {
+  $('#settings-anthropic-form')?.classList.remove('hidden');
+  $('#settings-anthropic-change-key')?.classList.add('hidden');
+  $('#settings-anthropic-key')?.focus();
+}
+
+async function saveAnthropicFromSettings(e) {
+  e?.preventDefault();
+  const backend = $('#settings-anthropic-backend')?.value || 'api';
+  const apiKey = $('#settings-anthropic-key')?.value.trim();
+  const bedrockKey = $('#settings-bedrock-key')?.value.trim();
+  const body = {
+    backend,
+    model: $('#settings-anthropic-model')?.value || undefined,
+    bedrock_model_id: $('#settings-bedrock-model')?.value || undefined,
+    bedrock_region: $('#settings-bedrock-region')?.value.trim() || undefined,
+  };
+  if (apiKey) body.api_key = apiKey;
+  if (bedrockKey) body.bedrock_api_key = bedrockKey;
+  if (backend === 'api' && !apiKey && !state.anthropicConfigured) {
+    toast('Enter an Anthropic API key', 'error');
+    $('#settings-anthropic-key')?.focus();
+    return;
+  }
+  try {
+    await api('/api/settings/anthropic', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+    if ($('#settings-anthropic-key')) $('#settings-anthropic-key').value = '';
+    if ($('#settings-bedrock-key')) $('#settings-bedrock-key').value = '';
+    await loadAnthropicSettingsSection();
+    toast('Claude settings saved', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function clearAnthropicFromSettings() {
+  try {
+    if (!confirm('Remove saved Anthropic / Bedrock API keys?')) return;
+    await api('/api/settings/anthropic', { method: 'DELETE' });
+    await loadAnthropicSettingsSection();
+    toast('Claude keys removed', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function saveAnthropicBackendFromSettings() {
+  const backend = $('#settings-anthropic-backend')?.value || 'api';
+  try {
+    const cfg = await api('/api/settings/anthropic/backend', {
+      method: 'PATCH',
+      body: JSON.stringify({ backend }),
+    });
+    state.anthropicBackend = cfg.backend === 'bedrock' ? 'bedrock' : 'api';
+    syncAnthropicModelSelects(cfg);
+    refreshAgentProviderUi();
+    toast(`Claude backend set to ${cfg.backend === 'bedrock' ? 'Bedrock' : 'Anthropic API'}`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function saveAnthropicModelFromSettings() {
+  const backend = $('#settings-anthropic-backend')?.value || 'api';
+  try {
+    if (backend === 'bedrock') {
+      const model = $('#settings-bedrock-model')?.value;
+      const region = $('#settings-bedrock-region')?.value.trim();
+      const cfg = await api('/api/settings/anthropic', {
+        method: 'PUT',
+        body: JSON.stringify({
+          backend: 'bedrock',
+          bedrock_model_id: model || undefined,
+          bedrock_region: region || undefined,
+        }),
+      });
+      state.bedrockModelId = cfg.bedrock_model_id || model;
+      state.bedrockRegion = cfg.bedrock_region || region || 'us-east-1';
+      toast(`Bedrock model set to ${state.bedrockModelId}`, 'success');
+    } else {
+      const model = $('#settings-anthropic-model')?.value;
+      const cfg = await api('/api/settings/anthropic/model', {
+        method: 'PATCH',
+        body: JSON.stringify({ model }),
+      });
+      state.anthropicModel = cfg.model || model;
+      toast(`Claude model set to ${state.anthropicModel}`, 'success');
+    }
+    refreshAgentProviderUi();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function setAnthropicAgentModel(modelId) {
+  if (!modelId) return;
+  const isBedrock = state.anthropicBackend === 'bedrock';
+  if (isBedrock && modelId === state.bedrockModelId) return;
+  if (!isBedrock && modelId === state.anthropicModel) return;
+  if (isBedrock) state.bedrockModelId = modelId;
+  else state.anthropicModel = modelId;
+  updateAgentUi();
+  try {
+    if (isBedrock) {
+      const cfg = await api('/api/settings/anthropic', {
+        method: 'PUT',
+        body: JSON.stringify({ backend: 'bedrock', bedrock_model_id: modelId }),
+      });
+      state.bedrockModelId = cfg.bedrock_model_id || modelId;
+    } else {
+      const cfg = await api('/api/settings/anthropic/model', {
+        method: 'PATCH',
+        body: JSON.stringify({ model: modelId }),
+      });
+      state.anthropicModel = cfg.model || modelId;
+    }
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -11185,7 +11440,9 @@ function initEditor() {
       getAiInlineComplete: () => getAiInlineCompleteEnabled(),
       getAiInlineProviderAvailable: () => getAiInlineProviderAvailable(),
       getGeminiConfigured: () => state.geminiConfigured,
+      getCursorConfigured: () => state.cursorConfigured,
       getCursorInlineAvailable: () => state.cursorConfigured && state.cursorBridgeOk,
+      getAnthropicConfigured: () => state.anthropicConfigured,
       getJavaLanguageLevel: () => state.javaLanguageLevel || 17,
       getLanguageContext: () => state.languageContext,
       isJdtlsReady: () => !!state.jdtlsReady,
@@ -14020,6 +14277,7 @@ function hideQuickFixMenu() {
     pop.classList.add('hidden');
     pop.classList.remove('ij-cascade-popover');
     pop.innerHTML = '';
+    delete pop.dataset.anchorLine;
   }
 }
 
@@ -14037,38 +14295,108 @@ function quickFixMenuLabel(f) {
   return `${src}: ${title}`;
 }
 
-function positionPopoverNearAnchor(pop, anchorEl) {
-  const anchor = anchorEl || aiFixMenuAnchor();
-  if (!pop || !anchor) return;
-  const rect = typeof anchor.getBoundingClientRect === 'function'
-    ? anchor.getBoundingClientRect()
-    : {
-        left: Number(anchor.left) || 8,
-        top: Number(anchor.top) || 8,
-        bottom: Number(anchor.bottom ?? ((Number(anchor.top) || 8) + (Number(anchor.height) || 16))),
-        right: Number(anchor.right ?? ((Number(anchor.left) || 8) + 1)),
-        width: Number(anchor.width) || 1,
-        height: Number(anchor.height) || 16,
-      };
-  pop.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 260))}px`;
-  if (rect.top < 72) {
-    pop.style.top = `${rect.bottom + 6}px`;
-  } else {
-    pop.style.top = `${rect.top - 8}px`;
-    requestAnimationFrame(() => {
-      const popRect = pop.getBoundingClientRect();
-      pop.style.top = `${Math.max(8, rect.top - popRect.height - 6)}px`;
-      if (parseFloat(pop.style.top) < 8) {
-        pop.style.top = `${rect.bottom + 6}px`;
-      }
-    });
-  }
+function isValidAnchorRect(rect) {
+  if (!rect) return false;
+  const w = Number(rect.width) || 0;
+  const h = Number(rect.height) || 0;
+  if (w <= 0 || h <= 0) return false;
+  // Detached DOM nodes report 0,0,0,0 — treat as invalid (was sending menu to top-left).
+  return rect.left !== 0 || rect.top !== 0 || rect.right !== 0 || rect.bottom !== 0;
 }
 
-function showQuickFixMenu(fixes, onPick, anchorEl) {
+function rectFromAnchor(anchor) {
+  if (!anchor) return null;
+  if (typeof anchor.getBoundingClientRect === 'function') {
+    if (anchor.isConnected === false) return null;
+    const rect = anchor.getBoundingClientRect();
+    return isValidAnchorRect(rect) ? rect : null;
+  }
+  const left = Number(anchor.left) || 0;
+  const top = Number(anchor.top) || 0;
+  const width = Number(anchor.width) || 1;
+  const height = Number(anchor.height) || 16;
+  const rect = {
+    left,
+    top,
+    width,
+    height,
+    right: Number(anchor.right ?? left + width),
+    bottom: Number(anchor.bottom ?? top + height),
+  };
+  return isValidAnchorRect(rect) ? rect : null;
+}
+
+/** Prefer live gutter bulb for `line`, then given anchor, then toolbar/status bulbs. */
+function resolveQuickFixAnchor(anchorEl, line) {
+  const lineNum = Number(line);
+  if (Number.isFinite(lineNum) && lineNum > 0 && state.editor?._reaperQuickFixBulbs?.length) {
+    for (const widget of state.editor._reaperQuickFixBulbs) {
+      const pos = widget.getPosition?.();
+      const node = widget.getDomNode?.();
+      if (pos?.range?.startLineNumber === lineNum && node?.isConnected) {
+        const rect = rectFromAnchor(node);
+        if (rect) return { el: node, rect, fromGutter: true };
+      }
+    }
+  }
+
+  const primary = rectFromAnchor(anchorEl);
+  if (primary) {
+    const fromGutter = !!anchorEl?.classList?.contains('ij-quickfix-glyph-bulb');
+    return { el: anchorEl, rect: primary, fromGutter };
+  }
+
+  const glowing = document.querySelector('.ij-quickfix-glyph-bulb.is-glowing');
+  const glowingRect = rectFromAnchor(glowing);
+  if (glowingRect) return { el: glowing, rect: glowingRect, fromGutter: true };
+
+  const fallback = aiFixMenuAnchor();
+  const fallbackRect = rectFromAnchor(fallback);
+  if (fallbackRect) return { el: fallback, rect: fallbackRect, fromGutter: false };
+
+  return null;
+}
+
+function positionPopoverNearAnchor(pop, anchorEl, line) {
+  if (!pop) return;
+  const resolved = resolveQuickFixAnchor(anchorEl, line);
+  if (!resolved) {
+    pop.style.left = '8px';
+    pop.style.top = '72px';
+    return;
+  }
+  const { rect, fromGutter } = resolved;
+  // Gutter bulbs: open to the right into the editor. Toolbar/status: align to the control.
+  const preferredLeft = fromGutter ? rect.right + 6 : rect.left;
+  pop.style.left = `${Math.max(8, Math.min(preferredLeft, window.innerWidth - 280))}px`;
+
+  const placeBelow = () => {
+    pop.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 40)}px`;
+  };
+
+  if (fromGutter || rect.top < 96) {
+    placeBelow();
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const popRect = pop.getBoundingClientRect();
+    const top = rect.top - popRect.height - 6;
+    if (top < 8) placeBelow();
+    else pop.style.top = `${top}px`;
+  });
+}
+
+function showQuickFixMenu(fixes, onPick, anchorEl, line) {
   const pop = $('#ai-quickfix-popover');
   if (!pop || !fixes?.length) return;
   pop.classList.remove('ij-cascade-popover');
+  const anchorLine = line != null
+    ? line
+    : (pop.dataset.anchorLine ? Number(pop.dataset.anchorLine) : null);
+  if (anchorLine != null && Number.isFinite(Number(anchorLine))) {
+    pop.dataset.anchorLine = String(anchorLine);
+  }
   pop.innerHTML = fixes.map((f, i) => {
     const title = quickFixMenuLabel(f);
     const loading = f?.provider === 'loading' || !f?.edits?.length;
@@ -14078,7 +14406,9 @@ function showQuickFixMenu(fixes, onPick, anchorEl) {
     return `<button type="button" class="ij-quickfix-item" data-idx="${i}">${title}</button>`;
   }).join('');
   pop.classList.remove('hidden');
-  positionPopoverNearAnchor(pop, anchorEl);
+  positionPopoverNearAnchor(pop, anchorEl, anchorLine);
+  // Reposition after layout — glyph widgets / taller menus after AI results load.
+  requestAnimationFrame(() => positionPopoverNearAnchor(pop, anchorEl, anchorLine));
   pop.querySelectorAll('.ij-quickfix-item:not(.ij-quickfix-item--loading)').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -14147,6 +14477,7 @@ function showRefactorStaircaseMenu(items, onPick, anchorEl) {
   }).join('');
   pop.classList.remove('hidden');
   positionPopoverNearAnchor(pop, anchorEl);
+  requestAnimationFrame(() => positionPopoverNearAnchor(pop, anchorEl));
   pop.querySelectorAll('.ij-quickfix-item[data-row]').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -18369,6 +18700,10 @@ function renderAgentProviderControls() {
     fillAgentModelSelect(select, models, current);
     if (def.id === 'cursor') state.cursorModel = select.value;
     else if (def.id === 'gemini') state.geminiModel = select.value;
+    else if (def.id === 'anthropic') {
+      if (state.anthropicBackend === 'bedrock') state.bedrockModelId = select.value;
+      else state.anthropicModel = select.value;
+    }
     container.appendChild(select);
   } else if (def.id === 'cursor' && state.cursorConfigured && !state.cursorModelsLoaded) {
     const hint = document.createElement('p');
@@ -19451,6 +19786,14 @@ function bindEvents() {
   $('#settings-gemini-change-key')?.addEventListener('click', showGeminiKeyForm);
   populateGeminiModelSelect();
   $('#settings-gemini-model')?.addEventListener('change', saveGeminiModelFromSettings);
+  $('#settings-anthropic-form')?.addEventListener('submit', saveAnthropicFromSettings);
+  $('#settings-anthropic-clear')?.addEventListener('click', clearAnthropicFromSettings);
+  $('#settings-anthropic-change-key')?.addEventListener('click', showAnthropicKeyForm);
+  $('#settings-anthropic-backend')?.addEventListener('change', saveAnthropicBackendFromSettings);
+  $('#settings-anthropic-model')?.addEventListener('change', saveAnthropicModelFromSettings);
+  $('#settings-bedrock-model')?.addEventListener('change', saveAnthropicModelFromSettings);
+  $('#settings-bedrock-region')?.addEventListener('change', saveAnthropicModelFromSettings);
+  populateAnthropicModelSelects();
   $('#btn-sync').addEventListener('click', syncPull);
   $('#btn-nav-commit')?.addEventListener('click', () => {
     switchPanel('git');
@@ -19800,6 +20143,7 @@ async function init() {
   syncWelcomeLayout();
   void loadCursorStatus();
   void loadGeminiSettingsSection();
+  void loadAnthropicSettingsSection();
   const initWork = (async () => {
   try {
     await loadRepos();

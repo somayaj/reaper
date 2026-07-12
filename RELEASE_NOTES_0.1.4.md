@@ -1,4 +1,4 @@
-Reaper 0.1.4 — macOS split release.
+Reaper 0.1.4 (build 454) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -9,14 +9,15 @@ Reaper 0.1.4 — macOS split release.
 
 Drag Reaper.app to Applications, then launch.
 
-### What's new
+### What's new (build 454)
 
-- **Docker Console:** View menu → Docker. Container list (`docker ps`), live logs, compose quick actions (Up / Down / Ps / Build / Follow), per-container Start / Stop / Restart / Logs, and a freeform `docker …` command bar (same idea as Git Console).
-- **Docker logs fix (build 431–432):** Output pane keeps visible height; container/`docker ps` commands no longer depend on a compose project cwd; `docker logs` stderr is captured. Build **432** loads a finite log tail first, then follows via XHR streaming so WKWebView shows live lines.
-- **Plain Java debug:** Debug a `public static void main` class without Maven/Gradle — Reaper compiles with `javac -g` into `.reaper/java-out` and launches the bundled Java Debug adapter (no more empty debug panel).
+- **Claude + Amazon Bedrock:** Settings → AI — Anthropic API or Bedrock (Mantle key or AWS IAM). Claude agent chat, inline completions, and AI quick fixes.
+- **Faster AI quick fixes:** Cursor and Gemini race in parallel (first useful edit wins), then Claude API, then Bedrock. Java jdtls overlaps with AI instead of blocking it.
+- **Honest empty-state toast:** If Cursor/Gemini are configured but return nothing, Reaper says so — it no longer claims you need to configure Settings.
 
-### Also in recent 0.1.3 builds
+### Also in 0.1.4
 
-- C/C++ and Java/Spring Boot debugger fixes, breakpoint gutter persistence, longer Gradle debug prebuild budget.
+- **Docker Console:** View menu → Docker. Container list, live logs, compose quick actions, per-container Start/Stop/Restart/Logs, and a freeform `docker …` bar.
+- **Plain Java debug:** Debug a `public static void main` class without Maven/Gradle — `javac -g` into `.reaper/java-out` and the bundled Java Debug adapter.
 
 **Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run `scripts/eject-reaper-dmgs.sh`.

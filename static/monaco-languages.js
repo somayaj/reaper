@@ -7676,7 +7676,31 @@
     }
 
     function hasAiQuickFixes(fixes) {
-      return fixes.some((f) => f.provider && f.provider !== 'local');
+      return fixes.some((f) => f.provider && f.provider !== 'local' && f.provider !== 'loading');
+    }
+
+    function aiProvidersConfigured() {
+      return !!(
+        helpers.getGeminiConfigured?.()
+        || helpers.getCursorConfigured?.()
+        || helpers.getCursorInlineAvailable?.()
+        || helpers.getAnthropicConfigured?.()
+        || helpers.getBedrockConfigured?.()
+      );
+    }
+
+    function toastNoQuickFixes(reason) {
+      if (aiProvidersConfigured()) {
+        helpers.toast?.(
+          reason || 'No quick fixes for this error — Cursor/Gemini returned nothing useful. Try again or check the bridge.',
+          'info',
+        );
+      } else {
+        helpers.toast?.(
+          'No quick fixes available — configure Cursor or Gemini in Settings → AI',
+          'error',
+        );
+      }
     }
 
     const QUICK_FIX_LOADING = Object.freeze({
@@ -7688,6 +7712,7 @@
       alwaysMenu = false,
       anchorEl = null,
       markers = null,
+      line = null,
     } = {}) {
       const model = ed.getModel();
       const scoped = model && markers
@@ -7698,10 +7723,7 @@
       const pending = (fixes || []).some((f) => f.provider === 'loading');
 
       if (!actionable.length && !pending) {
-        helpers.toast?.(
-          'No quick fixes available — configure Cursor or Gemini in Settings',
-          'error',
-        );
+        toastNoQuickFixes();
         return;
       }
       const showMenu = alwaysMenu
@@ -7720,6 +7742,10 @@
       const menuItems = pending
         ? [...actionable, ...(fixes || []).filter((f) => f.provider === 'loading')]
         : actionable;
+      const anchorLine = line
+        ?? markers?.[0]?.startLineNumber
+        ?? ed.getPosition()?.lineNumber
+        ?? null;
       helpers.showQuickFixMenu?.(menuItems, (fix) => {
         if (applyQuickFixEdits(ed, fix, markers)) {
           helpers.toast?.(`Applied: ${quickFixActionTitle(fix)}`, 'success');
@@ -7727,7 +7753,7 @@
         } else {
           helpers.toast?.('Could not apply fix', 'error');
         }
-      }, anchorEl);
+      }, anchorEl, anchorLine);
     }
 
     function runQuickFixFlow(ed, {
@@ -7750,15 +7776,14 @@
       }
       const fixes = collectQuickFixes(model, markers);
       const needsAiFetch = fetchAi && !hasAiQuickFixes(fixes);
+      const presentOpts = { alwaysMenu, anchorEl, markers, line };
 
       if (fixes.length) {
-        presentQuickFixes(ed, needsAiFetch ? [...fixes, QUICK_FIX_LOADING] : fixes, {
-          alwaysMenu, anchorEl, markers,
-        });
+        presentQuickFixes(ed, needsAiFetch ? [...fixes, QUICK_FIX_LOADING] : fixes, presentOpts);
       } else if (needsAiFetch) {
-        presentQuickFixes(ed, [QUICK_FIX_LOADING], { alwaysMenu, anchorEl, markers });
+        presentQuickFixes(ed, [QUICK_FIX_LOADING], presentOpts);
       } else {
-        presentQuickFixes(ed, fixes, { alwaysMenu, anchorEl, markers });
+        presentQuickFixes(ed, fixes, presentOpts);
         return;
       }
 
@@ -7766,25 +7791,35 @@
 
       const allMarkers = allFileMarkers(model);
       fetchQuickFixes(
-        model, allMarkers.length ? allMarkers : markers, { silent: true, scopeMarkers: markers },
+        model, allMarkers.length ? allMarkers : markers, {
+          silent: true,
+          scopeMarkers: markers,
+          forceRefresh: true,
+        },
       ).then((aiFixes) => {
         const merged = mergeQuickFixes(fixes, aiFixes);
         const menuOpen = helpers.isQuickFixMenuOpen?.();
         const hadInitialFixes = fixes.length > 0;
 
         if (merged.length && (menuOpen || !hadInitialFixes)) {
-          presentQuickFixes(ed, merged, { alwaysMenu, anchorEl, markers });
+          presentQuickFixes(ed, merged, presentOpts);
         } else if (!merged.length && !hadInitialFixes) {
           helpers.hideQuickFixMenu?.();
-          helpers.toast?.(
-            'No quick fixes available — configure Cursor or Gemini in Settings',
-            'error',
+          toastNoQuickFixes(
+            aiProvidersConfigured()
+              ? 'Cursor/Gemini are configured, but no fix was returned for this error'
+              : null,
           );
+        } else if (menuOpen && !merged.length && hadInitialFixes) {
+          // Drop the loading row; keep local fixes.
+          presentQuickFixes(ed, fixes, presentOpts);
         }
       }).catch((err) => {
         if (!fixes.length) {
           helpers.hideQuickFixMenu?.();
           helpers.toast?.(err?.message || 'AI quick fix failed', 'error');
+        } else if (helpers.isQuickFixMenuOpen?.()) {
+          presentQuickFixes(ed, fixes, presentOpts);
         }
       });
     }
@@ -7901,6 +7936,7 @@
     async function fetchQuickFixes(model, markers, {
       silent = false,
       scopeMarkers = null,
+      forceRefresh = false,
     } = {}) {
       const repo = helpers.getRepo();
       const path = helpers.getActivePath?.() || '';
@@ -7909,10 +7945,18 @@
       const payload = markersToDiagnosticPayload(markers);
       const key = quickFixCacheKey(repo, path, content.length, diagnosticSignature(payload));
       const anchorMarkers = scopeMarkers || markers;
-      const cached = readCachedQuickFixes(key, model, anchorMarkers);
-      if (cached !== null) return cached;
+      if (forceRefresh) {
+        quickFixCache.delete(key);
+      } else {
+        const cached = readCachedQuickFixes(key, model, anchorMarkers);
+        // Empty cache from a silent prefetch must not block a user click when AI is configured.
+        if (cached !== null) {
+          if (cached.length > 0 || silent || !aiProvidersConfigured()) return cached;
+          quickFixCache.delete(key);
+        }
+      }
       const inflight = quickFixInflight.get(key);
-      if (inflight) return inflight;
+      if (inflight && !forceRefresh) return inflight;
 
       const promise = (async () => {
         const controller = new AbortController();

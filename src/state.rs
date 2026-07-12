@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::cursor::{CursorBridge, SessionStore};
-use crate::agent::GeminiChatStore;
+use crate::agent::{AnthropicChatStore, GeminiChatStore};
 use crate::settings::SettingsStore;
 use crate::ui_preferences::UiPreferencesStore;
 use crate::workspace::{JavaIndexJobs, ProjectIndexJobs};
@@ -15,6 +15,7 @@ pub struct AppState {
     pub cursor_bridge: Arc<CursorBridge>,
     pub cursor_sessions: Arc<SessionStore>,
     pub gemini_chat_sessions: Arc<GeminiChatStore>,
+    pub anthropic_chat_sessions: Arc<AnthropicChatStore>,
     pub java_index_jobs: Arc<JavaIndexJobs>,
     pub project_index_jobs: Arc<ProjectIndexJobs>,
 }
@@ -29,6 +30,7 @@ impl AppState {
             cursor_bridge: Arc::new(CursorBridge::new()),
             cursor_sessions: Arc::new(SessionStore::default()),
             gemini_chat_sessions: Arc::new(GeminiChatStore::default()),
+            anthropic_chat_sessions: Arc::new(AnthropicChatStore::default()),
             project_index_jobs: Arc::new(ProjectIndexJobs::new(Arc::clone(&java_index_jobs))),
             java_index_jobs,
         }

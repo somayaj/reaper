@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 
 const GEMINI_SETTINGS_KEY: &str = "__gemini__";
 const CURSOR_SETTINGS_KEY: &str = "__cursor__";
+const ANTHROPIC_SETTINGS_KEY: &str = "__anthropic__";
+const BEDROCK_SETTINGS_KEY: &str = "__bedrock__";
 const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+const DEFAULT_BEDROCK_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SettingsFile {
@@ -20,6 +25,15 @@ struct SettingsFile {
     cursor_model: Option<String>,
     #[serde(default)]
     cursor_mode: Option<String>,
+    #[serde(default)]
+    anthropic_model: Option<String>,
+    /// "api" | "bedrock"
+    #[serde(default)]
+    anthropic_backend: Option<String>,
+    #[serde(default)]
+    bedrock_region: Option<String>,
+    #[serde(default)]
+    bedrock_model_id: Option<String>,
     #[serde(default)]
     jdk_home: Option<String>,
     /// Explicit Java language level for editor javac when the project does not declare one.
@@ -73,6 +87,18 @@ pub struct GeminiSettingsView {
     pub configured: bool,
     pub masked: Option<String>,
     pub model: String,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicSettingsView {
+    pub configured: bool,
+    pub masked: Option<String>,
+    pub model: String,
+    pub backend: String,
+    pub bedrock_region: String,
+    pub bedrock_model_id: String,
+    pub bedrock_masked: Option<String>,
     pub source: Option<String>,
 }
 
@@ -331,7 +357,11 @@ impl SettingsStore {
     }
 
     fn token_from_settings(&self, host: &str) -> Option<String> {
-        if host == GEMINI_SETTINGS_KEY || host == CURSOR_SETTINGS_KEY {
+        if host == GEMINI_SETTINGS_KEY
+            || host == CURSOR_SETTINGS_KEY
+            || host == ANTHROPIC_SETTINGS_KEY
+            || host == BEDROCK_SETTINGS_KEY
+        {
             return None;
         }
         let guard = self.inner.read().ok()?;
@@ -470,10 +500,11 @@ impl SettingsStore {
 
         if let Ok(guard) = self.inner.read() {
             for (host, token) in &guard.tokens {
-                if host == GEMINI_SETTINGS_KEY {
-                    continue;
-                }
-                if host == CURSOR_SETTINGS_KEY {
+                if host == GEMINI_SETTINGS_KEY
+                    || host == CURSOR_SETTINGS_KEY
+                    || host == ANTHROPIC_SETTINGS_KEY
+                    || host == BEDROCK_SETTINGS_KEY
+                {
                     continue;
                 }
                 entries.push(TokenInfo {
@@ -693,6 +724,223 @@ impl SettingsStore {
             bridge_error,
         }
     }
+
+    pub fn anthropic_api_key(&self) -> Option<String> {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(key) = guard.tokens.get(ANTHROPIC_SETTINGS_KEY) {
+                if !key.is_empty() {
+                    return Some(key.clone());
+                }
+            }
+        }
+        std::env::var("REAPER_ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+    }
+
+    pub fn bedrock_api_key(&self) -> Option<String> {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(key) = guard.tokens.get(BEDROCK_SETTINGS_KEY) {
+                if !key.is_empty() {
+                    return Some(key.clone());
+                }
+            }
+        }
+        std::env::var("REAPER_BEDROCK_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+    }
+
+    /// Returns `"api"` or `"bedrock"`.
+    pub fn anthropic_backend(&self) -> String {
+        if let Ok(guard) = self.inner.read() {
+            if let Some(backend) = &guard.anthropic_backend {
+                let b = backend.trim().to_ascii_lowercase();
+                if b == "bedrock" {
+                    return "bedrock".into();
+                }
+                if b == "api" {
+                    return "api".into();
+                }
+            }
+        }
+        match std::env::var("REAPER_ANTHROPIC_BACKEND")
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("bedrock") => "bedrock".into(),
+            _ => "api".into(),
+        }
+    }
+
+    pub fn anthropic_model(&self) -> String {
+        let stored = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.anthropic_model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| std::env::var("REAPER_ANTHROPIC_MODEL").ok())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.into());
+        normalize_anthropic_model(&stored)
+    }
+
+    pub fn bedrock_model_id(&self) -> String {
+        let stored = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.bedrock_model_id.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| std::env::var("REAPER_BEDROCK_MODEL").ok())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_BEDROCK_MODEL.into());
+        normalize_bedrock_model(&stored)
+    }
+
+    pub fn bedrock_region(&self) -> String {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.bedrock_region.clone())
+            .filter(|r| !r.is_empty())
+            .or_else(|| std::env::var("REAPER_BEDROCK_REGION").ok())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| DEFAULT_BEDROCK_REGION.into())
+    }
+
+    pub fn set_anthropic_api_key(&self, api_key: String) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard
+            .tokens
+            .insert(ANTHROPIC_SETTINGS_KEY.to_string(), api_key);
+        self.save(&guard)
+    }
+
+    pub fn clear_anthropic_api_key(&self) -> Result<bool> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let removed = guard.tokens.remove(ANTHROPIC_SETTINGS_KEY).is_some();
+        if removed {
+            self.save(&guard)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn set_bedrock_api_key(&self, api_key: String) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard
+            .tokens
+            .insert(BEDROCK_SETTINGS_KEY.to_string(), api_key);
+        self.save(&guard)
+    }
+
+    pub fn clear_bedrock_api_key(&self) -> Result<bool> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        let removed = guard.tokens.remove(BEDROCK_SETTINGS_KEY).is_some();
+        if removed {
+            self.save(&guard)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn set_anthropic_model(&self, model: String) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.anthropic_model = Some(normalize_anthropic_model(&model));
+        self.save(&guard)
+    }
+
+    pub fn set_anthropic_backend(&self, backend: String) -> Result<()> {
+        let backend = backend.trim().to_ascii_lowercase();
+        if backend != "api" && backend != "bedrock" {
+            anyhow::bail!("backend must be \"api\" or \"bedrock\"");
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.anthropic_backend = Some(backend);
+        self.save(&guard)
+    }
+
+    pub fn set_bedrock_region(&self, region: String) -> Result<()> {
+        let region = region.trim().to_string();
+        if region.is_empty() {
+            anyhow::bail!("bedrock_region required");
+        }
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.bedrock_region = Some(region);
+        self.save(&guard)
+    }
+
+    pub fn set_bedrock_model_id(&self, model_id: String) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        guard.bedrock_model_id = Some(normalize_bedrock_model(&model_id));
+        self.save(&guard)
+    }
+
+    pub fn anthropic_configured(&self) -> bool {
+        match self.anthropic_backend().as_str() {
+            "bedrock" => {
+                self.bedrock_api_key().is_some()
+                    || std::env::var("AWS_ACCESS_KEY_ID")
+                        .ok()
+                        .filter(|k| !k.is_empty())
+                        .is_some()
+                    || std::env::var("AWS_PROFILE")
+                        .ok()
+                        .filter(|p| !p.is_empty())
+                        .is_some()
+            }
+            _ => self.anthropic_api_key().is_some(),
+        }
+    }
+
+    pub fn anthropic_view(&self) -> AnthropicSettingsView {
+        let from_env = std::env::var("REAPER_ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        let from_file = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.tokens.get(ANTHROPIC_SETTINGS_KEY).cloned())
+            .filter(|k| !k.is_empty());
+
+        let (masked, source) = if let Some(key) = from_file {
+            (Some(mask_token(&key)), Some("settings".into()))
+        } else if let Some(key) = from_env {
+            (
+                Some(mask_token(&key)),
+                Some("env:REAPER_ANTHROPIC_API_KEY".into()),
+            )
+        } else {
+            (None, None)
+        };
+
+        let bedrock_from_env = std::env::var("REAPER_BEDROCK_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        let bedrock_from_file = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|g| g.tokens.get(BEDROCK_SETTINGS_KEY).cloned())
+            .filter(|k| !k.is_empty());
+        let bedrock_masked = bedrock_from_file
+            .as_ref()
+            .or(bedrock_from_env.as_ref())
+            .map(|k| mask_token(k));
+
+        AnthropicSettingsView {
+            configured: self.anthropic_configured(),
+            masked,
+            model: self.anthropic_model(),
+            backend: self.anthropic_backend(),
+            bedrock_region: self.bedrock_region(),
+            bedrock_model_id: self.bedrock_model_id(),
+            bedrock_masked,
+            source,
+        }
+    }
 }
 
 fn env_key_for_host(host: &str) -> String {
@@ -753,6 +1001,24 @@ pub fn normalize_gemini_model(model: &str) -> String {
         "gemini-1.5-flash" | "gemini-1.5-flash-8b" | "gemini-1.5-flash-latest" | "gemini-1.5-pro"
         | "gemini-1.5-pro-latest" => "gemini-2.5-flash".into(),
         other => other.to_string(),
+    }
+}
+
+pub fn normalize_anthropic_model(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        DEFAULT_ANTHROPIC_MODEL.into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn normalize_bedrock_model(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        DEFAULT_BEDROCK_MODEL.into()
+    } else {
+        trimmed.to_string()
     }
 }
 

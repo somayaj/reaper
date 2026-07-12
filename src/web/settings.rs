@@ -17,6 +17,12 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/settings/tokens/{host}", delete(remove_token))
         .route("/api/settings/gemini", get(get_gemini).put(set_gemini).delete(clear_gemini))
         .route("/api/settings/gemini/model", patch(set_gemini_model))
+        .route(
+            "/api/settings/anthropic",
+            get(get_anthropic).put(set_anthropic).delete(clear_anthropic),
+        )
+        .route("/api/settings/anthropic/model", patch(set_anthropic_model))
+        .route("/api/settings/anthropic/backend", patch(set_anthropic_backend))
         .route("/api/settings/cursor", get(get_cursor).put(set_cursor).delete(clear_cursor))
         .route("/api/settings/cursor/model", patch(set_cursor_model))
         .route("/api/settings/cursor/mode", patch(set_cursor_mode))
@@ -118,6 +124,107 @@ async fn set_gemini_model(
 async fn clear_gemini(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _ = state.settings.clear_gemini_api_key();
     Json(state.settings.gemini_view()).into_response()
+}
+
+async fn get_anthropic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.settings.anthropic_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetAnthropicRequest {
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    bedrock_api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    bedrock_region: Option<String>,
+    #[serde(default)]
+    bedrock_model_id: Option<String>,
+}
+
+async fn set_anthropic(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetAnthropicRequest>,
+) -> impl IntoResponse {
+    if let Some(api_key) = body.api_key.filter(|k| !k.trim().is_empty()) {
+        if let Err(e) = state.settings.set_anthropic_api_key(api_key.trim().to_string()) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    if let Some(bedrock_key) = body.bedrock_api_key.filter(|k| !k.trim().is_empty()) {
+        if let Err(e) = state.settings.set_bedrock_api_key(bedrock_key.trim().to_string()) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    if let Some(model) = body.model.filter(|m| !m.trim().is_empty()) {
+        if let Err(e) = state.settings.set_anthropic_model(model) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    if let Some(backend) = body.backend.filter(|b| !b.trim().is_empty()) {
+        if let Err(e) = state.settings.set_anthropic_backend(backend) {
+            return api_error(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(region) = body.bedrock_region.filter(|r| !r.trim().is_empty()) {
+        if let Err(e) = state.settings.set_bedrock_region(region) {
+            return api_error(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let Some(model_id) = body.bedrock_model_id.filter(|m| !m.trim().is_empty()) {
+        if let Err(e) = state.settings.set_bedrock_model_id(model_id) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    Json(state.settings.anthropic_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetAnthropicModelRequest {
+    model: String,
+}
+
+async fn set_anthropic_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetAnthropicModelRequest>,
+) -> impl IntoResponse {
+    let model = body.model.trim();
+    if model.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "model required");
+    }
+    if let Err(e) = state.settings.set_anthropic_model(model.to_string()) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    Json(state.settings.anthropic_view()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetAnthropicBackendRequest {
+    backend: String,
+}
+
+async fn set_anthropic_backend(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SetAnthropicBackendRequest>,
+) -> impl IntoResponse {
+    let backend = body.backend.trim();
+    if backend.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "backend required");
+    }
+    if let Err(e) = state.settings.set_anthropic_backend(backend.to_string()) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    Json(state.settings.anthropic_view()).into_response()
+}
+
+async fn clear_anthropic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let _ = state.settings.clear_anthropic_api_key();
+    let _ = state.settings.clear_bedrock_api_key();
+    Json(state.settings.anthropic_view()).into_response()
 }
 
 async fn get_cursor(State(state): State<Arc<AppState>>) -> impl IntoResponse {

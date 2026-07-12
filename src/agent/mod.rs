@@ -1,6 +1,10 @@
+mod anthropic;
+mod anthropic_chat;
 mod gemini;
 mod gemini_chat;
 
+pub use anthropic::{AnthropicClient, ClaudeBackend};
+pub use anthropic_chat::AnthropicChatStore;
 pub use gemini::GeminiClient;
 pub use gemini_chat::GeminiChatStore;
 
@@ -185,6 +189,7 @@ pub async fn suggest_commit_message(
 
 const INLINE_CURSOR_TIMEOUT: Duration = Duration::from_secs(8);
 const INLINE_GEMINI_TIMEOUT: Duration = Duration::from_secs(6);
+const INLINE_ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(8);
 
 const INLINE_COMPLETION_SYSTEM: &str = "You are an IDE inline ghost-text completion engine.\n\
     The user sees text they already typed, then <CURSOR>, then your output as gray suggestion text.\n\
@@ -374,13 +379,45 @@ async fn try_inline_via_gemini(
 }
 
 async fn try_inline_via_anthropic(
-    _settings: &SettingsStore,
-    _context: &str,
-    _line_prefix: &str,
-    _is_prose: bool,
+    settings: &SettingsStore,
+    context: &str,
+    line_prefix: &str,
+    is_prose: bool,
 ) -> Option<String> {
     // Claude/Anthropic inline — third in chain when API settings land.
-    None
+    let client = anthropic_client_from_settings(settings)?;
+    let fut = client.suggest_inline_completion(context);
+    match timeout(INLINE_ANTHROPIC_TIMEOUT, fut).await {
+        Ok(Ok(raw)) => normalize_inline_from_raw(&raw, line_prefix, is_prose),
+        Ok(Err(e)) => {
+            tracing::debug!("anthropic inline completion failed: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                "anthropic inline completion timed out after {:?}",
+                INLINE_ANTHROPIC_TIMEOUT
+            );
+            None
+        }
+    }
+}
+
+pub fn anthropic_client_from_settings(settings: &SettingsStore) -> Option<AnthropicClient> {
+    if !settings.anthropic_configured() {
+        return None;
+    }
+    match ClaudeBackend::parse(&settings.anthropic_backend()) {
+        ClaudeBackend::Api => {
+            let api_key = settings.anthropic_api_key()?;
+            Some(AnthropicClient::new_api(api_key, settings.anthropic_model()))
+        }
+        ClaudeBackend::Bedrock => Some(AnthropicClient::new_bedrock(
+            settings.bedrock_model_id(),
+            settings.bedrock_region(),
+            settings.bedrock_api_key(),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,8 +551,13 @@ struct AiQuickFixRaw {
     edits: Vec<AiQuickFixEditRaw>,
 }
 
-const QUICK_FIX_CURSOR_TIMEOUT: Duration = Duration::from_secs(12);
+const QUICK_FIX_CURSOR_TIMEOUT: Duration = Duration::from_secs(8);
+const QUICK_FIX_GEMINI_TIMEOUT: Duration = Duration::from_secs(8);
+const QUICK_FIX_CLAUDE_TIMEOUT: Duration = Duration::from_secs(8);
+const QUICK_FIX_BEDROCK_TIMEOUT: Duration = Duration::from_secs(8);
+const QUICK_FIX_CURSOR_HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Race Cursor + Gemini in parallel (first non-empty wins). Then Claude API, then Bedrock.
 pub async fn suggest_ai_quick_fixes(
     settings: &SettingsStore,
     ws: &Path,
@@ -531,17 +573,30 @@ pub async fn suggest_ai_quick_fixes(
     let context = build_quick_fix_context(path, content, diagnostics);
     let line_count = content.lines().count().max(1) as u32;
 
-    // Gemini: one HTTP call — usually much faster than Cursor session + stream.
-    if settings.gemini_api_key().is_some() {
-        match suggest_quick_fixes_via_gemini(settings, content, &context, line_count).await {
-            Ok(fixes) if !fixes.is_empty() => return Ok(fixes),
-            Ok(_) => tracing::debug!("gemini quick fix returned no fixes"),
-            Err(e) => tracing::warn!("gemini quick fix failed: {e:#}"),
-        }
-    }
+    let run_cursor = cursor_bridge.is_some() && settings.cursor_api_key().is_some();
+    let run_gemini = settings.gemini_api_key().is_some();
 
-    if let Some(bridge) = cursor_bridge {
-        if settings.cursor_api_key().is_some() && bridge.health().await {
+    if run_cursor || run_gemini {
+        let cursor_fut = async {
+            let Some(bridge) = cursor_bridge else {
+                return None;
+            };
+            if settings.cursor_api_key().is_none() {
+                return None;
+            }
+            let healthy = match timeout(QUICK_FIX_CURSOR_HEALTH_TIMEOUT, bridge.health()).await {
+                Ok(ok) => ok,
+                Err(_) => {
+                    tracing::warn!(
+                        "cursor bridge health timed out after {:?}",
+                        QUICK_FIX_CURSOR_HEALTH_TIMEOUT
+                    );
+                    false
+                }
+            };
+            if !healthy {
+                return None;
+            }
             let cursor = suggest_quick_fixes_via_cursor(
                 settings,
                 bridge,
@@ -551,15 +606,114 @@ pub async fn suggest_ai_quick_fixes(
                 line_count,
             );
             match timeout(QUICK_FIX_CURSOR_TIMEOUT, cursor).await {
-                Ok(Ok(fixes)) if !fixes.is_empty() => return Ok(fixes),
-                Ok(Ok(_)) => tracing::debug!("cursor quick fix returned no fixes"),
-                Ok(Err(e)) => tracing::warn!("cursor quick fix failed: {e:#}"),
-                Err(_) => tracing::warn!("cursor quick fix timed out after {:?}", QUICK_FIX_CURSOR_TIMEOUT),
+                Ok(Ok(fixes)) if !fixes.is_empty() => Some(fixes),
+                Ok(Ok(_)) => {
+                    tracing::debug!("cursor quick fix returned no fixes");
+                    None
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("cursor quick fix failed: {e:#}");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "cursor quick fix timed out after {:?}",
+                        QUICK_FIX_CURSOR_TIMEOUT
+                    );
+                    None
+                }
+            }
+        };
+
+        let gemini_fut = async {
+            if settings.gemini_api_key().is_none() {
+                return None;
+            }
+            let gemini = suggest_quick_fixes_via_gemini(settings, content, &context, line_count);
+            match timeout(QUICK_FIX_GEMINI_TIMEOUT, gemini).await {
+                Ok(Ok(fixes)) if !fixes.is_empty() => Some(fixes),
+                Ok(Ok(_)) => {
+                    tracing::debug!("gemini quick fix returned no fixes");
+                    None
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("gemini quick fix failed: {e:#}");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "gemini quick fix timed out after {:?}",
+                        QUICK_FIX_GEMINI_TIMEOUT
+                    );
+                    None
+                }
+            }
+        };
+
+        tokio::pin!(cursor_fut);
+        tokio::pin!(gemini_fut);
+        let mut cursor_done = !run_cursor;
+        let mut gemini_done = !run_gemini;
+
+        while !cursor_done || !gemini_done {
+            tokio::select! {
+                res = &mut cursor_fut, if !cursor_done => {
+                    cursor_done = true;
+                    if let Some(fixes) = res {
+                        return Ok(fixes);
+                    }
+                }
+                res = &mut gemini_fut, if !gemini_done => {
+                    gemini_done = true;
+                    if let Some(fixes) = res {
+                        return Ok(fixes);
+                    }
+                }
             }
         }
     }
 
+    // Claude via Anthropic API (if API key)
+    if settings.anthropic_api_key().is_some() {
+        let claude = suggest_quick_fixes_via_claude_api(settings, content, &context, line_count);
+        match timeout(QUICK_FIX_CLAUDE_TIMEOUT, claude).await {
+            Ok(Ok(fixes)) if !fixes.is_empty() => return Ok(fixes),
+            Ok(Ok(_)) => tracing::debug!("claude api quick fix returned no fixes"),
+            Ok(Err(e)) => tracing::warn!("claude api quick fix failed: {e:#}"),
+            Err(_) => tracing::warn!(
+                "claude api quick fix timed out after {:?}",
+                QUICK_FIX_CLAUDE_TIMEOUT
+            ),
+        }
+    }
+
+    // Bedrock (Mantle key or AWS credentials)
+    if bedrock_quick_fix_available(settings) {
+        let bedrock = suggest_quick_fixes_via_bedrock(settings, content, &context, line_count);
+        match timeout(QUICK_FIX_BEDROCK_TIMEOUT, bedrock).await {
+            Ok(Ok(fixes)) if !fixes.is_empty() => return Ok(fixes),
+            Ok(Ok(_)) => tracing::debug!("bedrock quick fix returned no fixes"),
+            Ok(Err(e)) => tracing::warn!("bedrock quick fix failed: {e:#}"),
+            Err(_) => tracing::warn!(
+                "bedrock quick fix timed out after {:?}",
+                QUICK_FIX_BEDROCK_TIMEOUT
+            ),
+        }
+    }
+
     Ok(Vec::new())
+}
+
+fn bedrock_quick_fix_available(settings: &SettingsStore) -> bool {
+    settings.bedrock_api_key().is_some()
+        || std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .is_some()
+        || std::env::var("AWS_PROFILE")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .is_some()
 }
 
 fn quick_fix_line_len(content: &str, line: u32) -> u32 {
@@ -735,6 +889,41 @@ async fn suggest_quick_fixes_via_gemini(
     Ok(tag_quick_fixes(
         parse_ai_quick_fixes(&raw, line_count, |line| quick_fix_line_len(content, line)),
         "gemini",
+    ))
+}
+
+async fn suggest_quick_fixes_via_claude_api(
+    settings: &SettingsStore,
+    content: &str,
+    context: &str,
+    line_count: u32,
+) -> Result<Vec<workspace::QuickFix>> {
+    let api_key = settings
+        .anthropic_api_key()
+        .ok_or_else(|| anyhow::anyhow!("anthropic api key not configured"))?;
+    let client = AnthropicClient::new_api(api_key, settings.anthropic_model());
+    let raw = client.suggest_quick_fixes(context).await?;
+    Ok(tag_quick_fixes(
+        parse_ai_quick_fixes(&raw, line_count, |line| quick_fix_line_len(content, line)),
+        "anthropic",
+    ))
+}
+
+async fn suggest_quick_fixes_via_bedrock(
+    settings: &SettingsStore,
+    content: &str,
+    context: &str,
+    line_count: u32,
+) -> Result<Vec<workspace::QuickFix>> {
+    let client = AnthropicClient::new_bedrock(
+        settings.bedrock_model_id(),
+        settings.bedrock_region(),
+        settings.bedrock_api_key(),
+    );
+    let raw = client.suggest_quick_fixes(context).await?;
+    Ok(tag_quick_fixes(
+        parse_ai_quick_fixes(&raw, line_count, |line| quick_fix_line_len(content, line)),
+        "bedrock",
     ))
 }
 
