@@ -1003,6 +1003,8 @@
       const last = text[text.length - 1];
       if ('+-*/%&|^<>?:'.includes(last)) {
         if (last === '-' && text.length === 1) return null;
+        // Ternary `:`, not YAML keys / labels / `case x:` — those must keep Space free.
+        if (last === ':' && !text.includes('?')) return null;
         return { op: last, lhs: text.slice(0, -1).trimEnd() };
       }
       if (
@@ -1154,7 +1156,7 @@
     return /\breturn(?:\s+[A-Za-z_$][\w$]*)?$/.test(trimmed);
   }
 
-  /** Method/ctor call argument list — not control-flow parens (`if (`). */
+  /** Method/ctor call argument list — not control-flow parens (`if (`) and not after the call is closed. */
   function isCallArgContext(linePrefix, path) {
     if (!isJavaLikePath(path)) return false;
     if (isInsideControlParen(linePrefix)) return false;
@@ -1165,6 +1167,8 @@
     if (!before || !/[\w)\]]$/.test(before)) return false;
     const inside = trimmed.slice(idx + 1);
     if (inside.includes('(') || inside.includes('{')) return false;
+    // `foo()` / `foo(x)` — call already closed; Space must type normally.
+    if (inside.includes(')')) return false;
     return true;
   }
 
@@ -4083,7 +4087,8 @@
       if (trimmed.endsWith(';')) return '\n';
     }
     if (lang === 'json' && trimmed.endsWith('"')) return ': ""';
-    if (lang === 'yaml' && /:\s*$/.test(trimmed)) return ' ';
+    // Do not ghost a space after YAML `key:` — sanitize would strip it, and Space-to-accept
+    // would then swallow the key without inserting anything.
     return '';
   }
 
@@ -6562,8 +6567,10 @@
       if (!ed) return false;
       if (memberFallbackEl) return true;
       const ctx = ed._contextKeyService;
-      return !!(ctx?.getContextKeyValue('suggestWidgetVisible')
-        || ctx?.getContextKeyValue('inlineSuggestionVisible'));
+      // Only the Monaco suggest widget / custom member popup — not inline ghost text.
+      // Treating inlineSuggestionVisible as blocking stole `:`, `(`, etc. and broke
+      // auto-closing brackets / YAML colon typing in Java and YAML.
+      return !!ctx?.getContextKeyValue('suggestWidgetVisible');
     }
 
     function editorIsTypingTarget(ed) {
@@ -6571,12 +6578,6 @@
       if (ed.hasTextFocus?.()) return true;
       const root = ed.getDomNode?.();
       return !!(root && root.contains(document.activeElement));
-    }
-
-    function cursorAfterIdentifier(model, position) {
-      if (!model || !position || position.column <= 1) return false;
-      const line = model.getLineContent(position.lineNumber);
-      return /[\w$]/.test(line.charAt(position.column - 2));
     }
 
     function typeThroughCompletion(ed, text) {
@@ -6602,9 +6603,25 @@
       const pos = ed.getPosition();
       if (!model || !pos) return;
 
-      const blocking = completionUiBlocksTyping(ed);
-      const afterId = cursorAfterIdentifier(model, pos);
-      if (!blocking && !afterId) return;
+      // Do not intercept merely because the caret follows an identifier, or because
+      // an inline ghost is visible — that stalled the caret after `:` / `()` in Java/YAML.
+      if (!completionUiBlocksTyping(ed)) return;
+
+      // Brackets and colon: dismiss the popup and let Monaco handle the key
+      // (autoClosingBrackets, indent, language triggers). Never preventDefault here.
+      if (
+        e.key === ':'
+        || e.key === '('
+        || e.key === ')'
+        || e.key === '['
+        || e.key === ']'
+        || e.key === '{'
+        || e.key === '}'
+      ) {
+        dismissSuggestUi(ed);
+        dismissInlineGhost(ed);
+        return;
+      }
 
       if (e.key === ' ') {
         e.preventDefault();
@@ -9270,8 +9287,19 @@
           const position = editor.getPosition();
           const path = helpers.getActivePath?.() || '';
           const linePrefix = model && position ? editorLinePrefix(model, position) : '';
+          const trimmedEnd = String(linePrefix || '').trimEnd();
+          // After `:` / `)`, Space is ordinary whitespace — never steal it for ghost accept.
+          if (/[:)]\s*$/.test(trimmedEnd)) {
+            dismissInlineGhost(editor);
+            return;
+          }
           const token = extractInlinePartialToken(linePrefix);
           const ghost = String(aiInlineCache.text || '').split('\n')[0];
+          // Nothing useful to accept → let Space type normally.
+          if (!ghost || !ghost.trim()) {
+            dismissInlineGhost(editor);
+            return;
+          }
           const completingWord = !!(token && ghost && /^[\w$]+$/.test(ghost));
           const contextual = isOperandContext(linePrefix)
             || isReturnContext(linePrefix)
