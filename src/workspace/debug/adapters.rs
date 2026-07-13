@@ -41,7 +41,7 @@ pub fn debug_capabilities(
     content: Option<&str>,
 ) -> Result<DebugCapabilities> {
     let rel_path = workspace::normalize_workspace_source_path(rel_path);
-    let ctx = workspace::run_context(ws, &rel_path, content, line.max(1), None, None)?;
+    let ctx = workspace::run_context(ws, &rel_path, content, line.max(1), None, None, None)?;
     let target = ctx.target.as_ref();
     let language = debug_language_label(target);
     let Some(target) = target else {

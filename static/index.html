@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="456" />
+  <meta name="reaper-ui-build" content="457" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=456" />
+  <link rel="stylesheet" href="/logo-animated.css?v=457" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=456" />
-  <link rel="stylesheet" href="/logo-animated.css?v=456" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=456" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=457" />
+  <link rel="stylesheet" href="/logo-animated.css?v=457" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=457" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=456"></script>
-  <script src="/launch-splash.js?v=456"></script>
+  <script src="/logo.js?v=457"></script>
+  <script src="/launch-splash.js?v=457"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -838,7 +838,7 @@
       <div class="ij-db-viewer-connection-wrap">
         <div class="ij-db-viewer-connection">
           <span id="db-viewer-status-dot" class="ij-db-viewer-status-dot" aria-hidden="true"></span>
-          <input id="db-viewer-url" type="text" class="ij-db-viewer-url" placeholder="postgresql://… or database.sqlite" autocomplete="off" spellcheck="false" aria-label="Database connection" />
+          <input id="db-viewer-url" type="text" class="ij-db-viewer-url" placeholder="postgresql://…, mysql://…, or database.sqlite" autocomplete="off" spellcheck="false" aria-label="Database connection" />
           <button type="button" id="btn-db-viewer-connect" class="ij-db-viewer-connect-btn">Connect</button>
         </div>
         <details id="db-viewer-ssl-panel" class="ij-db-ssl-panel">
@@ -870,7 +870,51 @@
               <span class="ij-db-ssl-label">Client private key</span>
               <input id="db-viewer-ssl-key" type="password" class="ij-db-ssl-input" placeholder="/path/to/client.key" autocomplete="off" spellcheck="false" />
             </label>
-            <p class="ij-db-ssl-footnote">PostgreSQL only. Use absolute paths to PEM files (same as DBeaver). Not used for Docker Compose local postgres.</p>
+            <p class="ij-db-ssl-footnote">PostgreSQL and MySQL/MariaDB. Use absolute paths to PEM files for CA, client certificate, and client private key (same idea as DBeaver). SSL mode maps to <code>psql</code> / <code>mysql --ssl-mode</code>. Not used for Docker Compose local DB exec.</p>
+          </div>
+        </details>
+        <details id="db-viewer-ssh-panel" class="ij-db-ssl-panel">
+          <summary class="ij-db-ssl-summary">
+            <span>SSH tunnel / Bastion</span>
+            <span id="db-viewer-ssh-hint" class="ij-db-ssl-hint"></span>
+          </summary>
+          <div class="ij-db-ssl-fields">
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Enable SSH tunnel</span>
+              <select id="db-viewer-ssh-enabled" class="ij-db-ssl-input" aria-label="Enable SSH tunnel">
+                <option value="">off</option>
+                <option value="1">on</option>
+              </select>
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Bastion host</span>
+              <input id="db-viewer-ssh-host" type="text" class="ij-db-ssl-input" placeholder="bastion.example.com" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Bastion port</span>
+              <input id="db-viewer-ssh-port" type="text" class="ij-db-ssl-input" placeholder="22" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Bastion user</span>
+              <input id="db-viewer-ssh-user" type="text" class="ij-db-ssl-input" placeholder="ubuntu" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">SSH private key</span>
+              <input id="db-viewer-ssh-key" type="password" class="ij-db-ssl-input" placeholder="/path/to/id_ed25519 (optional if ssh-agent)" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Remote DB host (from bastion)</span>
+              <input id="db-viewer-ssh-remote-host" type="text" class="ij-db-ssl-input" placeholder="defaults to host in URL" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Remote DB port</span>
+              <input id="db-viewer-ssh-remote-port" type="text" class="ij-db-ssl-input" placeholder="defaults to port in URL" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="ij-db-ssl-field">
+              <span class="ij-db-ssl-label">Local bind port</span>
+              <input id="db-viewer-ssh-local-port" type="text" class="ij-db-ssl-input" placeholder="auto" autocomplete="off" spellcheck="false" />
+            </label>
+            <p class="ij-db-ssl-footnote">Opens <code>ssh -N -L</code> through a bastion (jump host) and connects the DB client to <code>127.0.0.1</code>. Uses key file and/or ssh-agent (<code>BatchMode</code>). Password prompts are not supported. Combine with SSL above when the remote DB requires TLS.</p>
           </div>
         </details>
       </div>
@@ -1556,9 +1600,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=456"></script>
-  <script src="/monaco-languages.js?v=456" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=457"></script>
+  <script src="/monaco-languages.js?v=457" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=456"></script>
+  <script src="/app.js?v=457"></script>
 </body>
 </html>

@@ -41,6 +41,7 @@ mod project_profile;
 mod quick_fix;
 mod coverage;
 mod db_viewer;
+pub(crate) mod db_ssh_tunnel;
 mod run_project;
 mod debug;
 mod spring_props;
@@ -1070,8 +1071,9 @@ pub fn run_context(
     line: u32,
     database_url: Option<&str>,
     db_ssl: Option<&metadata::DbSslSettings>,
+    db_ssh: Option<&metadata::DbSshTunnelSettings>,
 ) -> Result<run_project::RunContext> {
-    run_project::run_context(ws, rel_path, content, line, database_url, db_ssl)
+    run_project::run_context(ws, rel_path, content, line, database_url, db_ssl, db_ssh)
 }
 
 pub use run_project::{AiRunTargetHint, JavaRunTarget, RunContext, RunProjectInfo};
@@ -1116,8 +1118,9 @@ pub fn db_connection_view(
     ws: &Path,
     database_url: Option<&str>,
     ssl: Option<&metadata::DbSslSettings>,
+    ssh: Option<&metadata::DbSshTunnelSettings>,
 ) -> db_viewer::DbConnectionView {
-    db_viewer::connection_view(ws, database_url, ssl)
+    db_viewer::connection_view(ws, database_url, ssl, ssh)
 }
 
 pub fn effective_database_url(ws: &Path, stored: Option<&str>) -> Option<String> {
@@ -1128,18 +1131,20 @@ pub fn db_schema(
     ws: &Path,
     database_url: Option<&str>,
     ssl: Option<&metadata::DbSslSettings>,
+    ssh: Option<&metadata::DbSshTunnelSettings>,
 ) -> db_viewer::DbSchemaResponse {
-    db_viewer::fetch_schema(ws, database_url, ssl)
+    db_viewer::fetch_schema(ws, database_url, ssl, ssh)
 }
 
 pub fn db_query(
     ws: &Path,
     database_url: Option<&str>,
     ssl: Option<&metadata::DbSslSettings>,
+    ssh: Option<&metadata::DbSshTunnelSettings>,
     sql: &str,
     limit: u32,
 ) -> db_viewer::DbQueryResult {
-    db_viewer::run_query(ws, database_url, ssl, sql, limit)
+    db_viewer::run_query(ws, database_url, ssl, ssh, sql, limit)
 }
 
 pub use db_viewer::{DbConnectionRequest, DbQueryRequest};
@@ -1221,10 +1226,12 @@ pub fn stream_workspace_sql_file(
     content: Option<&str>,
     database_url: Option<&str>,
     db_ssl: Option<&metadata::DbSslSettings>,
+    db_ssh: Option<&metadata::DbSshTunnelSettings>,
     tx: tokio::sync::mpsc::Sender<exec_stream::ExecStreamEvent>,
 ) -> Result<i32> {
     let rel_path = normalize_workspace_source_path(rel_path);
-    let command = db_viewer::prepare_sql_run_command(ws, &rel_path, content, database_url, db_ssl)?;
+    let command =
+        db_viewer::prepare_sql_run_command(ws, &rel_path, content, database_url, db_ssl, db_ssh)?;
     exec_stream::stream_shell(ws, None, &command, tx)
 }
 

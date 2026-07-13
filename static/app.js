@@ -10207,7 +10207,9 @@ async function loadDbConnection() {
     const urlEl = $('#db-viewer-url');
     if (urlEl && conn?.database_url != null) urlEl.value = conn.database_url;
     applyDbSslToForm(conn?.ssl);
+    applyDbSshToForm(conn?.ssh, conn?.ssh_local_port);
     updateDbSslPanelVisibility(conn);
+    updateDbSshPanelVisibility(conn);
     updateDbViewerStatusDot(conn);
     if (state.activeTab?.endsWith('.sql')) updateRunButtons();
     return conn;
@@ -10257,7 +10259,72 @@ function updateDbSslHint(ssl) {
 function updateDbSslPanelVisibility(conn) {
   const panel = $('#db-viewer-ssl-panel');
   if (!panel) return;
-  const show = !conn || conn.kind === 'postgres' || conn.kind === 'none';
+  const show = !conn || conn.kind === 'postgres' || conn.kind === 'mysql' || conn.kind === 'none';
+  panel.classList.toggle('is-hidden', !show);
+}
+
+function readDbSshFromForm() {
+  const enabled = ($('#db-viewer-ssh-enabled')?.value || '') === '1';
+  const host = $('#db-viewer-ssh-host')?.value?.trim() || '';
+  const portRaw = $('#db-viewer-ssh-port')?.value?.trim() || '';
+  const user = $('#db-viewer-ssh-user')?.value?.trim() || '';
+  const identity = $('#db-viewer-ssh-key')?.value?.trim() || '';
+  const remoteHost = $('#db-viewer-ssh-remote-host')?.value?.trim() || '';
+  const remotePortRaw = $('#db-viewer-ssh-remote-port')?.value?.trim() || '';
+  const localPortRaw = $('#db-viewer-ssh-local-port')?.value?.trim() || '';
+  if (!enabled && !host && !user && !identity && !remoteHost && !portRaw && !remotePortRaw && !localPortRaw) {
+    return null;
+  }
+  const port = portRaw ? Number.parseInt(portRaw, 10) : null;
+  const remotePort = remotePortRaw ? Number.parseInt(remotePortRaw, 10) : null;
+  const localPort = localPortRaw ? Number.parseInt(localPortRaw, 10) : null;
+  return {
+    enabled,
+    host: host || null,
+    port: Number.isFinite(port) && port > 0 ? port : null,
+    user: user || null,
+    identity_file: identity || null,
+    remote_host: remoteHost || null,
+    remote_port: Number.isFinite(remotePort) && remotePort > 0 ? remotePort : null,
+    local_port: Number.isFinite(localPort) && localPort > 0 ? localPort : null,
+  };
+}
+
+function applyDbSshToForm(ssh, localPortActive) {
+  const enabledEl = $('#db-viewer-ssh-enabled');
+  const hostEl = $('#db-viewer-ssh-host');
+  const portEl = $('#db-viewer-ssh-port');
+  const userEl = $('#db-viewer-ssh-user');
+  const keyEl = $('#db-viewer-ssh-key');
+  const remoteHostEl = $('#db-viewer-ssh-remote-host');
+  const remotePortEl = $('#db-viewer-ssh-remote-port');
+  const localPortEl = $('#db-viewer-ssh-local-port');
+  if (enabledEl) enabledEl.value = ssh?.enabled ? '1' : '';
+  if (hostEl) hostEl.value = ssh?.host || '';
+  if (portEl) portEl.value = ssh?.port != null ? String(ssh.port) : '';
+  if (userEl) userEl.value = ssh?.user || '';
+  if (keyEl) keyEl.value = ssh?.identity_file || '';
+  if (remoteHostEl) remoteHostEl.value = ssh?.remote_host || '';
+  if (remotePortEl) remotePortEl.value = ssh?.remote_port != null ? String(ssh.remote_port) : '';
+  if (localPortEl) localPortEl.value = ssh?.local_port != null ? String(ssh.local_port) : '';
+  updateDbSshHint(ssh, localPortActive);
+}
+
+function updateDbSshHint(ssh, localPortActive) {
+  const hint = $('#db-viewer-ssh-hint');
+  if (!hint) return;
+  if (!ssh?.enabled) {
+    hint.textContent = '';
+    return;
+  }
+  const port = localPortActive || ssh.local_port;
+  hint.textContent = port ? `on :${port}` : 'on';
+}
+
+function updateDbSshPanelVisibility(conn) {
+  const panel = $('#db-viewer-ssh-panel');
+  if (!panel) return;
+  const show = !conn || conn.kind === 'postgres' || conn.kind === 'mysql' || conn.kind === 'none';
   panel.classList.toggle('is-hidden', !show);
 }
 
@@ -10266,15 +10333,18 @@ async function saveDbConnection() {
   const urlEl = $('#db-viewer-url');
   const databaseUrl = urlEl?.value?.trim() || null;
   const ssl = readDbSslFromForm();
+  const ssh = readDbSshFromForm();
   try {
     const conn = await api(repoApi(state.repo, '/workspace/db/connection'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ database_url: databaseUrl, ssl }),
+      body: JSON.stringify({ database_url: databaseUrl, ssl, ssh }),
     });
     state.dbConnection = conn;
     applyDbSslToForm(conn?.ssl);
+    applyDbSshToForm(conn?.ssh, conn?.ssh_local_port);
     updateDbSslPanelVisibility(conn);
+    updateDbSshPanelVisibility(conn);
     updateDbViewerStatusDot(conn);
     await refreshDbSchema();
     void refreshRunInfo();
@@ -10483,7 +10553,7 @@ function sqlMayChangeSchema(sql) {
 function shellCommandMayAffectDbSchema(command) {
   const cmd = String(command || '').toLowerCase();
   return (
-    /\b(psql|sqlite3)\b/.test(cmd)
+    /\b(psql|mysql|mariadb|sqlite3)\b/.test(cmd)
     || /\binit-db\b/.test(cmd)
     || /\b(db:?(setup|seed|init|migrate|reset)|migrate:?(fresh|refresh)?|schema:?(load|dump))\b/.test(cmd)
     || /\b(flyway|liquibase|prisma)\b/.test(cmd)
@@ -11023,7 +11093,7 @@ function renderDbViewerSchema(schema) {
   const filter = ($('#db-viewer-schema-filter')?.value || state.dbSchemaFilter || '').trim().toLowerCase();
   if (!schema?.tables?.length) {
     const msg = conn?.error
-      || (conn?.connected ? 'No objects in this database' : 'Connect to a database or add a .sqlite file in the project');
+      || (conn?.connected ? 'No objects in this database' : 'Connect to a database (PostgreSQL, MySQL, or add a .sqlite file in the project)');
     container.innerHTML = `<div class="ij-db-viewer-empty">${escapeHtml(msg)}</div>`;
     return;
   }
@@ -15637,15 +15707,7 @@ function detectShellRunTargetFallback(path) {
 
 function detectSqlRunTargetFallback(path) {
   const conn = state.dbConnection;
-  if (conn?.connected && conn?.kind === 'postgres') {
-    return {
-      mode: 'sql',
-      classType: 'sql-script',
-      frameworks: ['sql'],
-      runnable: true,
-    };
-  }
-  if (conn?.connected && conn?.kind === 'sqlite') {
+  if (conn?.connected && (conn?.kind === 'postgres' || conn?.kind === 'mysql' || conn?.kind === 'sqlite')) {
     return {
       mode: 'sql',
       classType: 'sql-script',
@@ -15658,7 +15720,7 @@ function detectSqlRunTargetFallback(path) {
     classType: 'sql-script',
     frameworks: ['sql'],
     runnable: false,
-    reason: conn?.error || 'Connect to a database (docker-compose postgres, DATABASE_URL in .env, or Database panel)',
+    reason: conn?.error || 'Connect to a database (PostgreSQL, MySQL, docker-compose, DATABASE_URL in .env, or Database panel)',
   };
 }
 

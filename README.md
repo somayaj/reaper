@@ -15,7 +15,7 @@ A local **developer git studio** built in Rust. Host bare repositories over HTTP
 - **Build & run** — Gradle, Maven, Spring Boot, and native C/C++ (CMake) from toolbar or gutter
 - **C/C++ & languages** — Monaco editor with clangd navigation, 25+ languages, editor regression suite
 - **Package manifest** — dockable panel for Cargo, npm, Ruby, Go, and CMake dependencies
-- **Database viewer** — schema browser for project databases
+- **Database viewer** — schema browser for SQLite, PostgreSQL, and MySQL/MariaDB (SSL + SSH bastion tunnel optional)
 - **Test coverage** — JaCoCo widgets on Java test files
 
 ### Debugger

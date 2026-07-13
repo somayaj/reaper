@@ -261,6 +261,20 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_PSQL"),
     },
     ToolDef {
+        id: "mysql",
+        label: "MySQL / MariaDB (mysql)",
+        kind: ToolKind::Binary,
+        defaults: &["mysql", "mariadb"],
+        env_key: Some("REAPER_MYSQL"),
+    },
+    ToolDef {
+        id: "ssh",
+        label: "SSH (ssh)",
+        kind: ToolKind::Binary,
+        defaults: &["ssh"],
+        env_key: Some("REAPER_SSH"),
+    },
+    ToolDef {
         id: "sqlite3",
         label: "SQLite (sqlite3)",
         kind: ToolKind::Binary,
