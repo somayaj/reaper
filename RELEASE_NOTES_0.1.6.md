@@ -1,4 +1,4 @@
-Reaper 0.1.6 (build 457) — macOS split release.
+Reaper 0.1.6 (build 458) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,7 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Fix caret / Space after `:` and `()`:** Typing colon or parentheses no longer stalls the caret (completion type-through). Space works again after `)` and after YAML/Java `:` — inline ghost no longer swallows the key (UI build **458**).
 - **MySQL / MariaDB in Database viewer:** Connect with `mysql://` / `mariadb://`, browse schema, run queries, and execute `.sql` files. Discovers Compose MySQL services and `DATABASE_URL`.
 - **SSL for Postgres and MySQL:** CA, client certificate, and client private key (DBeaver-style) via the Database panel; maps to `psql` / `mysql --ssl-*`.
 - **SSH bastion tunnel:** Jump-host local port forward (`ssh -N -L`) with bastion host/user/key, optional remote host/port, and auto local port. Works with SSL on top when the remote DB needs TLS.
