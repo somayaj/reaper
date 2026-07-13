@@ -188,7 +188,7 @@ pub fn start_debug(
         thread::sleep(Duration::from_millis(wait_ms));
     }
 
-    let ctx = workspace::run_context(ws, &rel_path, content, line.max(1), None, None)?;
+    let ctx = workspace::run_context(ws, &rel_path, content, line.max(1), None, None, None)?;
     let bp_pairs: Vec<(String, u32)> = breakpoints
         .iter()
         .map(|b| (b.path.clone(), b.line))

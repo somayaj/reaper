@@ -1474,6 +1474,7 @@ async fn run_sql_file_handler(
     let content = body.content;
     let database_url = resolve_repo_database_url(&state.config, &name, &ws);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     let (tx, rx) = tokio::sync::mpsc::channel::<workspace::ExecStreamEvent>(256);
     tokio::task::spawn_blocking(move || {
         if let Err(e) = workspace::stream_workspace_sql_file(
@@ -1482,6 +1483,7 @@ async fn run_sql_file_handler(
             content.as_deref(),
             database_url.as_deref(),
             db_ssl.as_ref(),
+            db_ssh.as_ref(),
             tx.clone(),
         ) {
             let _ = tx.blocking_send(workspace::ExecStreamEvent {
@@ -1664,6 +1666,7 @@ async fn run_target_handler(
     let line = q.line.max(1);
     let database_url = resolve_repo_database_url(&state.config, &name, &ws);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     let ws_clone = ws.clone();
     let path_clone = path.clone();
     match tokio::task::spawn_blocking(move || {
@@ -1674,6 +1677,7 @@ async fn run_target_handler(
             line,
             database_url.as_deref(),
             db_ssl.as_ref(),
+            db_ssh.as_ref(),
         )
     })
     .await
@@ -1719,6 +1723,7 @@ async fn run_target_post(
     let path_clone = path.clone();
     let content_for_task = content.clone();
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     match tokio::task::spawn_blocking(move || {
         workspace::run_context(
             &ws_clone,
@@ -1727,6 +1732,7 @@ async fn run_target_post(
             line,
             database_url.as_deref(),
             db_ssl.as_ref(),
+            db_ssh.as_ref(),
         )
     })
     .await
@@ -1951,10 +1957,12 @@ async fn workspace_db_connection_get(
     };
     let database_url = repo_database_url(&state.config, &name);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     Json(workspace::db_connection_view(
         &ws,
         database_url.as_deref(),
         db_ssl.as_ref(),
+        db_ssh.as_ref(),
     ))
     .into_response()
 }
@@ -1968,19 +1976,34 @@ async fn workspace_db_connection_put(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
+    let ssh_enabled = body
+        .ssh
+        .as_ref()
+        .is_some_and(|s| s.clone().normalized().is_some_and(|n| n.is_enabled()));
+    let url_cleared = body
+        .database_url
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true);
+    if !ssh_enabled || url_cleared {
+        workspace::db_ssh_tunnel::stop_tunnel(&ws);
+    }
     match metadata::set_db_connection(
         &state.config,
         &name,
         body.database_url.clone(),
         body.ssl.clone(),
+        body.ssh.clone(),
     ) {
         Ok(_) => {
             let database_url = repo_database_url(&state.config, &name);
             let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+            let db_ssh = metadata::repo_db_ssh(&state.config, &name);
             Json(workspace::db_connection_view(
                 &ws,
                 database_url.as_deref(),
                 db_ssl.as_ref(),
+                db_ssh.as_ref(),
             ))
             .into_response()
         }
@@ -1998,10 +2021,12 @@ async fn workspace_db_schema_handler(
     };
     let database_url = repo_database_url(&state.config, &name);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     Json(workspace::db_schema(
         &ws,
         database_url.as_deref(),
         db_ssl.as_ref(),
+        db_ssh.as_ref(),
     ))
     .into_response()
 }
@@ -2017,11 +2042,13 @@ async fn workspace_db_query_handler(
     };
     let database_url = repo_database_url(&state.config, &name);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
+    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
     let limit = body.limit.clamp(1, 5_000);
     Json(workspace::db_query(
         &ws,
         database_url.as_deref(),
         db_ssl.as_ref(),
+        db_ssh.as_ref(),
         &body.sql,
         limit,
     ))

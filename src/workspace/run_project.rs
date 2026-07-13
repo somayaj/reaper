@@ -79,6 +79,7 @@ pub fn run_context(
     line: u32,
     database_url: Option<&str>,
     db_ssl: Option<&crate::repos::metadata::DbSslSettings>,
+    db_ssh: Option<&crate::repos::metadata::DbSshTunnelSettings>,
 ) -> Result<RunContext> {
     let rel_path = super::normalize_workspace_source_path(rel_path);
     if ruby_nav::is_ruby_path(&rel_path) {
@@ -167,7 +168,7 @@ pub fn run_context(
         });
     }
     if is_sql_path(&rel_path) {
-        let (project, target) = sql_run_context(ws, &rel_path, database_url, db_ssl)?;
+        let (project, target) = sql_run_context(ws, &rel_path, database_url, db_ssl, db_ssh)?;
         return Ok(RunContext {
             project,
             target: Some(target),
@@ -498,10 +499,11 @@ fn sql_run_context(
     rel_path: &str,
     database_url: Option<&str>,
     db_ssl: Option<&crate::repos::metadata::DbSslSettings>,
+    db_ssh: Option<&crate::repos::metadata::DbSshTunnelSettings>,
 ) -> Result<(RunProjectInfo, JavaRunTarget)> {
-    let target = detect_sql_run_target(ws, rel_path, database_url, db_ssl)?;
+    let target = detect_sql_run_target(ws, rel_path, database_url, db_ssl, db_ssh)?;
     let mut project = RunProjectInfo::default();
-    let conn = db_viewer::connection_view(ws, database_url, db_ssl);
+    let conn = db_viewer::connection_view(ws, database_url, db_ssl, db_ssh);
     if conn.connected {
         project.has_project = true;
         project.build_tool = conn.kind.clone();
@@ -515,6 +517,7 @@ fn detect_sql_run_target(
     rel_path: &str,
     database_url: Option<&str>,
     db_ssl: Option<&crate::repos::metadata::DbSslSettings>,
+    db_ssh: Option<&crate::repos::metadata::DbSshTunnelSettings>,
 ) -> Result<JavaRunTarget> {
     let rel = super::normalize_workspace_source_path(rel_path);
     match std::fs::read_to_string(ws.join(&rel)) {
@@ -541,7 +544,7 @@ fn detect_sql_run_target(
         Err(_) => {}
         Ok(_) => {}
     }
-    match db_viewer::sql_run_command(ws, rel_path, database_url, db_ssl) {
+    match db_viewer::sql_run_command(ws, rel_path, database_url, db_ssl, db_ssh) {
         Ok(command) => Ok(JavaRunTarget {
             runnable: true,
             mode: "sql".into(),
@@ -1708,7 +1711,7 @@ mod tests {
     }
 
     fn run_target(ws: &Path, rel_path: &str, content: Option<&str>) -> JavaRunTarget {
-        run_context(ws, rel_path, content, 1, None, None)
+        run_context(ws, rel_path, content, 1, None, None, None)
             .unwrap()
             .target
             .unwrap_or_else(|| panic!("no run target for {rel_path}"))
