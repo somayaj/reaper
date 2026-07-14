@@ -853,7 +853,13 @@ pub fn connection_view(
     }
     match resolve_db_kind_for_ops(ws, database_url, "", ssh_out.as_ref()) {
         Ok((kind, local_port)) => {
-            connection_view_for_kind(effective.as_deref(), &kind, ssl_out, ssh_out, local_port)
+            let mut view =
+                connection_view_for_kind(effective.as_deref(), &kind, ssl_out.clone(), ssh_out, local_port);
+            if let Err(e) = probe_db_kind(ws, &kind, ssl_out.as_ref()) {
+                view.connected = false;
+                view.error = Some(e.to_string());
+            }
+            view
         }
         Err(e) => DbConnectionView {
             database_url: effective,
@@ -867,6 +873,51 @@ pub fn connection_view(
             ssh_local_port: None,
             ..Default::default()
         },
+    }
+}
+
+/// Actually talk to the database (Test and Connect must share this path).
+fn probe_db_kind(ws: &Path, kind: &DbKind, ssl: Option<&DbSslSettings>) -> Result<()> {
+    match kind {
+        DbKind::Sqlite(path) => {
+            let conn = rusqlite::Connection::open(path)
+                .with_context(|| format!("open sqlite {}", path.display()))?;
+            conn.query_row("SELECT 1", [], |_| Ok(()))
+                .context("sqlite probe SELECT 1")?;
+            Ok(())
+        }
+        DbKind::Postgres { url, compose } => {
+            let out = run_postgres_psql(
+                ws,
+                url,
+                compose.as_ref(),
+                ssl,
+                &["-At", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"],
+            )?;
+            if out.exit_code != 0 {
+                anyhow::bail!("{}", format_psql_error(&out.stdout, &out.stderr));
+            }
+            Ok(())
+        }
+        DbKind::Mysql { url, compose } => {
+            let out = run_mysql_cli(
+                ws,
+                url,
+                compose.as_ref(),
+                ssl,
+                &[
+                    "--batch",
+                    "--raw",
+                    "--skip-column-names",
+                    "-e",
+                    "SELECT 1",
+                ],
+            )?;
+            if out.exit_code != 0 {
+                anyhow::bail!("{}", format_mysql_error(&out.stdout, &out.stderr));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1990,25 +2041,80 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn mysql_ssl_mode(ssl: Option<&DbSslSettings>) -> Option<&'static str> {
+fn mysql_ssl_mode_kind(ssl: Option<&DbSslSettings>) -> Option<&'static str> {
     let mode = ssl
         .and_then(|s| s.ssl_mode.as_deref())
         .map(str::trim)
         .filter(|m| !m.is_empty())?;
-    Some(match mode.to_ascii_lowercase().as_str() {
+    let normalized = mode.to_ascii_lowercase().replace('_', "-");
+    Some(match normalized.as_str() {
         "disable" | "disabled" => "DISABLED",
         "allow" | "prefer" | "preferred" => "PREFERRED",
         "require" | "required" => "REQUIRED",
         "verify-ca" => "VERIFY_CA",
-        "verify-full" | "verify_identity" => "VERIFY_IDENTITY",
+        "verify-full" | "verify-identity" => "VERIFY_IDENTITY",
         _ => "PREFERRED",
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlClientFlavor {
+    /// Oracle MySQL client — supports `--ssl-mode=…`.
+    Mysql,
+    /// MariaDB client — rejects `--ssl-mode` with "unknown variable 'ssl-mode=…'".
+    MariaDb,
+}
+
+fn detect_mysql_client_flavor(program: &str) -> MysqlClientFlavor {
+    let output = std::process::Command::new(program)
+        .arg("--version")
+        .output();
+    let text = match output {
+        Ok(out) => {
+            let mut s = String::new();
+            s.push_str(&String::from_utf8_lossy(&out.stdout));
+            s.push_str(&String::from_utf8_lossy(&out.stderr));
+            s
+        }
+        Err(_) => String::new(),
+    };
+    if text.to_ascii_lowercase().contains("mariadb") {
+        MysqlClientFlavor::MariaDb
+    } else {
+        MysqlClientFlavor::Mysql
+    }
+}
+
+fn compose_mysql_client_flavor(exec: &ComposeMysqlExec) -> MysqlClientFlavor {
+    if exec.service.to_ascii_lowercase().contains("maria") {
+        MysqlClientFlavor::MariaDb
+    } else {
+        MysqlClientFlavor::Mysql
+    }
+}
+
+/// SSL CLI flags for `mysql` / `mariadb`. MariaDB does not accept `--ssl-mode`.
 fn mysql_ssl_cli_args(ssl: Option<&DbSslSettings>) -> Vec<String> {
+    mysql_ssl_cli_args_for(ssl, detect_mysql_client_flavor(&mysql_program()))
+}
+
+fn mysql_ssl_cli_args_for(ssl: Option<&DbSslSettings>, flavor: MysqlClientFlavor) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(mode) = mysql_ssl_mode(ssl) {
-        args.push(format!("--ssl-mode={mode}"));
+    let mode = mysql_ssl_mode_kind(ssl);
+    match flavor {
+        MysqlClientFlavor::Mysql => {
+            if let Some(mode) = mode {
+                args.push(format!("--ssl-mode={mode}"));
+            }
+        }
+        MysqlClientFlavor::MariaDb => match mode {
+            Some("DISABLED") => args.push("--skip-ssl".into()),
+            Some("REQUIRED") | Some("VERIFY_CA") | Some("VERIFY_IDENTITY") => {
+                args.push("--ssl".into());
+            }
+            Some("PREFERRED") | None => {}
+            Some(_) => args.push("--ssl".into()),
+        },
     }
     let Some(ssl) = ssl else {
         return args;
@@ -2021,6 +2127,9 @@ fn mysql_ssl_cli_args(ssl: Option<&DbSslSettings>) -> Vec<String> {
     }
     if let Some(path) = ssl.ssl_key.as_deref().filter(|p| !p.is_empty()) {
         args.push(format!("--ssl-key={path}"));
+    }
+    if flavor == MysqlClientFlavor::MariaDb && mode == Some("VERIFY_IDENTITY") {
+        args.push("--ssl-verify-server-cert".into());
     }
     args
 }
@@ -2078,8 +2187,8 @@ fn run_mysql_cli(
             "-D".to_string(),
             shell_quote(&exec.database),
         ];
-        // SSL inside compose container is rare; still pass through when set.
-        for arg in mysql_ssl_cli_args(ssl) {
+        // SSL inside compose is rare; pick flags matching the service image family.
+        for arg in mysql_ssl_cli_args_for(ssl, compose_mysql_client_flavor(exec)) {
             parts.push(shell_quote(&arg));
         }
         parts.extend(extra_args.iter().map(|s| shell_quote(s)));
@@ -2509,11 +2618,40 @@ mod tests {
             ssl_cert: Some("/certs/client-cert.pem".into()),
             ssl_key: Some("/certs/client-key.pem".into()),
         };
-        let args = mysql_ssl_cli_args(Some(&ssl));
+        let args = mysql_ssl_cli_args_for(Some(&ssl), MysqlClientFlavor::Mysql);
         assert!(args.iter().any(|a| a == "--ssl-mode=VERIFY_IDENTITY"));
         assert!(args.iter().any(|a| a == "--ssl-ca=/certs/ca.pem"));
         assert!(args.iter().any(|a| a == "--ssl-cert=/certs/client-cert.pem"));
         assert!(args.iter().any(|a| a == "--ssl-key=/certs/client-key.pem"));
+    }
+
+    #[test]
+    fn mysql_ssl_cli_args_mariadb_avoids_ssl_mode() {
+        let ssl = DbSslSettings {
+            ssl_mode: Some("verify_ca".into()),
+            ssl_root_cert: Some("/certs/ca.pem".into()),
+            ssl_cert: Some("/certs/client-cert.pem".into()),
+            ssl_key: Some("/certs/client-key.pem".into()),
+        };
+        let args = mysql_ssl_cli_args_for(Some(&ssl), MysqlClientFlavor::MariaDb);
+        assert!(
+            args.iter().all(|a| !a.starts_with("--ssl-mode=")),
+            "MariaDB rejects --ssl-mode; got {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--ssl"));
+        assert!(args.iter().any(|a| a == "--ssl-ca=/certs/ca.pem"));
+        assert!(args.iter().any(|a| a == "--ssl-cert=/certs/client-cert.pem"));
+        assert!(args.iter().any(|a| a == "--ssl-key=/certs/client-key.pem"));
+    }
+
+    #[test]
+    fn mysql_ssl_mode_normalizes_underscores() {
+        let ssl = DbSslSettings {
+            ssl_mode: Some("verify_ca".into()),
+            ..Default::default()
+        };
+        let args = mysql_ssl_cli_args_for(Some(&ssl), MysqlClientFlavor::Mysql);
+        assert!(args.iter().any(|a| a == "--ssl-mode=VERIFY_CA"));
     }
 
     #[test]
@@ -2535,10 +2673,13 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(cmd.contains("--ssl-mode=REQUIRED"), "cmd={cmd}");
         assert!(cmd.contains("--ssl-ca=/tmp/ca.pem"), "cmd={cmd}");
         assert!(cmd.contains("--ssl-cert=/tmp/client.crt"), "cmd={cmd}");
         assert!(cmd.contains("--ssl-key=/tmp/client.key"), "cmd={cmd}");
+        assert!(
+            cmd.contains("--ssl-mode=REQUIRED") || cmd.contains("--ssl"),
+            "cmd={cmd}"
+        );
         assert!(cmd.contains("MYSQL_PWD="), "cmd={cmd}");
         assert!(cmd.contains("< 'queries/seed.sql'"), "cmd={cmd}");
         let _ = std::fs::remove_dir_all(&tmp);

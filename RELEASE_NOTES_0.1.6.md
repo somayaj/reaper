@@ -1,4 +1,4 @@
-Reaper 0.1.6 (build 459) — macOS split release.
+Reaper 0.1.6 (build 461) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,7 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **MariaDB SSL fix:** Database viewer no longer passes MySQL-only `--ssl-mode` to MariaDB clients (fixes `unknown variable 'ssl-mode=…'`). Test and Connect both run a real `SELECT 1` probe. UI build **461**.
 - **Named Database connections:** Save multiple DB profiles per repo, switch from a dropdown, and Test without saving. Passwords are masked in the URL (`***`) with a separate password field (blank keeps the stored secret). UI build **459**.
 - **Fix caret / Space after `:` and `()`:** Typing colon or parentheses no longer stalls the caret (completion type-through). Space works again after `)` and after YAML/Java `:` — inline ghost no longer swallows the key (UI build **458**).
 - **MySQL / MariaDB in Database viewer:** Connect with `mysql://` / `mariadb://`, browse schema, run queries, and execute `.sql` files. Discovers Compose MySQL services and `DATABASE_URL`.
