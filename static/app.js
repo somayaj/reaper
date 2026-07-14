@@ -20155,6 +20155,7 @@ function bindEvents() {
   $('#btn-agent-revert')?.addEventListener('click', revertAgentMessage);
   $('#btn-agent-settings').addEventListener('click', showAgentKeyForm);
   $('#btn-agent-clear').addEventListener('click', clearAgentSession);
+  $('#btn-agent-close')?.addEventListener('click', closeAgent);
   $('#agent-provider-picker')?.addEventListener('click', (e) => {
     const chip = e.target.closest('[data-agent-provider]');
     if (chip) setAgentProvider(chip.dataset.agentProvider);
