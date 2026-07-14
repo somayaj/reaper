@@ -1123,6 +1123,28 @@ pub fn db_connection_view(
     db_viewer::connection_view(ws, database_url, ssl, ssh)
 }
 
+pub fn db_connection_view_for_repo(
+    ws: &Path,
+    meta: &metadata::RepoMetadata,
+) -> db_viewer::DbConnectionView {
+    db_viewer::connection_view_for_repo(ws, meta)
+}
+
+pub fn attach_db_connection_list(
+    view: db_viewer::DbConnectionView,
+    meta: &metadata::RepoMetadata,
+) -> db_viewer::DbConnectionView {
+    db_viewer::attach_connection_list(view, meta)
+}
+
+pub fn merge_database_url_with_password(
+    form_url: &str,
+    password: Option<&str>,
+    stored: Option<&str>,
+) -> String {
+    db_viewer::merge_database_url_with_password(form_url, password, stored)
+}
+
 pub fn effective_database_url(ws: &Path, stored: Option<&str>) -> Option<String> {
     db_viewer::effective_database_url(ws, stored)
 }
@@ -1147,7 +1169,9 @@ pub fn db_query(
     db_viewer::run_query(ws, database_url, ssl, ssh, sql, limit)
 }
 
-pub use db_viewer::{DbConnectionRequest, DbQueryRequest};
+pub use db_viewer::{
+    DbConnectionDeleteRequest, DbConnectionRequest, DbConnectionSelectRequest, DbQueryRequest,
+};
 
 pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     let path = safe_join(ws, rel_path)?;

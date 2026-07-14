@@ -10199,19 +10199,65 @@ function initDockerLogsDockResize() {
   window.addEventListener('blur', stopBottomDrag);
 }
 
+function applyDbConnectionToForm(conn, { clearPassword = true } = {}) {
+  state.dbConnection = conn;
+  const urlEl = $('#db-viewer-url');
+  if (urlEl) urlEl.value = conn?.database_url ?? '';
+  const nameEl = $('#db-viewer-connection-name');
+  if (nameEl) nameEl.value = conn?.connection_name ?? '';
+  const pwEl = $('#db-viewer-password');
+  if (pwEl && clearPassword) {
+    pwEl.value = '';
+    pwEl.placeholder = conn?.password_set ? '•••••••• (saved)' : 'Password';
+  }
+  populateDbConnectionPicker(conn);
+  applyDbSslToForm(conn?.ssl);
+  applyDbSshToForm(conn?.ssh, conn?.ssh_local_port);
+  updateDbSslPanelVisibility(conn);
+  updateDbSshPanelVisibility(conn);
+  updateDbViewerStatusDot(conn);
+  if (state.activeTab?.endsWith('.sql')) updateRunButtons();
+}
+
+function populateDbConnectionPicker(conn) {
+  const picker = $('#db-viewer-connection-picker');
+  if (!picker) return;
+  const list = Array.isArray(conn?.connections) ? conn.connections : [];
+  const activeId = conn?.active_id || '';
+  const opts = [
+    `<option value="">New connection…</option>`,
+    ...list.map((c) => {
+      const selected = c.id === activeId ? ' selected' : '';
+      const label = escapeHtml(`${c.name}${c.display ? ` — ${c.display}` : ''}`);
+      return `<option value="${escapeHtml(c.id)}"${selected}>${label}</option>`;
+    }),
+  ];
+  picker.innerHTML = opts.join('');
+  if (activeId) picker.value = activeId;
+  else picker.value = '';
+}
+
+function readDbConnectionPayload() {
+  const urlEl = $('#db-viewer-url');
+  const nameEl = $('#db-viewer-connection-name');
+  const pwEl = $('#db-viewer-password');
+  const picker = $('#db-viewer-connection-picker');
+  const connectionId = picker?.value?.trim() || null;
+  return {
+    connection_id: connectionId || null,
+    name: nameEl?.value?.trim() || null,
+    database_url: urlEl?.value?.trim() || null,
+    password: pwEl?.value || null,
+    ssl: readDbSslFromForm(),
+    ssh: readDbSshFromForm(),
+  };
+}
+
 async function loadDbConnection() {
   if (!state.repo) return null;
   try {
     const conn = await api(repoApi(state.repo, '/workspace/db/connection'));
-    state.dbConnection = conn;
-    const urlEl = $('#db-viewer-url');
-    if (urlEl && conn?.database_url != null) urlEl.value = conn.database_url;
-    applyDbSslToForm(conn?.ssl);
-    applyDbSshToForm(conn?.ssh, conn?.ssh_local_port);
-    updateDbSslPanelVisibility(conn);
-    updateDbSshPanelVisibility(conn);
-    updateDbViewerStatusDot(conn);
-    if (state.activeTab?.endsWith('.sql')) updateRunButtons();
+    applyDbConnectionToForm(conn);
     return conn;
   } catch (e) {
     toast(`Database: ${e.message}`, 'warning');
@@ -10330,28 +10376,107 @@ function updateDbSshPanelVisibility(conn) {
 
 async function saveDbConnection() {
   if (!state.repo) return null;
-  const urlEl = $('#db-viewer-url');
-  const databaseUrl = urlEl?.value?.trim() || null;
-  const ssl = readDbSslFromForm();
-  const ssh = readDbSshFromForm();
+  const payload = readDbConnectionPayload();
   try {
     const conn = await api(repoApi(state.repo, '/workspace/db/connection'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ database_url: databaseUrl, ssl, ssh }),
+      body: JSON.stringify(payload),
     });
-    state.dbConnection = conn;
-    applyDbSslToForm(conn?.ssl);
-    applyDbSshToForm(conn?.ssh, conn?.ssh_local_port);
-    updateDbSslPanelVisibility(conn);
-    updateDbSshPanelVisibility(conn);
-    updateDbViewerStatusDot(conn);
+    applyDbConnectionToForm(conn);
     await refreshDbSchema();
     void refreshRunInfo();
     toast(conn?.connected ? `Connected to ${conn.display}` : 'Connection saved', conn?.connected ? 'success' : 'info');
     return conn;
   } catch (e) {
     toast(e.message || 'Could not save connection', 'error');
+    return null;
+  }
+}
+
+async function testDbConnection() {
+  if (!state.repo) return null;
+  const payload = readDbConnectionPayload();
+  try {
+    const conn = await api(repoApi(state.repo, '/workspace/db/connection/test'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    updateDbViewerStatusDot(conn);
+    updateDbSslPanelVisibility(conn);
+    updateDbSshPanelVisibility(conn);
+    if (conn?.connected) toast(`Connection OK — ${conn.display}`, 'success');
+    else toast(conn?.error || 'Connection failed', 'error');
+    return conn;
+  } catch (e) {
+    toast(e.message || 'Connection test failed', 'error');
+    return null;
+  }
+}
+
+async function selectDbConnection(id) {
+  if (!state.repo) return null;
+  if (!id) {
+    applyDbConnectionToForm({
+      ...(state.dbConnection || {}),
+      active_id: null,
+      connection_name: '',
+      database_url: '',
+      password_set: false,
+      connected: false,
+      error: null,
+      display: 'Not connected',
+      kind: 'none',
+      ssl: null,
+      ssh: null,
+      connections: state.dbConnection?.connections || [],
+    });
+    const pwEl = $('#db-viewer-password');
+    if (pwEl) {
+      pwEl.value = '';
+      pwEl.placeholder = 'Password';
+    }
+    return null;
+  }
+  try {
+    const conn = await api(repoApi(state.repo, '/workspace/db/connection/select'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    applyDbConnectionToForm(conn);
+    await refreshDbSchema();
+    void refreshRunInfo();
+    return conn;
+  } catch (e) {
+    toast(e.message || 'Could not switch connection', 'error');
+    return null;
+  }
+}
+
+async function deleteDbConnection() {
+  if (!state.repo) return null;
+  const id = $('#db-viewer-connection-picker')?.value?.trim();
+  if (!id) {
+    toast('Select a saved connection to delete', 'info');
+    return null;
+  }
+  const label = $('#db-viewer-connection-name')?.value?.trim() || id;
+  if (!window.confirm(`Delete connection “${label}”?`)) return null;
+  try {
+    const conn = await api(repoApi(state.repo, '/workspace/db/connection/delete'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    applyDbConnectionToForm(conn);
+    await refreshDbSchema();
+    void refreshRunInfo();
+    toast('Connection deleted', 'info');
+    return conn;
+  } catch (e) {
+    toast(e.message || 'Could not delete connection', 'error');
     return null;
   }
 }
@@ -10370,7 +10495,20 @@ async function refreshDbSchema() {
     const schema = await api(repoApi(state.repo, '/workspace/db/schema'));
     state.dbSchema = schema;
     const conn = dbConnFromPayload(schema);
-    if (conn) state.dbConnection = conn;
+    if (conn) {
+      const prev = state.dbConnection || {};
+      state.dbConnection = {
+        ...prev,
+        ...conn,
+        connections:
+          Array.isArray(conn.connections) && conn.connections.length
+            ? conn.connections
+            : prev.connections || [],
+        active_id: conn.active_id ?? prev.active_id,
+        connection_name: conn.connection_name ?? prev.connection_name,
+        password_set: conn.password_set ?? prev.password_set,
+      };
+    }
     renderDbViewerSchema(schema);
     return schema;
   } catch (e) {
@@ -10391,6 +10529,13 @@ function dbConnFromPayload(payload) {
       display: payload.display,
       connected: payload.connected,
       error: payload.error,
+      ssl: payload.ssl,
+      ssh: payload.ssh,
+      ssh_local_port: payload.ssh_local_port,
+      password_set: payload.password_set,
+      active_id: payload.active_id,
+      connection_name: payload.connection_name,
+      connections: payload.connections,
     };
   }
   return null;
@@ -19818,6 +19963,11 @@ function bindEvents() {
   $('#btn-db-viewer-close')?.addEventListener('click', hideDbViewerPanel);
   $('#btn-db-viewer-refresh')?.addEventListener('click', () => void refreshDbViewerPanel());
   $('#btn-db-viewer-connect')?.addEventListener('click', () => void saveDbConnection());
+  $('#btn-db-viewer-test')?.addEventListener('click', () => void testDbConnection());
+  $('#btn-db-viewer-delete')?.addEventListener('click', () => void deleteDbConnection());
+  $('#db-viewer-connection-picker')?.addEventListener('change', (e) => {
+    void selectDbConnection(e.target?.value || '');
+  });
   $('#btn-db-viewer-run-query')?.addEventListener('click', () => void runDbQuery(getDbSqlText()));
   $('#btn-db-viewer-run-selection')?.addEventListener('click', () => void runDbQuery(getDbSqlSelectionText()));
   getDbSqlEl()?.addEventListener('keydown', (e) => {
