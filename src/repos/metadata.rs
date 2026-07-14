@@ -24,6 +24,10 @@ pub struct RepoMetadata {
     /// SSH bastion / jump-host tunnel for PostgreSQL and MySQL/MariaDB.
     #[serde(default)]
     pub db_ssh: Option<DbSshTunnelSettings>,
+    /// Named saved DB connections (dropdown). Legacy `database_url`/`db_ssl`/`db_ssh`
+    /// are mirrored from the active profile for older code paths.
+    #[serde(default)]
+    pub db_connections: Option<DbConnectionsStore>,
 }
 
 /// DB SSL options (DBeaver-style); absolute PEM paths for CA, client cert, and private key.
@@ -145,6 +149,82 @@ impl Default for RepoMetadata {
             database_url: None,
             db_ssl: None,
             db_ssh: None,
+            db_connections: None,
+        }
+    }
+}
+
+/// One named Database viewer profile (URL + SSL + SSH).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DbConnectionProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_ssl: Option<DbSslSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_ssh: Option<DbSshTunnelSettings>,
+}
+
+/// Saved Database viewer connections for a repo.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DbConnectionsStore {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_id: Option<String>,
+    #[serde(default)]
+    pub connections: Vec<DbConnectionProfile>,
+}
+
+impl RepoMetadata {
+    /// Ensure `db_connections` exists, migrating legacy flat fields when needed.
+    pub fn ensure_db_connections(&mut self) {
+        if self
+            .db_connections
+            .as_ref()
+            .is_some_and(|s| !s.connections.is_empty())
+        {
+            self.sync_legacy_from_active();
+            return;
+        }
+        let has_legacy = self
+            .database_url
+            .as_ref()
+            .is_some_and(|u| !u.trim().is_empty())
+            || self.db_ssl.is_some()
+            || self.db_ssh.is_some();
+        if has_legacy {
+            let id = "default".to_string();
+            self.db_connections = Some(DbConnectionsStore {
+                active_id: Some(id.clone()),
+                connections: vec![DbConnectionProfile {
+                    id,
+                    name: "Default".into(),
+                    database_url: self.database_url.clone(),
+                    db_ssl: self.db_ssl.clone(),
+                    db_ssh: self.db_ssh.clone(),
+                }],
+            });
+        } else if self.db_connections.is_none() {
+            self.db_connections = Some(DbConnectionsStore::default());
+        }
+    }
+
+    pub fn active_db_profile(&self) -> Option<&DbConnectionProfile> {
+        let store = self.db_connections.as_ref()?;
+        if let Some(id) = store.active_id.as_deref() {
+            if let Some(p) = store.connections.iter().find(|c| c.id == id) {
+                return Some(p);
+            }
+        }
+        store.connections.first()
+    }
+
+    pub fn sync_legacy_from_active(&mut self) {
+        if let Some(p) = self.active_db_profile().cloned() {
+            self.database_url = p.database_url;
+            self.db_ssl = p.db_ssl;
+            self.db_ssh = p.db_ssh;
         }
     }
 }
@@ -155,7 +235,9 @@ pub fn load(config: &Config, name: &str) -> Result<RepoMetadata> {
         return Ok(RepoMetadata::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&raw)?)
+    let mut metadata: RepoMetadata = serde_json::from_str(&raw)?;
+    metadata.ensure_db_connections();
+    Ok(metadata)
 }
 
 pub fn save(config: &Config, name: &str, metadata: &RepoMetadata) -> Result<()> {
@@ -164,7 +246,10 @@ pub fn save(config: &Config, name: &str, metadata: &RepoMetadata) -> Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let raw = serde_json::to_string_pretty(metadata)?;
+    let mut to_save = metadata.clone();
+    to_save.ensure_db_connections();
+    to_save.sync_legacy_from_active();
+    let raw = serde_json::to_string_pretty(&to_save)?;
     std::fs::write(path, raw)?;
     Ok(())
 }
@@ -223,20 +308,132 @@ pub fn set_db_connection(
     db_ssl: Option<DbSslSettings>,
     db_ssh: Option<DbSshTunnelSettings>,
 ) -> Result<RepoMetadata> {
+    upsert_db_connection(
+        config,
+        name,
+        None,
+        Some("Default".into()),
+        database_url,
+        db_ssl,
+        db_ssh,
+    )
+}
+
+/// Create or update a named connection and make it active. Mirrors legacy fields.
+pub fn upsert_db_connection(
+    config: &Config,
+    name: &str,
+    connection_id: Option<String>,
+    connection_name: Option<String>,
+    database_url: Option<String>,
+    db_ssl: Option<DbSslSettings>,
+    db_ssh: Option<DbSshTunnelSettings>,
+) -> Result<RepoMetadata> {
     let mut metadata = load(config, name)?;
-    metadata.database_url = database_url.filter(|s| !s.trim().is_empty());
-    metadata.db_ssl = db_ssl.and_then(|ssl| ssl.normalized());
-    metadata.db_ssh = db_ssh.and_then(|ssh| ssh.normalized());
+    metadata.ensure_db_connections();
+    let store = metadata.db_connections.get_or_insert_with(DbConnectionsStore::default);
+    let id = connection_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("conn-{}", short_id()));
+    let label = connection_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            store
+                .connections
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+        })
+        .unwrap_or_else(|| "Connection".into());
+    let profile = DbConnectionProfile {
+        id: id.clone(),
+        name: label,
+        database_url: database_url.filter(|s| !s.trim().is_empty()),
+        db_ssl: db_ssl.and_then(|ssl| ssl.normalized()),
+        db_ssh: db_ssh.and_then(|ssh| ssh.normalized()),
+    };
+    if let Some(existing) = store.connections.iter_mut().find(|c| c.id == id) {
+        *existing = profile;
+    } else {
+        store.connections.push(profile);
+    }
+    store.active_id = Some(id);
+    metadata.sync_legacy_from_active();
     save(config, name, &metadata)?;
     Ok(metadata)
 }
 
+pub fn select_db_connection(config: &Config, name: &str, connection_id: &str) -> Result<RepoMetadata> {
+    let mut metadata = load(config, name)?;
+    metadata.ensure_db_connections();
+    let store = metadata
+        .db_connections
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("no saved connections"))?;
+    if !store.connections.iter().any(|c| c.id == connection_id) {
+        anyhow::bail!("connection not found: {connection_id}");
+    }
+    store.active_id = Some(connection_id.to_string());
+    metadata.sync_legacy_from_active();
+    save(config, name, &metadata)?;
+    Ok(metadata)
+}
+
+pub fn delete_db_connection(config: &Config, name: &str, connection_id: &str) -> Result<RepoMetadata> {
+    let mut metadata = load(config, name)?;
+    metadata.ensure_db_connections();
+    let store = metadata
+        .db_connections
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("no saved connections"))?;
+    let before = store.connections.len();
+    store.connections.retain(|c| c.id != connection_id);
+    if store.connections.len() == before {
+        anyhow::bail!("connection not found: {connection_id}");
+    }
+    if store.active_id.as_deref() == Some(connection_id) {
+        store.active_id = store.connections.first().map(|c| c.id.clone());
+    }
+    if store.connections.is_empty() {
+        metadata.database_url = None;
+        metadata.db_ssl = None;
+        metadata.db_ssh = None;
+        metadata.db_connections = Some(DbConnectionsStore::default());
+    } else {
+        metadata.sync_legacy_from_active();
+    }
+    save(config, name, &metadata)?;
+    Ok(metadata)
+}
+
+fn short_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
 pub fn repo_db_ssl(config: &Config, name: &str) -> Option<DbSslSettings> {
-    load(config, name).ok().and_then(|meta| meta.db_ssl)
+    load(config, name)
+        .ok()
+        .and_then(|meta| meta.active_db_profile().and_then(|p| p.db_ssl.clone()).or(meta.db_ssl))
 }
 
 pub fn repo_db_ssh(config: &Config, name: &str) -> Option<DbSshTunnelSettings> {
-    load(config, name).ok().and_then(|meta| meta.db_ssh)
+    load(config, name)
+        .ok()
+        .and_then(|meta| meta.active_db_profile().and_then(|p| p.db_ssh.clone()).or(meta.db_ssh))
+}
+
+pub fn repo_database_url(config: &Config, name: &str) -> Option<String> {
+    load(config, name).ok().and_then(|meta| {
+        meta.active_db_profile()
+            .and_then(|p| p.database_url.clone())
+            .or(meta.database_url)
+    })
 }
 
 pub fn clear_remote(config: &Config, name: &str) -> Result<()> {

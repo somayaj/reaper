@@ -510,6 +510,54 @@ pub struct DbConnectionView {
     /// Local port of the active SSH forward, when a tunnel is up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_local_port: Option<u16>,
+    /// True when the stored URL embeds a password (UI shows a separate password field).
+    #[serde(default)]
+    pub password_set: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<DbConnectionListItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DbConnectionListItem {
+    pub id: String,
+    pub name: String,
+    pub display: String,
+    pub kind: String,
+    #[serde(default)]
+    pub password_set: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbConnectionRequest {
+    /// Existing profile id to update; omit to create a new named connection.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub database_url: Option<String>,
+    /// New password. Empty / omitted keeps the previously stored password when the URL
+    /// contains `***` or no password segment.
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub ssl: Option<DbSslSettings>,
+    #[serde(default)]
+    pub ssh: Option<DbSshTunnelSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbConnectionSelectRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbConnectionDeleteRequest {
+    pub id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -599,18 +647,170 @@ pub struct DbQueryRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DbConnectionRequest {
-    #[serde(default)]
-    pub database_url: Option<String>,
-    #[serde(default)]
-    pub ssl: Option<DbSslSettings>,
-    #[serde(default)]
-    pub ssh: Option<DbSshTunnelSettings>,
-}
-
 fn default_query_limit() -> u32 {
     500
+}
+
+impl Default for DbConnectionView {
+    fn default() -> Self {
+        Self {
+            database_url: None,
+            kind: "none".into(),
+            resolved_path: None,
+            display: "Not connected".into(),
+            connected: false,
+            error: None,
+            ssl: None,
+            ssh: None,
+            ssh_local_port: None,
+            password_set: false,
+            active_id: None,
+            connection_name: None,
+            connections: Vec::new(),
+        }
+    }
+}
+
+const PASSWORD_MASK: &str = "***";
+
+/// Replace an embedded URL password with `***` for UI/API responses.
+pub fn mask_database_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some(PASSWORD_MASK));
+    }
+    parsed.to_string()
+}
+
+pub fn url_has_password(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.password().map(|p| !p.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Merge a form URL + optional password with a previously stored secret URL.
+///
+/// - If `password` is non-empty, it becomes the URL password.
+/// - If the form URL uses `***` as password (or omits one) and `stored` has a password, keep it.
+pub fn merge_database_url_with_password(
+    form_url: &str,
+    password: Option<&str>,
+    stored: Option<&str>,
+) -> String {
+    let form = form_url.trim();
+    if form.is_empty() {
+        return String::new();
+    }
+    let Ok(mut parsed) = url::Url::parse(form) else {
+        return form.to_string();
+    };
+    let new_password = password.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(pw) = new_password {
+        let _ = parsed.set_password(Some(pw));
+        return parsed.to_string();
+    }
+    let form_pw = parsed.password().unwrap_or("");
+    let keep = form_pw.is_empty() || form_pw == PASSWORD_MASK;
+    if keep {
+        if let Some(stored_url) = stored.and_then(|s| url::Url::parse(s).ok()) {
+            if let Some(stored_pw) = stored_url.password().filter(|p| !p.is_empty() && *p != PASSWORD_MASK)
+            {
+                let _ = parsed.set_password(Some(stored_pw));
+            } else if form_pw == PASSWORD_MASK {
+                let _ = parsed.set_password(None);
+            }
+        } else if form_pw == PASSWORD_MASK {
+            let _ = parsed.set_password(None);
+        }
+    }
+    parsed.to_string()
+}
+
+fn list_item_for_url(id: &str, name: &str, url: Option<&str>) -> DbConnectionListItem {
+    let raw = url.unwrap_or("");
+    let kind = if raw.is_empty() {
+        "none"
+    } else if is_postgres_url(raw) {
+        "postgres"
+    } else if is_mysql_url(raw) {
+        "mysql"
+    } else {
+        "sqlite"
+    };
+    let display = match kind {
+        "postgres" => postgres_display(raw),
+        "mysql" => mysql_display(raw),
+        "sqlite" => Path::new(raw)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(raw)
+            .to_string(),
+        _ => "Not connected".into(),
+    };
+    DbConnectionListItem {
+        id: id.to_string(),
+        name: name.to_string(),
+        display,
+        kind: kind.into(),
+        password_set: url_has_password(raw),
+    }
+}
+
+/// Strip embedded passwords from a connection view (schema/query payloads).
+pub fn mask_connection_secrets(mut view: DbConnectionView) -> DbConnectionView {
+    if let Some(url) = view.database_url.as_deref() {
+        view.password_set = url_has_password(url);
+        view.database_url = Some(mask_database_url(url));
+    } else {
+        view.password_set = false;
+    }
+    view
+}
+
+pub fn attach_connection_list(
+    mut view: DbConnectionView,
+    meta: &crate::repos::metadata::RepoMetadata,
+) -> DbConnectionView {
+    let mut meta = meta.clone();
+    meta.ensure_db_connections();
+    if let Some(store) = meta.db_connections.as_ref() {
+        view.active_id = store
+            .active_id
+            .clone()
+            .or_else(|| store.connections.first().map(|c| c.id.clone()));
+        if let Some(active) = meta.active_db_profile() {
+            view.connection_name = Some(active.name.clone());
+        }
+        view.connections = store
+            .connections
+            .iter()
+            .map(|c| list_item_for_url(&c.id, &c.name, c.database_url.as_deref()))
+            .collect();
+    }
+    mask_connection_secrets(view)
+}
+
+pub fn connection_view_for_repo(
+    ws: &Path,
+    meta: &crate::repos::metadata::RepoMetadata,
+) -> DbConnectionView {
+    let mut meta = meta.clone();
+    meta.ensure_db_connections();
+    let profile = meta.active_db_profile();
+    let url = profile
+        .and_then(|p| p.database_url.as_deref())
+        .or(meta.database_url.as_deref());
+    let ssl = profile
+        .and_then(|p| p.db_ssl.as_ref())
+        .or(meta.db_ssl.as_ref());
+    let ssh = profile
+        .and_then(|p| p.db_ssh.as_ref())
+        .or(meta.db_ssh.as_ref());
+    let view = connection_view(ws, url, ssl, ssh);
+    attach_connection_list(view, &meta)
 }
 
 pub fn connection_view(
@@ -633,6 +833,7 @@ pub fn connection_view(
             ssl: ssl_out,
             ssh: ssh_out,
             ssh_local_port: None,
+            ..Default::default()
         };
     }
     if ssh_out.as_ref().is_some_and(|s| s.enabled) && !ssh_out.as_ref().is_some_and(|s| s.is_enabled())
@@ -647,6 +848,7 @@ pub fn connection_view(
             ssl: ssl_out,
             ssh: ssh_out,
             ssh_local_port: None,
+            ..Default::default()
         };
     }
     match resolve_db_kind_for_ops(ws, database_url, "", ssh_out.as_ref()) {
@@ -663,6 +865,7 @@ pub fn connection_view(
             ssl: ssl_out,
             ssh: ssh_out,
             ssh_local_port: None,
+            ..Default::default()
         },
     }
 }
@@ -690,6 +893,7 @@ fn connection_view_for_kind(
                 ssl: None,
                 ssh: None,
                 ssh_local_port: None,
+                ..Default::default()
             }
         }
         DbKind::Postgres { url, .. } => {
@@ -708,6 +912,7 @@ fn connection_view_for_kind(
                 ssl,
                 ssh,
                 ssh_local_port,
+                ..Default::default()
             }
         }
         DbKind::Mysql { url, .. } => {
@@ -726,6 +931,7 @@ fn connection_view_for_kind(
                 ssl,
                 ssh,
                 ssh_local_port,
+                ..Default::default()
             }
         }
     }
@@ -780,7 +986,7 @@ pub fn fetch_schema(
     let ssh_out = ssh.cloned().and_then(|s| s.clone().normalized());
     if let Some(err) = ssl_out.as_ref().and_then(validate_ssl_files) {
         return DbSchemaResponse {
-            connection: DbConnectionView {
+            connection: mask_connection_secrets(DbConnectionView {
                 database_url: effective,
                 kind: "none".into(),
                 resolved_path: None,
@@ -790,19 +996,20 @@ pub fn fetch_schema(
                 ssl: ssl_out,
                 ssh: ssh_out,
                 ssh_local_port: None,
-            },
+                ..Default::default()
+            }),
             tables: Vec::new(),
         };
     }
     match resolve_db_kind_for_ops(ws, database_url, "", ssh_out.as_ref()) {
         Ok((kind, local_port)) => {
-            let connection = connection_view_for_kind(
+            let connection = mask_connection_secrets(connection_view_for_kind(
                 effective.as_deref(),
                 &kind,
                 ssl_out.clone(),
                 ssh_out.clone(),
                 local_port,
-            );
+            ));
             let tables = match &kind {
                 DbKind::Sqlite(path) => sqlite_schema(path),
                 DbKind::Postgres { url, compose } => {
@@ -825,7 +1032,7 @@ pub fn fetch_schema(
             }
         }
         Err(e) => DbSchemaResponse {
-            connection: DbConnectionView {
+            connection: mask_connection_secrets(DbConnectionView {
                 database_url: database_url.filter(|s| !s.trim().is_empty()).map(str::to_string),
                 kind: "none".into(),
                 resolved_path: None,
@@ -835,7 +1042,8 @@ pub fn fetch_schema(
                 ssl: ssl_out,
                 ssh: ssh_out,
                 ssh_local_port: None,
-            },
+                ..Default::default()
+            }),
             tables: Vec::new(),
         },
     }
@@ -2389,6 +2597,57 @@ mod tests {
         .unwrap();
         assert!(cmd.contains("db.internal:5432"), "cmd={cmd}");
         assert!(!cmd.contains("127.0.0.1"), "cmd={cmd}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn masks_and_merges_database_url_password() {
+        let raw = "postgresql://app:s3cret@localhost:5432/app";
+        let masked = mask_database_url(raw);
+        assert!(masked.contains("***"));
+        assert!(!masked.contains("s3cret"));
+        assert!(url_has_password(raw));
+
+        let kept = merge_database_url_with_password(
+            "postgresql://app:***@localhost:5432/app",
+            None,
+            Some(raw),
+        );
+        assert_eq!(kept, raw);
+
+        let blank_pw = merge_database_url_with_password(
+            "postgresql://app@localhost:5432/app",
+            Some(""),
+            Some(raw),
+        );
+        assert_eq!(blank_pw, raw);
+
+        let replaced = merge_database_url_with_password(
+            "postgresql://app:***@localhost:5432/app",
+            Some("newpass"),
+            Some(raw),
+        );
+        assert!(replaced.contains("newpass"));
+        assert!(!replaced.contains("s3cret"));
+    }
+
+    #[test]
+    fn connection_view_masks_password_in_list() {
+        let tmp = std::env::temp_dir().join(format!("reaper-db-mask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut meta = crate::repos::metadata::RepoMetadata {
+            database_url: Some("postgresql://u:p@127.0.0.1:1/db".into()),
+            ..Default::default()
+        };
+        meta.ensure_db_connections();
+        let view = connection_view_for_repo(&tmp, &meta);
+        let url = view.database_url.as_deref().unwrap_or("");
+        assert!(url.contains("***"), "url={url}");
+        assert!(!url.contains(":p@"));
+        assert!(view.password_set);
+        assert_eq!(view.connections.len(), 1);
+        assert_eq!(view.connections[0].name, "Default");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

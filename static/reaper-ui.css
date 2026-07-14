@@ -7492,12 +7492,78 @@ main { background: var(--ij-bg); }
   border-bottom: 1px solid var(--ij-border);
 }
 
+.ij-db-viewer-connection-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 0;
+  flex-shrink: 0;
+}
+
+.ij-db-viewer-picker {
+  flex: 1 1 55%;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: var(--ij-input-bg, rgba(0, 0, 0, 0.25));
+  color: var(--ij-text, #ddd);
+}
+
+.ij-db-viewer-name {
+  flex: 0 1 35%;
+  min-width: 72px;
+  max-width: 140px;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: var(--ij-input-bg, rgba(0, 0, 0, 0.25));
+  color: var(--ij-text, #ddd);
+}
+
+.ij-db-viewer-name:focus,
+.ij-db-viewer-picker:focus {
+  outline: none;
+  border-color: var(--ij-accent, #7eb8da);
+}
+
 .ij-db-viewer-connection {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ij-db-viewer-password {
+  flex: 0 1 110px;
+  min-width: 80px;
+  max-width: 160px;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid var(--ij-border);
+  border-radius: 4px;
+  background: var(--ij-input-bg, rgba(0, 0, 0, 0.25));
+  color: var(--ij-text, #ddd);
+}
+
+.ij-db-viewer-password:focus {
+  outline: none;
+  border-color: var(--ij-accent, #7eb8da);
+}
+
+.ij-db-viewer-connect-btn--secondary {
+  background: transparent;
+  border: 1px solid var(--ij-border);
+  color: var(--ij-text-muted, #aaa);
+}
+
+.ij-db-viewer-connect-btn--secondary:hover {
+  background: var(--ij-hover-bg, rgba(255, 255, 255, 0.08));
+  color: var(--ij-text, #ccc);
 }
 
 .ij-db-ssl-panel {

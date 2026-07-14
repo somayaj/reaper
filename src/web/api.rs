@@ -168,6 +168,18 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
             get(workspace_db_connection_get).put(workspace_db_connection_put),
         )
         .route(
+            "/api/repos/{name}/workspace/db/connection/test",
+            post(workspace_db_connection_test),
+        )
+        .route(
+            "/api/repos/{name}/workspace/db/connection/select",
+            post(workspace_db_connection_select),
+        )
+        .route(
+            "/api/repos/{name}/workspace/db/connection/delete",
+            post(workspace_db_connection_delete),
+        )
+        .route(
             "/api/repos/{name}/workspace/db/schema",
             get(workspace_db_schema_handler),
         )
@@ -1932,10 +1944,7 @@ async fn workspace_open_external(
 }
 
 fn repo_database_url(config: &crate::config::Config, name: &str) -> Option<String> {
-    metadata::load(config, name)
-        .ok()
-        .and_then(|meta| meta.database_url)
-        .filter(|url| !url.trim().is_empty())
+    metadata::repo_database_url(config, name).filter(|url| !url.trim().is_empty())
 }
 
 fn resolve_repo_database_url(
@@ -1947,6 +1956,55 @@ fn resolve_repo_database_url(
     workspace::effective_database_url(ws, stored.as_deref())
 }
 
+fn db_connection_response(
+    ws: &std::path::Path,
+    config: &crate::config::Config,
+    name: &str,
+) -> axum::response::Response {
+    match metadata::load(config, name) {
+        Ok(meta) => Json(workspace::db_connection_view_for_repo(ws, &meta)).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+fn merge_db_url_from_request(
+    config: &crate::config::Config,
+    name: &str,
+    body: &workspace::DbConnectionRequest,
+) -> Option<String> {
+    let form = body.database_url.as_deref().unwrap_or("").trim();
+    if form.is_empty() {
+        return None;
+    }
+    let meta = metadata::load(config, name).ok();
+    let stored = meta.as_ref().and_then(|m| {
+        let id = body.connection_id.as_deref().filter(|s| !s.is_empty());
+        if let Some(cid) = id {
+            m.db_connections.as_ref().and_then(|store| {
+                store
+                    .connections
+                    .iter()
+                    .find(|c| c.id == cid)
+                    .and_then(|c| c.database_url.clone())
+            })
+        } else {
+            m.active_db_profile()
+                .and_then(|p| p.database_url.clone())
+                .or_else(|| m.database_url.clone())
+        }
+    });
+    let merged = workspace::merge_database_url_with_password(
+        form,
+        body.password.as_deref(),
+        stored.as_deref(),
+    );
+    if merged.trim().is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
 async fn workspace_db_connection_get(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1955,16 +2013,7 @@ async fn workspace_db_connection_get(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
-    let database_url = repo_database_url(&state.config, &name);
-    let db_ssl = metadata::repo_db_ssl(&state.config, &name);
-    let db_ssh = metadata::repo_db_ssh(&state.config, &name);
-    Json(workspace::db_connection_view(
-        &ws,
-        database_url.as_deref(),
-        db_ssl.as_ref(),
-        db_ssh.as_ref(),
-    ))
-    .into_response()
+    db_connection_response(&ws, &state.config, &name)
 }
 
 async fn workspace_db_connection_put(
@@ -1976,37 +2025,80 @@ async fn workspace_db_connection_put(
         Ok(ws) => ws,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
+    let merged_url = merge_db_url_from_request(&state.config, &name, &body);
     let ssh_enabled = body
         .ssh
         .as_ref()
         .is_some_and(|s| s.clone().normalized().is_some_and(|n| n.is_enabled()));
-    let url_cleared = body
-        .database_url
+    let url_cleared = merged_url
         .as_ref()
         .map(|s| s.trim().is_empty())
         .unwrap_or(true);
     if !ssh_enabled || url_cleared {
         workspace::db_ssh_tunnel::stop_tunnel(&ws);
     }
-    match metadata::set_db_connection(
+    match metadata::upsert_db_connection(
         &state.config,
         &name,
-        body.database_url.clone(),
+        body.connection_id.clone(),
+        body.name.clone(),
+        merged_url,
         body.ssl.clone(),
         body.ssh.clone(),
     ) {
-        Ok(_) => {
-            let database_url = repo_database_url(&state.config, &name);
-            let db_ssl = metadata::repo_db_ssl(&state.config, &name);
-            let db_ssh = metadata::repo_db_ssh(&state.config, &name);
-            Json(workspace::db_connection_view(
-                &ws,
-                database_url.as_deref(),
-                db_ssl.as_ref(),
-                db_ssh.as_ref(),
-            ))
-            .into_response()
-        }
+        Ok(_) => db_connection_response(&ws, &state.config, &name),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_db_connection_test(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<workspace::DbConnectionRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let merged_url = merge_db_url_from_request(&state.config, &name, &body);
+    let meta = metadata::load(&state.config, &name).unwrap_or_default();
+    let view = workspace::db_connection_view(
+        &ws,
+        merged_url.as_deref(),
+        body.ssl.as_ref(),
+        body.ssh.as_ref(),
+    );
+    Json(workspace::attach_db_connection_list(view, &meta)).into_response()
+}
+
+async fn workspace_db_connection_select(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<workspace::DbConnectionSelectRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    workspace::db_ssh_tunnel::stop_tunnel(&ws);
+    match metadata::select_db_connection(&state.config, &name, &body.id) {
+        Ok(_) => db_connection_response(&ws, &state.config, &name),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn workspace_db_connection_delete(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<workspace::DbConnectionDeleteRequest>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    workspace::db_ssh_tunnel::stop_tunnel(&ws);
+    match metadata::delete_db_connection(&state.config, &name, &body.id) {
+        Ok(_) => db_connection_response(&ws, &state.config, &name),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
