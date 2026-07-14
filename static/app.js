@@ -10384,9 +10384,21 @@ async function saveDbConnection() {
       body: JSON.stringify(payload),
     });
     applyDbConnectionToForm(conn);
-    await refreshDbSchema();
+    const schema = await refreshDbSchema();
     void refreshRunInfo();
-    toast(conn?.connected ? `Connected to ${conn.display}` : 'Connection saved', conn?.connected ? 'success' : 'info');
+    const err =
+      conn?.error ||
+      schema?.connection?.error ||
+      schema?.error ||
+      state.dbConnection?.error ||
+      null;
+    if (err) {
+      toast(err, 'error');
+    } else if (conn?.connected) {
+      toast(`Connected to ${conn.display}`, 'success');
+    } else {
+      toast('Connection saved', 'info');
+    }
     return conn;
   } catch (e) {
     toast(e.message || 'Could not save connection', 'error');
