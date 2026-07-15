@@ -56,6 +56,12 @@ struct SettingsFile {
     /// Periodically fetch remotes while a repo is open (ahead/behind in header). Off by default.
     #[serde(default)]
     git_background_fetch: Option<bool>,
+    /// Recently used remote URLs for Import (most recent first).
+    #[serde(default)]
+    recent_git_remotes: Vec<String>,
+    /// Recently used local folder paths for Import (most recent first).
+    #[serde(default)]
+    recent_git_local_paths: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -112,6 +118,20 @@ pub struct GeneralSettingsView {
     pub last_repo: Option<String>,
     pub java_index_mode: String,
     pub git_background_fetch: bool,
+    pub recent_git_remotes: Vec<String>,
+    pub recent_git_local_paths: Vec<String>,
+}
+
+const MAX_RECENT_GIT: usize = 15;
+
+fn push_recent(list: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    list.retain(|existing| existing != value);
+    list.insert(0, value.to_string());
+    list.truncate(MAX_RECENT_GIT);
 }
 
 impl SettingsStore {
@@ -410,7 +430,14 @@ impl SettingsStore {
     }
 
     pub fn general_view(&self) -> GeneralSettingsView {
-        let (default_repo, last_repo, java_index_mode, git_background_fetch) = self
+        let (
+            default_repo,
+            last_repo,
+            java_index_mode,
+            git_background_fetch,
+            recent_git_remotes,
+            recent_git_local_paths,
+        ) = self
             .inner
             .read()
             .ok()
@@ -430,15 +457,31 @@ impl SettingsStore {
                         .filter(|m| !m.is_empty())
                         .unwrap_or_else(|| "lazy".into()),
                     guard.git_background_fetch.unwrap_or(false),
+                    guard.recent_git_remotes.clone(),
+                    guard.recent_git_local_paths.clone(),
                 )
             })
-            .unwrap_or_else(|| (None, None, "lazy".into(), false));
+            .unwrap_or_else(|| (None, None, "lazy".into(), false, Vec::new(), Vec::new()));
         GeneralSettingsView {
             default_repo,
             last_repo,
             java_index_mode,
             git_background_fetch,
+            recent_git_remotes,
+            recent_git_local_paths,
         }
+    }
+
+    pub fn push_recent_git_remote(&self, url: &str) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        push_recent(&mut guard.recent_git_remotes, url);
+        self.save(&guard)
+    }
+
+    pub fn push_recent_git_local_path(&self, path: &str) -> Result<()> {
+        let mut guard = self.inner.write().expect("settings lock poisoned");
+        push_recent(&mut guard.recent_git_local_paths, path);
+        self.save(&guard)
     }
 
     /// Repo to prefetch on startup: explicit default, else last opened.

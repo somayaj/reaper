@@ -4541,10 +4541,314 @@ main { background: var(--ij-bg); }
   background: var(--ij-bg);
 }
 
-.ij-clone-tabs {
+/* ── New / Import repository dialogs ───────────────────── */
+
+.repo-dialog {
+  width: 100%;
+  max-width: 40rem;
+  background: var(--ij-panel);
+  border: 1px solid var(--ij-border);
+  border-radius: 12px;
+  box-shadow: var(--ij-shadow);
+  overflow: hidden;
   display: flex;
+  flex-direction: column;
+  font-size: var(--ij-font-sm);
+}
+
+.repo-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 24px 0;
+}
+
+.repo-dialog-header h3 {
+  margin: 0;
+  font-size: var(--ij-font-xl);
+  font-weight: 600;
+  color: var(--ij-text-heading);
+  letter-spacing: -0.01em;
+}
+
+.repo-dialog-lead {
+  margin: 6px 0 0;
+  font-size: var(--ij-font-sm);
+  line-height: 1.45;
+  color: var(--ij-text-dim);
+}
+
+.repo-dialog-x {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin: -2px -4px 0 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ij-text-dim);
+  font-size: var(--ij-font-2xl);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.repo-dialog-x:hover {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-text-heading);
+}
+
+.repo-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 22px 24px 12px;
+}
+
+.repo-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px 22px;
+}
+
+.repo-source-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.repo-source-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
-  margin-bottom: 4px;
+  text-align: left;
+  padding: 14px 14px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--ij-border);
+  background: color-mix(in srgb, var(--ij-bg) 55%, var(--ij-panel));
+  color: var(--ij-text);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.repo-source-card strong {
+  font-size: var(--ij-font-lg);
+  font-weight: 600;
+  color: var(--ij-text-heading);
+}
+
+.repo-source-card span {
+  font-size: var(--ij-font-sm);
+  line-height: 1.4;
+  color: var(--ij-text-dim);
+}
+
+.repo-source-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.repo-dialog-x:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.repo-source-card.active {
+  border-color: var(--ij-accent);
+  background: color-mix(in srgb, var(--ij-accent) 12%, var(--ij-panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ij-accent) 35%, transparent);
+}
+
+.repo-dialog-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.repo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.repo-field label {
+  font-size: var(--ij-font-sm);
+  font-weight: 500;
+  color: var(--ij-text-bright);
+}
+
+.repo-optional {
+  margin-left: 4px;
+  font-weight: 400;
+  color: var(--ij-text-dim);
+}
+
+.repo-input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-bg);
+  color: var(--ij-text-heading);
+  font-size: var(--ij-font-lg);
+  line-height: 1.35;
+}
+
+.repo-input::placeholder {
+  color: var(--ij-text-dim);
+  opacity: 0.85;
+}
+
+.repo-input:focus {
+  outline: none;
+  border-color: var(--ij-accent);
+  box-shadow: 0 0 0 3px var(--ij-accent-muted);
+}
+
+.repo-input-mono {
+  font-family: var(--ij-mono);
+  font-size: var(--ij-font-md);
+}
+
+.repo-select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ij-border);
+  background: var(--ij-bg);
+  color: var(--ij-text-heading);
+  font-size: var(--ij-font-lg);
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.repo-select:focus {
+  outline: none;
+  border-color: var(--ij-accent);
+  box-shadow: 0 0 0 3px var(--ij-accent-muted);
+}
+
+.repo-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.repo-path-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.repo-path-row .repo-input {
+  flex: 1;
+}
+
+.repo-hint {
+  margin: 0;
+  font-size: var(--ij-font-sm);
+  line-height: 1.45;
+  color: var(--ij-text-dim);
+}
+
+.repo-hint code {
+  font-family: var(--ij-mono);
+  font-size: var(--ij-font-xs);
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ij-bg) 70%, transparent);
+}
+
+.repo-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ij-accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.repo-link:hover {
+  text-decoration: underline;
+}
+
+.repo-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: var(--ij-font-lg);
+  line-height: 1.4;
+  color: var(--ij-text-bright);
+  cursor: pointer;
+  user-select: none;
+}
+
+.repo-check input {
+  margin-top: 2px;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ij-accent);
+  flex-shrink: 0;
+}
+
+.repo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(var(--ij-ui-font-size) * 2.9);
+  padding: 0 16px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: var(--ij-font-lg);
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+
+.repo-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.repo-btn-primary {
+  background: var(--ij-accent);
+  border-color: var(--ij-accent);
+  color: var(--ij-accent-fg);
+  font-weight: 600;
+}
+
+.repo-btn-primary:hover:not(:disabled) {
+  background: var(--ij-accent-hover);
+  border-color: var(--ij-accent-hover);
+}
+
+.repo-btn-secondary {
+  background: color-mix(in srgb, var(--ij-bg) 40%, var(--ij-panel));
+  border-color: var(--ij-border);
+  color: var(--ij-text-heading);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.repo-btn-secondary:hover:not(:disabled) {
+  border-color: var(--ij-accent);
+  background: var(--ij-toolwindow-active);
+}
+
+.repo-btn-ghost {
+  background: transparent;
+  border-color: var(--ij-border);
+  color: var(--ij-text);
+}
+
+.repo-btn-ghost:hover:not(:disabled) {
+  background: var(--ij-toolwindow-active);
+  color: var(--ij-text-heading);
 }
 
 .ij-clone-path-row {
@@ -4578,29 +4882,6 @@ main { background: var(--ij-bg); }
 .ij-clone-browse-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.ij-clone-tab {
-  flex: 1;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--ij-border);
-  background: var(--ij-tab-inactive);
-  color: var(--ij-text-muted);
-  font-size: 12px;
-  font-weight: 500;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.ij-clone-tab:hover {
-  color: var(--ij-text-bright);
-  background: color-mix(in srgb, var(--ij-accent) 6%, var(--ij-tab-inactive));
-}
-
-.ij-clone-tab.active {
-  color: var(--ij-text-bright);
-  background: var(--ij-tab-active);
-  border-color: color-mix(in srgb, var(--ij-tab-border-active) 55%, var(--ij-border));
 }
 
 .ij-clone-feedback {

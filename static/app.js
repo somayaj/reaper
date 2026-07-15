@@ -557,6 +557,9 @@ const state = {
   pushPreview: null,
   commitBusy: false,
   gitBackgroundFetch: false,
+  lastRepo: null,
+  recentGitRemotes: [],
+  recentGitLocalPaths: [],
   cloneSource: 'remote',
   currentBranch: '',
   defaultBranch: '',
@@ -970,7 +973,7 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
   const overlay = $('#clone-modal-overlay');
   const isLocal = state.cloneSource === 'local';
   const busyLabel = isLocal ? 'Importing…' : 'Cloning…';
-  const idleLabel = isLocal ? 'Import' : 'Import';
+  const idleLabel = isLocal ? 'Import & open' : 'Clone & open';
 
   if (errEl) {
     errEl.textContent = error;
@@ -983,11 +986,17 @@ function setCloneModalState({ busy = false, status = '', error = '' } = {}) {
   }
   if (overlay) overlay.classList.toggle('ij-clone-modal--busy', busy);
   if (cancelBtn) cancelBtn.disabled = busy;
+  const closeBtn = $('#clone-modal-close');
+  if (closeBtn) closeBtn.disabled = busy;
+  ['#clone-tab-remote', '#clone-tab-local'].forEach((sel) => {
+    const tab = $(sel);
+    if (tab) tab.disabled = busy;
+  });
   if (submitBtn) {
     submitBtn.disabled = busy;
     submitBtn.textContent = busy ? busyLabel : idleLabel;
   }
-  ['#clone-remote-url', '#clone-local-name', '#clone-local-path', '#clone-local-browse'].forEach((sel) => {
+  ['#clone-remote-url', '#clone-local-name', '#clone-local-path', '#clone-local-browse', '#clone-recent-remote', '#clone-recent-local'].forEach((sel) => {
     const input = $(sel);
     if (input) input.disabled = busy;
   });
@@ -5591,7 +5600,13 @@ function bindWelcomeCarousel(root = document) {
 }
 
 function welcomeScreenHtml() {
-  const recent = state.repos.slice(0, 5);
+  const last = state.lastRepo;
+  const ordered = [...state.repos].sort((a, b) => {
+    if (last && a.name === last) return -1;
+    if (last && b.name === last) return 1;
+    return String(a.name).localeCompare(String(b.name));
+  });
+  const recent = ordered.slice(0, 5);
   const recentHtml = recent.length
     ? `<div class="ij-recent">
         <div class="ij-recent-title">Recent repositories</div>
@@ -10509,7 +10524,7 @@ async function refreshDbSchema() {
     const conn = dbConnFromPayload(schema);
     if (conn) {
       const prev = state.dbConnection || {};
-      state.dbConnection = {
+      const merged = {
         ...prev,
         ...conn,
         connections:
@@ -10520,6 +10535,9 @@ async function refreshDbSchema() {
         connection_name: conn.connection_name ?? prev.connection_name,
         password_set: conn.password_set ?? prev.password_set,
       };
+      state.dbConnection = merged;
+      populateDbConnectionPicker(merged);
+      updateDbViewerStatusDot(merged);
     }
     renderDbViewerSchema(schema);
     return schema;
@@ -12003,6 +12021,7 @@ async function selectRepoOnce(name, token) {
     return;
   }
 
+  state.lastRepo = name;
   const previousRepo = state.repo;
   const switching = previousRepo !== name;
   const showLoader = switching || !previousRepo;
@@ -12303,8 +12322,59 @@ function showCloneModal(source = 'remote') {
   if (nameInput) nameInput.dataset.userEdited = '';
   setCloneModalTab(source);
   setCloneModalState({ busy: false, status: '', error: '' });
+  void populateCloneRecentDropdowns();
   $('#clone-modal-overlay')?.classList.remove('hidden');
   $('#clone-modal-overlay')?.classList.add('flex');
+}
+
+function uniqueNonEmpty(values) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of values) {
+    const v = String(raw || '').trim();
+    if (!v) continue;
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
+function fillRecentSelect(selectEl, values, placeholder) {
+  if (!selectEl) return;
+  const list = uniqueNonEmpty(values);
+  selectEl.innerHTML = [
+    `<option value="">${escapeHtml(placeholder)}</option>`,
+    ...list.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`),
+  ].join('');
+  selectEl.disabled = list.length === 0;
+  selectEl.value = '';
+}
+
+async function populateCloneRecentDropdowns() {
+  try {
+    const general = await api('/api/settings/general');
+    state.lastRepo = general?.last_repo || null;
+    state.recentGitRemotes = Array.isArray(general?.recent_git_remotes)
+      ? general.recent_git_remotes
+      : [];
+    state.recentGitLocalPaths = Array.isArray(general?.recent_git_local_paths)
+      ? general.recent_git_local_paths
+      : [];
+  } catch {
+    /* keep cached */
+  }
+  const remotes = [
+    ...(state.recentGitRemotes || []),
+    ...(state.repos || []).map((r) => r.remote_url).filter(Boolean),
+  ];
+  const locals = [
+    ...(state.recentGitLocalPaths || []),
+    ...(state.repos || []).map((r) => r.project_folder).filter(Boolean),
+  ];
+  fillRecentSelect($('#clone-recent-remote'), remotes, 'Choose a recent URL…');
+  fillRecentSelect($('#clone-recent-local'), locals, 'Choose a recent folder…');
 }
 
 function hideCloneModal() {
@@ -12418,6 +12488,7 @@ async function cloneRepo(e) {
     setCloneModalState({ busy: false });
     hideCloneModal();
     form.reset();
+    state.recentGitRemotes = uniqueNonEmpty([remoteUrl, ...(state.recentGitRemotes || [])]).slice(0, 15);
     await loadRepos();
     await selectRepo(repo.name);
     toast(`Cloned ${repo.name}`, 'success');
@@ -12465,6 +12536,7 @@ async function importLocalRepo() {
     setCloneModalState({ busy: false });
     hideCloneModal();
     $('#clone-repo-form')?.reset();
+    state.recentGitLocalPaths = uniqueNonEmpty([localPath, ...(state.recentGitLocalPaths || [])]).slice(0, 15);
     await loadRepos();
     await selectRepo(repo.name);
     toast(`Imported ${repo.name}`, 'success');
@@ -19851,6 +19923,7 @@ function switchPanel(name) {
 function showModal() {
   $('#modal-overlay').classList.remove('hidden');
   $('#modal-overlay').classList.add('flex');
+  setTimeout(() => $('#new-repo-name')?.focus(), 0);
 }
 
 function hideModal() {
@@ -20046,7 +20119,9 @@ function bindEvents() {
   $('#btn-new-repo-empty')?.addEventListener('click', showModal);
   $('#btn-new-file').addEventListener('click', showFileModal);
   $('#modal-cancel').addEventListener('click', hideModal);
+  $('#modal-close')?.addEventListener('click', hideModal);
   $('#clone-modal-cancel')?.addEventListener('click', hideCloneModal);
+  $('#clone-modal-close')?.addEventListener('click', hideCloneModal);
   $('#publish-modal-cancel')?.addEventListener('click', hidePublishModal);
   $('#push-modal-cancel')?.addEventListener('click', hidePushModal);
   $('#push-modal-confirm')?.addEventListener('click', executePush);
@@ -20400,6 +20475,26 @@ function bindEvents() {
 
   $('#clone-tab-remote')?.addEventListener('click', () => setCloneModalTab('remote'));
   $('#clone-tab-local')?.addEventListener('click', () => setCloneModalTab('local'));
+  $('#clone-recent-remote')?.addEventListener('change', () => {
+    const url = $('#clone-recent-remote')?.value?.trim();
+    if (!url) return;
+    const input = $('#clone-remote-url');
+    if (input) {
+      input.value = url;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus();
+    }
+  });
+  $('#clone-recent-local')?.addEventListener('change', () => {
+    const path = $('#clone-recent-local')?.value?.trim();
+    if (!path) return;
+    const input = $('#clone-local-path');
+    if (input) {
+      input.value = path;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus();
+    }
+  });
 
   $('#clone-remote-url')?.addEventListener('input', (e) => {
     const nameInput = $('#clone-local-name');
@@ -20493,6 +20588,13 @@ async function init() {
   try {
     const general = await api('/api/settings/general');
     state.gitBackgroundFetch = !!general?.git_background_fetch;
+    state.lastRepo = general?.last_repo || null;
+    state.recentGitRemotes = Array.isArray(general?.recent_git_remotes)
+      ? general.recent_git_remotes
+      : [];
+    state.recentGitLocalPaths = Array.isArray(general?.recent_git_local_paths)
+      ? general.recent_git_local_paths
+      : [];
     if (!repoToOpen && !shouldSkipAutoRepoOpen()) {
       repoToOpen = general?.default_repo || general?.last_repo || null;
     }

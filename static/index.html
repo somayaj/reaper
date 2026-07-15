@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="463" />
+  <meta name="reaper-ui-build" content="467" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=463" />
+  <link rel="stylesheet" href="/logo-animated.css?v=467" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=463" />
-  <link rel="stylesheet" href="/logo-animated.css?v=463" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=463" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=467" />
+  <link rel="stylesheet" href="/logo-animated.css?v=467" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=467" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=463"></script>
-  <script src="/launch-splash.js?v=463"></script>
+  <script src="/logo.js?v=467"></script>
+  <script src="/launch-splash.js?v=467"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -1065,43 +1065,64 @@
   </div>
 
   <!-- Import repository modal -->
-  <div id="clone-modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
-    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-      <div class="px-6 pt-6 pb-4">
-        <div class="flex items-center gap-3 mb-1">
-          <span data-reaper-logo="md" data-reaper-logo-chrome="true" class="logo-mark"></span>
-          <div>
-            <h3 class="text-lg font-semibold text-white">Import repository</h3>
-            <p class="text-xs text-gray-500">Clone from a remote URL or import a local git folder</p>
+  <div id="clone-modal-overlay" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/60" role="dialog" aria-modal="true" aria-labelledby="clone-modal-title">
+    <div class="repo-dialog">
+      <header class="repo-dialog-header">
+        <div>
+          <h3 id="clone-modal-title">Import repository</h3>
+          <p class="repo-dialog-lead">Bring an existing project into Reaper</p>
+        </div>
+        <button type="button" id="clone-modal-close" class="repo-dialog-x" aria-label="Close">×</button>
+      </header>
+
+      <form id="clone-repo-form" class="repo-dialog-body" novalidate>
+        <div class="repo-source-choice" role="tablist" aria-label="Import source">
+          <button type="button" id="clone-tab-remote" class="repo-source-card active" role="tab" aria-selected="true">
+            <strong>From URL</strong>
+            <span>Clone GitHub, GitLab, or any git remote</span>
+          </button>
+          <button type="button" id="clone-tab-local" class="repo-source-card" role="tab" aria-selected="false">
+            <strong>From folder</strong>
+            <span>Open a git repo already on this Mac</span>
+          </button>
+        </div>
+
+        <div id="clone-remote-panel" class="repo-dialog-panel">
+          <div class="repo-field">
+            <label for="clone-recent-remote">Recent remotes</label>
+            <select id="clone-recent-remote" class="repo-select" aria-label="Recent remote URLs">
+              <option value="">Choose a recent URL…</option>
+            </select>
           </div>
-        </div>
-      </div>
-      <form id="clone-repo-form" class="px-6 pb-2 space-y-4" novalidate>
-        <div class="ij-clone-tabs" role="tablist" aria-label="Import source">
-          <button type="button" id="clone-tab-remote" class="ij-clone-tab active" role="tab" aria-selected="true">Remote URL</button>
-          <button type="button" id="clone-tab-local" class="ij-clone-tab" role="tab" aria-selected="false">Local folder</button>
-        </div>
-        <div id="clone-remote-panel" class="space-y-4">
-          <div>
-            <label class="block text-xs font-medium text-gray-400 mb-1.5">Remote URL</label>
-            <input id="clone-remote-url" name="remote_url" placeholder="https://github.com/owner/repo.git" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+          <div class="repo-field">
+            <label for="clone-remote-url">Repository URL</label>
+            <input id="clone-remote-url" name="remote_url" placeholder="https://github.com/owner/repo.git" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url" class="repo-input repo-input-mono" />
           </div>
-          <p id="clone-remote-hint" class="text-[11px] text-gray-600">Private repos need a PAT for the remote host in <button type="button" id="clone-open-settings" class="text-accent hover:underline">Settings → Git hosts</button>.</p>
+          <p id="clone-remote-hint" class="repo-hint">Private repos: add a token in <button type="button" id="clone-open-settings" class="repo-link">Settings → Git hosts</button></p>
         </div>
-        <div id="clone-local-panel" class="space-y-4 hidden">
-          <div>
-            <label class="block text-xs font-medium text-gray-400 mb-1.5">Local path</label>
-            <div class="ij-clone-path-row">
-              <input id="clone-local-path" name="local_path" placeholder="/Users/you/projects/my-app" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm font-mono text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
-              <button type="button" id="clone-local-browse" class="ij-clone-browse-btn">Browse…</button>
+
+        <div id="clone-local-panel" class="repo-dialog-panel hidden">
+          <div class="repo-field">
+            <label for="clone-recent-local">Recent folders</label>
+            <select id="clone-recent-local" class="repo-select" aria-label="Recent local folders">
+              <option value="">Choose a recent folder…</option>
+            </select>
+          </div>
+          <div class="repo-field">
+            <label for="clone-local-path">Folder</label>
+            <div class="repo-path-row">
+              <input id="clone-local-path" name="local_path" placeholder="/Users/you/projects/my-app" class="repo-input repo-input-mono" />
+              <button type="button" id="clone-local-browse" class="repo-btn repo-btn-secondary">Browse…</button>
             </div>
           </div>
-          <p class="text-[11px] text-gray-600">Absolute path to an existing git repository on this machine (normal or bare).</p>
+          <p class="repo-hint">Pick the folder that contains a <code>.git</code> directory</p>
         </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">Local name <span class="text-gray-600">(optional)</span></label>
-          <input id="clone-local-name" name="name" placeholder="owner/repo — derived automatically if empty" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+
+        <div class="repo-field">
+          <label for="clone-local-name">Name in Reaper <span class="repo-optional">optional</span></label>
+          <input id="clone-local-name" name="name" placeholder="Filled in from the URL or folder" class="repo-input" />
         </div>
+
         <div id="clone-feedback" class="ij-clone-feedback">
           <div id="clone-status" class="ij-clone-status hidden" aria-live="polite">
             <span class="ij-clone-spinner" aria-hidden="true"></span>
@@ -1110,10 +1131,11 @@
           <div id="clone-error" class="ij-clone-error hidden" role="alert"></div>
         </div>
       </form>
-      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
-        <button type="button" id="clone-modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Import</button>
-      </div>
+
+      <footer class="repo-dialog-footer">
+        <button type="button" id="clone-modal-cancel" class="repo-btn repo-btn-ghost">Cancel</button>
+        <button type="submit" id="btn-clone-submit" form="clone-repo-form" class="repo-btn repo-btn-primary">Clone &amp; open</button>
+      </footer>
     </div>
   </div>
 
@@ -1188,36 +1210,37 @@
     </div>
   </div>
 
-  <!-- Modal -->
-  <div id="modal-overlay" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
-    <div class="glass border border-surface-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-      <div class="px-6 pt-6 pb-4">
-        <div class="flex items-center gap-3 mb-1">
-          <span data-reaper-logo="md" data-reaper-logo-chrome="true" class="logo-mark"></span>
-          <div>
-            <h3 class="text-lg font-semibold text-white">New repository</h3>
-            <p class="text-xs text-gray-500">Hosted locally · HTTP git remote</p>
-          </div>
-        </div>
-      </div>
-      <form id="new-repo-form" class="px-6 pb-2 space-y-4">
+  <!-- New repository modal -->
+  <div id="modal-overlay" class="fixed inset-0 z-50 hidden items-center justify-center p-4 bg-black/60" role="dialog" aria-modal="true" aria-labelledby="new-repo-title">
+    <div class="repo-dialog">
+      <header class="repo-dialog-header">
         <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">Name</label>
-          <input name="name" required pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="my-project or org/my-project" autofocus class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring transition-shadow" />
+          <h3 id="new-repo-title">New repository</h3>
+          <p class="repo-dialog-lead">Start a fresh project in your Reaper workspace</p>
         </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">Description <span class="text-gray-600">(optional)</span></label>
-          <input name="description" placeholder="What is this repo for?" class="w-full bg-surface-950 border border-surface-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-accent-ring" />
+        <button type="button" id="modal-close" class="repo-dialog-x" aria-label="Close">×</button>
+      </header>
+
+      <form id="new-repo-form" class="repo-dialog-body">
+        <div class="repo-field">
+          <label for="new-repo-name">Name</label>
+          <input id="new-repo-name" name="name" required pattern="[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?" placeholder="my-project" autofocus class="repo-input" />
+          <p class="repo-hint">Letters, numbers, <code>.</code> <code>_</code> <code>-</code> — or <code>org/project</code></p>
         </div>
-        <label class="flex items-center gap-2.5 text-sm text-gray-400 cursor-pointer">
-          <input type="checkbox" name="init_readme" checked class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent" />
-          Initialize with README
+        <div class="repo-field">
+          <label for="new-repo-description">Description <span class="repo-optional">optional</span></label>
+          <input id="new-repo-description" name="description" placeholder="Short note about this project" class="repo-input" />
+        </div>
+        <label class="repo-check">
+          <input type="checkbox" name="init_readme" checked />
+          <span>Add a README so the repo isn’t empty</span>
         </label>
       </form>
-      <div class="px-6 py-4 border-t border-surface-700/80 flex justify-end gap-2 bg-surface-900/50">
-        <button type="button" id="modal-cancel" class="px-4 py-2 text-sm rounded-lg border border-surface-700 hover:bg-surface-800 text-gray-300 transition-colors">Cancel</button>
-        <button type="submit" form="new-repo-form" class="px-4 py-2 text-sm rounded-lg bg-accent hover:bg-accent-hover text-surface-950 font-semibold transition-colors">Create</button>
-      </div>
+
+      <footer class="repo-dialog-footer">
+        <button type="button" id="modal-cancel" class="repo-btn repo-btn-ghost">Cancel</button>
+        <button type="submit" form="new-repo-form" class="repo-btn repo-btn-primary">Create &amp; open</button>
+      </footer>
     </div>
   </div>
 
@@ -1609,9 +1632,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=463"></script>
-  <script src="/monaco-languages.js?v=463" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=467"></script>
+  <script src="/monaco-languages.js?v=467" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=463"></script>
+  <script src="/app.js?v=467"></script>
 </body>
 </html>
