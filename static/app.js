@@ -11259,21 +11259,12 @@ function renderDbViewerSchema(schema) {
     container.innerHTML = '<div class="ij-db-viewer-empty">No objects match filter</div>';
     return;
   }
-  const expandAll = !state.dbSchemaOpenTables.size
-    && !state.dbSchemaOpenSchemas.size
-    && !state.dbSchemaOpenFolders.size
-    && !filter;
+  const expandMatching = !!filter;
   const groups = groupDbTablesBySchema(objects);
-  const flattenSchema = groups.length === 1 && ['main', 'public'].includes(groups[0][0]);
-  let bodyHtml;
-  if (flattenSchema) {
-    bodyHtml = renderDbSchemaBody(groups[0][1], 0, expandAll || !!filter);
-  } else {
-    bodyHtml = groups.map(([schemaName, schemaObjects]) => {
-      const schemaOpen = expandAll || state.dbSchemaOpenSchemas.has(schemaName) || !!filter;
-      return renderDbSchemaNode(schemaName, schemaObjects, 0, schemaOpen, expandAll || !!filter);
-    }).join('');
-  }
+  const bodyHtml = groups.map(([schemaName, schemaObjects]) => {
+    const schemaOpen = expandMatching || state.dbSchemaOpenSchemas.has(schemaName);
+    return renderDbSchemaNode(schemaName, schemaObjects, 0, schemaOpen, expandMatching);
+  }).join('');
   container.innerHTML = `<div class="ij-tree ij-db-object-tree" role="tree" aria-label="Database objects">${bodyHtml}</div>`;
   wireDbObjectTree(container);
 }
