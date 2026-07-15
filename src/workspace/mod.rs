@@ -1130,6 +1130,14 @@ pub fn db_connection_view_for_repo(
     db_viewer::connection_view_for_repo(ws, meta)
 }
 
+pub fn db_connection_view_for_repo_probed(
+    ws: &Path,
+    meta: &metadata::RepoMetadata,
+    probe: bool,
+) -> db_viewer::DbConnectionView {
+    db_viewer::connection_view_for_repo_probed(ws, meta, probe)
+}
+
 pub fn attach_db_connection_list(
     view: db_viewer::DbConnectionView,
     meta: &metadata::RepoMetadata,
