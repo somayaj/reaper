@@ -1,4 +1,4 @@
-Reaper 0.1.6 (build 468) — macOS split release.
+Reaper 0.1.6 (build 469) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,7 +11,8 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
-- **Database over SSH + SSL:** Postgres tunnels keep the real hostname for TLS (`hostaddr=127.0.0.1`); MySQL softens verify-* to require over the loopback forward. Opening the Database panel no longer live-probes (avoids 120s hangs); Test/Connect still probe with ~10s connect timeouts. Clearer SSH auth errors (strips OpenSSH post-quantum noise). Build **468**.
+- **MariaDB password + SSL over SSH:** Pass `--password=` (MariaDB ignores `MYSQL_PWD` and was disabling cert verify as “passwordless”). Tunnel uses TCP; hostname verify softened on loopback while CA still applies; clearer handshake / bastion remote-host errors. Build **469**.
+- **Database over SSH + SSL:** Postgres tunnels keep the real hostname for TLS (`hostaddr=127.0.0.1`); MySQL softens verify-* over the loopback forward. Opening the Database panel no longer live-probes (avoids 120s hangs); Test/Connect still probe with connect timeouts. Clearer SSH auth errors (strips OpenSSH post-quantum noise). Build **468**.
 - **Import remotes & folders as dropdowns:** Recent clone URLs and local paths are saved and shown in the Import dialog; also seeded from existing repos. UI build **467**.
 - **New / Import dialogs refreshed:** Clearer From URL / From folder choices, plain-language labels, and Create/Clone & open actions. UI build **466**.
 - **Database connection picker stays populated:** Schema responses include the saved connection list so the dropdown does not clear after Connect. UI build **467**.

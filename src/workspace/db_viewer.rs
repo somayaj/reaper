@@ -924,7 +924,7 @@ fn connection_view_inner(
 
 /// Actually talk to the database (Test and Connect must share this path).
 fn probe_db_kind(ws: &Path, kind: &DbKind, ssl: Option<&DbSslSettings>) -> Result<()> {
-    match kind {
+    let result: Result<()> = match kind {
         DbKind::Sqlite(path) => {
             let conn = rusqlite::Connection::open(path)
                 .with_context(|| format!("open sqlite {}", path.display()))?;
@@ -964,7 +964,36 @@ fn probe_db_kind(ws: &Path, kind: &DbKind, ssl: Option<&DbSslSettings>) -> Resul
             }
             Ok(())
         }
-    }
+    };
+    result.map_err(|e| {
+        let msg = e.to_string();
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("certificate")
+            || lower.contains("ssl")
+            || lower.contains("verify")
+            || lower.contains("root certificate")
+        {
+            return anyhow::anyhow!(
+                "{msg} — for SSH + verify-full: set Root certificate (CA), keep the real DB hostname in the URL, and set “Remote DB host (from bastion)” if the jump box reaches the DB on a private hostname/IP"
+            );
+        }
+        if lower.contains("connection refused")
+            || lower.contains("could not connect")
+            || lower.contains("lost connection")
+            || lower.contains("initial communication packet")
+            || lower.contains("system error: 60")
+        {
+            return anyhow::anyhow!(
+                "{msg} — tunnel accepted locally but the MySQL greeting never arrived (wrong Remote DB host/port from the bastion, or the remote side is not MySQL). Set “Remote DB host (from bastion)” to the private hostname/IP the jump box uses"
+            );
+        }
+        if lower.contains("passwordless") {
+            return anyhow::anyhow!(
+                "{msg} — re-enter the database password and click Connect (MariaDB ignores env passwords for SSL verify)"
+            );
+        }
+        e
+    })
 }
 
 fn connection_view_for_kind(
@@ -2188,23 +2217,35 @@ fn mysql_base_cli_args(target: &MysqlCliTarget, ssl: Option<&DbSslSettings>) -> 
         target.port.clone(),
         "-u".into(),
         target.user.clone(),
+        // Force TCP — important for 127.0.0.1 SSH tunnels (avoid local socket).
+        "--protocol=TCP".into(),
         "--connect-timeout".into(),
-        "10".into(),
+        "15".into(),
     ];
+    // MariaDB 11+ treats MYSQL_PWD as "no password" and disables ssl-verify-server-cert.
+    // Pass the password as a real CLI flag so verify-full / CA checks stay enabled.
+    if let Some(password) = target.password.as_deref().filter(|p| !p.is_empty()) {
+        args.push(format!("--password={password}"));
+    }
     if let Some(db) = &target.database {
         args.push("-D".into());
         args.push(db.clone());
     }
-    args.extend(mysql_ssl_cli_args(ssl));
+    let flavor = detect_mysql_client_flavor(&mysql_program());
+    args.extend(mysql_ssl_cli_args_for(ssl, flavor));
+    // Tunnel host is 127.0.0.1; MariaDB 11+ verifies hostname by default and would fail.
+    if flavor == MysqlClientFlavor::MariaDb
+        && db_ssh_tunnel::is_tunneled_loopback_host(&target.host)
+        && ssl.is_some_and(|s| !s.is_empty())
+    {
+        args.push("--disable-ssl-verify-server-cert".into());
+    }
     args
 }
 
-fn mysql_cli_env(target: &MysqlCliTarget) -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    if let Some(password) = &target.password {
-        env.push(("MYSQL_PWD".into(), password.clone()));
-    }
-    env
+fn mysql_cli_env(_target: &MysqlCliTarget) -> Vec<(String, String)> {
+    // Intentionally empty: do not use MYSQL_PWD (MariaDB ignores it for SSL verify).
+    Vec::new()
 }
 
 fn mysql_program() -> String {
@@ -2277,17 +2318,7 @@ fn mysql_cli_file_command(url: &str, ssl: Option<&DbSslSettings>, rel_sql_file: 
     for arg in mysql_base_cli_args(&target, ssl) {
         parts.push(shell_quote(&arg));
     }
-    let pwd_prefix = target
-        .password
-        .as_ref()
-        .map(|p| format!("MYSQL_PWD={} ", shell_quote(p)))
-        .unwrap_or_default();
-    Ok(format!(
-        "{}{} < {}",
-        pwd_prefix,
-        parts.join(" "),
-        shell_quote(rel_sql_file)
-    ))
+    Ok(format!("{} < {}", parts.join(" "), shell_quote(rel_sql_file)))
 }
 
 fn compose_mysql_file_command(exec: &ComposeMysqlExec, rel_sql_file: &str) -> String {
@@ -2404,7 +2435,8 @@ fn run_postgres_psql(
         let command = compose_psql_shell_command(exec, extra_args);
         return run_shell_command(ws, &command);
     }
-    let timed_url = with_pg_connect_timeout(url, 10);
+    let ssl_url = apply_pg_ssl_to_url(url, ssl);
+    let timed_url = with_pg_connect_timeout(&ssl_url, 10);
     let mut owned = vec![timed_url];
     owned.extend(extra_args.iter().map(|s| (*s).to_string()));
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
@@ -2466,11 +2498,32 @@ fn validate_ssl_files(ssl: &DbSslSettings) -> Option<String> {
             return Some(format!("{label} not found: {path}"));
         }
     }
+    let mode = ssl
+        .ssl_mode
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if matches!(mode.as_str(), "verify-full" | "verify-ca" | "verify-identity")
+        && ssl
+            .ssl_root_cert
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .is_none()
+    {
+        return Some(
+            "SSL mode verify-full/verify-ca requires a Root certificate (CA) file path \
+             (e.g. your cloud provider’s RDS/Cloud SQL CA bundle)"
+                .into(),
+        );
+    }
     None
 }
 
-/// MySQL through an SSH local forward uses host 127.0.0.1, so verify-full/verify-ca
-/// hostname checks fail. Keep encryption via require.
+/// MySQL through an SSH local forward uses host 127.0.0.1, so verify-full hostname
+/// checks fail. Keep CA verification via verify-ca when possible.
 fn soften_ssl_for_mysql_tunnel(ssl: Option<&DbSslSettings>, host: &str) -> Option<DbSslSettings> {
     let ssl = ssl?.clone().normalized()?;
     if !db_ssh_tunnel::is_tunneled_loopback_host(host) {
@@ -2482,9 +2535,10 @@ fn soften_ssl_for_mysql_tunnel(ssl: Option<&DbSslSettings>, host: &str) -> Optio
         .unwrap_or("")
         .to_ascii_lowercase()
         .replace('_', "-");
-    if mode.contains("verify") {
+    if mode == "verify-full" || mode == "verify-identity" {
         let mut out = ssl;
-        out.ssl_mode = Some("require".into());
+        // VERIFY_IDENTITY fails against 127.0.0.1; VERIFY_CA still checks the chain.
+        out.ssl_mode = Some("verify-ca".into());
         return Some(out);
     }
     Some(ssl)
@@ -2500,7 +2554,9 @@ fn ssl_env_pairs(ssl: Option<&DbSslSettings>) -> Vec<(String, String)> {
         .as_deref()
         .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("disable"))
     {
-        out.push(("PGSSLMODE".into(), mode.to_string()));
+        // libpq expects verify-full / verify-ca (hyphen).
+        let normalized = mode.to_ascii_lowercase().replace('_', "-");
+        out.push(("PGSSLMODE".into(), normalized));
     }
     if let Some(path) = ssl.ssl_root_cert.as_deref().filter(|p| !p.is_empty()) {
         out.push(("PGSSLROOTCERT".into(), path.to_string()));
@@ -2512,6 +2568,52 @@ fn ssl_env_pairs(ssl: Option<&DbSslSettings>) -> Vec<(String, String)> {
         out.push(("PGSSLKEY".into(), path.to_string()));
     }
     out
+}
+
+/// Put SSL settings on the URL so they win over ambient env and survive tunneling.
+fn apply_pg_ssl_to_url(url: &str, ssl: Option<&DbSslSettings>) -> String {
+    let Some(ssl) = ssl.filter(|s| !s.is_empty()) else {
+        return url.to_string();
+    };
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            k != "sslmode" && k != "sslrootcert" && k != "sslcert" && k != "sslkey"
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if let Some(mode) = ssl
+        .ssl_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        pairs.push((
+            "sslmode".into(),
+            mode.to_ascii_lowercase().replace('_', "-"),
+        ));
+    }
+    if let Some(path) = ssl.ssl_root_cert.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        pairs.push(("sslrootcert".into(), path.to_string()));
+    }
+    if let Some(path) = ssl.ssl_cert.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        pairs.push(("sslcert".into(), path.to_string()));
+    }
+    if let Some(path) = ssl.ssl_key.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        pairs.push(("sslkey".into(), path.to_string()));
+    }
+    parsed.set_query(None);
+    {
+        let mut ser = parsed.query_pairs_mut();
+        for (k, v) in &pairs {
+            ser.append_pair(k, v);
+        }
+    }
+    parsed.to_string()
 }
 
 fn ssl_env_shell_prefix(ssl: Option<&DbSslSettings>) -> String {
@@ -2783,9 +2885,18 @@ mod tests {
             cmd.contains("--ssl-mode=REQUIRED") || cmd.contains("--ssl"),
             "cmd={cmd}"
         );
-        assert!(cmd.contains("MYSQL_PWD="), "cmd={cmd}");
+        assert!(cmd.contains("--password=secret"), "cmd={cmd}");
+        assert!(!cmd.contains("MYSQL_PWD="), "cmd={cmd}");
         assert!(cmd.contains("< 'queries/seed.sql'"), "cmd={cmd}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mysql_base_cli_args_pass_password_flag() {
+        let target = parse_mysql_url("mysql://app:s3cret@127.0.0.1:3307/app").unwrap();
+        let args = mysql_base_cli_args(&target, None);
+        assert!(args.iter().any(|a| a == "--password=s3cret"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--protocol=TCP"), "{args:?}");
     }
 
     #[test]
