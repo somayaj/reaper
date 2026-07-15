@@ -102,12 +102,14 @@ pub fn import_local_repo(
         .canonicalize()
         .with_context(|| format!("resolve source path {}", src.display()))?;
     metadata::set_local_path(config, &name, &src_canon)?;
+    let _ = settings.push_recent_git_local_path(&src_canon.display().to_string());
 
     if let Some(origin) = git::remote_url(&src_canon, "origin") {
         if let Ok(clean) = normalize_remote_url(&origin) {
             if let Ok(host) = host_from_url(&clean) {
                 git::set_remote_url(&path, "origin", &clean)?;
                 metadata::set_remote(config, &name, &clean, &host)?;
+                let _ = settings.push_recent_git_remote(&clean);
                 return summarize_repo(config, settings, &name, &path);
             }
         }
@@ -176,6 +178,7 @@ pub fn import_repo(
 
     git::set_remote_url(&path, "origin", &clean)?;
     metadata::set_remote(config, &name, &clean, &host)?;
+    let _ = settings.push_recent_git_remote(&clean);
 
     summarize_repo(config, settings, &name, &path)
 }

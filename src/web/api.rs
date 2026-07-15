@@ -2114,13 +2114,16 @@ async fn workspace_db_schema_handler(
     let database_url = repo_database_url(&state.config, &name);
     let db_ssl = metadata::repo_db_ssl(&state.config, &name);
     let db_ssh = metadata::repo_db_ssh(&state.config, &name);
-    Json(workspace::db_schema(
+    let mut schema = workspace::db_schema(
         &ws,
         database_url.as_deref(),
         db_ssl.as_ref(),
         db_ssh.as_ref(),
-    ))
-    .into_response()
+    );
+    if let Ok(meta) = metadata::load(&state.config, &name) {
+        schema.connection = workspace::attach_db_connection_list(schema.connection, &meta);
+    }
+    Json(schema).into_response()
 }
 
 async fn workspace_db_query_handler(

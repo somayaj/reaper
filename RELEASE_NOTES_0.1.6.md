@@ -1,4 +1,4 @@
-Reaper 0.1.6 (build 463) — macOS split release.
+Reaper 0.1.6 (build 467) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,10 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Import remotes & folders as dropdowns:** Recent clone URLs and local paths are saved and shown in the Import dialog; also seeded from existing repos. UI build **467**.
+- **New / Import dialogs refreshed:** Clearer From URL / From folder choices, plain-language labels, and Create/Clone & open actions. UI build **466**.
+- **Database connection picker stays populated:** Schema responses include the saved connection list so the dropdown does not clear after Connect. UI build **467**.
+- **Welcome Recent repos:** Last opened repo appears first.
 - **Database viewer tree starts collapsed:** Schema/database nodes are listed closed; expand folders and tables as needed (filter still expands matches). UI build **463**.
 - **Agent panel × closes the panel:** The close button on the agent toolbar now hides the agent (right/bottom dock) or switches away when docked left. UI build **462**.
 - **MariaDB SSL fix:** Database viewer no longer passes MySQL-only `--ssl-mode` to MariaDB clients (fixes `unknown variable 'ssl-mode=…'`). Test and Connect both run a real `SELECT 1` probe. UI build **461**.
