@@ -169,8 +169,37 @@ pub fn ensure_tunnel(
 }
 
 /// Rewrite a postgres/mysql URL so clients connect through the local forward.
+///
+/// For PostgreSQL, keep the original hostname (TLS / SNI / verify-full) and set
+/// `hostaddr=127.0.0.1` so libpq dials the tunnel. MySQL has no hostaddr, so the
+/// host becomes `127.0.0.1` (callers should soften verify-* SSL modes).
 pub fn rewrite_url_through_tunnel(url: &str, local_port: u16) -> Result<String> {
     let mut parsed = url::Url::parse(url).with_context(|| format!("invalid database URL: {url}"))?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let is_postgres = scheme == "postgres"
+        || scheme == "postgresql"
+        || scheme.starts_with("postgres");
+
+    if is_postgres {
+        parsed
+            .set_port(Some(local_port))
+            .map_err(|_| anyhow::anyhow!("failed to set tunnel port"))?;
+        let mut pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("hostaddr"))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        pairs.push(("hostaddr".into(), "127.0.0.1".into()));
+        parsed.set_query(None);
+        {
+            let mut ser = parsed.query_pairs_mut();
+            for (k, v) in &pairs {
+                ser.append_pair(k, v);
+            }
+        }
+        return Ok(parsed.to_string());
+    }
+
     parsed
         .set_host(Some("127.0.0.1"))
         .context("failed to set tunnel host")?;
@@ -178,6 +207,11 @@ pub fn rewrite_url_through_tunnel(url: &str, local_port: u16) -> Result<String> 
         .set_port(Some(local_port))
         .map_err(|_| anyhow::anyhow!("failed to set tunnel port"))?;
     Ok(parsed.to_string())
+}
+
+/// True when the client is dialing a local SSH forward (hostname verify will fail).
+pub fn is_tunneled_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 pub fn build_ssh_args(
@@ -197,6 +231,8 @@ pub fn build_ssh_args(
         bastion_port.to_string(),
         "-o".into(),
         "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
         "-o".into(),
         "ExitOnForwardFailure=yes".into(),
         "-o".into(),
@@ -271,7 +307,7 @@ fn wait_for_tunnel(child: &mut Child, local_port: u16) -> Result<()> {
             if let Some(mut stderr) = child.stderr.take() {
                 let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
             }
-            let detail = err.trim();
+            let detail = summarize_ssh_stderr(&err);
             if detail.is_empty() {
                 bail!("SSH tunnel exited early (status {status})");
             }
@@ -286,6 +322,40 @@ fn wait_for_tunnel(child: &mut Child, local_port: u16) -> Result<()> {
     }
     let _ = child.kill();
     bail!("SSH tunnel timed out waiting for local port {local_port}");
+}
+
+/// Drop OpenSSH noise (e.g. post-quantum warnings) so auth failures stay readable.
+fn summarize_ssh_stderr(raw: &str) -> String {
+    let filtered: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            if line.starts_with("** ") {
+                return false;
+            }
+            if lower.contains("openssh.com/pq.html")
+                || lower.contains("post-quantum")
+                || lower.contains("post quantum")
+                || lower == "openssh.org"
+                || lower.contains("openssh: post-quantum")
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
+    if filtered.is_empty() {
+        return raw.trim().to_string();
+    }
+    let joined = filtered.join(" ");
+    if joined.to_ascii_lowercase().contains("permission denied (publickey)") {
+        return format!(
+            "{joined} — check bastion user, private key path, and that the matching public key is in authorized_keys on the bastion."
+        );
+    }
+    joined
 }
 
 fn port_is_open(port: u16) -> bool {
@@ -308,6 +378,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn summarize_ssh_stderr_strips_pq_warning() {
+        let raw = "\
+** WARNING: connection is not using a post-quantum key exchange algorithm. **
+** This session may be vulnerable to \"store now, decrypt later\" attacks. **
+** The server may need to be upgraded. See https://openssh.com/pq.html
+ubuntu@ey.carnow.com: Permission denied (publickey).
+";
+        let out = summarize_ssh_stderr(raw);
+        assert!(out.contains("Permission denied (publickey)"));
+        assert!(out.contains("authorized_keys"));
+        assert!(!out.contains("post-quantum"));
+        assert!(!out.contains("openssh.com/pq.html"));
+    }
+
+    #[test]
     fn builds_ssh_args_with_identity() {
         let args = build_ssh_args(
             "deploy",
@@ -328,6 +413,7 @@ mod tests {
         assert!(args.contains(&"IdentitiesOnly=yes".into()));
         assert!(args.contains(&"deploy@bastion.example".into()));
         assert!(args.contains(&"ExitOnForwardFailure=yes".into()));
+        assert!(args.contains(&"ConnectTimeout=10".into()));
     }
 
     #[test]
@@ -337,10 +423,19 @@ mod tests {
             15432,
         )
         .unwrap();
-        assert!(out.contains("127.0.0.1:15432"));
+        assert!(out.contains("15432"), "out={out}");
+        assert!(out.contains("hostaddr=127.0.0.1"), "out={out}");
+        assert!(out.contains("db.prod.internal"), "out={out}");
         assert!(out.contains("orders"));
         assert!(out.contains("app"));
-        assert!(!out.contains("db.prod.internal"));
+        assert!(!out.contains("@127.0.0.1"), "postgres should keep hostname for TLS: {out}");
+    }
+
+    #[test]
+    fn rewrites_mysql_url_to_loopback() {
+        let out = rewrite_url_through_tunnel("mysql://root:pw@db.internal:3306/app", 13306).unwrap();
+        assert!(out.contains("127.0.0.1:13306"), "out={out}");
+        assert!(out.contains("app"));
     }
 
     #[test]

@@ -797,6 +797,15 @@ pub fn connection_view_for_repo(
     ws: &Path,
     meta: &crate::repos::metadata::RepoMetadata,
 ) -> DbConnectionView {
+    connection_view_for_repo_probed(ws, meta, false)
+}
+
+/// Like [`connection_view_for_repo`], optionally running a live `SELECT 1` probe.
+pub fn connection_view_for_repo_probed(
+    ws: &Path,
+    meta: &crate::repos::metadata::RepoMetadata,
+    probe: bool,
+) -> DbConnectionView {
     let mut meta = meta.clone();
     meta.ensure_db_connections();
     let profile = meta.active_db_profile();
@@ -809,15 +818,26 @@ pub fn connection_view_for_repo(
     let ssh = profile
         .and_then(|p| p.db_ssh.as_ref())
         .or(meta.db_ssh.as_ref());
-    let view = connection_view(ws, url, ssl, ssh);
+    let view = connection_view_inner(ws, url, ssl, ssh, probe);
     attach_connection_list(view, &meta)
 }
 
+/// Live connection check (Test / Connect). Opens SSH when configured and runs `SELECT 1`.
 pub fn connection_view(
     ws: &Path,
     database_url: Option<&str>,
     ssl: Option<&DbSslSettings>,
     ssh: Option<&DbSshTunnelSettings>,
+) -> DbConnectionView {
+    connection_view_inner(ws, database_url, ssl, ssh, true)
+}
+
+fn connection_view_inner(
+    ws: &Path,
+    database_url: Option<&str>,
+    ssl: Option<&DbSslSettings>,
+    ssh: Option<&DbSshTunnelSettings>,
+    probe: bool,
 ) -> DbConnectionView {
     let effective = effective_database_url(ws, database_url);
     let ssl_out = ssl.cloned().and_then(|s| s.clone().normalized());
@@ -851,6 +871,32 @@ pub fn connection_view(
             ..Default::default()
         };
     }
+
+    // Panel open / GET: resolve kind from URL only — do not open SSH or run SELECT 1.
+    if !probe {
+        return match resolve_db_kind(ws, database_url, "") {
+            Ok(kind) => {
+                let mut view =
+                    connection_view_for_kind(effective.as_deref(), &kind, ssl_out, ssh_out, None);
+                view.connected = false;
+                view.error = None;
+                view
+            }
+            Err(e) => DbConnectionView {
+                database_url: effective,
+                kind: "none".into(),
+                resolved_path: None,
+                display: "Not connected".into(),
+                connected: false,
+                error: Some(e.to_string()),
+                ssl: ssl_out,
+                ssh: ssh_out,
+                ssh_local_port: None,
+                ..Default::default()
+            },
+        };
+    }
+
     match resolve_db_kind_for_ops(ws, database_url, "", ssh_out.as_ref()) {
         Ok((kind, local_port)) => {
             let mut view =
@@ -2142,6 +2188,8 @@ fn mysql_base_cli_args(target: &MysqlCliTarget, ssl: Option<&DbSslSettings>) -> 
         target.port.clone(),
         "-u".into(),
         target.user.clone(),
+        "--connect-timeout".into(),
+        "10".into(),
     ];
     if let Some(db) = &target.database {
         args.push("-D".into());
@@ -2206,6 +2254,8 @@ fn run_mysql_cli(
     }
 
     let target = parse_mysql_url(url)?;
+    let softened = soften_ssl_for_mysql_tunnel(ssl, &target.host);
+    let ssl = softened.as_ref().or(ssl);
     let mut owned = mysql_base_cli_args(&target, ssl);
     owned.extend(extra_args.iter().map(|s| (*s).to_string()));
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
@@ -2220,6 +2270,8 @@ fn run_mysql_cli(
 
 fn mysql_cli_file_command(url: &str, ssl: Option<&DbSslSettings>, rel_sql_file: &str) -> Result<String> {
     let target = parse_mysql_url(url)?;
+    let softened = soften_ssl_for_mysql_tunnel(ssl, &target.host);
+    let ssl = softened.as_ref().or(ssl);
     let program = mysql_program();
     let mut parts = vec![shell_quote(&program)];
     for arg in mysql_base_cli_args(&target, ssl) {
@@ -2352,10 +2404,14 @@ fn run_postgres_psql(
         let command = compose_psql_shell_command(exec, extra_args);
         return run_shell_command(ws, &command);
     }
-    let mut owned = vec![url.to_string()];
+    let timed_url = with_pg_connect_timeout(url, 10);
+    let mut owned = vec![timed_url];
     owned.extend(extra_args.iter().map(|s| (*s).to_string()));
     let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let env_vec = ssl_env_pairs(ssl);
+    let mut env_vec = ssl_env_pairs(ssl);
+    if !env_vec.iter().any(|(k, _)| k == "PGCONNECT_TIMEOUT") {
+        env_vec.push(("PGCONNECT_TIMEOUT".into(), "10".into()));
+    }
     let env_refs: Vec<(&str, &str)> = env_vec
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -2369,6 +2425,32 @@ fn run_postgres_psql(
         &refs,
         &env_refs,
     )
+}
+
+/// Ensure libpq fails fast instead of hanging until the UI's 120s abort.
+fn with_pg_connect_timeout(url: &str, secs: u32) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let has = parsed
+        .query_pairs()
+        .any(|(k, _)| k.eq_ignore_ascii_case("connect_timeout"));
+    if has {
+        return url.to_string();
+    }
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.push(("connect_timeout".into(), secs.to_string()));
+    parsed.set_query(None);
+    {
+        let mut ser = parsed.query_pairs_mut();
+        for (k, v) in &pairs {
+            ser.append_pair(k, v);
+        }
+    }
+    parsed.to_string()
 }
 
 fn validate_ssl_files(ssl: &DbSslSettings) -> Option<String> {
@@ -2385,6 +2467,27 @@ fn validate_ssl_files(ssl: &DbSslSettings) -> Option<String> {
         }
     }
     None
+}
+
+/// MySQL through an SSH local forward uses host 127.0.0.1, so verify-full/verify-ca
+/// hostname checks fail. Keep encryption via require.
+fn soften_ssl_for_mysql_tunnel(ssl: Option<&DbSslSettings>, host: &str) -> Option<DbSslSettings> {
+    let ssl = ssl?.clone().normalized()?;
+    if !db_ssh_tunnel::is_tunneled_loopback_host(host) {
+        return Some(ssl);
+    }
+    let mode = ssl
+        .ssl_mode
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if mode.contains("verify") {
+        let mut out = ssl;
+        out.ssl_mode = Some("require".into());
+        return Some(out);
+    }
+    Some(ssl)
 }
 
 fn ssl_env_pairs(ssl: Option<&DbSslSettings>) -> Vec<(String, String)> {

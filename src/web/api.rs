@@ -1961,8 +1961,18 @@ fn db_connection_response(
     config: &crate::config::Config,
     name: &str,
 ) -> axum::response::Response {
+    db_connection_response_probed(ws, config, name, false)
+}
+
+fn db_connection_response_probed(
+    ws: &std::path::Path,
+    config: &crate::config::Config,
+    name: &str,
+    probe: bool,
+) -> axum::response::Response {
     match metadata::load(config, name) {
-        Ok(meta) => Json(workspace::db_connection_view_for_repo(ws, &meta)).into_response(),
+        Ok(meta) => Json(workspace::db_connection_view_for_repo_probed(ws, &meta, probe))
+            .into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -2046,7 +2056,7 @@ async fn workspace_db_connection_put(
         body.ssl.clone(),
         body.ssh.clone(),
     ) {
-        Ok(_) => db_connection_response(&ws, &state.config, &name),
+        Ok(_) => db_connection_response_probed(&ws, &state.config, &name, true),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
