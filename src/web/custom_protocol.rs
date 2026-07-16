@@ -26,17 +26,19 @@ impl GuiProtocolBridge {
         Self { router, handle }
     }
 
-    pub fn dispatch_sync(&self, request: wry::http::Request<Vec<u8>>) -> wry::http::Response<Vec<u8>> {
+    /// Uses `http` types (via axum) so this compiles on Windows without the macOS-only `wry` crate.
+    /// On macOS, wry's `http` re-export is the same crate and is type-compatible.
+    pub fn dispatch_sync(&self, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
         match self.handle.block_on(self.dispatch(request)) {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!("custom protocol dispatch failed: {error:#}");
-                wry::http::Response::builder()
+                Response::builder()
                     .status(500)
-                    .header(wry::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                     .body(error.to_string().into_bytes())
                     .unwrap_or_else(|_| {
-                        wry::http::Response::builder()
+                        Response::builder()
                             .status(500)
                             .body(Vec::new())
                             .expect("empty 500 response")
@@ -47,19 +49,19 @@ impl GuiProtocolBridge {
 
     async fn dispatch(
         &self,
-        request: wry::http::Request<Vec<u8>>,
-    ) -> anyhow::Result<wry::http::Response<Vec<u8>>> {
-        let axum_request = wry_to_axum_request(request)?;
+        request: Request<Vec<u8>>,
+    ) -> anyhow::Result<Response<Vec<u8>>> {
+        let axum_request = protocol_to_axum_request(request)?;
         let mut router = self.router.clone();
         let axum_response = router
             .oneshot(axum_request)
             .await
             .context("router oneshot")?;
-        wry_from_axum_response(axum_response).await
+        protocol_from_axum_response(axum_response).await
     }
 }
 
-fn wry_to_axum_request(request: wry::http::Request<Vec<u8>>) -> anyhow::Result<Request<Body>> {
+fn protocol_to_axum_request(request: Request<Vec<u8>>) -> anyhow::Result<Request<Body>> {
     let (parts, body) = request.into_parts();
     let path_and_query = parts
         .uri
@@ -79,9 +81,9 @@ fn wry_to_axum_request(request: wry::http::Request<Vec<u8>>) -> anyhow::Result<R
         .context("build axum request body")
 }
 
-async fn wry_from_axum_response(
+async fn protocol_from_axum_response(
     response: Response<Body>,
-) -> anyhow::Result<wry::http::Response<Vec<u8>>> {
+) -> anyhow::Result<Response<Vec<u8>>> {
     let (parts, body) = response.into_parts();
     let bytes = body
         .collect()
@@ -89,13 +91,13 @@ async fn wry_from_axum_response(
         .context("read axum response body")?
         .to_bytes();
 
-    let mut builder = wry::http::Response::builder().status(parts.status);
+    let mut builder = Response::builder().status(parts.status);
     for (name, value) in parts.headers.iter() {
         builder = builder.header(name, value);
     }
     builder
         .body(bytes.to_vec())
-        .context("build wry response body")
+        .context("build protocol response body")
 }
 
 pub fn loopback_ws_base(host: &str, port: u16) -> String {
@@ -125,7 +127,7 @@ mod tests {
         );
         let bridge = GuiProtocolBridge::new(router, Handle::current());
 
-        let request = wry::http::Request::builder()
+        let request = Request::builder()
             .uri("reaper://localhost/api/version")
             .body(Vec::new())
             .unwrap();

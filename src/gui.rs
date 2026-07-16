@@ -1,5 +1,6 @@
 //! macOS native window (WKWebView via wry).
 
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
 use crate::web::SharedGuiProtocolBridge;

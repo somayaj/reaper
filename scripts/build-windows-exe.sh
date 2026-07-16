@@ -36,19 +36,33 @@ mkdir -p "$ROOT/dist"
 
 echo "== Cross-compiling reaper (${TARGET}, release) =="
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$LINKER"
+# Prefer the repo-local target dir for predictable dist/ copy (ignore Cursor sandbox CARGO_TARGET_DIR).
+unset CARGO_TARGET_DIR
 # GUI crates are macOS-only; this binary serves the IDE in --server / browser mode.
 (
   cd "$ROOT"
   REAPER_SKIP_EDITOR_TESTS=1 cargo build --release --target "$TARGET"
 )
 
-SRC="$ROOT/target/${TARGET}/release/reaper.exe"
+TARGET_ROOT="${CARGO_TARGET_DIR:-$ROOT/target}"
+SRC="$TARGET_ROOT/${TARGET}/release/reaper.exe"
 if [[ ! -f "$SRC" ]]; then
-  echo "Built binary not found: $SRC" >&2
+  # Fallback: ask cargo where the artifact landed (handles external CARGO_TARGET_DIR).
+  SRC="$(
+    cd "$ROOT"
+    REAPER_SKIP_EDITOR_TESTS=1 cargo build --release --target "$TARGET" --message-format=json \
+      | sed -n 's/.*"executable":"\([^"]*reaper\.exe\)".*/\1/p' \
+      | tail -1 \
+      | sed 's#\\\\#/#g'
+  )"
+fi
+if [[ ! -f "$SRC" ]]; then
+  echo "Built binary not found under ${TARGET}/release/reaper.exe" >&2
   exit 1
 fi
 
 cp "$SRC" "$OUT_EXE"
+file "$OUT_EXE" || true
 echo ""
 echo "Windows exe: $OUT_EXE ($(du -h "$OUT_EXE" | awk '{print $1}'))"
 echo "Note: runs as a local server (open the printed URL in a browser). Native Windows GUI is not in this build."
