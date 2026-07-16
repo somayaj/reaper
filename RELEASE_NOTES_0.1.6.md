@@ -1,13 +1,18 @@
-Reaper 0.1.6 (build 469) — macOS split release.
+Reaper 0.1.6 (build 469) — macOS + Windows release.
 
-**Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
+**Install:** download the asset for your platform below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
-| Mac | Download |
-|-----|----------|
+| Platform | Download |
+|----------|----------|
 | Apple Silicon (M1/M2/M3/M4) | `reaper-0.1.6-macos-arm64.dmg` |
-| Intel (2015–2020 MacBook Pro, iMac, etc.) | `reaper-0.1.6-macos-x86_64.dmg` |
+| Intel Mac (2015–2020) | `reaper-0.1.6-macos-x86_64.dmg` |
+| Windows x64 | `reaper-0.1.6-windows-x64.exe` |
 
-Drag Reaper.app to Applications, then launch.
+**macOS:** open the DMG, drag Reaper.app to Applications, then launch.
+
+**Windows:** run `reaper-0.1.6-windows-x64.exe` (server / browser UI at the printed local URL). Native Windows desktop GUI is not in this build yet.
+
+**Release push:** `./scripts/release-macos-and-windows.sh` (builds both DMGs + Windows exe and uploads to GitHub).
 
 ### What's new
 
