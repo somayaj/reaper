@@ -64,11 +64,25 @@ fi
 cp "$SRC" "$OUT_EXE"
 file "$OUT_EXE" || true
 
-# Portable native layout: exe + static UI + cursor-bridge
+# WebView2Loader.dll is required next to reaper.exe for the native window.
+WEBVIEW2_DLL="$ROOT/resources/webview2-win-x64/WebView2Loader.dll"
+if [[ ! -f "$WEBVIEW2_DLL" ]]; then
+  echo "== Fetching WebView2Loader.dll =="
+  CACHE="$ROOT/resources/.cache"
+  mkdir -p "$CACHE" "$ROOT/resources/webview2-win-x64"
+  NUPKG="$CACHE/Microsoft.Web.WebView2.nupkg"
+  if [[ ! -f "$NUPKG" ]]; then
+    curl -fsSL -o "$NUPKG" "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2903.40"
+  fi
+  unzip -o -j "$NUPKG" "runtimes/win-x64/native/WebView2Loader.dll" -d "$ROOT/resources/webview2-win-x64"
+fi
+
+# Portable native layout: exe + WebView2Loader + static UI + cursor-bridge
 STAGE="$ROOT/dist/reaper-${VERSION}-windows-x64"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp "$OUT_EXE" "$STAGE/reaper.exe"
+cp "$WEBVIEW2_DLL" "$STAGE/WebView2Loader.dll"
 if [[ -d "$ROOT/static" ]]; then
   echo "== Staging static UI beside exe =="
   rsync -a --delete \
@@ -86,6 +100,7 @@ fi
 echo ""
 echo "Windows exe: $OUT_EXE ($(du -h "$OUT_EXE" | awk '{print $1}'))"
 echo "Windows folder (copy this whole folder to the VM): $STAGE"
-echo "  Run reaper.exe for native WebView2 window (requires WebView2 Runtime)."
+echo "  Must include WebView2Loader.dll next to reaper.exe"
+echo "  Also install WebView2 Runtime: https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+echo "  Run reaper.exe for native WebView2 window."
 echo "  Use --server for browser-only mode."
-echo "  Cursor agent needs Node.js on Windows (nodejs.org)."
