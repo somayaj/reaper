@@ -92,17 +92,19 @@ Contents:
   reaper.exe           - native WebView2 app (default)
   WebView2Loader.dll   - required next to reaper.exe
   static\\              - IDE UI (required)
-  cursor-bridge\\       - Cursor agent bridge (optional; needs Node.js)
+  node\\                 - bundled Node.js (Cursor agent bridge)
+  cursor-bridge\\       - Cursor agent bridge scripts
 
 Setup:
-  1. Unzip this folder anywhere (keep files together).
-  2. Install WebView2 Runtime if prompted:
+  1. Unzip this folder anywhere (keep ALL files together).
+  2. Install WebView2 Runtime (needed for the native window):
      https://go.microsoft.com/fwlink/p/?LinkId=2124703
   3. Double-click reaper.exe
 
-Optional:
-  reaper.exe --server   browser-only mode
-  Install Node.js from https://nodejs.org for Cursor agent chat.
+If only a black console appears and no window:
+  - Install WebView2 Runtime (link above), then try again
+  - Or run:  reaper.exe --server
+    then open the https://127.0.0.1:… URL printed in the console
 EOF
 
 if [[ -d "$ROOT/static" ]]; then
@@ -111,6 +113,16 @@ if [[ -d "$ROOT/static" ]]; then
     --exclude '*.map' \
     "$ROOT/static/" "$STAGE/static/"
 fi
+
+echo "== Vendoring Node.js (windows-x64) =="
+"$ROOT/scripts/vendor-node-windows.sh"
+if [[ -f "$ROOT/resources/node-windows-x64/node.exe" ]]; then
+  echo "== Staging bundled Node.js (node.exe only) =="
+  mkdir -p "$STAGE/node"
+  # Official win-x64 node.exe is self-contained; skip npm/node_modules to keep the zip small.
+  cp "$ROOT/resources/node-windows-x64/node.exe" "$STAGE/node/node.exe"
+fi
+
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
   echo "== Staging cursor-bridge beside exe =="
   rsync -a --delete \

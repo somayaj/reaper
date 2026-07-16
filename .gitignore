@@ -12,6 +12,7 @@
 
 # Vendored Node.js binaries (downloaded at build time)
 /resources/node-macos-*/
+/resources/node-windows-x64/
 /resources/jdk-macos-*/
 /resources/jdtls/
 /resources/debug-adapters-macos-*/

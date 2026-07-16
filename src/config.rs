@@ -150,11 +150,21 @@ pub fn running_in_app_bundle() -> bool {
         .unwrap_or(false)
 }
 
-/// Node.js shipped inside Reaper.app (Cursor agent bridge; not the host install).
+/// Node.js shipped with the desktop package (Cursor agent bridge; not the host install).
 pub fn bundled_node() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mac_os) = exe.parent() {
-            let resources = mac_os.join("../Resources");
+        if let Some(dir) = exe.parent() {
+            // Windows portable: node/node.exe next to reaper.exe
+            for candidate in [
+                dir.join("node").join("node.exe"),
+                dir.join("node.exe"),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate.canonicalize().unwrap_or(candidate));
+                }
+            }
+            // macOS .app: Resources/node…/bin/node
+            let resources = dir.join("../Resources");
             let arch = crate::platform::macos_host_arch();
             for candidate in [
                 resources.join(format!("node-{arch}/bin/node")),

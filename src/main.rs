@@ -358,6 +358,28 @@ fn run_gui_mode() -> anyhow::Result<()> {
     })?;
 
     let gui_result = gui::run(&launch, protocol_bridge);
+    if let Err(ref e) = gui_result {
+        eprintln!();
+        eprintln!("Native window failed: {e:#}");
+        #[cfg(target_os = "windows")]
+        {
+            eprintln!();
+            eprintln!("Common fix: install WebView2 Runtime, then re-run reaper.exe");
+            eprintln!("  https://go.microsoft.com/fwlink/p/?LinkId=2124703");
+            eprintln!();
+            eprintln!("Or use browser mode:");
+            eprintln!("  reaper.exe --server");
+            eprintln!("then open the URL printed in the console (https://127.0.0.1:…).");
+            // Keep the console visible so the user can read the error.
+            eprintln!();
+            eprintln!("Press Enter to exit…");
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            gui::show_error(&format!("Reaper window failed:\n\n{e:#}"));
+        }
+    }
     shutdown_notify.notify_one();
     process_registry::initiate_shutdown();
     gui_result
