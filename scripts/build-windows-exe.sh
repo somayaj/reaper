@@ -120,9 +120,12 @@ if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
 fi
 
 echo "== Creating ${STAGE_NAME}.zip =="
+rm -f "$OUT_ZIP"
 (
   cd "$ROOT/dist"
-  ditto -c -k --sequesterRsrc --keepParent "$STAGE_NAME" "${STAGE_NAME}.zip"
+  # Avoid AppleDouble / __MACOSX junk in the archive
+  COPYFILE_DISABLE=1 zip -r -X -q "${STAGE_NAME}.zip" "$STAGE_NAME" \
+    -x "*.DS_Store" -x "*__MACOSX*"
 )
 
 echo ""
