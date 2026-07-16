@@ -36,7 +36,16 @@ async fn serve_index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("index.html: {error}"),
+                format!(
+                    "index.html not found at {} ({error}).\n\
+                     On Windows, keep the `static` folder next to reaper.exe.\n\
+                     Expected:\n\
+                       reaper.exe\n\
+                       WebView2Loader.dll\n\
+                       static\\index.html\n\
+                     Or set REAPER_STATIC_DIR to that static folder.",
+                    path.display()
+                ),
             )
                 .into_response();
         }

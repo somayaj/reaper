@@ -144,7 +144,7 @@ pub fn running_in_app_bundle() -> bool {
             }
             // Portable Windows layout: reaper.exe beside static/index.html
             p.parent()
-                .map(|dir| dir.join("static/index.html").is_file())
+                .map(|dir| dir.join("static").join("index.html").is_file())
                 .unwrap_or(false)
         })
         .unwrap_or(false)
