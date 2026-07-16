@@ -63,6 +63,23 @@ fi
 
 cp "$SRC" "$OUT_EXE"
 file "$OUT_EXE" || true
+
+# Portable layout: exe + cursor-bridge next to it (so the VM can find the bridge).
+STAGE="$ROOT/dist/reaper-${VERSION}-windows-x64"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp "$OUT_EXE" "$STAGE/reaper.exe"
+if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
+  echo "== Staging cursor-bridge beside exe =="
+  rsync -a --delete \
+    --exclude node_modules \
+    --exclude '.bridge-version' \
+    "$ROOT/cursor-bridge/" "$STAGE/cursor-bridge/"
+fi
+
 echo ""
 echo "Windows exe: $OUT_EXE ($(du -h "$OUT_EXE" | awk '{print $1}'))"
-echo "Note: runs as a local server (open the printed URL in a browser). Native Windows GUI is not in this build."
+echo "Windows folder (copy this whole folder to the VM): $STAGE"
+echo "  Inside the VM: run reaper.exe — console prints https://127.0.0.1:<port>"
+echo "  Cursor agent needs Node.js installed on Windows (nodejs.org)."
+echo "Note: native Windows GUI is not in this build (browser UI only)."

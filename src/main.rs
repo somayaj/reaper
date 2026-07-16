@@ -113,9 +113,16 @@ async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
     cursor::reclaim_bridge_port().await;
     match cursor::ensure_bridge_running().await {
         Ok(()) => tracing::info!("Cursor bridge connected at {}", cursor::bridge_url()),
-        Err(e) => tracing::warn!(
-            "Cursor bridge unavailable: {e:#} (agent chat disabled until bridge starts)"
-        ),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            tracing::warn!(
+                "Cursor bridge unavailable: {msg} (agent chat disabled until bridge starts)"
+            );
+            // Always print to the console so Windows users see this isn't fatal.
+            eprintln!(
+                "Note: Cursor agent bridge unavailable ({msg}). The IDE still runs without it."
+            );
+        }
     }
 
     Ok(AppState::new(config, settings, ui_preferences))
@@ -220,6 +227,14 @@ async fn run_server_mode() -> anyhow::Result<()> {
     let config = state.config.clone();
     let url = config.base_url();
     persist_server_url(&config.data_dir, &url);
+
+    // Always print to stderr so Windows/.exe users see the URL (default log level is warn).
+    eprintln!();
+    eprintln!("Reaper is running.");
+    eprintln!("Open in your browser:  {url}");
+    eprintln!("(If the browser warns about the certificate, choose Advanced → Continue.)");
+    eprintln!("Data directory: {}", config.data_dir.display());
+    eprintln!();
 
     tracing::info!("Reaper listening on {url} (HTTP/2 over TLS)");
     tracing::info!("Data directory: {}", config.data_dir.display());

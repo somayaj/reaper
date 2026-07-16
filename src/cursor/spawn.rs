@@ -77,18 +77,41 @@ fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
         .status()
         .context("failed to copy cursor-bridge into Reaper data directory")?;
 
-    #[cfg(not(target_os = "macos"))]
-    let status = std::process::Command::new("cp")
-        .arg("-R")
-        .arg(source)
-        .arg(dest)
-        .status()
-        .context("failed to copy cursor-bridge into Reaper data directory")?;
-
-    if !status.success() {
-        bail!("failed to copy cursor-bridge into Reaper data directory");
+    #[cfg(target_os = "macos")]
+    {
+        if !status.success() {
+            bail!("failed to copy cursor-bridge into Reaper data directory");
+        }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        copy_dir_recursive(source, dest)
+            .context("failed to copy cursor-bridge into Reaper data directory")?;
+    }
+
     fs::write(&marker, version)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ft.is_file() {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&from, &to)
+                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -164,29 +187,63 @@ fn find_node() -> Result<PathBuf> {
         );
     }
 
-    for path in [
-        PathBuf::from("/opt/homebrew/bin/node"),
-        PathBuf::from("/usr/local/bin/node"),
-        PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node"),
-    ] {
-        if path.is_file() {
+    #[cfg(windows)]
+    {
+        if let Ok(path) = which_node_windows() {
             return Ok(path);
         }
+        bail!(
+            "Node.js not found. Install from https://nodejs.org , set REAPER_NODE, or place node.exe next to reaper.exe"
+        );
     }
 
-    if let Ok(path) = find_node_via_login_path() {
-        return Ok(path);
-    }
+    #[cfg(not(windows))]
+    {
+        for path in [
+            PathBuf::from("/opt/homebrew/bin/node"),
+            PathBuf::from("/usr/local/bin/node"),
+            PathBuf::from(
+                "/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node",
+            ),
+        ] {
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
 
-    if let Ok(path) = which_node() {
-        return Ok(path);
-    }
+        if let Ok(path) = find_node_via_login_path() {
+            return Ok(path);
+        }
 
-    bail!(
-        "Node.js not found. Install with `brew install node`, set REAPER_NODE, or run from Reaper.app (bundled Node)"
-    );
+        if let Ok(path) = which_node() {
+            return Ok(path);
+        }
+
+        bail!(
+            "Node.js not found. Install with `brew install node`, set REAPER_NODE, or run from Reaper.app (bundled Node)"
+        );
+    }
 }
 
+#[cfg(windows)]
+fn which_node_windows() -> Result<PathBuf> {
+    let output = std::process::Command::new("where.exe")
+        .arg("node")
+        .output()
+        .context("failed to run where.exe node")?;
+    if !output.status.success() {
+        bail!("node not on PATH");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && PathBuf::from(l).is_file())
+        .ok_or_else(|| anyhow::anyhow!("node not on PATH"))?;
+    Ok(PathBuf::from(path))
+}
+
+#[cfg(not(windows))]
 fn find_node_via_login_path() -> Result<PathBuf> {
     let output = std::process::Command::new("sh")
         .arg("-lc")
@@ -203,6 +260,7 @@ fn find_node_via_login_path() -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+#[cfg(not(windows))]
 fn which_node() -> Result<PathBuf> {
     let output = std::process::Command::new("sh")
         .arg("-lc")
