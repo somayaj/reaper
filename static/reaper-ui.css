@@ -479,6 +479,34 @@ html.ij-native-titlebar {
   --ij-titlebar-inset-left: 78px;
 }
 
+/* Windows WebView2 uses the OS title bar — hide the macOS drag strip. */
+html.ij-platform-windows {
+  --ij-titlebar-h: 0px;
+  --ij-titlebar-inset-left: 12px;
+}
+
+html.ij-platform-windows .ij-window-titlebar {
+  display: none !important;
+}
+
+/* Animated SVG + drop-shadow often composites as a black band in WebView2/UTM. */
+html.ij-platform-windows .reaper-logo-anim * {
+  animation: none !important;
+}
+
+html.ij-platform-windows .ij-welcome-logo,
+html.ij-platform-windows #launch-splash .logo-mark,
+html.ij-platform-windows #launch-splash .ij-welcome-logo {
+  filter: none !important;
+  overflow: hidden !important;
+}
+
+html.ij-platform-windows #launch-splash .reaper-logo-anim .anim-layer,
+html.ij-platform-windows .ij-welcome .reaper-logo-anim .anim-layer {
+  opacity: 1 !important;
+  transform: none !important;
+}
+
 .ij-window-titlebar {
   position: relative;
   display: flex;

@@ -197,7 +197,7 @@ fn create_window(
     use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
     let title = window_title_from_url(&launch.webview_url);
-    // Windows: normal title bar (no macOS transparent chrome).
+    // Windows: normal OS title bar (no macOS transparent chrome).
     let window = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
@@ -208,9 +208,15 @@ fn create_window(
     let show_proxy = proxy.clone();
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
+    // Mark platform so CSS can hide the macOS drag titlebar and tone down SVG anims
+    // that WebView2/UTM often composite incorrectly (black band + logo artifacts).
+    let init_script = format!(
+        "document.documentElement.classList.add('ij-platform-windows');\n{}",
+        launch.init_script
+    );
     let webview = WebViewBuilder::new()
         .with_url(&launch.webview_url)
-        .with_initialization_script(&launch.init_script)
+        .with_initialization_script(&init_script)
         .with_asynchronous_custom_protocol(
             crate::web::SCHEME.into(),
             move |_webview_id, request, responder| {
