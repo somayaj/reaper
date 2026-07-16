@@ -64,11 +64,17 @@ fi
 cp "$SRC" "$OUT_EXE"
 file "$OUT_EXE" || true
 
-# Portable layout: exe + cursor-bridge next to it (so the VM can find the bridge).
+# Portable native layout: exe + static UI + cursor-bridge
 STAGE="$ROOT/dist/reaper-${VERSION}-windows-x64"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp "$OUT_EXE" "$STAGE/reaper.exe"
+if [[ -d "$ROOT/static" ]]; then
+  echo "== Staging static UI beside exe =="
+  rsync -a --delete \
+    --exclude '*.map' \
+    "$ROOT/static/" "$STAGE/static/"
+fi
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
   echo "== Staging cursor-bridge beside exe =="
   rsync -a --delete \
@@ -80,6 +86,6 @@ fi
 echo ""
 echo "Windows exe: $OUT_EXE ($(du -h "$OUT_EXE" | awk '{print $1}'))"
 echo "Windows folder (copy this whole folder to the VM): $STAGE"
-echo "  Inside the VM: run reaper.exe — console prints https://127.0.0.1:<port>"
-echo "  Cursor agent needs Node.js installed on Windows (nodejs.org)."
-echo "Note: native Windows GUI is not in this build (browser UI only)."
+echo "  Run reaper.exe for native WebView2 window (requires WebView2 Runtime)."
+echo "  Use --server for browser-only mode."
+echo "  Cursor agent needs Node.js on Windows (nodejs.org)."

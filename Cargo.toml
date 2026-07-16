@@ -40,7 +40,10 @@ aws-sdk-bedrockruntime = "1.136.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tao = "0.30"
 wry = { version = "0.49", features = ["transparent"] }
 muda = "0.19"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+rfd = "0.15"

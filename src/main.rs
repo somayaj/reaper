@@ -54,7 +54,12 @@ fn wants_gui() -> bool {
     {
         return running_in_app_bundle();
     }
-    #[cfg(not(target_os = "macos"))]
+    // Windows: default to native WebView2 window; use --server for browser-only.
+    #[cfg(target_os = "windows")]
+    {
+        return true;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     false
 }
 

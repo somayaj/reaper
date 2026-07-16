@@ -6,10 +6,14 @@ pub fn pick_folder(prompt: &str) -> anyhow::Result<Option<String>> {
     {
         pick_folder_macos(prompt)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        pick_folder_windows(prompt)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = prompt;
-        anyhow::bail!("folder picker is only available on macOS")
+        anyhow::bail!("folder picker is only available on macOS and Windows")
     }
 }
 
@@ -36,4 +40,12 @@ fn pick_folder_macos(prompt: &str) -> anyhow::Result<Option<String>> {
     } else {
         Ok(Some(path))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn pick_folder_windows(prompt: &str) -> anyhow::Result<Option<String>> {
+    let path = rfd::FileDialog::new()
+        .set_title(prompt)
+        .pick_folder();
+    Ok(path.map(|p| p.to_string_lossy().replace('\\', "/")))
 }

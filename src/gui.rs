@@ -1,6 +1,6 @@
-//! macOS native window (WKWebView via wry).
+//! Native desktop window (WKWebView on macOS, WebView2 on Windows via wry).
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::Arc;
 
 use crate::web::SharedGuiProtocolBridge;
@@ -69,14 +69,14 @@ fn install_macos_menu() -> muda::Menu {
     menu
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 enum UserEvent {
     OpenWindow(String),
     ShowWindow(tao::window::WindowId),
     ToggleFullscreen(tao::window::WindowId),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn window_title_from_url(url: &str) -> String {
     if let Ok(parsed) = url::Url::parse(url) {
         if let Some(repo) = parsed
@@ -91,7 +91,7 @@ fn window_title_from_url(url: &str) -> String {
     "Reaper".to_string()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn parse_ipc_open_url(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     if value.get("type")?.as_str()? != "open-repo-window" {
@@ -105,10 +105,16 @@ fn parse_ipc_open_url(body: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn parse_ipc_toggle_fullscreen(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(|t| t == "toggle-fullscreen"))
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "toggle-fullscreen")
+        })
         .unwrap_or(false)
 }
 
@@ -180,7 +186,63 @@ fn create_window(
     Ok((window, webview))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
+fn create_window(
+    launch: &GuiLaunch,
+    protocol_bridge: SharedGuiProtocolBridge,
+    event_loop: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
+    use tao::window::WindowBuilder;
+    use wry::{http::Request, PageLoadEvent, WebViewBuilder};
+
+    let title = window_title_from_url(&launch.webview_url);
+    // Windows: normal title bar (no macOS transparent chrome).
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
+        .with_visible(false)
+        .build(event_loop)?;
+
+    let window_id = window.id();
+    let show_proxy = proxy.clone();
+    let ipc_proxy = proxy.clone();
+    let popup_proxy = proxy.clone();
+    let webview = WebViewBuilder::new()
+        .with_url(&launch.webview_url)
+        .with_initialization_script(&launch.init_script)
+        .with_asynchronous_custom_protocol(
+            crate::web::SCHEME.into(),
+            move |_webview_id, request, responder| {
+                let bridge = Arc::clone(&protocol_bridge);
+                std::thread::spawn(move || {
+                    let response = bridge.dispatch_sync(request);
+                    responder.respond(response);
+                });
+            },
+        )
+        .with_on_page_load_handler(move |event, _loaded_url| {
+            if matches!(event, PageLoadEvent::Finished) {
+                let _ = show_proxy.send_event(UserEvent::ShowWindow(window_id));
+            }
+        })
+        .with_ipc_handler(move |req: Request<String>| {
+            if let Some(next_url) = parse_ipc_open_url(req.body()) {
+                let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
+            } else if parse_ipc_toggle_fullscreen(req.body()) {
+                let _ = ipc_proxy.send_event(UserEvent::ToggleFullscreen(window_id));
+            }
+        })
+        .with_new_window_req_handler(move |target_url| {
+            let _ = popup_proxy.send_event(UserEvent::OpenWindow(target_url));
+            false
+        })
+        .build(&window)?;
+
+    Ok((window, webview))
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyhow::Result<()> {
     use std::collections::HashMap;
 
@@ -190,6 +252,7 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
         window::WindowId,
     };
 
+    #[cfg(target_os = "macos")]
     let _menu = install_macos_menu();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -258,7 +321,7 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn run(_launch: &GuiLaunch, _protocol_bridge: SharedGuiProtocolBridge) -> anyhow::Result<()> {
-    anyhow::bail!("GUI mode is only supported on macOS")
+    anyhow::bail!("GUI mode is only supported on macOS and Windows")
 }

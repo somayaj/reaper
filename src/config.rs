@@ -110,10 +110,16 @@ fn resolve_static_dir() -> PathBuf {
     }
 
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mac_os) = exe.parent() {
-            let bundled = mac_os.join("../Resources/static");
+        if let Some(dir) = exe.parent() {
+            // macOS .app bundle
+            let bundled = dir.join("../Resources/static");
             if bundled.join("index.html").is_file() {
                 return bundled.canonicalize().unwrap_or(bundled);
+            }
+            // Windows / portable: static/ next to the executable
+            let beside = dir.join("static");
+            if beside.join("index.html").is_file() {
+                return beside.canonicalize().unwrap_or(beside);
             }
         }
     }
@@ -126,13 +132,20 @@ fn resolve_static_dir() -> PathBuf {
     PathBuf::from("static")
 }
 
+/// True when running from a packaged desktop install (.app or portable Windows folder).
 pub fn running_in_app_bundle() -> bool {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| {
-            p.to_string_lossy()
-                .contains(".app/Contents/MacOS/")
+            let s = p.to_string_lossy();
+            if s.contains(".app/Contents/MacOS/") {
+                return true;
+            }
+            // Portable Windows layout: reaper.exe beside static/index.html
+            p.parent()
+                .map(|dir| dir.join("static/index.html").is_file())
+                .unwrap_or(false)
         })
         .unwrap_or(false)
 }
