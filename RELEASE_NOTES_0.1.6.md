@@ -6,13 +6,13 @@ Reaper 0.1.6 (build 469) — macOS + Windows release.
 |----------|----------|
 | Apple Silicon (M1/M2/M3/M4) | `reaper-0.1.6-macos-arm64.dmg` |
 | Intel Mac (2015–2020) | `reaper-0.1.6-macos-x86_64.dmg` |
-| Windows x64 | `reaper-0.1.6-windows-x64.exe` |
+| Windows x64 | `reaper-0.1.6-windows-x64.zip` |
 
 **macOS:** open the DMG, drag Reaper.app to Applications, then launch.
 
-**Windows:** run `reaper-0.1.6-windows-x64.exe` (server / browser UI at the printed local URL). Native Windows desktop GUI is not in this build yet.
+**Windows:** unzip `reaper-0.1.6-windows-x64.zip` and keep the folder together (`reaper.exe`, `WebView2Loader.dll`, `static\`). Install [WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703) if prompted, then run `reaper.exe`.
 
-**Release push:** `./scripts/release-macos-and-windows.sh` (builds both DMGs + Windows exe and uploads to GitHub).
+**Release push:** `./scripts/release-macos-and-windows.sh` (builds both DMGs + Windows zip and uploads to GitHub).
 
 ### What's new
 

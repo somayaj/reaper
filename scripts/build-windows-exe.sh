@@ -77,12 +77,34 @@ if [[ ! -f "$WEBVIEW2_DLL" ]]; then
   unzip -o -j "$NUPKG" "runtimes/win-x64/native/WebView2Loader.dll" -d "$ROOT/resources/webview2-win-x64"
 fi
 
-# Portable native layout: exe + WebView2Loader + static UI + cursor-bridge
-STAGE="$ROOT/dist/reaper-${VERSION}-windows-x64"
-rm -rf "$STAGE"
+# Portable zip: exe + WebView2Loader + static UI + cursor-bridge
+STAGE_NAME="reaper-${VERSION}-windows-x64"
+STAGE="$ROOT/dist/${STAGE_NAME}"
+OUT_ZIP="$ROOT/dist/${STAGE_NAME}.zip"
+rm -rf "$STAGE" "$OUT_ZIP"
 mkdir -p "$STAGE"
 cp "$OUT_EXE" "$STAGE/reaper.exe"
 cp "$WEBVIEW2_DLL" "$STAGE/WebView2Loader.dll"
+cat >"$STAGE/README.txt" <<EOF
+Reaper ${VERSION} for Windows x64 (portable)
+
+Contents:
+  reaper.exe           - native WebView2 app (default)
+  WebView2Loader.dll   - required next to reaper.exe
+  static\\              - IDE UI (required)
+  cursor-bridge\\       - Cursor agent bridge (optional; needs Node.js)
+
+Setup:
+  1. Unzip this folder anywhere (keep files together).
+  2. Install WebView2 Runtime if prompted:
+     https://go.microsoft.com/fwlink/p/?LinkId=2124703
+  3. Double-click reaper.exe
+
+Optional:
+  reaper.exe --server   browser-only mode
+  Install Node.js from https://nodejs.org for Cursor agent chat.
+EOF
+
 if [[ -d "$ROOT/static" ]]; then
   echo "== Staging static UI beside exe =="
   rsync -a --delete \
@@ -97,10 +119,15 @@ if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
     "$ROOT/cursor-bridge/" "$STAGE/cursor-bridge/"
 fi
 
+echo "== Creating ${STAGE_NAME}.zip =="
+(
+  cd "$ROOT/dist"
+  ditto -c -k --sequesterRsrc --keepParent "$STAGE_NAME" "${STAGE_NAME}.zip"
+)
+
 echo ""
-echo "Windows exe: $OUT_EXE ($(du -h "$OUT_EXE" | awk '{print $1}'))"
-echo "Windows folder (copy this whole folder to the VM): $STAGE"
-echo "  Must include WebView2Loader.dll next to reaper.exe"
-echo "  Also install WebView2 Runtime: https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-echo "  Run reaper.exe for native WebView2 window."
+echo "Windows portable folder: $STAGE"
+echo "Windows zip:             $OUT_ZIP ($(du -h "$OUT_ZIP" | awk '{print $1}'))"
+echo "  Unzip on Windows, keep files together, run reaper.exe"
+echo "  WebView2 Runtime: https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 echo "  Use --server for browser-only mode."

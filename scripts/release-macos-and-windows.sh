@@ -20,11 +20,11 @@ GH_REPO="${REAPER_GH_REPO:-reaper-org/releases}"
 
 ARM_DMG="$ROOT/dist/reaper-${VERSION}-macos-arm64.dmg"
 INTEL_DMG="$ROOT/dist/reaper-${VERSION}-macos-x86_64.dmg"
-WIN_EXE="$ROOT/dist/reaper-${VERSION}-windows-x64.exe"
+WIN_ZIP="$ROOT/dist/reaper-${VERSION}-windows-x64.zip"
 
 ARM_NAME="$(basename "$ARM_DMG")"
 INTEL_NAME="$(basename "$INTEL_DMG")"
-WIN_NAME="$(basename "$WIN_EXE")"
+WIN_NAME="$(basename "$WIN_ZIP")"
 TITLE="Reaper ${VERSION} (macOS + Windows)"
 
 SKIP_MACOS="${REAPER_SKIP_MACOS:-0}"
@@ -48,7 +48,7 @@ if [[ "${REAPER_SKIP_BUILD:-}" != "1" ]]; then
     "$ROOT/scripts/build-macos-split-dmgs.sh"
   fi
   if [[ "$SKIP_WINDOWS" != "1" ]]; then
-    echo "== Building Windows exe =="
+    echo "== Building Windows portable zip =="
     "$ROOT/scripts/build-windows-exe.sh"
   fi
 fi
@@ -64,11 +64,11 @@ if [[ "$SKIP_MACOS" != "1" ]]; then
   done
 fi
 if [[ "$SKIP_WINDOWS" != "1" ]]; then
-  if [[ ! -f "$WIN_EXE" ]]; then
-    echo "Windows exe not found: $WIN_EXE" >&2
+  if [[ ! -f "$WIN_ZIP" ]]; then
+    echo "Windows zip not found: $WIN_ZIP" >&2
     exit 1
   fi
-  UPLOAD_ASSETS+=("$WIN_EXE")
+  UPLOAD_ASSETS+=("$WIN_ZIP")
 fi
 
 if [[ ${#UPLOAD_ASSETS[@]} -eq 0 ]]; then
@@ -94,7 +94,7 @@ Reaper ${VERSION} — macOS + Windows release.
 
 **macOS:** open the DMG, drag Reaper.app to Applications, then launch.
 
-**Windows:** run \`${WIN_NAME}\` (or \`reaper.exe --server\`). The IDE UI opens in your browser at the printed local URL. Native Windows desktop GUI is not included in this build yet.
+**Windows:** unzip \`${WIN_NAME}\` and keep the folder together (\`reaper.exe\`, \`WebView2Loader.dll\`, \`static\\\`). Install [WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703) if prompted, then run \`reaper.exe\`. Use \`--server\` for browser-only mode.
 
 **Tip (macOS):** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run scripts/eject-reaper-dmgs.sh.
 EOF
@@ -110,8 +110,8 @@ fi
     echo "SHA256 (macos-x86_64): \`$(shasum -a 256 "$INTEL_DMG" | awk '{print $1}')\`"
     echo ""
   fi
-  if [[ -f "$WIN_EXE" ]]; then
-    echo "SHA256 (windows-x64): \`$(shasum -a 256 "$WIN_EXE" | awk '{print $1}')\`"
+  if [[ -f "$WIN_ZIP" ]]; then
+    echo "SHA256 (windows-x64 zip): \`$(shasum -a 256 "$WIN_ZIP" | awk '{print $1}')\`"
     echo ""
   fi
 } >>"$NOTES_FILE"
@@ -120,7 +120,7 @@ cleanup_stray_release_assets() {
   while IFS= read -r asset_name; do
     [[ -z "$asset_name" ]] && continue
     case "$asset_name" in
-      reaper-*-macos-arm64.dmg|reaper-*-macos-x86_64.dmg|reaper-*-windows-x64.exe) continue ;;
+      reaper-*-macos-arm64.dmg|reaper-*-macos-x86_64.dmg|reaper-*-windows-x64.zip) continue ;;
     esac
     echo "Removing stray release asset: ${asset_name}"
     gh release delete-asset "$TAG" "$asset_name" --repo "$GH_REPO" --yes
