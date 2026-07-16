@@ -68,7 +68,29 @@
   const LOGO_SVG_URL = '/reaper-logo.svg?v=416';
   let logoSvgMarkup = SVG;
 
+  function isWindowsUi() {
+    try {
+      return document.documentElement.classList.contains('ij-platform-windows')
+        || /Windows/i.test(navigator.userAgent || '');
+    } catch {
+      return false;
+    }
+  }
+
+  /** Static mark for WebView2 — animated SVG text/transforms paint outside the box there. */
+  function staticLogoHtml(size = 'md', { pulse = false, extraClass = '', opacity = '' } = {}) {
+    const dim = SIZES[size] || SIZES.md;
+    const pulseCls = pulse ? ' loading-dot' : '';
+    const opacityCls = opacity ? ` ${opacity}` : '';
+    const alt = extraClass.includes('ij-welcome-logo') ? 'Reaper' : '';
+    const classes = `logo-mark reaper-logo-static ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
+    return `<span class="${classes}" role="img" aria-label="${alt || 'Reaper'}"><img src="/favicon.svg" alt="" width="64" height="64" draggable="false" style="display:block;width:100%;height:100%;object-fit:contain" /></span>`;
+  }
+
   function reaperLogoHtml(size = 'md', { pulse = false, chrome = false, extraClass = '', opacity = '' } = {}) {
+    if (isWindowsUi()) {
+      return staticLogoHtml(size, { pulse, extraClass, opacity });
+    }
     const dim = SIZES[size] || SIZES.md;
     const pulseCls = pulse ? ' loading-dot' : '';
     const opacityCls = opacity ? ` ${opacity}` : '';

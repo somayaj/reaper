@@ -489,22 +489,31 @@ html.ij-platform-windows .ij-window-titlebar {
   display: none !important;
 }
 
-/* Animated SVG + drop-shadow often composites as a black band in WebView2/UTM. */
-html.ij-platform-windows .reaper-logo-anim * {
-  animation: none !important;
+/* WebView2/UTM: animated SVG text paints outside the logo into a black band. */
+html.ij-platform-windows #launch-splash {
+  display: none !important;
 }
 
-html.ij-platform-windows .ij-welcome-logo,
-html.ij-platform-windows #launch-splash .logo-mark,
-html.ij-platform-windows #launch-splash .ij-welcome-logo {
+html.ij-platform-windows .reaper-logo-anim .anim-layer,
+html.ij-platform-windows .reaper-logo-anim .code-drop,
+html.ij-platform-windows .reaper-logo-anim .console-line,
+html.ij-platform-windows .reaper-logo-anim .intro-field,
+html.ij-platform-windows .reaper-logo-anim .harvest-pile,
+html.ij-platform-windows .reaper-logo-anim .stalk {
+  display: none !important;
+}
+
+html.ij-platform-windows .logo-mark,
+html.ij-platform-windows .ij-welcome-logo {
   filter: none !important;
   overflow: hidden !important;
+  max-width: 96px;
+  max-height: 96px;
 }
 
-html.ij-platform-windows #launch-splash .reaper-logo-anim .anim-layer,
-html.ij-platform-windows .ij-welcome .reaper-logo-anim .anim-layer {
-  opacity: 1 !important;
-  transform: none !important;
+html.ij-platform-windows .reaper-logo-static {
+  display: inline-block;
+  overflow: hidden;
 }
 
 .ij-window-titlebar {
