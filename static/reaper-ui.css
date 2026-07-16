@@ -489,31 +489,105 @@ html.ij-platform-windows .ij-window-titlebar {
   display: none !important;
 }
 
-/* WebView2/UTM: animated SVG text paints outside the logo into a black band. */
+/* WebView2/UTM: SVG + blur + GPU layers paint outside boxes (black bands / bleed-through). */
 html.ij-platform-windows #launch-splash {
   display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
-html.ij-platform-windows .reaper-logo-anim .anim-layer,
-html.ij-platform-windows .reaper-logo-anim .code-drop,
-html.ij-platform-windows .reaper-logo-anim .console-line,
-html.ij-platform-windows .reaper-logo-anim .intro-field,
-html.ij-platform-windows .reaper-logo-anim .harvest-pile,
-html.ij-platform-windows .reaper-logo-anim .stalk {
+html.ij-platform-windows body.ij-shell > :not(#launch-splash) {
+  visibility: visible !important;
+}
+
+html.ij-platform-windows,
+html.ij-platform-windows body {
+  background: var(--ij-bg, #2b2b2b) !important;
+}
+
+html.ij-platform-windows *,
+html.ij-platform-windows *::before,
+html.ij-platform-windows *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+}
+
+html.ij-platform-windows .reaper-logo-anim,
+html.ij-platform-windows svg.logo-anim,
+html.ij-platform-windows .logo-mark svg,
+html.ij-platform-windows .reaper-logo-static svg {
   display: none !important;
 }
 
-html.ij-platform-windows .logo-mark,
-html.ij-platform-windows .ij-welcome-logo {
-  filter: none !important;
+html.ij-platform-windows .reaper-logo-css {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
   overflow: hidden !important;
-  max-width: 96px;
-  max-height: 96px;
+  contain: strict;
+  border-radius: 8px;
+  background: #0a0a0a;
+  color: #589df6;
+  box-sizing: border-box;
+  flex-shrink: 0;
 }
 
-html.ij-platform-windows .reaper-logo-static {
-  display: inline-block;
-  overflow: hidden;
+html.ij-platform-windows .reaper-logo-glyph {
+  font-family: Consolas, Menlo, Monaco, monospace;
+  font-weight: 700;
+  font-size: 0.72em;
+  line-height: 1;
+  color: #589df6;
+}
+
+html.ij-platform-windows .ij-welcome-logo.reaper-logo-css {
+  width: 56px !important;
+  height: 56px !important;
+  max-width: 56px !important;
+  max-height: 56px !important;
+  margin-bottom: 1rem;
+  overflow: hidden !important;
+}
+
+html.ij-platform-windows .ij-welcome-showcase {
+  display: none !important;
+}
+
+html.ij-platform-windows .ij-welcome-layout {
+  grid-template-columns: 1fr !important;
+  width: min(100%, 640px) !important;
+}
+
+html.ij-platform-windows .ij-action-card,
+html.ij-platform-windows .ij-welcome-carousel-track,
+html.ij-platform-windows .ij-welcome-carousel-dot {
+  transform: none !important;
+  transition: none !important;
+  will-change: auto !important;
+}
+
+/* Solid modal scrims — translucent overlays punch holes / show Commit buttons through. */
+html.ij-platform-windows #clone-modal-overlay,
+html.ij-platform-windows #repo-info-overlay,
+html.ij-platform-windows #publish-modal-overlay,
+html.ij-platform-windows #push-modal-overlay,
+html.ij-platform-windows #file-modal-overlay,
+html.ij-platform-windows #settings-modal-overlay,
+html.ij-platform-windows #rename-prompt-overlay,
+html.ij-platform-windows #loading-overlay {
+  background: #1e1e1e !important;
+  backdrop-filter: none !important;
+}
+
+html.ij-platform-windows #clone-modal-overlay.flex,
+html.ij-platform-windows #repo-info-overlay.flex,
+html.ij-platform-windows #publish-modal-overlay.flex,
+html.ij-platform-windows #push-modal-overlay.flex,
+html.ij-platform-windows #file-modal-overlay.flex,
+html.ij-platform-windows #settings-modal-overlay.flex,
+html.ij-platform-windows #rename-prompt-overlay.flex {
+  background: #121212 !important;
 }
 
 .ij-window-titlebar {

@@ -268,7 +268,9 @@ fn run_gui_mode() -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use gui::GuiLaunch;
-    use web::{loopback_ws_base, webview_init_script, GuiProtocolBridge, WEBVIEW_ENTRY};
+    use web::{loopback_ws_base, webview_init_script, GuiProtocolBridge};
+    #[cfg(not(target_os = "windows"))]
+    use web::WEBVIEW_ENTRY;
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<GuiLaunch, String>>(1);
     let (bridge_tx, bridge_rx) =
@@ -302,15 +304,25 @@ fn run_gui_mode() -> anyhow::Result<()> {
                 .send(bridge)
                 .map_err(|_| anyhow::anyhow!("GUI exited before protocol bridge ready"))?;
 
+            // Windows WebView2: load over loopback HTTP. Custom `reaper://` + CDN CSS often
+            // paints a broken shell in VMs; HTTP uses the same axum router already bound.
+            #[cfg(target_os = "windows")]
+            let webview_url = {
+                let base = loopback_url.trim_end_matches('/');
+                format!("{base}/")
+            };
+            #[cfg(not(target_os = "windows"))]
+            let webview_url = WEBVIEW_ENTRY.to_string();
+
             tracing::info!("Reaper loopback on {loopback_url} (terminal WS, git CLI)");
-            tracing::info!("Reaper WebView on {WEBVIEW_ENTRY} (custom protocol)");
+            tracing::info!("Reaper WebView on {webview_url}");
             tracing::info!("Data directory: {}", config.data_dir.display());
             tracing::info!("Log file: {}", Config::resolve_log_path().display());
             tracing::info!("Repositories stored in {}", config.repos_dir.display());
             tracing::info!("Static assets from {}", config.static_dir.display());
 
             tx.send(Ok(GuiLaunch {
-                webview_url: WEBVIEW_ENTRY.to_string(),
+                webview_url,
                 init_script: webview_init_script(&loopback_ws),
             }))
             .map_err(|_| anyhow::anyhow!("GUI exited before server started"))?;
@@ -366,10 +378,6 @@ fn run_gui_mode() -> anyhow::Result<()> {
             eprintln!();
             eprintln!("Common fix: install WebView2 Runtime, then re-run reaper.exe");
             eprintln!("  https://go.microsoft.com/fwlink/p/?LinkId=2124703");
-            eprintln!();
-            eprintln!("Or use browser mode:");
-            eprintln!("  reaper.exe --server");
-            eprintln!("then open the URL printed in the console (https://127.0.0.1:…).");
             // Keep the console visible so the user can read the error.
             eprintln!();
             eprintln!("Press Enter to exit…");

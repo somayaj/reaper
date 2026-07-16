@@ -326,7 +326,10 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         bail!("cursor-bridge/install-deps.mjs missing");
     }
 
-    bail!("cursor-bridge dependencies incomplete after install");
+    bail!(
+        "cursor-bridge dependencies incomplete after install \
+         (needs network to registry.npmjs.org, or a package that already includes node_modules)"
+    );
 }
 
 pub async fn reclaim_bridge_port() {
@@ -351,15 +354,29 @@ pub async fn reclaim_bridge_port() {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8091);
     tracing::info!("Stopping orphaned Cursor bridge on port {port}…");
-    let script = format!(
-        "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
-    );
-    let _ = Command::new("sh")
-        .arg("-lc")
-        .arg(script)
-        .status()
-        .await;
+    kill_listeners_on_port(port).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+async fn kill_listeners_on_port(port: u16) {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "$conns = Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue; \
+             foreach ($c in $conns) {{ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }}"
+        );
+        let _ = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .await;
+    }
+    #[cfg(not(windows))]
+    {
+        let script = format!(
+            "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
+        );
+        let _ = Command::new("sh").arg("-lc").arg(script).status().await;
+    }
 }
 
 pub async fn ensure_bridge_running() -> Result<()> {
@@ -388,10 +405,7 @@ pub async fn ensure_bridge_running() -> Result<()> {
                 .and_then(|host_port| host_port.rsplit(':').next())
                 .and_then(|p| p.parse::<u16>().ok())
             {
-                let script = format!(
-                    "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
-                );
-                let _ = Command::new("sh").arg("-lc").arg(script).status().await;
+                kill_listeners_on_port(port).await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }

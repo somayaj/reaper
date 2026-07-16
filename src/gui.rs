@@ -194,6 +194,7 @@ fn create_window(
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 ) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
     use tao::window::WindowBuilder;
+    use wry::WebViewBuilderExtWindows;
     use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
     let title = window_title_from_url(&launch.webview_url);
@@ -208,15 +209,26 @@ fn create_window(
     let show_proxy = proxy.clone();
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
-    // Mark platform so CSS can hide the macOS drag titlebar and tone down SVG anims
-    // that WebView2/UTM often composite incorrectly (black band + logo artifacts).
+    // WebView2/UTM: skip splash; disable GPU compositing (black bands / layer bleed in VMs).
     let init_script = format!(
-        "document.documentElement.classList.add('ij-platform-windows');\n{}",
+        r#"document.documentElement.classList.add('ij-platform-windows','reaper-ui-ready');
+window.__reaperSkipSplash=true;
+document.addEventListener('DOMContentLoaded',function(){{
+  document.body&&document.body.classList.add('reaper-ui-ready');
+  var s=document.getElementById('launch-splash');
+  if(s)s.remove();
+}});
+{}"#,
         launch.init_script
     );
     let webview = WebViewBuilder::new()
         .with_url(&launch.webview_url)
         .with_initialization_script(&init_script)
+        .with_background_color((0x2B, 0x2B, 0x2B, 255))
+        .with_additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --disable-gpu --disable-gpu-compositing --disable-smooth-scrolling",
+        )
         .with_asynchronous_custom_protocol(
             crate::web::SCHEME.into(),
             move |_webview_id, request, responder| {

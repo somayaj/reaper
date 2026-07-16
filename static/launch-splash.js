@@ -1,5 +1,17 @@
 /** Launch splash — animated welcome logo while the IDE loads. */
 (function () {
+  // WebView2: never mount the animated harvest SVG (compositor black-band bug).
+  if (window.__reaperSkipSplash
+      || (document.documentElement
+          && document.documentElement.classList.contains('ij-platform-windows'))) {
+    var doomed = document.getElementById('launch-splash');
+    if (doomed) doomed.remove();
+    document.body && document.body.classList.add('reaper-ui-ready');
+    document.documentElement.classList.add('reaper-ui-ready');
+    window.waitForLaunchSplashHarvest = function () { return Promise.resolve(); };
+    return;
+  }
+
   var splash = document.getElementById('launch-splash');
   if (!splash) return;
 

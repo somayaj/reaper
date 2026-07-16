@@ -3,42 +3,54 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="471" />
+  <meta name="reaper-ui-build" content="474" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <style id="reaper-boot">
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
-    /* WebView2/UTM: animated SVG logo escapes its box into a black band — hide early. */
-    html.ij-platform-windows #launch-splash{display:none!important}
+    /* WebView2/UTM: animated SVG escapes its box — never paint splash/logo anims. */
+    html.ij-platform-windows #launch-splash{display:none!important;visibility:hidden!important;pointer-events:none!important}
     html.ij-platform-windows .ij-window-titlebar{display:none!important}
+    html.ij-platform-windows body.ij-shell>:not(#launch-splash){visibility:visible!important}
+    html.ij-platform-windows .reaper-logo-anim,
+    html.ij-platform-windows .reaper-logo-anim *{animation:none!important;filter:none!important}
     html.ij-platform-windows .reaper-logo-anim .anim-layer,
     html.ij-platform-windows .reaper-logo-anim .code-drop,
     html.ij-platform-windows .reaper-logo-anim .console-line,
     html.ij-platform-windows .reaper-logo-anim .intro-field,
-    html.ij-platform-windows .reaper-logo-anim .harvest-pile{display:none!important}
+    html.ij-platform-windows .reaper-logo-anim .harvest-pile,
+    html.ij-platform-windows .reaper-logo-anim .stalk,
+    html.ij-platform-windows .reaper-logo-anim .harvest-bit{display:none!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=471" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
-      // Apply before logo/splash paint (init scripts may run too late for WebView2).
+      function markWindowsUi() {
+        document.documentElement.classList.add('ij-platform-windows', 'reaper-ui-ready');
+        window.__reaperSkipSplash = true;
+      }
       try {
-        var ua = navigator.userAgent || '';
-        if (/Windows/i.test(ua) || /Win64|WOW64/i.test(ua)) {
-          document.documentElement.classList.add('ij-platform-windows');
-          document.documentElement.classList.add('reaper-ui-ready');
-          document.addEventListener('DOMContentLoaded', function () {
-            document.body && document.body.classList.add('reaper-ui-ready');
-            var splash = document.getElementById('launch-splash');
-            if (splash) splash.remove();
-          });
+        if (window.__reaperSkipSplash) markWindowsUi();
+        else {
+          var ua = navigator.userAgent || '';
+          if (/Windows/i.test(ua) || /Win64|WOW64/i.test(ua)) markWindowsUi();
         }
       } catch (e) {}
     })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    (function () {
+      if (window.__reaperSkipSplash) return;
+      var l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.href = '/logo-animated.css?v=474';
+      document.head.appendChild(l);
+    })();
+  </script>
+  <!-- Local Tailwind — CDN (cdn.tailwindcss.com / Cloudflare) fails offline & in locked-down VMs. -->
+  <script src="/vendor/tailwindcss.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -89,12 +101,27 @@
       },
     };
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=471" />
-  <link rel="stylesheet" href="/logo-animated.css?v=471" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=471" />
+  <script>
+    (function () {
+      // Skip Google Fonts when offline / Windows portable (Segoe UI is already first in config).
+      if (window.__reaperSkipSplash || document.documentElement.classList.contains('ij-platform-windows')) return;
+      var pre1 = document.createElement('link');
+      pre1.rel = 'preconnect';
+      pre1.href = 'https://fonts.googleapis.com';
+      var pre2 = document.createElement('link');
+      pre2.rel = 'preconnect';
+      pre2.href = 'https://fonts.gstatic.com';
+      pre2.crossOrigin = '';
+      var font = document.createElement('link');
+      font.rel = 'stylesheet';
+      font.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
+      document.head.appendChild(pre1);
+      document.head.appendChild(pre2);
+      document.head.appendChild(font);
+    })();
+  </script>
+  <link rel="stylesheet" href="/reaper-ui.css?v=474" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=474" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -107,8 +134,14 @@
   </style>
 </head>
 <body class="h-full bg-surface-950 text-gray-300 font-sans antialiased overflow-hidden ij-shell">
+  <script>
+    (function () {
+      if (!window.__reaperSkipSplash) return;
+      document.body.classList.add('reaper-ui-ready');
+    })();
+  </script>
 
-  <!-- Launch splash — preview: /launch-splash-preview.html -->
+  <!-- Launch splash — preview: /launch-splash-preview.html (skipped on Windows WebView2) -->
   <div id="launch-splash" role="status" aria-live="polite" aria-label="Starting IDE">
     <div class="ij-launch-brand">
       <!-- LAUNCH-LOGO:START -->
@@ -117,8 +150,15 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=471"></script>
-  <script src="/launch-splash.js?v=471"></script>
+  <script>
+    (function () {
+      if (!window.__reaperSkipSplash) return;
+      var splash = document.getElementById('launch-splash');
+      if (splash) splash.remove();
+    })();
+  </script>
+  <script src="/logo.js?v=474"></script>
+  <script src="/launch-splash.js?v=474"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -1104,7 +1144,7 @@
           </button>
           <button type="button" id="clone-tab-local" class="repo-source-card" role="tab" aria-selected="false">
             <strong>From folder</strong>
-            <span>Open a git repo already on this Mac</span>
+            <span>Open a git repo already on this machine</span>
           </button>
         </div>
 
@@ -1653,9 +1693,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=471"></script>
-  <script src="/monaco-languages.js?v=471" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=474"></script>
+  <script src="/monaco-languages.js?v=474" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=471"></script>
+  <script src="/app.js?v=474"></script>
 </body>
 </html>

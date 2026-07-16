@@ -70,6 +70,7 @@
 
   function isWindowsUi() {
     try {
+      if (window.__reaperSkipSplash) return true;
       return document.documentElement.classList.contains('ij-platform-windows')
         || /Windows/i.test(navigator.userAgent || '');
     } catch {
@@ -77,14 +78,14 @@
     }
   }
 
-  /** Static mark for WebView2 — animated SVG text/transforms paint outside the box there. */
+  /** CSS-only mark — WebView2/UTM paints any SVG (even static) outside its box. */
   function staticLogoHtml(size = 'md', { pulse = false, extraClass = '', opacity = '' } = {}) {
     const dim = SIZES[size] || SIZES.md;
     const pulseCls = pulse ? ' loading-dot' : '';
     const opacityCls = opacity ? ` ${opacity}` : '';
     const alt = extraClass.includes('ij-welcome-logo') ? 'Reaper' : '';
-    const classes = `logo-mark reaper-logo-static ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
-    return `<span class="${classes}" role="img" aria-label="${alt || 'Reaper'}"><img src="/favicon.svg" alt="" width="64" height="64" draggable="false" style="display:block;width:100%;height:100%;object-fit:contain" /></span>`;
+    const classes = `logo-mark reaper-logo-static reaper-logo-css ${dim}${pulseCls}${opacityCls} ${extraClass}`.trim().replace(/\s+/g, ' ');
+    return `<span class="${classes}" role="img" aria-label="${alt || 'Reaper'}"><span class="reaper-logo-glyph" aria-hidden="true">R</span></span>`;
   }
 
   function reaperLogoHtml(size = 'md', { pulse = false, chrome = false, extraClass = '', opacity = '' } = {}) {
@@ -113,14 +114,16 @@
 
   window.ReaperLogo = { reaperLogoHtml, mountReaperLogos, SIZES };
 
-  fetch(LOGO_SVG_URL)
-    .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
-    .then(function (text) {
-      logoSvgMarkup = text.trim();
-      mountReaperLogos();
-      window.dispatchEvent(new CustomEvent('reaper-logo-svg-ready'));
-    })
-    .catch(function () {});
+  if (!isWindowsUi()) {
+    fetch(LOGO_SVG_URL)
+      .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+      .then(function (text) {
+        logoSvgMarkup = text.trim();
+        mountReaperLogos();
+        window.dispatchEvent(new CustomEvent('reaper-logo-svg-ready'));
+      })
+      .catch(function () {});
+  }
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => mountReaperLogos());

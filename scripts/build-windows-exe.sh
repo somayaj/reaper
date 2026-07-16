@@ -93,7 +93,7 @@ Contents:
   WebView2Loader.dll   - required next to reaper.exe
   static\\              - IDE UI (required)
   node\\                 - bundled Node.js (Cursor agent bridge)
-  cursor-bridge\\       - Cursor agent bridge scripts
+  cursor-bridge\\       - Cursor agent bridge (+ node_modules; no npm at runtime)
 
 Setup:
   1. Unzip this folder anywhere (keep ALL files together).
@@ -124,9 +124,32 @@ if [[ -f "$ROOT/resources/node-windows-x64/node.exe" ]]; then
 fi
 
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
-  echo "== Staging cursor-bridge beside exe =="
+  echo "== Staging cursor-bridge (with node_modules; offline-ready) =="
+  # Same as macOS: ship deps in the package. Runtime install hits npm/Cloudflare
+  # (e.g. 104.16.x.x:443) and times out in locked-down / UTM VMs.
+  if [[ ! -f "$ROOT/cursor-bridge/node_modules/@connectrpc/connect/package.json" ]]; then
+    echo "Installing cursor-bridge dependencies for Windows package…"
+    BUILD_NODE=""
+    if [[ -x "$ROOT/resources/node-arm64/bin/node" ]]; then
+      BUILD_NODE="$ROOT/resources/node-arm64/bin/node"
+    elif [[ -x "$ROOT/resources/node-x64/bin/node" ]]; then
+      BUILD_NODE="$ROOT/resources/node-x64/bin/node"
+    elif command -v node >/dev/null 2>&1; then
+      BUILD_NODE="$(command -v node)"
+    fi
+    if [[ -n "$BUILD_NODE" && -f "$ROOT/cursor-bridge/install-deps.mjs" ]]; then
+      (cd "$ROOT/cursor-bridge" && "$BUILD_NODE" install-deps.mjs)
+    elif command -v npm >/dev/null 2>&1; then
+      (cd "$ROOT/cursor-bridge" && npm install --omit=dev)
+    else
+      echo "Warning: cursor-bridge node_modules missing and no node/npm to install" >&2
+    fi
+  fi
+  if [[ ! -f "$ROOT/cursor-bridge/node_modules/@cursor/sdk/package.json" ]]; then
+    echo "error: cursor-bridge node_modules incomplete; cannot build offline Windows package" >&2
+    exit 1
+  fi
   rsync -a --delete \
-    --exclude node_modules \
     --exclude '.bridge-version' \
     "$ROOT/cursor-bridge/" "$STAGE/cursor-bridge/"
 fi

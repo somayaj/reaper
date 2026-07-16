@@ -164,6 +164,10 @@ body.ij-shell.reaper-ui-ready > :not(#launch-splash) {
   visibility: visible;
 }
 
+html.ij-platform-windows body.ij-shell > :not(#launch-splash) {
+  visibility: visible !important;
+}
+
 body.reaper-ui-ready {
   background: var(--ij-bg, #2b2b2b) !important;
 }
