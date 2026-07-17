@@ -858,6 +858,56 @@ function testInlineCompletionRegression(win) {
     'uppercase F does not prefer control keyword inline',
   );
   ok(
+    h.shouldPreferModifierKeywordInline('src/App.java', '    private', 'private'),
+    'typing private prefers modifier keyword over types',
+  );
+  ok(
+    h.shouldPreferModifierKeywordInline('src/App.java', '    priv', 'priv'),
+    'partial priv prefers private modifier',
+  );
+  ok(
+    !h.shouldPreferModifierKeywordInline('src/App.java', '    String privateName', 'privateName'),
+    'identifier after type is not modifier typing',
+  );
+  ok(
+    h.inlineSuffixFromIndexItems(
+      [{ label: 'PrivateKeyEntry', kind: 'class' }, { label: 'private', kind: 'keyword' }],
+      '    private',
+      'private',
+      'src/App.java',
+    ) === '',
+    'index ghost suppressed for private → PrivateKeyEntry',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    private',
+      'public class App {\n    private\n}\n',
+      2,
+      17,
+      {
+        helpers: {
+          getRepo: () => 'r',
+          getActivePath: () => 'src/App.java',
+          getJavaSourceOverlays: () => [],
+        },
+        model: { getValue: () => 'public class App {\n    private\n}\n' },
+        position: { lineNumber: 2, column: 12 },
+      },
+    ) === '',
+    'local inline does not extend private into PrivateKeyEntry',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    priv',
+      'public class App {\n    priv\n}\n',
+      2,
+      17,
+    ) === 'ate',
+    'local inline completes priv → private',
+  );
+  ok(
     h.localInlineSuggestion(
       'src/Billing.java',
       '    f',

@@ -4892,19 +4892,212 @@ function scheduleStructureCaretHighlight() {
 
 function structureNodeMatchesFilter(node, filter) {
   if (!filter) return true;
-  const hay = `${node.kind || ''} ${node.name || ''} ${node.label || ''}`.toLowerCase();
+  const mods = Array.isArray(node.modifiers) ? node.modifiers.join(' ') : '';
+  const hay = `${node.kind || ''} ${node.name || ''} ${node.label || ''} ${node.detail || ''} ${mods}`.toLowerCase();
   if (hay.includes(filter)) return true;
   return (node.children || []).some((c) => structureNodeMatchesFilter(c, filter));
 }
 
+/** Map tree-sitter / outline node kinds → Structure icon buckets. */
+function structureIconKind(kind) {
+  const k = String(kind || '').toLowerCase();
+  // Exact outline kinds first (avoid "constructor".includes("struct")).
+  if (k === 'constructor') return 'constructor';
+  if (k === 'method' || k === 'function') return 'method';
+  if (k === 'field' || k === 'property') return 'field';
+  if (k === 'class' || k === 'record') return 'class';
+  if (k === 'interface') return 'interface';
+  if (k === 'enum') return 'enum';
+  if (k === 'annotation') return 'annotation';
+  if (k === 'struct') return 'struct';
+  if (k === 'trait') return 'trait';
+  if (!k || k === 'error' || k.includes('missing')) return 'error';
+  if (k.includes('interface')) return 'interface';
+  if (k.includes('enum')) return 'enum';
+  if (k.includes('annotation')) return 'annotation';
+  if (k.includes('constructor')) return 'constructor';
+  if (k.includes('record') || k.includes('class')) return 'class';
+  if (k.includes('struct')) return 'struct';
+  if (k.includes('trait') || k.includes('protocol')) return 'trait';
+  if (k.includes('impl')) return 'impl';
+  if (
+    k.includes('method')
+    || k.includes('function')
+    || k === 'fn_item'
+    || k.includes('arrow_function')
+    || k.includes('function_item')
+  ) {
+    return 'method';
+  }
+  if (
+    k.includes('field')
+    || k.includes('property')
+    || k.includes('variable_declarator')
+    || k.includes('variable_declaration')
+    || k.includes('lexical_declaration')
+  ) {
+    return 'field';
+  }
+  if (k.includes('const') || k.includes('static_item') || k.includes('constant')) return 'const';
+  if (
+    k.includes('type_alias')
+    || k.includes('type_item')
+    || k.includes('type_definition')
+    || k.includes('type_declaration')
+  ) {
+    return 'type';
+  }
+  if (
+    k.includes('package')
+    || k.includes('module')
+    || k.includes('namespace')
+    || k === 'mod_item'
+    || k === 'program'
+    || k === 'source_file'
+    || k === 'compilation_unit'
+    || k === 'document'
+  ) {
+    return 'module';
+  }
+  if (k.includes('import') || k.includes('export') || k.includes('use_declaration')) return 'import';
+  if (k === 'pair' || k.includes('mapping_pair')) return 'key';
+  return 'node';
+}
+
+function structureIconSvg(iconKind) {
+  const badges = {
+    class: ['C', '#9876aa'],
+    interface: ['I', '#6a8759'],
+    enum: ['E', '#cc7832'],
+    struct: ['S', '#9876aa'],
+    trait: ['T', '#6a8759'],
+    impl: ['i', '#6897bb'],
+    method: ['m', '#ffc66d'],
+    constructor: ['+', '#ffc66d'],
+    field: ['f', '#6897bb'],
+    const: ['=', '#6897bb'],
+    type: ['t', '#a9b7c6'],
+    module: ['P', '#bbb529'],
+    import: ['→', '#a9b7c6'],
+    key: ['k', '#cc7832'],
+    annotation: ['@', '#bbb529'],
+    error: ['!', '#bc3f3c'],
+    node: ['·', '#808080'],
+  };
+  const [letter, color] = badges[iconKind] || badges.node;
+  const fontSize = 8;
+  return `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="${color}" fill-opacity=".2"/><text x="8" y="11.2" text-anchor="middle" font-size="${fontSize}" font-weight="700" fill="${color}" font-family="Consolas,Menlo,monospace">${letter}</text></svg>`;
+}
+
+function shortAstKind(kind) {
+  const k = String(kind || '');
+  if (!k) return 'node';
+  const mapped = {
+    method_declaration: 'method',
+    method_definition: 'method',
+    function_declaration: 'function',
+    function_definition: 'function',
+    function_item: 'function',
+    arrow_function: 'function',
+    class_declaration: 'class',
+    class_definition: 'class',
+    class_specifier: 'class',
+    interface_declaration: 'interface',
+    enum_declaration: 'enum',
+    enum_item: 'enum',
+    struct_item: 'struct',
+    trait_item: 'trait',
+    impl_item: 'impl',
+    field_declaration: 'field',
+    property_identifier: 'property',
+    package_declaration: 'package',
+    import_declaration: 'import',
+    import_statement: 'import',
+    export_statement: 'export',
+    use_declaration: 'use',
+    type_alias_declaration: 'type',
+    type_item: 'type',
+    lexical_declaration: 'var',
+    variable_declaration: 'var',
+    variable_declarator: 'var',
+    const_item: 'const',
+    pair: 'key',
+    block_mapping_pair: 'key',
+    program: 'file',
+    source_file: 'file',
+    compilation_unit: 'file',
+  };
+  if (mapped[k]) return mapped[k];
+  return k
+    .replace(/_declaration$/i, '')
+    .replace(/_definition$/i, '')
+    .replace(/_statement$/i, '')
+    .replace(/_item$/i, '')
+    .replace(/_/g, ' ');
+}
+
+function prettyAstKind(kind) {
+  return String(kind || '')
+    .split('_')
+    .filter(Boolean)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(' ');
+}
+
+function structureKindTag(kind) {
+  const k = String(kind || '').toLowerCase();
+  if (['class', 'interface', 'enum', 'record', 'annotation', 'method', 'field', 'constructor', 'struct', 'trait', 'function'].includes(k)) {
+    return k;
+  }
+  return shortAstKind(kind);
+}
+
+function structureModifierTagsHtml(modifiers) {
+  if (!Array.isArray(modifiers) || !modifiers.length) return '';
+  return `<span class="ij-structure-tags">${modifiers.map((m) => (
+    `<span class="ij-structure-tag ij-structure-tag-mod">${escapeHtml(m)}</span>`
+  )).join('')}</span>`;
+}
+
+function structureNodeLabelHtml(node) {
+  const iconKind = structureIconKind(node.kind);
+  const icon = `<span class="ij-tree-icon ij-structure-icon ij-structure-icon-${escapeHtml(iconKind)}" aria-hidden="true">${structureIconSvg(iconKind)}</span>`;
+  const fullMode = state.structureMode === 'full';
+
+  if (fullMode) {
+    const text = node.label || node.name || prettyAstKind(node.kind);
+    return `${icon}<span class="ij-structure-node-anon">${escapeHtml(text)}</span>`;
+  }
+
+  // Structure: icon · name · modifier tags · return/field type
+  // Kind is conveyed by the icon (class/method/field); avoid redundant kind chips.
+  const displayName = node.name || node.label || shortAstKind(node.kind);
+  const modsHtml = structureModifierTagsHtml(node.modifiers);
+  const detailHtml = node.detail
+    ? `<span class="ij-structure-node-detail">${escapeHtml(node.detail)}</span>`
+    : '';
+  return `${icon}<span class="ij-structure-node-name">${escapeHtml(displayName)}</span>${modsHtml}${detailHtml}`;
+}
+
 function renderStructureNode(node, depth, filter) {
+  // Skip invisible file wrapper — show class roots directly.
+  if (node.kind === 'file' || node.kind === 'package') {
+    return (node.children || [])
+      .filter((c) => structureNodeMatchesFilter(c, filter))
+      .map((c) => renderStructureNode(c, depth, filter))
+      .join('');
+  }
   if (!structureNodeMatchesFilter(node, filter)) return '';
   const kids = (node.children || []).filter((c) => structureNodeMatchesFilter(c, filter));
   const hasKids = kids.length > 0;
-  const label = node.name
-    ? `<span class="ij-structure-node-kind">${escapeHtml(prettyAstKind(node.kind))}</span><span class="ij-structure-node-name">${escapeHtml(node.name)}</span>`
-    : `<span class="ij-tree-label">${escapeHtml(node.label || prettyAstKind(node.kind))}</span>`;
-  const title = escapeHtml(node.label || node.kind || '');
+  const label = structureNodeLabelHtml(node);
+  const titleParts = [
+    node.kind,
+    node.name,
+    ...(node.modifiers || []),
+    node.detail,
+  ].filter(Boolean);
+  const title = escapeHtml(titleParts.join(' · '));
   const data = `data-sl="${node.start_line || 1}" data-sc="${node.start_column || 1}" data-el="${node.end_line || 1}" data-ec="${node.end_column || 1}" data-kind="${escapeHtml(node.kind || '')}"`;
   const open = depth < 2 || !!filter;
   if (!hasKids) {
@@ -4918,14 +5111,6 @@ function renderStructureNode(node, depth, filter) {
     </summary>
     <div class="ij-structure-children">${childHtml}</div>
   </details>`;
-}
-
-function prettyAstKind(kind) {
-  return String(kind || '')
-    .split('_')
-    .filter(Boolean)
-    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-    .join(' ');
 }
 
 function renderStructureTree(ast) {
@@ -5043,14 +5228,21 @@ function onStructureTreeClick(e) {
   const row = e.target.closest('.ij-structure-node-row');
   if (!row) return;
   if (e.target.closest('.ij-tree-chevron')) return;
+  // Keep Structure open — don't route through openFileAt/activateTabShell
+  // (those call revealFileInExplorer and switch to Project).
+  e.preventDefault();
+  e.stopPropagation();
   const line = Number(row.dataset.sl || 1);
   const column = Number(row.dataset.sc || 1);
   $('#structure-tree')?.querySelectorAll('.ij-structure-node-row.active').forEach((el) => {
     el.classList.remove('active');
   });
   row.classList.add('active');
-  if (!state.activeTab) return;
-  void openFileAt(state.activeTab, line, column);
+  if (!state.editor || !state.activeTab) return;
+  state.editor.revealLineInCenter(line);
+  state.editor.setPosition({ lineNumber: line, column });
+  state.editor.focus();
+  highlightStructureUnderCaret();
 }
 
 function scheduleBuildTasksRefresh(options = {}) {

@@ -105,7 +105,42 @@ export function testAstStructureRegression(appSrc, indexHtml, apiRs, astRs, lang
 
   const clickBody = extractFunctionBody(appSrc, 'onStructureTreeClick');
   ok(!!clickBody, 'ast ui: onStructureTreeClick present');
-  ok(clickBody.includes('openFileAt'), 'ast ui: node click navigates via openFileAt');
+  ok(
+    clickBody.includes('setPosition') && clickBody.includes('revealLineInCenter'),
+    'ast ui: node click moves editor caret',
+  );
+  ok(
+    !/\bopenFileAt\s*\(/.test(clickBody) && !/\brevealFileInExplorer\s*\(/.test(clickBody),
+    'ast ui: Structure click stays on Structure (no explorer switch)',
+  );
+
+  ok(appSrc.includes('function structureIconKind'), 'ast ui: structureIconKind mapper present');
+  ok(appSrc.includes('function structureIconSvg'), 'ast ui: structureIconSvg glyphs present');
+  ok(appSrc.includes('function structureNodeLabelHtml'), 'ast ui: structureNodeLabelHtml present');
+  const labelBody = extractFunctionBody(appSrc, 'structureNodeLabelHtml');
+  ok(
+    labelBody.includes('ij-structure-icon') && labelBody.includes('structureModifierTagsHtml'),
+    'ast ui: Structure rows use icon + modifier tags',
+  );
+  ok(
+    appSrc.includes('ij-structure-tag-mod') && appSrc.includes('function structureModifierTagsHtml'),
+    'ast ui: modifier tags helper present',
+  );
+  const iconKindBody = extractFunctionBody(appSrc, 'structureIconKind');
+  ok(
+    iconKindBody.indexOf("k === 'constructor'") >= 0
+      && iconKindBody.indexOf("k === 'constructor'") < iconKindBody.indexOf("includes('struct')"),
+    'ast ui: constructor icon mapped before struct substring',
+  );
+  ok(
+    astRs.includes('java_structure_outline') && astRs.includes('modifiers'),
+    'ast rust: Java Structure outline includes modifiers',
+  );
+  ok(
+    astRs.includes('skip package') || astRs.includes('skip package / imports'),
+    'ast rust: Java Structure skips package/imports',
+  );
+  ok(astRs.includes('java_member_node'), 'ast rust: Java Structure outlines class members');
 
   const caretBody = extractFunctionBody(appSrc, 'highlightStructureUnderCaret');
   ok(!!caretBody, 'ast ui: highlightStructureUnderCaret present');

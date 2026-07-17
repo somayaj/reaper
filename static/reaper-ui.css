@@ -2970,6 +2970,18 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   margin: 0;
 }
 
+.ij-structure-branch > summary {
+  list-style: none;
+}
+
+.ij-structure-branch > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ij-structure-branch[open] > .ij-structure-node-row .ij-tree-chevron {
+  transform: rotate(90deg);
+}
+
 .ij-structure-node-row {
   cursor: pointer;
   user-select: none;
@@ -2979,15 +2991,74 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   font-size: 11px;
 }
 
-.ij-structure-node-kind {
+.ij-structure-icon {
+  margin-right: 2px;
+}
+
+.ij-structure-icon svg text {
+  font-family: var(--ij-mono, Consolas, Menlo, monospace);
+  -webkit-font-smoothing: antialiased;
+}
+
+.ij-structure-node-detail {
   color: var(--ij-muted);
   font-size: 10px;
-  margin-right: 4px;
+  margin-left: 2px;
+  font-family: var(--ij-font-mono, ui-monospace, monospace);
+  flex-shrink: 0;
 }
 
 .ij-structure-node-name {
-  color: var(--ij-text);
+  color: var(--ij-text-bright, var(--ij-text));
   font-family: var(--ij-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-structure-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.ij-structure-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  text-transform: lowercase;
+  flex-shrink: 0;
+}
+
+.ij-structure-tag-kind {
+  color: var(--ij-accent, #6897bb);
+  background: color-mix(in srgb, var(--ij-accent, #6897bb) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ij-accent, #6897bb) 28%, transparent);
+}
+
+.ij-structure-tag-mod {
+  color: var(--ij-muted);
+  background: color-mix(in srgb, var(--ij-muted) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ij-border, #3c3f41) 80%, transparent);
+}
+
+.ij-structure-node-anon {
+  color: var(--ij-muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ij-structure-node-row.active,
