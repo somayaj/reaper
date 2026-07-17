@@ -36,6 +36,17 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 aws-config = { version = "1.9.0", features = ["behavior-version-latest"] }
 aws-sdk-bedrock = "1.148.0"
 aws-sdk-bedrockruntime = "1.136.0"
+tree-sitter = "0.24"
+tree-sitter-java = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

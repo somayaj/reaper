@@ -36,6 +36,7 @@ mod java_ecosystem;
 mod java_format;
 mod java_synthetic_members;
 mod languages;
+pub mod ast;
 mod project_jobs;
 mod project_profile;
 mod quick_fix;
