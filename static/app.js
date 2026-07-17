@@ -11,6 +11,13 @@ const BUILD_TASKS_DOCK_KEY = 'reaper-build-tasks-dock';
 const BUILD_TASKS_WIDTH_KEY = 'reaper-build-tasks-w';
 const PACKAGE_MANIFEST_DOCK_KEY = 'reaper-package-manifest-dock';
 const PACKAGE_MANIFEST_WIDTH_KEY = 'reaper-package-manifest-w';
+const STRUCTURE_MODE_KEY = 'reaper-structure-mode';
+const STRUCTURE_REFRESH_DELAY_MS = 350;
+const AST_LANG_EXTS = new Set([
+  'java', 'py', 'pyw', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx',
+  'go', 'rs', 'c', 'h', 'cpp', 'cc', 'cxx', 'hpp', 'hh',
+  'json', 'jsonc', 'yml', 'yaml',
+]);
 const DB_VIEWER_RIGHT_WIDTH_KEY = 'reaper-db-viewer-right-w';
 const DB_VIEWER_SCHEMA_RAIL_WIDTH_KEY = 'reaper-db-schema-rail-w';
 const GIT_VIEWER_RIGHT_WIDTH_KEY = 'reaper-git-viewer-right-w';
@@ -511,6 +518,11 @@ const state = {
   editor: null,
   dirty: new Set(),
   activePanel: 'explorer',
+  structureMode: localStorage.getItem(STRUCTURE_MODE_KEY) === 'full' ? 'full' : 'structure',
+  structureFilter: '',
+  structureAst: null,
+  structurePath: null,
+  structureSeq: 0,
   agentDock: localStorage.getItem(AGENT_DOCK_KEY) || 'left',
   terminalDock: localStorage.getItem(TERMINAL_DOCK_KEY) || 'bottom',
   dockerLogsOpen: false,
@@ -4832,6 +4844,214 @@ async function runManifestCommand(command, packageRoot) {
 
 let buildTasksTimer = null;
 let buildTasksRequestId = 0;
+let structureRefreshTimer = null;
+let structureCaretTimer = null;
+
+function isAstSupportedPath(path) {
+  if (!path || isExternalEditorPath(path)) return false;
+  const base = String(path).replace(/\\/g, '/').split('/').pop() || '';
+  const lower = base.toLowerCase();
+  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return false;
+  const ext = lower.includes('.') ? lower.split('.').pop() : '';
+  return AST_LANG_EXTS.has(ext);
+}
+
+function syncStructureModeButtons() {
+  const mode = state.structureMode === 'full' ? 'full' : 'structure';
+  $$('[data-ast-mode]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.astMode === mode);
+  });
+}
+
+function setStructureMode(mode) {
+  const next = mode === 'full' ? 'full' : 'structure';
+  if (state.structureMode === next) return;
+  state.structureMode = next;
+  localStorage.setItem(STRUCTURE_MODE_KEY, next);
+  syncStructureModeButtons();
+  void refreshStructurePanel({ force: true });
+}
+
+function scheduleStructureRefresh() {
+  if (state.activePanel !== 'structure') return;
+  clearTimeout(structureRefreshTimer);
+  structureRefreshTimer = setTimeout(() => {
+    structureRefreshTimer = null;
+    void refreshStructurePanel();
+  }, STRUCTURE_REFRESH_DELAY_MS);
+}
+
+function scheduleStructureCaretHighlight() {
+  if (state.activePanel !== 'structure') return;
+  clearTimeout(structureCaretTimer);
+  structureCaretTimer = setTimeout(() => {
+    structureCaretTimer = null;
+    highlightStructureUnderCaret();
+  }, 80);
+}
+
+function structureNodeMatchesFilter(node, filter) {
+  if (!filter) return true;
+  const hay = `${node.kind || ''} ${node.name || ''} ${node.label || ''}`.toLowerCase();
+  if (hay.includes(filter)) return true;
+  return (node.children || []).some((c) => structureNodeMatchesFilter(c, filter));
+}
+
+function renderStructureNode(node, depth, filter) {
+  if (!structureNodeMatchesFilter(node, filter)) return '';
+  const kids = (node.children || []).filter((c) => structureNodeMatchesFilter(c, filter));
+  const hasKids = kids.length > 0;
+  const label = node.name
+    ? `<span class="ij-structure-node-kind">${escapeHtml(prettyAstKind(node.kind))}</span><span class="ij-structure-node-name">${escapeHtml(node.name)}</span>`
+    : `<span class="ij-tree-label">${escapeHtml(node.label || prettyAstKind(node.kind))}</span>`;
+  const title = escapeHtml(node.label || node.kind || '');
+  const data = `data-sl="${node.start_line || 1}" data-sc="${node.start_column || 1}" data-el="${node.end_line || 1}" data-ec="${node.end_column || 1}" data-kind="${escapeHtml(node.kind || '')}"`;
+  const open = depth < 2 || !!filter;
+  if (!hasKids) {
+    return `<div class="ij-tree-row ij-structure-node-row" style="--depth:${depth}" ${data} title="${title}">${label}</div>`;
+  }
+  const childHtml = kids.map((c) => renderStructureNode(c, depth + 1, filter)).join('');
+  return `<details class="ij-structure-branch" ${open ? 'open' : ''}>
+    <summary class="ij-tree-row ij-tree-dir-row ij-structure-node-row" style="--depth:${depth}" ${data} title="${title}" aria-expanded="${open ? 'true' : 'false'}">
+      <span class="ij-tree-chevron" aria-hidden="true"></span>
+      ${label}
+    </summary>
+    <div class="ij-structure-children">${childHtml}</div>
+  </details>`;
+}
+
+function prettyAstKind(kind) {
+  return String(kind || '')
+    .split('_')
+    .filter(Boolean)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(' ');
+}
+
+function renderStructureTree(ast) {
+  const tree = $('#structure-tree');
+  const subtitle = $('#structure-subtitle');
+  if (!tree) return;
+  if (!ast?.root) {
+    tree.innerHTML = `<div class="ij-structure-empty">Open a supported source file to view its structure.</div>`;
+    if (subtitle) subtitle.textContent = '';
+    return;
+  }
+  const filter = (state.structureFilter || '').trim().toLowerCase();
+  if (subtitle) {
+    const modeLabel = ast.mode === 'full' ? 'AST' : 'Structure';
+    subtitle.textContent = `${ast.language || '?'} · ${modeLabel} · ${ast.path || ''}`;
+  }
+  const html = renderStructureNode(ast.root, 0, filter);
+  tree.innerHTML = html
+    ? `<div class="ij-structure-tree">${html}</div>`
+    : `<div class="ij-structure-empty">No nodes match this filter.</div>`;
+  highlightStructureUnderCaret();
+}
+
+async function refreshStructurePanel({ force = false } = {}) {
+  const tree = $('#structure-tree');
+  const subtitle = $('#structure-subtitle');
+  if (!tree) return;
+  if (!state.repo) {
+    state.structureAst = null;
+    state.structurePath = null;
+    tree.innerHTML = `<div class="ij-structure-empty">Select a repo to browse structure.</div>`;
+    if (subtitle) subtitle.textContent = '';
+    return;
+  }
+  const path = state.activeTab;
+  if (!path || !isAstSupportedPath(path)) {
+    state.structureAst = null;
+    state.structurePath = path || null;
+    tree.innerHTML = `<div class="ij-structure-empty">Structure is available for Java, Python, JS/TS, Go, Rust, C/C++, JSON, and YAML.</div>`;
+    if (subtitle) subtitle.textContent = path ? path : '';
+    return;
+  }
+  if (!force && state.structureAst && state.structurePath === path && state.activePanel !== 'structure') {
+    return;
+  }
+  const seq = ++state.structureSeq;
+  const mode = state.structureMode === 'full' ? 'full' : 'structure';
+  const content = state.editor && state.activeTab === path
+    ? state.editor.getValue()
+    : (state.tabContents.get(path) ?? null);
+  try {
+    const body = { path, mode };
+    if (content != null) body.content = content;
+    const ast = await api(repoApi(state.repo, '/workspace/ast'), {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 30_000,
+    });
+    if (seq !== state.structureSeq) return;
+    state.structureAst = ast;
+    state.structurePath = path;
+    renderStructureTree(ast);
+  } catch (err) {
+    if (seq !== state.structureSeq) return;
+    state.structureAst = null;
+    state.structurePath = path;
+    tree.innerHTML = `<div class="ij-structure-empty">${escapeHtml(err.message || 'Failed to parse AST')}</div>`;
+    if (subtitle) subtitle.textContent = path;
+  }
+}
+
+function positionInAstRange(line, column, node) {
+  const sl = node.start_line || 1;
+  const sc = node.start_column || 1;
+  const el = node.end_line || sl;
+  const ec = node.end_column || sc;
+  if (line < sl || line > el) return false;
+  if (line === sl && column < sc) return false;
+  if (line === el && column > ec) return false;
+  return true;
+}
+
+function findDeepestAstNode(node, line, column, best = null) {
+  if (!node || !positionInAstRange(line, column, node)) return best;
+  let next = node;
+  for (const child of node.children || []) {
+    const hit = findDeepestAstNode(child, line, column, null);
+    if (hit) next = hit;
+  }
+  return next;
+}
+
+function highlightStructureUnderCaret() {
+  const tree = $('#structure-tree');
+  if (!tree || !state.structureAst?.root || !state.editor) return;
+  const pos = state.editor.getPosition();
+  if (!pos) return;
+  const hit = findDeepestAstNode(state.structureAst.root, pos.lineNumber, pos.column);
+  tree.querySelectorAll('.ij-structure-node-row.caret-active').forEach((el) => {
+    el.classList.remove('caret-active');
+  });
+  if (!hit) return;
+  const selector = `.ij-structure-node-row[data-sl="${hit.start_line}"][data-sc="${hit.start_column}"][data-el="${hit.end_line}"][data-ec="${hit.end_column}"]`;
+  const row = tree.querySelector(selector);
+  if (!row) return;
+  row.classList.add('caret-active');
+  let details = row.closest('details');
+  while (details) {
+    details.open = true;
+    details = details.parentElement?.closest('details') || null;
+  }
+}
+
+function onStructureTreeClick(e) {
+  const row = e.target.closest('.ij-structure-node-row');
+  if (!row) return;
+  if (e.target.closest('.ij-tree-chevron')) return;
+  const line = Number(row.dataset.sl || 1);
+  const column = Number(row.dataset.sc || 1);
+  $('#structure-tree')?.querySelectorAll('.ij-structure-node-row.active').forEach((el) => {
+    el.classList.remove('active');
+  });
+  row.classList.add('active');
+  if (!state.activeTab) return;
+  void openFileAt(state.activeTab, line, column);
+}
 
 function scheduleBuildTasksRefresh(options = {}) {
   const { fromDisk = false } = options;
@@ -5651,6 +5871,7 @@ function welcomeScreenHtml() {
         <div class="ij-shortcut"><dt>⌘N</dt><dd>New file</dd></div>
         <div class="ij-shortcut"><dt>⌘W</dt><dd>Close tab</dd></div>
         <div class="ij-shortcut"><dt>Alt+1</dt><dd>Project tool window</dd></div>
+        <div class="ij-shortcut"><dt>Alt+7</dt><dd>Structure tool window</dd></div>
       </dl>
     </div>
     ${welcomeShowcaseHtml()}
@@ -5789,6 +6010,7 @@ function runMenuAction(action) {
     publish: showPublishModal,
     'repo-info': showRepoInfoModal,
     'panel-explorer': () => switchPanel('explorer'),
+    'panel-structure': () => switchPanel('structure'),
     'panel-git': () => switchPanel('git'),
     'panel-history': () => switchPanel('history'),
     'panel-terminal': () => showTerminal(),
@@ -5866,6 +6088,7 @@ const PALETTE_COMMANDS = [
   { id: 'publish', label: 'Publish to remote…', run: showPublishModal, needsRepo: true },
   { id: 'repo-info', label: 'Repository details', run: showRepoInfoModal, needsRepo: true },
   { id: 'explorer', label: 'Show Project', kbd: 'Alt+1', run: () => switchPanel('explorer') },
+  { id: 'structure', label: 'Show Structure', kbd: 'Alt+7', run: () => switchPanel('structure'), needsRepo: true },
   { id: 'git-panel', label: 'Show Commit', kbd: 'Alt+9', run: () => switchPanel('git') },
   { id: 'terminal', label: 'Show Terminal', run: () => showTerminal() },
   { id: 'terminal-new', label: 'New Terminal', kbd: '⌘⇧`', run: () => newTerminal(), needsRepo: true },
@@ -11877,6 +12100,7 @@ function initEditor() {
       scheduleRenderTabs();
       scheduleAutoSave();
       scheduleDiagnostics();
+      scheduleStructureRefresh();
       if (shouldAutoOpenBuildTasks(state.activeTab)) {
         if (state.buildTasksPanelOpen) scheduleBuildTasksRefresh();
       } else if (shouldAutoOpenPackageManifest(state.activeTab)) {
@@ -11900,6 +12124,7 @@ function initEditor() {
     });
     state.editor.onDidChangeCursorPosition((e) => {
       updateEditorStatus(e.position);
+      scheduleStructureCaretHighlight();
       if (state.activeTab?.endsWith('.java') || state.activeTab?.endsWith('.rb')
         || state.activeTab?.endsWith('.py') || state.activeTab?.endsWith('.pyw')
         || state.activeTab?.endsWith('.go') || isNativeSourcePath(state.activeTab)) updateRunButtons();
@@ -14387,6 +14612,7 @@ function activateTab(path, { skipFlush = false } = {}) {
   // setEditorContent here used to wipe red dots after tab switches.
   activateTabShell(path);
   scheduleRenderTabs({ immediate: true });
+  if (state.activePanel === 'structure') scheduleStructureRefresh();
 }
 
 function isDiagnosablePath(path) {
@@ -19895,6 +20121,7 @@ function switchPanel(name) {
   syncActivityButtons();
   const titles = {
     explorer: 'Project',
+    structure: 'Structure',
     git: 'Commit',
     history: 'Git Log',
     terminal: 'Terminal',
@@ -19911,6 +20138,10 @@ function switchPanel(name) {
   applyDockerLogsDock();
   if (name === 'git') refreshGitStatus();
   else if (name === 'history') refreshHistory();
+  else if (name === 'structure') {
+    syncStructureModeButtons();
+    void refreshStructurePanel({ force: true });
+  }
   if (name === 'agent') {
     loadCursorStatus();
     setTimeout(() => $('#agent-input')?.focus(), 50);
@@ -20169,6 +20400,16 @@ function bindEvents() {
   });
   $('#build-tasks-close')?.addEventListener('click', () => hideBuildTasksPanel());
   $('#btn-build-tasks')?.addEventListener('click', () => toggleBuildTasksPanel());
+  $('#structure-refresh')?.addEventListener('click', () => void refreshStructurePanel({ force: true }));
+  $('#structure-filter')?.addEventListener('input', (e) => {
+    state.structureFilter = e.target.value || '';
+    if (state.structureAst) renderStructureTree(state.structureAst);
+  });
+  $$('[data-ast-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => setStructureMode(btn.dataset.astMode));
+  });
+  $('#structure-tree')?.addEventListener('click', onStructureTreeClick);
+  syncStructureModeButtons();
   $('#package-manifest-refresh')?.addEventListener('click', () => {
     void loadPackageManifest(state.activeTab);
   });
@@ -20295,6 +20536,16 @@ function bindEvents() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#tree-context-menu')?.classList.contains('hidden')) {
       hideTreeContextMenu();
+      return;
+    }
+    if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.key === '1' || e.code === 'Digit1')) {
+      e.preventDefault();
+      switchPanel('explorer');
+      return;
+    }
+    if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.key === '7' || e.code === 'Digit7')) {
+      e.preventDefault();
+      switchPanel('structure');
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {

@@ -3304,6 +3304,26 @@ async function main() {
     debugHarness.testDebugRegression(appSrc, indexHtml, sessionRs, dapRs, adaptersRs, ok);
   }
 
+  section('Structure / AST regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const apiSrc = fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8');
+    const astRs = fs.readFileSync(path.join(ROOT, 'src/workspace/ast.rs'), 'utf8');
+    const languagesRs = fs.readFileSync(path.join(ROOT, 'src/workspace/languages.rs'), 'utf8');
+    const cargoToml = fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8');
+    const astHarness = await import(path.join(ROOT, 'scripts/lib/ast-structure-harness.mjs'));
+    astHarness.testAstStructureRegression(
+      appSrc,
+      indexHtml,
+      apiSrc,
+      astRs,
+      languagesRs,
+      cargoToml,
+      ok,
+    );
+  }
+
   section('Compiler settings regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

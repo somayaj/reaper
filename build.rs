@@ -23,6 +23,8 @@ fn main() {
     println!("cargo:rerun-if-changed=scripts/lib/terminal-harness.mjs");
     println!("cargo:rerun-if-changed=scripts/test-terminal-integration.mjs");
     println!("cargo:rerun-if-changed=scripts/test-terminal-integration.sh");
+    println!("cargo:rerun-if-changed=scripts/lib/ast-structure-harness.mjs");
+    println!("cargo:rerun-if-changed=src/workspace/ast.rs");
 
     if std::env::var("REAPER_SKIP_EDITOR_TESTS").is_ok() {
         return;

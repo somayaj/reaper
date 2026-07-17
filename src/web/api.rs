@@ -96,6 +96,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/repos/{name}/workspace/fetch", post(fetch_workspace))
         .route("/api/repos/{name}/workspace/tree", get(workspace_tree))
         .route(
+            "/api/repos/{name}/workspace/ast",
+            get(workspace_ast_get).post(workspace_ast_post),
+        )
+        .route(
             "/api/repos/{name}/workspace/file",
             get(read_workspace_file)
                 .post(create_workspace_file)
@@ -531,6 +535,72 @@ async fn workspace_tree(
 struct TreeQuery {
     dir: Option<String>,
     recursive: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct AstQuery {
+    path: String,
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AstBody {
+    path: String,
+    content: Option<String>,
+    mode: Option<String>,
+}
+
+async fn workspace_ast_get(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<AstQuery>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let mode = workspace::ast::AstMode::parse(q.mode.as_deref());
+    let path = q.path.clone();
+    match tokio::task::spawn_blocking(move || workspace::ast::parse_ast_file(&ws, &path, mode))
+        .await
+    {
+        Ok(Ok(ast)) => Json(ast).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("ast parse task"),
+        ),
+    }
+}
+
+async fn workspace_ast_post(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<AstBody>,
+) -> impl IntoResponse {
+    let ws = match workspace::ensure_workspace(&state.config, &name) {
+        Ok(ws) => ws,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let mode = workspace::ast::AstMode::parse(body.mode.as_deref());
+    let path = body.path.clone();
+    let content = match body.content {
+        Some(c) => c,
+        None => match workspace::read_file(&ws, &path) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::NOT_FOUND, e),
+        },
+    };
+    match tokio::task::spawn_blocking(move || workspace::ast::parse_ast(&path, &content, mode))
+        .await
+    {
+        Ok(Ok(ast)) => Json(ast).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("ast parse task"),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

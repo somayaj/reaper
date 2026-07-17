@@ -29,6 +29,23 @@ const SKIP_DIRS: &[&str] = &[
     "storage",
 ];
 
+/// Languages with a bundled tree-sitter grammar for Structure / AST.
+pub fn has_ast_grammar(language: &str) -> bool {
+    matches!(
+        language,
+        "java"
+            | "python"
+            | "javascript"
+            | "typescript"
+            | "go"
+            | "rust"
+            | "c"
+            | "cpp"
+            | "json"
+            | "yaml"
+    )
+}
+
 pub fn language_for_path(path: &str) -> Option<&'static str> {
     let lower = path.replace('\\', "/").to_lowercase();
     let base = lower.rsplit('/').next()?;
