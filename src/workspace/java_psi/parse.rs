@@ -12,6 +12,7 @@ pub struct CompilationUnit {
 pub struct TypeDecl {
     pub kind: TypeKind,
     pub name: String,
+    pub modifiers: Vec<String>,
     pub line: u32,
     pub column: u32,
     pub members: Vec<MemberDecl>,
@@ -31,6 +32,11 @@ pub enum TypeKind {
 pub struct MemberDecl {
     pub kind: MemberKind,
     pub name: String,
+    pub modifiers: Vec<String>,
+    /// Field type or method return type (`void`, `int`, `String`, …).
+    pub type_name: Option<String>,
+    /// Parameter list text including parentheses, e.g. `(String name)`.
+    pub params: Option<String>,
     pub line: u32,
     pub column: u32,
 }
@@ -123,7 +129,7 @@ impl<'a> Parser<'a> {
 
     fn try_parse_type_decl(&mut self, nested: bool) -> Option<TypeDecl> {
         let start = self.pos;
-        self.skip_modifiers_and_annotations();
+        let modifiers = self.collect_modifiers_and_annotations();
         let kind = if self.match_kind(TokenKind::At) {
             if !self.match_keyword(Keyword::Interface) {
                 self.pos = start;
@@ -152,6 +158,7 @@ impl<'a> Parser<'a> {
         let mut decl = TypeDecl {
             kind,
             name,
+            modifiers,
             line,
             column,
             members: Vec::new(),
@@ -188,7 +195,7 @@ impl<'a> Parser<'a> {
                         owner.nested.push(nested);
                         continue;
                     }
-                    if let Some(member) = self.try_parse_member() {
+                    if let Some(member) = self.try_parse_member(&owner.name) {
                         owner.members.push(member);
                         continue;
                     }
@@ -199,10 +206,41 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn try_parse_member(&mut self) -> Option<MemberDecl> {
+    fn try_parse_member(&mut self, owner_name: &str) -> Option<MemberDecl> {
         let start = self.pos;
-        self.skip_modifiers_and_annotations();
-        let _ = self.skip_single_type();
+        let modifiers = self.collect_modifiers_and_annotations();
+        let line = self.tokens.get(start).map(|t| t.line).unwrap_or(1);
+
+        // Constructor: only when name matches the enclosing type (never annotations).
+        if let TokenKind::Identifier(ctor_name) = self.peek().kind.clone() {
+            let next_paren = self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| matches!(t.kind, TokenKind::LParen));
+            if next_paren && ctor_name == owner_name {
+                let column = self.peek().column;
+                self.bump();
+                let params = self.consume_param_list_text();
+                self.skip_method_tail();
+                return Some(MemberDecl {
+                    kind: MemberKind::Constructor,
+                    name: ctor_name,
+                    modifiers,
+                    type_name: None,
+                    params: Some(params),
+                    line,
+                    column,
+                });
+            }
+        }
+
+        let type_name = match self.parse_type_text() {
+            Some(t) => t,
+            None => {
+                self.pos = start;
+                return None;
+            }
+        };
         let name = match self.parse_identifier() {
             Some(n) => n,
             None => {
@@ -210,52 +248,185 @@ impl<'a> Parser<'a> {
                 return None;
             }
         };
+        if is_keyword(&name) {
+            self.pos = start;
+            return None;
+        }
+        let column = self
+            .tokens
+            .iter()
+            .skip(start)
+            .find(|t| matches!(&t.kind, TokenKind::Identifier(id) if id == &name))
+            .map(|t| t.column)
+            .unwrap_or(1);
 
-        if self.match_kind(TokenKind::LParen) {
-            self.skip_balanced(TokenKind::LParen, TokenKind::RParen);
+        if matches!(self.peek().kind, TokenKind::LParen) {
+            let params = self.consume_param_list_text();
             self.skip_method_tail();
-            let line = self.tokens.get(start).map(|t| t.line).unwrap_or(1);
-            let col = self
-                .tokens
-                .iter()
-                .skip(start)
-                .find(|t| matches!(&t.kind, TokenKind::Identifier(id) if id == &name))
-                .map(|t| t.column)
-                .unwrap_or(1);
             return Some(MemberDecl {
-                kind: if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                    MemberKind::Constructor
-                } else {
-                    MemberKind::Method
-                },
+                kind: MemberKind::Method,
                 name,
+                modifiers,
+                type_name: Some(type_name),
+                params: Some(params),
                 line,
-                column: col,
+                column,
             });
         }
 
-        if self.match_kind(TokenKind::Semi) {
-            let col = self
-                .tokens
-                .iter()
-                .skip(start)
-                .find(|t| matches!(&t.kind, TokenKind::Identifier(id) if id == &name))
-                .map(|t| t.column)
-                .unwrap_or(1);
-            let line = self.tokens.get(start).map(|t| t.line).unwrap_or(1);
-            if is_keyword(&name) {
-                return None;
-            }
+        // Field: type name [= …];
+        if matches!(
+            self.peek().kind,
+            TokenKind::Semi | TokenKind::Assign | TokenKind::Comma
+        ) {
+            self.skip_until_semi();
+            let _ = self.match_kind(TokenKind::Semi);
             return Some(MemberDecl {
                 kind: MemberKind::Field,
                 name,
+                modifiers,
+                type_name: Some(type_name),
+                params: None,
                 line,
-                column: col,
+                column,
             });
         }
 
         self.pos = start;
         None
+    }
+
+    fn consume_param_list_text(&mut self) -> String {
+        if !matches!(self.peek().kind, TokenKind::LParen) {
+            return "()".into();
+        }
+        let start = self.pos;
+        self.bump();
+        self.skip_balanced_depth(TokenKind::LParen, TokenKind::RParen);
+        let end = self.pos;
+        let mut out = String::new();
+        let mut prev_word = false;
+        for tok in &self.tokens[start..end] {
+            match &tok.kind {
+                TokenKind::LParen => {
+                    out.push('(');
+                    prev_word = false;
+                }
+                TokenKind::RParen => {
+                    out.push(')');
+                    prev_word = false;
+                }
+                TokenKind::Comma => {
+                    out.push_str(", ");
+                    prev_word = false;
+                }
+                TokenKind::Dot => {
+                    out.push('.');
+                    prev_word = false;
+                }
+                TokenKind::Lt => {
+                    out.push('<');
+                    prev_word = false;
+                }
+                TokenKind::Gt => {
+                    out.push('>');
+                    prev_word = false;
+                }
+                TokenKind::LBracket => {
+                    out.push('[');
+                    prev_word = false;
+                }
+                TokenKind::RBracket => {
+                    out.push(']');
+                    prev_word = false;
+                }
+                TokenKind::Identifier(id) => {
+                    if prev_word {
+                        out.push(' ');
+                    }
+                    out.push_str(id);
+                    prev_word = true;
+                }
+                TokenKind::Keyword(kw) => {
+                    if prev_word {
+                        out.push(' ');
+                    }
+                    out.push_str(keyword_label(*kw));
+                    prev_word = true;
+                }
+                _ => {}
+            }
+        }
+        if out.is_empty() {
+            "()".into()
+        } else {
+            out
+        }
+    }
+
+    fn skip_until_semi(&mut self) {
+        while !self.at_eof() {
+            match self.peek().kind {
+                TokenKind::Semi => break,
+                TokenKind::LBrace => {
+                    self.bump();
+                    self.skip_balanced_depth(TokenKind::LBrace, TokenKind::RBrace);
+                }
+                TokenKind::LParen => {
+                    self.bump();
+                    self.skip_balanced_depth(TokenKind::LParen, TokenKind::RParen);
+                }
+                _ => self.bump(),
+            }
+        }
+    }
+
+    fn parse_type_text(&mut self) -> Option<String> {
+        let mut out = String::new();
+        match self.peek().kind.clone() {
+            TokenKind::Keyword(Keyword::Void) => {
+                self.bump();
+                out.push_str("void");
+            }
+            TokenKind::Identifier(id) => {
+                self.bump();
+                out.push_str(&id);
+                while matches!(self.peek().kind, TokenKind::Dot) {
+                    let next_is_ident = self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| matches!(t.kind, TokenKind::Identifier(_)));
+                    if !next_is_ident {
+                        break;
+                    }
+                    self.bump();
+                    if let Some(part) = self.parse_identifier() {
+                        out.push('.');
+                        out.push_str(&part);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => return None,
+        }
+        while matches!(self.peek().kind, TokenKind::Lt) {
+            out.push_str(&self.consume_angle_text());
+        }
+        while self.match_kind(TokenKind::LBracket) {
+            let _ = self.match_kind(TokenKind::RBracket);
+            out.push_str("[]");
+        }
+        Some(out)
+    }
+
+    fn consume_angle_text(&mut self) -> String {
+        if !matches!(self.peek().kind, TokenKind::Lt) {
+            return String::new();
+        }
+        self.bump();
+        self.skip_balanced_depth(TokenKind::Lt, TokenKind::Gt);
+        "<…>".into()
     }
 
     fn skip_method_tail(&mut self) {
@@ -339,20 +510,33 @@ impl<'a> Parser<'a> {
         self.skip_single_type()
     }
 
-    fn skip_modifiers_and_annotations(&mut self) {
+    fn collect_modifiers_and_annotations(&mut self) -> Vec<String> {
+        let mut mods = Vec::new();
         loop {
             if self.match_kind(TokenKind::At) {
+                // Skip annotations in the outline (keep modifiers only).
+                // Support @Name, @pkg.Name, and @Name(…) / @Name(value = "…").
                 if matches!(self.peek().kind, TokenKind::Identifier(_)) {
                     self.bump();
+                    while matches!(self.peek().kind, TokenKind::Dot)
+                        && self
+                            .tokens
+                            .get(self.pos + 1)
+                            .is_some_and(|t| matches!(t.kind, TokenKind::Identifier(_)))
+                    {
+                        self.bump(); // dot
+                        self.bump(); // ident
+                    }
                 }
                 if self.match_kind(TokenKind::LParen) {
-                    self.skip_balanced(TokenKind::LParen, TokenKind::RParen);
+                    // '(' already consumed — do not call skip_balanced (it would re-match '(').
+                    self.skip_balanced_depth(TokenKind::LParen, TokenKind::RParen);
                 }
                 continue;
             }
-            if matches!(
-                self.peek().kind,
-                TokenKind::Keyword(
+            if let TokenKind::Keyword(kw) = self.peek().kind {
+                if matches!(
+                    kw,
                     Keyword::Public
                         | Keyword::Private
                         | Keyword::Protected
@@ -361,13 +545,19 @@ impl<'a> Parser<'a> {
                         | Keyword::Abstract
                         | Keyword::Sealed
                         | Keyword::NonSealed
-                )
-            ) {
-                self.bump();
-                continue;
+                ) {
+                    mods.push(keyword_label(kw).into());
+                    self.bump();
+                    continue;
+                }
             }
             break;
         }
+        mods
+    }
+
+    fn skip_modifiers_and_annotations(&mut self) {
+        let _ = self.collect_modifiers_and_annotations();
     }
 
     fn skip_balanced(&mut self, open: TokenKind, close: TokenKind) {
@@ -459,6 +649,32 @@ fn is_keyword(name: &str) -> bool {
     super::super::symbols::is_keyword(name)
 }
 
+fn keyword_label(kw: Keyword) -> &'static str {
+    match kw {
+        Keyword::Package => "package",
+        Keyword::Import => "import",
+        Keyword::Class => "class",
+        Keyword::Interface => "interface",
+        Keyword::Enum => "enum",
+        Keyword::Record => "record",
+        Keyword::Static => "static",
+        Keyword::Extends => "extends",
+        Keyword::Implements => "implements",
+        Keyword::Throws => "throws",
+        Keyword::Void => "void",
+        Keyword::Return => "return",
+        Keyword::New => "new",
+        Keyword::Public => "public",
+        Keyword::Private => "private",
+        Keyword::Protected => "protected",
+        Keyword::Abstract => "abstract",
+        Keyword::Final => "final",
+        Keyword::Sealed => "sealed",
+        Keyword::NonSealed => "non-sealed",
+        Keyword::Permits => "permits",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +729,74 @@ mod tests {
         let beta = find_type_position(src, "Beta");
         assert_eq!(beta.0, 2);
         assert!(beta.1 > 1);
+    }
+
+    #[test]
+    fn parses_modifiers_methods_fields_and_ctors() {
+        let unit = parse_compilation_unit(
+            "package com.example;\n\
+             public final class Hello {\n\
+               private static final int COUNT = 1;\n\
+               public Hello(String name) {}\n\
+               protected void run() {}\n\
+             }",
+        );
+        assert_eq!(unit.package.as_deref(), Some("com.example"));
+        let ty = &unit.types[0];
+        assert_eq!(ty.name, "Hello");
+        assert_eq!(ty.modifiers, vec!["public", "final"]);
+        assert!(ty.members.iter().any(|m| {
+            m.kind == MemberKind::Field
+                && m.name == "COUNT"
+                && m.modifiers.iter().any(|x| x == "private")
+                && m.type_name.as_deref() == Some("int")
+        }));
+        assert!(ty.members.iter().any(|m| {
+            m.kind == MemberKind::Constructor
+                && m.name == "Hello"
+                && m.params.as_deref() == Some("(String name)")
+        }));
+        assert!(ty.members.iter().any(|m| {
+            m.kind == MemberKind::Method
+                && m.name == "run"
+                && m.modifiers.iter().any(|x| x == "protected")
+                && m.type_name.as_deref() == Some("void")
+        }));
+    }
+
+    #[test]
+    fn annotations_are_not_parsed_as_constructors() {
+        let unit = parse_compilation_unit(
+            "package com.example.helloworld;\n\
+             import org.springframework.web.bind.annotation.GetMapping;\n\
+             import org.springframework.web.bind.annotation.RestController;\n\
+             @RestController\n\
+             public class HelloController {\n\
+               @GetMapping(\"/\")\n\
+               public String hello() { return \"hello world\"; }\n\
+               @GetMapping(\"/root\")\n\
+               public String helloRoot() { return \"com.example.helloworld\"; }\n\
+             }",
+        );
+        assert_eq!(unit.types.len(), 1);
+        let ty = &unit.types[0];
+        assert_eq!(ty.name, "HelloController");
+        assert!(
+            !ty.members.iter().any(|m| m.name == "GetMapping"),
+            "annotation names must not become members: {:?}",
+            ty.members
+        );
+        assert_eq!(ty.members.len(), 2);
+        assert!(ty.members.iter().any(|m| {
+            m.kind == MemberKind::Method
+                && m.name == "hello"
+                && m.modifiers.iter().any(|x| x == "public")
+                && m.type_name.as_deref() == Some("String")
+        }));
+        assert!(ty.members.iter().any(|m| {
+            m.kind == MemberKind::Method
+                && m.name == "helloRoot"
+                && m.type_name.as_deref() == Some("String")
+        }));
     }
 }

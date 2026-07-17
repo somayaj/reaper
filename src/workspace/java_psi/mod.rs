@@ -14,7 +14,10 @@ pub use annotations::{
 };
 pub use imports::{ImportMap, type_import_fqcns};
 pub use index::{JavaSymbol, index_source, package_name};
-pub use parse::{CompilationUnit, find_type_position, parse_compilation_unit};
+pub use parse::{
+    CompilationUnit, MemberDecl, MemberKind, TypeDecl, TypeKind, find_type_position,
+    parse_compilation_unit,
+};
 
 /// Parse and index a `.java` file.
 pub fn analyze_source(content: &str, rel_path: &str, index_members: bool) -> (CompilationUnit, Vec<JavaSymbol>) {

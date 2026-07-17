@@ -42,6 +42,11 @@ pub struct AstNode {
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+    /// Extra signature text: field/return type, or method params.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     pub start_line: u32,
     pub start_column: u32,
     pub end_line: u32,
@@ -105,6 +110,17 @@ pub fn parse_ast(path: &str, content: &str, mode: AstMode) -> Result<AstResponse
     }
     let language = languages::language_for_path(path)
         .context("unsupported file type for AST")?;
+
+    // Structure mode for Java uses PSI outline (package / types / modifiers / members).
+    if mode == AstMode::Structure && language == "java" {
+        return Ok(AstResponse {
+            path: path.replace('\\', "/"),
+            language: language.to_string(),
+            mode: "structure".into(),
+            root: java_structure_outline(content),
+        });
+    }
+
     let grammar_id = resolve_grammar_language(path, language);
     let grammar = language_grammar(grammar_id)
         .with_context(|| format!("no tree-sitter grammar for '{language}'"))?;
@@ -129,6 +145,125 @@ pub fn parse_ast(path: &str, content: &str, mode: AstMode) -> Result<AstResponse
         },
         root,
     })
+}
+
+fn java_structure_outline(content: &str) -> AstNode {
+    use super::java_psi::parse_compilation_unit;
+
+    let unit = parse_compilation_unit(content);
+    // Class structure only — skip package / imports.
+    let children: Vec<AstNode> = unit.types.iter().map(java_type_node).collect();
+
+    let end_line = children
+        .iter()
+        .map(|c| c.end_line)
+        .max()
+        .unwrap_or(1);
+
+    AstNode {
+        kind: "file".into(),
+        label: Some("File".into()),
+        name: None,
+        modifiers: Vec::new(),
+        detail: None,
+        start_line: 1,
+        start_column: 1,
+        end_line,
+        end_column: 1,
+        children,
+    }
+}
+
+fn java_type_node(ty: &super::java_psi::TypeDecl) -> AstNode {
+    use super::java_psi::{MemberKind, TypeKind};
+
+    let kind = match ty.kind {
+        TypeKind::Class => "class",
+        TypeKind::Interface => "interface",
+        TypeKind::Enum => "enum",
+        TypeKind::Record => "record",
+        TypeKind::Annotation => "annotation",
+    };
+
+    let mut children = Vec::new();
+    // Fields → constructors → methods → nested types.
+    for member in ty.members.iter().filter(|m| m.kind == MemberKind::Field) {
+        children.push(java_member_node(member));
+    }
+    for member in ty.members.iter().filter(|m| m.kind == MemberKind::Constructor) {
+        children.push(java_member_node(member));
+    }
+    for member in ty.members.iter().filter(|m| m.kind == MemberKind::Method) {
+        children.push(java_member_node(member));
+    }
+    for nested in &ty.nested {
+        children.push(java_type_node(nested));
+    }
+
+    let end_line = children
+        .iter()
+        .map(|c| c.end_line)
+        .max()
+        .unwrap_or(ty.line)
+        .max(ty.line);
+
+    AstNode {
+        kind: kind.into(),
+        label: Some(ty.name.clone()),
+        name: Some(ty.name.clone()),
+        modifiers: ty.modifiers.clone(),
+        detail: None,
+        start_line: ty.line,
+        start_column: ty.column,
+        end_line,
+        end_column: ty.column,
+        children,
+    }
+}
+
+fn java_member_node(member: &super::java_psi::MemberDecl) -> AstNode {
+    use super::java_psi::MemberKind;
+
+    let kind = match member.kind {
+        MemberKind::Method => "method",
+        MemberKind::Field => "field",
+        MemberKind::Constructor => "constructor",
+    };
+    let params = member.params.as_deref().unwrap_or("()");
+    let type_name = member.type_name.as_deref().unwrap_or("");
+
+    let (display_name, detail) = match member.kind {
+        MemberKind::Field => (member.name.clone(), member.type_name.clone()),
+        MemberKind::Constructor => (
+            format!("{}{}", member.name, if params.is_empty() { "()" } else { params }),
+            None,
+        ),
+        MemberKind::Method => (
+            format!(
+                "{}{}",
+                member.name,
+                if params.is_empty() { "()" } else { params }
+            ),
+            Some(if type_name.is_empty() {
+                "void".into()
+            } else {
+                type_name.to_string()
+            }),
+        ),
+    };
+
+    AstNode {
+        kind: kind.into(),
+        label: Some(display_name.clone()),
+        name: Some(display_name),
+        modifiers: member.modifiers.clone(),
+        detail,
+        start_line: member.line,
+        start_column: member.column,
+        end_line: member.line,
+        end_column: member.column,
+        children: Vec::new(),
+    }
 }
 
 /// Parse from workspace disk.
@@ -162,6 +297,8 @@ fn convert_node(node: Node<'_>, source: &[u8], mode: AstMode, depth: usize) -> A
         kind,
         label: Some(label),
         name,
+        modifiers: Vec::new(),
+        detail: None,
         start_line: (start.row as u32) + 1,
         start_column: (start.column as u32) + 1,
         end_line: (end.row as u32) + 1,
@@ -382,15 +519,27 @@ mod tests {
 package com.example;
 public class Hello {
   private int x;
+  public Hello() {}
   public void run() {}
 }
 "#;
         let ast = parse_ast("src/Hello.java", src, AstMode::Structure).unwrap();
         assert_eq!(ast.language, "java");
         assert_eq!(ast.mode, "structure");
+        assert!(!find_kind(&ast.root, "package"));
+        assert!(find_kind(&ast.root, "class"));
         assert!(find_name(&ast.root, "Hello"));
-        assert!(find_name(&ast.root, "run") || find_kind(&ast.root, "method_declaration"));
-        assert!(ast.root.start_line >= 1);
+        let hello = find_node(&ast.root, "Hello", "class").expect("class Hello");
+        assert!(hello.modifiers.iter().any(|m| m == "public"));
+        assert!(find_kind(&ast.root, "field"));
+        assert!(find_kind(&ast.root, "constructor"));
+        assert!(find_kind(&ast.root, "method"));
+        let run = find_node(&ast.root, "run()", "method").expect("method run()");
+        assert!(run.modifiers.iter().any(|m| m == "public"));
+        assert_eq!(run.detail.as_deref(), Some("void"));
+        let field = find_node(&ast.root, "x", "field").expect("field x");
+        assert!(field.modifiers.iter().any(|m| m == "private"));
+        assert_eq!(field.detail.as_deref(), Some("int"));
     }
 
     #[test]
@@ -461,7 +610,7 @@ public class Hello {
     }
 
     #[test]
-    fn full_mode_keeps_more_named_nodes_than_structure() {
+    fn java_structure_is_compact_outline_vs_full_ast() {
         let src = r#"
 public class Demo {
   public int value() {
@@ -472,8 +621,10 @@ public class Demo {
 "#;
         let structure = parse_ast("Demo.java", src, AstMode::Structure).unwrap();
         let full = parse_ast("Demo.java", src, AstMode::Full).unwrap();
+        assert!(find_kind(&structure.root, "class"));
+        assert!(find_kind(&structure.root, "method"));
         assert!(
-            count_nodes(&full.root) >= count_nodes(&structure.root),
+            count_nodes(&full.root) > count_nodes(&structure.root),
             "full={} structure={}",
             count_nodes(&full.root),
             count_nodes(&structure.root)
@@ -524,6 +675,13 @@ public class Demo {
             return true;
         }
         node.children.iter().any(|c| find_kind(c, kind))
+    }
+
+    fn find_node<'a>(node: &'a AstNode, name: &str, kind: &str) -> Option<&'a AstNode> {
+        if node.kind == kind && node.name.as_deref() == Some(name) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| find_node(c, name, kind))
     }
 
     fn count_nodes(node: &AstNode) -> usize {
