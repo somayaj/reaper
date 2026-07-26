@@ -73,6 +73,7 @@
       return 'makefile';
     }
     if (base === 'cmakelists.txt') return 'cmake';
+    if (base === 'elide.pkl' || base.endsWith('.pkl')) return 'pkl';
     if (base.endsWith('.gradle.kts')) return 'kotlin';
     if (base.endsWith('.gradle')) return 'groovy';
     if (base.endsWith('.properties') || base.endsWith('.gradle.properties')) return 'ini';
@@ -114,6 +115,7 @@
       proto: 'protobuf',
       graphql: 'graphql',
       gql: 'graphql',
+      pkl: 'pkl',
     };
     return map[ext] || 'plaintext';
   }
@@ -154,7 +156,7 @@
     const lang = langForPath(path);
     return [
       'markdown', 'plaintext', 'yaml', 'json', 'html', 'xml', 'toml', 'ini',
-      'css', 'scss', 'less', 'sql', 'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql',
+      'css', 'scss', 'less', 'sql', 'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'pkl',
     ].includes(lang);
   }
 
@@ -367,7 +369,7 @@
   function langLabel(lang) {
     const labels = {
       groovy: 'Groovy', kotlin: 'Kotlin', javascript: 'JavaScript', typescript: 'TypeScript',
-      plaintext: 'Plain Text', ini: 'Properties', cpp: 'C/C++',
+      plaintext: 'Plain Text', ini: 'Properties', cpp: 'C/C++', pkl: 'Pkl',
     };
     return labels[lang] || (lang.charAt(0).toUpperCase() + lang.slice(1));
   }
@@ -379,6 +381,7 @@
     if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(base)) return 'C++';
     if (base === 'makefile' || base === 'gnumakefile') return 'Makefile';
     if (base.endsWith('.mk') || base.startsWith('makefile.')) return 'Makefile';
+    if (base === 'elide.pkl' || base.endsWith('.pkl')) return 'Pkl (Elide)';
     return langLabel(langForPath(path));
   }
 
@@ -510,12 +513,80 @@
     });
   }
 
+  const PKL_KEYWORDS = [
+    'amends', 'amend', 'import', 'as', 'module', 'extends', 'class', 'typealias',
+    'local', 'const', 'fixed', 'hidden', 'open', 'abstract', 'external', 'new',
+    'if', 'else', 'when', 'for', 'in', 'let', 'function', 'read', 'throw',
+    'null', 'true', 'false', 'this', 'super', 'outer', 'Unknown',
+  ];
+
+  function registerPkl() {
+    if (window.__reaperPklRegistered) return;
+    window.__reaperPklRegistered = true;
+
+    try {
+      monaco.languages.register({ id: 'pkl', aliases: ['Pkl', 'pkl', 'Elide'] });
+    } catch {
+      /* already registered */
+    }
+
+    monaco.languages.setMonarchTokensProvider('pkl', {
+      defaultToken: '',
+      tokenPostfix: '.pkl',
+      keywords: PKL_KEYWORDS,
+      tokenizer: {
+        root: [
+          [/\/\/.*$/, 'comment'],
+          [/\/\*/, 'comment', '@comment'],
+          [/"([^"\\]|\\.)*"/, 'string'],
+          [/"([^"\\]|\\.)*$/, 'string.invalid'],
+          [/'([^'\\]|\\.)*'/, 'string'],
+          [/\b\d+(\.\d+)?\b/, 'number'],
+          // Match words via monarch cases (do not expand keywords into a regex).
+          [/[A-Z][\w.]*/, 'type.identifier'],
+          [/[a-z_][\w]*/, {
+            cases: {
+              '@keywords': 'keyword',
+              '@default': 'identifier',
+            },
+          }],
+          [/[\[\]]/, 'delimiter.square'],
+          [/[{}]/, 'delimiter.curly'],
+          [/[()]/, 'delimiter.parenthesis'],
+          [/[=:;,.]/, 'delimiter'],
+        ],
+        comment: [
+          [/[^/*]+/, 'comment'],
+          [/\*\//, 'comment', '@pop'],
+          [/[/*]/, 'comment'],
+        ],
+      },
+    });
+
+    monaco.languages.setLanguageConfiguration('pkl', {
+      comments: { lineComment: '//', blockComment: ['/*', '*/'] },
+      brackets: [
+        ['{', '}'],
+        ['[', ']'],
+        ['(', ')'],
+      ],
+      autoClosingPairs: [
+        { open: '{', close: '}' },
+        { open: '[', close: ']' },
+        { open: '(', close: ')' },
+        { open: '"', close: '"' },
+        { open: "'", close: "'" },
+      ],
+    });
+  }
+
   function ensureReaperCustomLanguage(lang) {
     if (lang === 'groovy') registerGroovy();
     if (lang === 'makefile') registerMakefile();
+    if (lang === 'pkl') registerPkl();
   }
 
-  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile']);
+  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile', 'pkl']);
 
   const DEF_PREFIXES = [
     'class', 'module', 'interface', 'enum', 'record', 'struct', 'trait', 'mod', 'type', 'object',
@@ -592,7 +663,7 @@
     'java', 'kotlin', 'groovy', 'rust', 'javascript', 'typescript', 'python', 'go',
     'csharp', 'ruby', 'php', 'swift', 'c', 'cpp', 'shell', 'lua', 'dart', 'r', 'sql',
     'html', 'css', 'scss', 'less', 'json', 'markdown', 'xml', 'yaml', 'toml', 'ini',
-    'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'plaintext',
+    'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'pkl', 'plaintext',
   ];
 
   /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
@@ -4190,8 +4261,13 @@
     if (isImportTypingLine(path, linePrefix)) return false;
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
     if (isDeclarationTyping(path, linePrefix)) return false;
-    const modToken = extractInlinePartialToken(linePrefix);
-    if (modToken && shouldPreferModifierKeywordInline(path, linePrefix, modToken)) return false;
+    // Modifier keyword gate only when typing a lowercase word — skip on empty-line
+    // AI routing (hot path in perf benches / pause prefetch).
+    const prefixTrimmed = String(linePrefix || '').trimEnd();
+    if (prefixTrimmed && /[a-z]$/.test(prefixTrimmed)) {
+      const modToken = extractInlinePartialToken(linePrefix);
+      if (modToken && shouldPreferModifierKeywordInline(path, linePrefix, modToken)) return false;
+    }
     if (localGhost) return false;
     if (shouldPreferAiStatementInline(path, linePrefix, content, lineNumber)) return true;
 

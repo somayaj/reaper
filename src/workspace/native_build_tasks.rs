@@ -11,6 +11,9 @@ pub fn try_native_tree(
     rel_path: &str,
     compose_content: Option<&str>,
 ) -> Result<Option<BuildTasksTree>> {
+    if let Some(tree) = try_elide_tree(ws, rel_path)? {
+        return Ok(Some(tree));
+    }
     if let Some(tree) = try_docker_tree(ws, rel_path, compose_content)? {
         return Ok(Some(tree));
     }
@@ -530,6 +533,71 @@ fn focus_for_manifest(ws: &Path, rel_path: &str, manifest_path: &str) -> String 
         }
     }
     String::new()
+}
+
+pub fn try_elide_tree(ws: &Path, rel_path: &str) -> Result<Option<BuildTasksTree>> {
+    let Some((dir, manifest_path)) = find_nearest_manifest(ws, rel_path, &["elide.pkl"])? else {
+        return Ok(None);
+    };
+    let rel = super::normalize_workspace_source_path(rel_path);
+    let base = rel.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+    // When elide.pkl is open, always show Elide tasks (even in Maven/Gradle hybrids).
+    // Otherwise only claim the panel for pure-Elide projects (no sibling ecosystem manifests).
+    if base != "elide.pkl" {
+        let sibling_manifests = [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "package.json",
+            "Cargo.toml",
+            "go.mod",
+            "pyproject.toml",
+            "Gemfile",
+            "pubspec.yaml",
+        ];
+        if sibling_manifests.iter().any(|n| dir.join(n).is_file()) {
+            return Ok(None);
+        }
+        if find_nearest_manifest(ws, &rel, &sibling_manifests)?.is_some() {
+            return Ok(None);
+        }
+    }
+    let text = std::fs::read_to_string(dir.join("elide.pkl"))
+        .with_context(|| format!("read {manifest_path}"))?;
+    let info = super::elide_pkl::parse_elide_pkl(&text);
+    let name = info.name.clone().unwrap_or_else(|| "elide".into());
+    let mut tasks = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for (id, cmd, group) in super::elide_pkl::inspect_or_infer_native_tasks(&dir, &info) {
+        if seen.insert(format!("native:{id}")) {
+            tasks.push(task_labeled(&id, &format!(":{id}"), &cmd, group));
+        }
+    }
+    for (script, cmd) in &info.scripts {
+        if seen.insert(format!("script:{script}")) {
+            tasks.push(task_labeled(
+                script,
+                script,
+                cmd,
+                super::elide_pkl::script_group(script),
+            ));
+        }
+    }
+    if tasks.is_empty() {
+        tasks.push(task("build", "elide build", "lifecycle"));
+        tasks.push(task("test", "elide test", "verification"));
+        tasks.push(task("run", "elide run", "application"));
+        tasks.push(task("install", "elide install", "lifecycle"));
+    }
+    Ok(Some(leaf_tree(
+        ws,
+        rel_path,
+        "elide",
+        &name,
+        &manifest_path,
+        tasks,
+    )?))
 }
 
 fn try_npm_tree(ws: &Path, rel_path: &str) -> Result<Option<BuildTasksTree>> {
@@ -2372,6 +2440,100 @@ version = "0.1.0"
         assert_eq!(tree.build_tool, "cargo");
         assert_eq!(tree.root_name, "demo");
         assert!(tree.tree.tasks.iter().any(|t| t.command == "cargo build"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn elide_tree_reads_scripts_and_native_targets() {
+        let tmp = std::env::temp_dir().join(format!("reaper-elide-tasks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("elide.pkl"),
+            r#"
+amends "elide:project.pkl"
+name = "HelloElide Project"
+jvm { main = "com.example.Hello" }
+sources {
+  ["main"] = new Sources.SourceSetSpec {
+    paths { "src/main/java/**/*.java" }
+  }
+  ["test"] = new Sources.SourceSetSpec {
+    type = "test"
+    paths { "src/test/**/*.java" }
+  }
+}
+dependencies {
+  maven {
+    testPackages { "org.junit.jupiter:junit-jupiter:5.11.4" }
+  }
+}
+artifacts {
+  ["app"] = new Jvm.Jar { name = "hello-world" }
+}
+scripts {
+  ["build"] = "elide build"
+  ["pom"] = "elide mvn -- -q package"
+  ["gradle"] = "./gradlew build"
+  ["cargo"] = "cargo build --release"
+}
+"#,
+        )
+        .unwrap();
+        let tree = try_elide_tree(&tmp, "elide.pkl").unwrap().expect("tree");
+        assert_eq!(tree.build_tool, "elide");
+        assert_eq!(tree.root_name, "HelloElide Project");
+        assert_eq!(tree.root_path, "elide.pkl");
+        assert!(tree.tree.tasks.iter().any(|t| t.command == "elide build"));
+        assert!(tree
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.command == "elide mvn -- -q package"));
+        assert!(tree
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.command == "./gradlew build"));
+        assert!(tree
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.command == "cargo build --release"));
+        assert!(tree
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.id == "pom" && t.group == "maven"));
+        assert!(tree
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.command.contains("elide build :") || t.command == "elide install"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn elide_tree_not_stolen_by_sibling_pom_when_java_open() {
+        let tmp = std::env::temp_dir().join(format!("reaper-elide-hybrid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("src/main/java")).unwrap();
+        fs::write(tmp.join("pom.xml"), "<project/>").unwrap();
+        fs::write(
+            tmp.join("elide.pkl"),
+            r#"
+amends "elide:project.pkl"
+name = "hybrid"
+scripts { ["build"] = "elide build" }
+"#,
+        )
+        .unwrap();
+        fs::write(tmp.join("src/main/java/App.java"), "class App {}").unwrap();
+        assert!(try_elide_tree(&tmp, "src/main/java/App.java")
+            .unwrap()
+            .is_none());
+        let tree = try_elide_tree(&tmp, "elide.pkl").unwrap().expect("elide");
+        assert_eq!(tree.build_tool, "elide");
         let _ = fs::remove_dir_all(&tmp);
     }
 

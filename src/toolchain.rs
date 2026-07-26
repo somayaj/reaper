@@ -65,6 +65,13 @@ pub const TOOLS: &[ToolDef] = &[
         env_key: Some("REAPER_MVN"),
     },
     ToolDef {
+        id: "elide",
+        label: "Elide",
+        kind: ToolKind::Binary,
+        defaults: &["elide"],
+        env_key: Some("REAPER_ELIDE"),
+    },
+    ToolDef {
         id: "python",
         label: "Python (python3)",
         kind: ToolKind::Binary,
@@ -333,6 +340,16 @@ pub fn compiler_env_entries() -> Vec<(String, String)> {
         }
     }
 
+    // Bare `elide …` build tasks need the resolved install on PATH (Settings or well-known).
+    if let Some(path) = resolve_program("elide") {
+        if let Some(parent) = path.parent() {
+            let parent = parent.to_path_buf();
+            if !path_prefixes.contains(&parent) {
+                path_prefixes.push(parent);
+            }
+        }
+    }
+
     if !path_prefixes.is_empty() {
         let current = std::env::var("PATH").unwrap_or_default();
         let mut merged = path_prefixes;
@@ -390,6 +407,32 @@ pub fn resolve_program(id: &str) -> Option<PathBuf> {
         if let Some(path) = crate::config::bundled_jdtls() {
             return Some(path);
         }
+    }
+    if id == "elide" {
+        if let Ok(raw) = std::env::var("ELIDE_BIN") {
+            let path = PathBuf::from(raw);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        if let Some(path) = find_on_path("elide") {
+            return Some(path);
+        }
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            for rel in [".local/share/elide/bin/elide", ".elide/bin/elide"] {
+                let cand = home.join(rel);
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+        for abs in ["/usr/local/bin/elide", "/opt/homebrew/bin/elide"] {
+            let cand = PathBuf::from(abs);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+        return None;
     }
     if id == "gradle" {
         if let Some(path) = configured_path(id) {

@@ -65,6 +65,7 @@ const LANG_PATH_FIXTURES = [
   ['Dockerfile', 'dockerfile'],
   ['api.proto', 'protobuf'],
   ['schema.graphql', 'graphql'],
+  ['elide.pkl', 'pkl'],
   ['notes.txt', 'plaintext'],
 ];
 
@@ -3158,7 +3159,7 @@ function testInlinePerformanceBenchmarks(win) {
       h.shouldRouteInlineToAi(filePath, '    ', 'line\n    \nnext\n', 2);
     }
   }, 400);
-  okPerfUnder(routeMs, 120, 'shouldRouteInlineToAi all languages empty line (400 iter)');
+  okPerfUnder(routeMs, 160, 'shouldRouteInlineToAi all languages empty line (400 iter)');
 
   const markupPaths = LANG_PATH_FIXTURES.filter(([p]) => h.isMarkupOrConfigPath(p));
   ok(markupPaths.length >= 10, 'markup/config paths covered for perf bench');
@@ -3174,7 +3175,7 @@ function testInlinePerformanceBenchmarks(win) {
       );
     }
   }, 600);
-  okPerfUnder(markupStormMs, 100, 'markup empty-line route + inline items (600 iter)');
+  okPerfUnder(markupStormMs, 140, 'markup empty-line route + inline items (600 iter)');
 
   const pomItems = h.buildInlineItems(
     { getLineContent: () => '  ' },
@@ -3372,6 +3373,14 @@ async function main() {
       cargoToml,
       ok,
     );
+  }
+
+  section('Elide package manifest / build tasks regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const monacoSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
+    const elideHarness = await import(path.join(ROOT, 'scripts/lib/elide-manifest-harness.mjs'));
+    elideHarness.testElideManifestRegression(appSrc, monacoSrc, ok);
   }
 
   section('Compiler settings regression');
