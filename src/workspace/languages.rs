@@ -59,6 +59,9 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
     if base == "cmakelists.txt" {
         return Some("cmake");
     }
+    if base == "elide.pkl" || base.ends_with(".pkl") {
+        return Some("pkl");
+    }
     if base.ends_with(".gradle.kts") {
         return Some("kotlin");
     }
@@ -103,6 +106,7 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
         "dockerfile" => "dockerfile",
         "proto" => "protobuf",
         "graphql" | "gql" => "graphql",
+        "pkl" => "pkl",
         _ => return None,
     })
 }
@@ -215,6 +219,7 @@ pub fn file_extensions_for_tool(tool_id: &str) -> &'static [&'static str] {
         "groovy" => &[".groovy", ".gvy", ".gy", ".gsh"],
         "gradle" => &[".gradle", ".gradle.kts", "gradlew"],
         "maven" => &["pom.xml", "mvnw"],
+        "elide" => &[".pkl", "elide.pkl"],
         "python" => &[".py", ".pyw"],
         "ruby" => &[".rb"],
         "bundle" => &[".rb", "Gemfile"],
@@ -550,6 +555,8 @@ mod tests {
         assert_eq!(language_for_path("app/models/user.rb"), Some("ruby"));
         assert_eq!(language_for_path("main.go"), Some("go"));
         assert_eq!(language_for_path("Dockerfile"), Some("dockerfile"));
+        assert_eq!(language_for_path("elide.pkl"), Some("pkl"));
+        assert_eq!(language_for_path("config/project.pkl"), Some("pkl"));
     }
 
     #[test]

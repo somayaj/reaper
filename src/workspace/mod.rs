@@ -10,6 +10,7 @@ mod jdtls;
 mod lsp;
 pub mod terminal;
 mod build_tasks;
+mod elide_pkl;
 mod native_build_tasks;
 mod package_manifest;
 mod classpath;

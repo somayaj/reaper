@@ -1,4 +1,4 @@
-Reaper 0.1.6 (build 470) — macOS split release.
+Reaper 0.1.6 (build 475) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,8 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Elide (`elide.pkl`) Build Tasks:** Open `elide.pkl` to get an Elide tasks panel (like Cargo/Gradle) — inspect/infer lifecycle targets plus `scripts` bridges (`elide build`, Maven/Gradle/Cargo helpers). Configure the binary under Settings → Compiler → Elide (`REAPER_ELIDE`); well-known installs (`~/.local/share/elide/bin/elide`) are discovered automatically and put on `PATH` so tasks run as bare `elide …`. Build **475**.
+- **Pkl syntax highlighting:** Monaco language support for `.pkl` / `elide.pkl`. Build **475**.
 - **Structure / AST panel (Alt+7):** Multi-language outline via tree-sitter (Java, Python, JS/TS, Go, Rust, C/C++, JSON, YAML). Java Structure mode shows class → fields → constructors → methods with icons and modifier tags; click jumps the editor caret without switching to Project. Full AST mode available via toggle. Build **470**.
 - **Java modifier typing:** Typing `private` / `public` / … at a member start prefers the keyword — no more `PrivateKeyEntry` ghost/suggest hijack. Build **470**.
 - **MariaDB password + SSL over SSH:** Pass `--password=` (MariaDB ignores `MYSQL_PWD` and was disabling cert verify as “passwordless”). Tunnel uses TCP; hostname verify softened on loopback while CA still applies; clearer handshake / bastion remote-host errors. Build **469**.

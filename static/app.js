@@ -3559,6 +3559,7 @@ function fileIcon(name) {
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.sql')) return 'sql';
   if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return 'docker';
+  if (lower === 'elide.pkl' || lower.endsWith('.pkl')) return 'elide';
   if (lower === '.gitignore' || lower === '.gitattributes') return 'git';
   return 'file';
 }
@@ -3585,6 +3586,7 @@ function treeIconSvg(kind) {
     go: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="7" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">Go</text></svg>',
     sql: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">SQL</text></svg>',
     docker: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">D</text></svg>',
+    elide: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#2E8B9A" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="7" font-weight="700" fill="#2E8B9A" font-family="Consolas,Menlo,monospace">E</text></svg>',
     git: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#f14c28" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#f14c28" font-family="Consolas,Menlo,monospace">G</text></svg>',
     file: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2.5h5.5L12 5v8.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z" fill="currentColor" fill-opacity=".28"/><path d="M9.5 2.5V5H12" stroke="currentColor" stroke-opacity=".55" stroke-width=".8"/></svg>',
   };
@@ -4476,6 +4478,8 @@ function isProjectBuildFile(path) {
   if (base === 'cargo.toml') return true;
   // Dart / Flutter
   if (base === 'pubspec.yaml') return true;
+  // Elide (scripts + native :targets)
+  if (base === 'elide.pkl') return true;
   // Generic Gradle/Kotlin files
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   // Generic TOML (project manifests)
@@ -4508,6 +4512,7 @@ function buildTasksPanelTitle(buildTool) {
     pdm: 'PDM tasks',
     pipenv: 'Pipenv tasks',
     docker: 'Docker tasks',
+    elide: 'Elide tasks',
   };
   return labels[buildTool] || 'Build tasks';
 }
@@ -4524,7 +4529,7 @@ function buildTaskWorkdir(modulePath) {
   const manifestNames = new Set([
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
     'package.json', 'pyproject.toml', 'manage.py', 'go.mod', 'rakefile', 'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
-    'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'pubspec.yaml',
+    'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'pubspec.yaml', 'elide.pkl', 'cargo.toml',
     'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'dockerfile',
   ]);
   if (!manifestNames.has(lowerBase) && !lowerBase.startsWith('dockerfile.')) return undefined;
@@ -4537,6 +4542,7 @@ function packageManifestKindForPath(path) {
   const normalized = path.replace(/\\/g, '/');
   const base = normalized.split('/').pop() || '';
   const lower = base.toLowerCase();
+  // elide.pkl is build-tasks only (not Package Manifest) — like pom/gradle.
   if (lower === 'cargo.toml') return 'cargo';
   if (lower === 'pubspec.yaml') return 'dart';
   if (lower === 'pyproject.toml') return 'python';
@@ -4603,6 +4609,7 @@ function projectProfileSupportsBuildTasks(path) {
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   if (base === 'cargo.toml') return true;
   if (base === 'pubspec.yaml') return true;
+  if (base === 'elide.pkl') return true;
   
   return true;
 }
@@ -5453,6 +5460,7 @@ function buildTaskModuleKeyFromPath(path) {
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json', 'rakefile',
     'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
     'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'go.mod',
+    'elide.pkl', 'cargo.toml', 'pubspec.yaml',
   ]);
   if (buildManifestNames.has(lower)) {
     return p.slice(0, p.length - base.length).replace(/\/$/, '');
@@ -5471,6 +5479,7 @@ function buildTaskNodeModuleKey(node) {
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json', 'rakefile',
     'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
     'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'go.mod',
+    'elide.pkl', 'cargo.toml', 'pubspec.yaml',
   ]);
   if (buildManifestNames.has(lower)) {
     return p.slice(0, p.length - base.length).replace(/\/$/, '');
