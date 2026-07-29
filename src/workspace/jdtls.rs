@@ -98,8 +98,14 @@ pub fn is_enabled() -> bool {
     match std::env::var("REAPER_USE_JDTLS").as_deref() {
         Ok("0") | Ok("false") | Ok("no") => false,
         Ok("1") | Ok("true") | Ok("yes") => true,
-        _ => crate::toolchain::resolve_program("jdtls").is_some(),
+        _ => jdtls_launch_available(),
     }
+}
+
+fn jdtls_launch_available() -> bool {
+    crate::config::bundled_jdtls_root().is_some()
+        || crate::config::bundled_jdtls().is_some()
+        || crate::toolchain::resolve_program("jdtls").is_some()
 }
 
 /// Path to the Microsoft java-debug Eclipse plugin JAR (bundled or VS Code extension).
@@ -112,7 +118,7 @@ pub fn java_debug_plugin_jar() -> Option<PathBuf> {
 
 /// True when jdtls can host an in-process Java DAP session via the bundled plugin.
 pub fn java_debug_via_jdtls_available() -> bool {
-    is_enabled() && java_debug_plugin_jar().is_some()
+    java_debug_plugin_jar().is_some() && jdtls_launch_available()
 }
 
 /// Cap for resolveMainClass / classpath during debug start. Keep well under the
@@ -1796,16 +1802,8 @@ fn jdtls_initialization_options() -> Value {
 }
 
 fn find_vscode_java_debug_plugin_jar() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    for root in [
-        format!("{home}/.cursor/extensions"),
-        format!("{home}/.vscode/extensions"),
-    ] {
-        let dir = PathBuf::from(&root);
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for root in crate::platform::editor_extension_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -2071,6 +2069,9 @@ fn lsp_request_with_retry(
 }
 
 fn bundled_jdtls_root() -> Option<PathBuf> {
+    if let Some(root) = crate::config::bundled_jdtls_root() {
+        return Some(root);
+    }
     let bin = crate::config::bundled_jdtls()?;
     let root = bin.parent()?.parent()?.to_path_buf();
     (root.join("plugins").is_dir()).then_some(root)
@@ -2085,6 +2086,10 @@ fn jdtls_shared_config_dir(base: &Path) -> PathBuf {
             base.join("config_mac")
         };
     }
+    #[cfg(windows)]
+    {
+        return base.join("config_win");
+    }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
         return base.join("config_linux_arm");
@@ -2093,7 +2098,7 @@ fn jdtls_shared_config_dir(base: &Path) -> PathBuf {
     {
         return base.join("config_linux");
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         return base.join("config_linux");
     }

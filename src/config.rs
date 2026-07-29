@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -203,15 +203,29 @@ pub fn bundled_node() -> Option<PathBuf> {
 /// Temurin JDK 21 shipped inside Reaper.app (runs jdtls only — not the project JDK).
 pub fn bundled_jdtls_java_home() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mac_os) = exe.parent() {
-            let resources = mac_os.join("../Resources");
-            let arch = crate::platform::macos_host_arch();
-            for candidate in [
-                resources.join(format!("jdk-21-{arch}/Contents/Home")),
-                resources.join("jdk-21/Contents/Home"),
-            ] {
-                if crate::jdk::jdk_has_tool(&candidate, "java") {
-                    return Some(candidate.canonicalize().unwrap_or(candidate));
+        if let Some(exe_dir) = exe.parent() {
+            #[cfg(windows)]
+            {
+                for candidate in [
+                    exe_dir.join("jdk-21"),
+                    exe_dir.join("jdk").join("jdk-21"),
+                ] {
+                    if crate::jdk::jdk_has_tool(&candidate, "java") {
+                        return Some(candidate.canonicalize().unwrap_or(candidate));
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let resources = exe_dir.join("../Resources");
+                let arch = crate::platform::macos_host_arch();
+                for candidate in [
+                    resources.join(format!("jdk-21-{arch}/Contents/Home")),
+                    resources.join("jdk-21/Contents/Home"),
+                ] {
+                    if crate::jdk::jdk_has_tool(&candidate, "java") {
+                        return Some(candidate.canonicalize().unwrap_or(candidate));
+                    }
                 }
             }
         }
@@ -221,6 +235,13 @@ pub fn bundled_jdtls_java_home() -> Option<PathBuf> {
 
 fn dev_bundled_jdtls_java_home() -> Option<PathBuf> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    #[cfg(windows)]
+    {
+        let home = base.join("jdk-windows-x64");
+        if crate::jdk::jdk_has_tool(&home, "java") {
+            return Some(home);
+        }
+    }
     let arch = crate::platform::macos_host_arch();
     let home = base.join(format!("jdk-macos-{arch}/Contents/Home"));
     if crate::jdk::jdk_has_tool(&home, "java") {
@@ -233,42 +254,101 @@ fn dev_bundled_jdtls_java_home() -> Option<PathBuf> {
 /// Eclipse JDT Language Server shipped inside Reaper.app (Java navigation).
 pub fn bundled_jdtls() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mac_os) = exe.parent() {
-            let bundled = mac_os.join("../Resources/jdtls/bin/jdtls");
-            if bundled.is_file() {
-                return Some(bundled.canonicalize().unwrap_or(bundled));
+        if let Some(exe_dir) = exe.parent() {
+            #[cfg(windows)]
+            {
+                let root = exe_dir.join("jdtls");
+                if root.join("plugins").is_dir() {
+                    return Some(root.join("bin/jdtls"));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let bundled = exe_dir.join("../Resources/jdtls/bin/jdtls");
+                if bundled.is_file() {
+                    return Some(bundled.canonicalize().unwrap_or(bundled));
+                }
             }
         }
     }
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("resources/jdtls/bin/jdtls");
-    if dev.is_file() {
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/jdtls");
+    if dev.join("plugins").is_dir() {
+        return Some(dev.join("bin/jdtls"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mac_dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/jdtls/bin/jdtls");
+        if mac_dev.is_file() {
+            return Some(mac_dev);
+        }
+    }
+    None
+}
+
+/// Root of a vendored jdtls distribution (contains `plugins/` and `config_*`).
+pub fn bundled_jdtls_root() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for candidate in [exe_dir.join("jdtls")] {
+                if candidate.join("plugins").is_dir() {
+                    return Some(candidate.canonicalize().unwrap_or(candidate));
+                }
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/jdtls");
+    if dev.join("plugins").is_dir() {
         return Some(dev);
     }
     None
 }
 
+fn has_bundled_debug_adapters(dir: &Path) -> bool {
+    dir.join("java-debug").is_dir() || dir.join("js-debug").is_dir()
+}
+
 /// Root directory for debug adapters shipped inside Reaper.app (or dev resources).
 pub fn bundled_debug_adapters_dir() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(mac_os) = exe.parent() {
-            let resources = mac_os.join("../Resources");
-            let arch = crate::platform::macos_host_arch();
-            for candidate in [
-                resources.join(format!("debug-adapters-{arch}")),
-                resources.join("debug-adapters"),
-            ] {
-                if candidate.join("js-debug").is_dir() {
-                    return Some(candidate.canonicalize().unwrap_or(candidate));
+        if let Some(exe_dir) = exe.parent() {
+            #[cfg(windows)]
+            {
+                for candidate in [exe_dir.join("debug-adapters"), exe_dir.join("debug-adapters-x64")]
+                {
+                    if has_bundled_debug_adapters(&candidate) {
+                        return Some(candidate.canonicalize().unwrap_or(candidate));
+                    }
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                let resources = exe_dir.join("../Resources");
+                let arch = crate::platform::macos_host_arch();
+                for candidate in [
+                    resources.join(format!("debug-adapters-{arch}")),
+                    resources.join("debug-adapters"),
+                ] {
+                    if has_bundled_debug_adapters(&candidate) {
+                        return Some(candidate.canonicalize().unwrap_or(candidate));
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let dev =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/debug-adapters-windows-x64");
+        if has_bundled_debug_adapters(&dev) {
+            return Some(dev);
         }
     }
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
         "resources/debug-adapters-macos-{}",
         crate::platform::macos_host_arch()
     ));
-    if dev.join("js-debug").is_dir() {
+    if has_bundled_debug_adapters(&dev) {
         return Some(dev);
     }
     None
@@ -295,6 +375,15 @@ pub fn bundled_debugpy_dir() -> Option<PathBuf> {
             None
         }
     })
+}
+
+pub fn bundled_java_debug_dap() -> Option<PathBuf> {
+    let path = bundled_debug_adapters_dir()?.join("java-debug/debugAdapter.js");
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 pub fn bundled_java_debug_plugin_jar() -> Option<PathBuf> {

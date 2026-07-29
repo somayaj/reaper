@@ -6585,7 +6585,7 @@ fn java_home_from_java_cmd() -> Result<PathBuf> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("java.home = ") {
             let home = PathBuf::from(rest.trim());
-            if home.is_dir() {
+            if crate::jdk::jdk_has_tool(&home, "java") {
                 return Ok(home);
             }
         }

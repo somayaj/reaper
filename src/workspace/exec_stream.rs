@@ -60,8 +60,24 @@ fn pump_reader<R: Read + Send + 'static>(
 }
 
 pub(crate) fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    stream_process_inner(cmd, tx, false)
+}
+
+pub(crate) fn stream_process_user(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
+    stream_process_inner(cmd, tx, true)
+}
+
+fn stream_process_inner(
+    cmd: &mut Command,
+    tx: &async_mpsc::Sender<ExecStreamEvent>,
+    user_process: bool,
+) -> Result<i32> {
     process_registry::configure_command(cmd);
-    crate::platform::hide_console_window(cmd);
+    if user_process {
+        crate::platform::hide_console_window_user(cmd);
+    } else {
+        crate::platform::hide_console_window(cmd);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let label = cmd
@@ -283,13 +299,27 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
         step: Some("javac".into()),
     });
 
-    let mut javac = Command::new("javac");
-    javac
-        .current_dir(ws)
-        .args(["-d", ".reaper/java-out", "-encoding", "UTF-8", &rel]);
-    jdk::apply_java_env(&mut javac);
-    let compile_code = stream_process(&mut javac, &tx)?;
-    if compile_code != 0 {
+    let compile = super::java::plain_javac_output(ws, &rel, false)?;
+    if !compile.status.success() {
+        let stdout = String::from_utf8_lossy(&compile.stdout);
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        if !stdout.is_empty() {
+            let _ = emit(&tx, ExecStreamEvent {
+                t: "stdout".into(),
+                text: Some(stdout.into_owned()),
+                code: None,
+                step: Some("javac".into()),
+            });
+        }
+        if !stderr.is_empty() {
+            let _ = emit(&tx, ExecStreamEvent {
+                t: "stderr".into(),
+                text: Some(stderr.into_owned()),
+                code: None,
+                step: Some("javac".into()),
+            });
+        }
+        let compile_code = compile.status.code().unwrap_or(-1);
         let _ = emit(&tx, ExecStreamEvent {
             t: "exit".into(),
             text: None,
@@ -297,6 +327,24 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
             step: Some("javac".into()),
         });
         return Ok(compile_code);
+    }
+    let stdout = String::from_utf8_lossy(&compile.stdout);
+    let stderr = String::from_utf8_lossy(&compile.stderr);
+    if !stdout.is_empty() {
+        let _ = emit(&tx, ExecStreamEvent {
+            t: "stdout".into(),
+            text: Some(stdout.into_owned()),
+            code: None,
+            step: Some("javac".into()),
+        });
+    }
+    if !stderr.is_empty() {
+        let _ = emit(&tx, ExecStreamEvent {
+            t: "stderr".into(),
+            text: Some(stderr.into_owned()),
+            code: None,
+            step: Some("javac".into()),
+        });
     }
 
     let _ = emit(&tx, ExecStreamEvent {
@@ -306,11 +354,8 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
         step: Some("java".into()),
     });
 
-    let mut java = Command::new("java");
-    java.current_dir(ws)
-        .args(["-cp", ".reaper/java-out", &info.qualified_name]);
-    jdk::apply_java_env(&mut java);
-    let run_code = stream_process(&mut java, &tx)?;
+    let mut java = super::java::plain_java_run_command(ws, &info.qualified_name)?;
+    let run_code = stream_process_user(&mut java, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
         t: "exit".into(),
         text: None,

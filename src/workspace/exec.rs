@@ -45,7 +45,9 @@ pub fn run_tool_command(cwd: &Path, tool_id: &str, args: &[&str]) -> Result<GitO
 
 /// Run java/javac with the configured JDK (Settings → Toolchains), not system default.
 pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
-    let mut cmd = crate::platform::command(program);
+    let home = jdk::effective_java_home()?;
+    let exe = jdk::jdk_bin(&home, program);
+    let mut cmd = crate::platform::command_user_process(&exe);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())

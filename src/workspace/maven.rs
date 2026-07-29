@@ -122,6 +122,38 @@ pub fn resolve_maven_command(project_root: &Path) -> MavenCommand {
     }
 }
 
+/// True when the resolved Maven command can actually be executed on this machine.
+pub fn maven_command_available(cmd: &MavenCommand) -> bool {
+    let wrapper_name = cmd.program.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if wrapper_name.eq_ignore_ascii_case("mvnw.cmd") || wrapper_name == "mvnw" {
+        return cmd.cwd.join(wrapper_name).is_file();
+    }
+    program_on_path(cmd.program.to_string_lossy().as_ref())
+}
+
+fn program_on_path(program: &str) -> bool {
+    #[cfg(windows)]
+    {
+        crate::platform::command("where")
+            .arg(program)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("which")
+            .arg(program)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Ensure `mvnw` is executable (git checkouts sometimes drop the bit).
 pub fn ensure_mvnw_executable(root: &Path) -> Result<()> {
     #[cfg(unix)]

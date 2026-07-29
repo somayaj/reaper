@@ -218,15 +218,24 @@ pub fn start_debug(
     }
 
     // Prebuild + adapter spawn without holding the session lock.
-    for cmd in &plan.pre_commands {
-        let prebuild_cwd = plan.prebuild_cwd.as_deref().unwrap_or(ws);
-        tracing::info!("debug start: prebuild in {}", prebuild_cwd.display());
-        run_prebuild(prebuild_cwd, cmd)?;
+    for step in &plan.prebuild_steps {
+        match step {
+            adapters::PrebuildStep::Shell { cwd, command } => {
+                tracing::info!("debug start: prebuild in {}", cwd.display());
+                run_prebuild_shell(cwd, command)?;
+            }
+            adapters::PrebuildStep::PlainJavac { cwd, rel_path } => {
+                tracing::info!("debug start: javac prebuild in {}", cwd.display());
+                run_plain_javac_prebuild(cwd, rel_path)?;
+            }
+        }
     }
 
     if plan.use_jdtls_java {
         tracing::info!("debug start: resolving Java launch via jdtls");
         adapters::finalize_java_launch_plan(&mut plan, ws, &rel_path)?;
+    } else {
+        adapters::finalize_standalone_java_launch_plan(&mut plan, ws, &rel_path)?;
     }
     adapters::resolve_launch_program_after_prebuild(&mut plan, ws, &rel_path)?;
 
@@ -690,11 +699,27 @@ fn stop_session_inner(guard: &mut DebugSession) -> Result<()> {
     Ok(())
 }
 
-fn run_prebuild(cwd: &Path, command: &str) -> Result<()> {
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
+fn run_plain_javac_prebuild(cwd: &Path, rel_path: &str) -> Result<()> {
+    let output = workspace::java::plain_javac_output(cwd, rel_path, true)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or("(no compiler output)");
+    let clipped: String = detail.chars().take(2000).collect();
+    bail!("prebuild failed: javac -g -d .reaper/java-out {rel_path}\n{clipped}");
+}
+
+fn run_prebuild_shell(cwd: &Path, command: &str) -> Result<()> {
+    use std::process::Stdio;
+    let shell = crate::platform::login_shell();
+    let mut child = crate::platform::command(&shell);
+    crate::platform::configure_shell_script(&mut child, command);
+    let mut child = child
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -23,12 +23,16 @@ pub struct AdapterSpec {
 }
 
 #[derive(Clone, Debug)]
+pub enum PrebuildStep {
+    Shell { cwd: PathBuf, command: String },
+    PlainJavac { cwd: PathBuf, rel_path: String },
+}
+
+#[derive(Clone, Debug)]
 pub struct LaunchPlan {
     pub language: String,
     pub adapter: AdapterSpec,
-    pub pre_commands: Vec<String>,
-    /// Working directory for `pre_commands` (defaults to workspace root).
-    pub prebuild_cwd: Option<PathBuf>,
+    pub prebuild_steps: Vec<PrebuildStep>,
     pub launch: Value,
     /// Connect to Java DAP over TCP via jdtls instead of spawning a stdio adapter.
     pub use_jdtls_java: bool,
@@ -152,8 +156,7 @@ pub fn build_launch_plan(
         return Ok(LaunchPlan {
             language: "Python".into(),
             adapter,
-            pre_commands: Vec::new(),
-            prebuild_cwd: None,
+            prebuild_steps: Vec::new(),
             launch,
             use_jdtls_java: false,
         });
@@ -174,8 +177,7 @@ pub fn build_launch_plan(
         return Ok(LaunchPlan {
             language: "Go".into(),
             adapter,
-            pre_commands: Vec::new(),
-            prebuild_cwd: None,
+            prebuild_steps: Vec::new(),
             launch: json!({
                 "type": "go",
                 "request": "launch",
@@ -218,8 +220,7 @@ pub fn build_launch_plan(
                 "JavaScript".into()
             },
             adapter,
-            pre_commands: Vec::new(),
-            prebuild_cwd: None,
+            prebuild_steps: Vec::new(),
             launch,
             use_jdtls_java: false,
         });
@@ -243,8 +244,10 @@ pub fn build_launch_plan(
         return Ok(LaunchPlan {
             language: "Rust".into(),
             adapter,
-            pre_commands: vec![pre],
-            prebuild_cwd: Some(cargo_cwd.clone()),
+            prebuild_steps: vec![PrebuildStep::Shell {
+                cwd: cargo_cwd.clone(),
+                command: pre,
+            }],
             launch: json!({
                 "type": "lldb",
                 "request": "launch",
@@ -279,8 +282,10 @@ pub fn build_launch_plan(
             return Ok(LaunchPlan {
                 language: if is_cpp { "C++".into() } else { "C".into() },
                 adapter,
-                pre_commands: vec![cmake.prebuild],
-                prebuild_cwd: Some(cmake.cwd),
+                prebuild_steps: vec![PrebuildStep::Shell {
+                    cwd: cmake.cwd,
+                    command: cmake.prebuild,
+                }],
                 launch: json!({
                     "type": "lldb",
                     "request": "launch",
@@ -318,8 +323,10 @@ pub fn build_launch_plan(
         return Ok(LaunchPlan {
             language: if is_cpp { "C++".into() } else { "C".into() },
             adapter,
-            pre_commands: vec![pre],
-            prebuild_cwd: None,
+            prebuild_steps: vec![PrebuildStep::Shell {
+                cwd: ws.to_path_buf(),
+                command: pre,
+            }],
             launch: json!({
                 "type": "lldb",
                 "request": "launch",
@@ -352,9 +359,8 @@ pub fn build_launch_plan(
             true,
             resolve_java_launch,
         )?;
-        if let Some((cwd, cmd)) = java_compile_prebuild(ws, rel_path, &ctx.project) {
-            plan.pre_commands.push(cmd);
-            plan.prebuild_cwd = Some(cwd);
+        if let Some(step) = java_compile_prebuild(ws, rel_path, &ctx.project) {
+            plan.prebuild_steps.push(step);
         }
         return Ok(plan);
     }
@@ -388,9 +394,8 @@ pub fn build_launch_plan(
             true,
             resolve_java_launch,
         )?;
-        if let Some((cwd, cmd)) = java_compile_prebuild(ws, rel_path, &ctx.project) {
-            plan.pre_commands.push(cmd);
-            plan.prebuild_cwd = Some(cwd);
+        if let Some(step) = java_compile_prebuild(ws, rel_path, &ctx.project) {
+            plan.prebuild_steps.push(step);
         }
         return Ok(plan);
     }
@@ -418,9 +423,8 @@ pub fn build_launch_plan(
             true,
             resolve_java_launch,
         )?;
-        if let Some((cwd, cmd)) = java_compile_prebuild(ws, rel_path, &ctx.project) {
-            plan.pre_commands.push(cmd);
-            plan.prebuild_cwd = Some(cwd);
+        if let Some(step) = java_compile_prebuild(ws, rel_path, &ctx.project) {
+            plan.prebuild_steps.push(step);
         }
         return Ok(plan);
     }
@@ -594,7 +598,7 @@ fn java_compile_prebuild(
     ws: &Path,
     rel_path: &str,
     project: &crate::workspace::run_project::RunProjectInfo,
-) -> Option<(PathBuf, String)> {
+) -> Option<PrebuildStep> {
     if !project.has_project {
         return plain_java_javac_prebuild(ws, rel_path);
     }
@@ -607,18 +611,27 @@ fn java_compile_prebuild(
                 .and_then(|m| m)
                 .unwrap_or_default();
             let program = cmd.program.to_string_lossy().into_owned();
-            Some((cmd.cwd, gradle_debug_classes_cmd(&program, &module)))
+            Some(PrebuildStep::Shell {
+                cwd: cmd.cwd,
+                command: gradle_debug_classes_cmd(&program, &module),
+            })
         }
         "maven" => {
             let module_root = maven::find_maven_root(ws, rel_path).ok()??;
             let cmd = maven::resolve_maven_command(&module_root);
+            if !maven::maven_command_available(&cmd) {
+                return plain_java_javac_prebuild(ws, rel_path);
+            }
             let program = cmd.program.to_string_lossy().into_owned();
             let pl_suffix = if cmd.project_args.is_empty() {
                 String::new()
             } else {
                 format!(" {}", cmd.project_args.join(" "))
             };
-            Some((cmd.cwd, maven_debug_compile_cmd(&program, &pl_suffix)))
+            Some(PrebuildStep::Shell {
+                cwd: cmd.cwd,
+                command: maven_debug_compile_cmd(&program, &pl_suffix),
+            })
         }
         // Unknown build tool — still try single-file javac so Debug isn't empty.
         _ => plain_java_javac_prebuild(ws, rel_path),
@@ -627,22 +640,14 @@ fn java_compile_prebuild(
 
 /// Compile a plain `.java` file (no Maven/Gradle) into `.reaper/java-out` with debug symbols.
 /// Mirrors Run's `javac -d .reaper/java-out` path so Debug has classes on the classpath.
-fn plain_java_javac_prebuild(ws: &Path, rel_path: &str) -> Option<(PathBuf, String)> {
+fn plain_java_javac_prebuild(ws: &Path, rel_path: &str) -> Option<PrebuildStep> {
     if !rel_path.ends_with(".java") {
         return None;
     }
-    let rel = rel_path.replace('\\', "/");
-    let javac = crate::jdk::javac_path()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "javac".into());
-    // -g: lines,vars,source so locals/watch work (same idea as Maven debuglevel).
-    let cmd = format!(
-        "mkdir -p .reaper/java-out && {} -g -d .reaper/java-out -encoding UTF-8 {}",
-        shell_quote(&javac),
-        shell_quote(&rel)
-    );
-    Some((ws.to_path_buf(), cmd))
+    Some(PrebuildStep::PlainJavac {
+        cwd: ws.to_path_buf(),
+        rel_path: rel_path.replace('\\', "/"),
+    })
 }
 
 /// DAP launch when jdtls classpath resolve fails but we already compiled to `.reaper/java-out`.
@@ -652,16 +657,12 @@ pub fn plain_java_launch_fallback(
     rel_path: &str,
     stop_on_entry: bool,
 ) -> Option<Value> {
-    if gradle::find_gradle_root(ws, rel_path)
-        .ok()
-        .flatten()
-        .is_some()
-        || maven::find_maven_root(ws, rel_path).ok().flatten().is_some()
-    {
-        return None;
-    }
     let out = ws.join(".reaper/java-out");
     if !out.is_dir() {
+        return None;
+    }
+    // Prefer Maven/Gradle output when a real build already published classes.
+    if has_published_java_classes(ws, rel_path) {
         return None;
     }
     let project_name = ws
@@ -688,6 +689,62 @@ pub fn plain_java_launch_fallback(
         }
     }
     Some(launch)
+}
+
+fn has_published_java_classes(ws: &Path, rel_path: &str) -> bool {
+    if let Some(root) = maven::find_maven_root(ws, rel_path).ok().flatten() {
+        if root.join("target/classes").is_dir() {
+            return true;
+        }
+    }
+    if let Some(root) = gradle::find_gradle_root(ws, rel_path).ok().flatten() {
+        for sub in ["build/classes/java/main", "build/classes/kotlin/main"] {
+            if root.join(sub).is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Fill classpaths for the bundled / VS Code node java-debug adapter after prebuild.
+pub fn finalize_standalone_java_launch_plan(
+    plan: &mut LaunchPlan,
+    ws: &Path,
+    rel_path: &str,
+) -> Result<()> {
+    if plan.use_jdtls_java {
+        return Ok(());
+    }
+    if !matches!(
+        plan.language.as_str(),
+        "Java" | "Kotlin" | "Java Test" | "Spring Boot"
+    ) {
+        return Ok(());
+    }
+    let main_class = plan
+        .launch
+        .get("mainClass")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .context("Java launch missing mainClass")?;
+    let stop_on_entry = plan
+        .launch
+        .get("stopOnEntry")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if let Some(fallback) =
+        plain_java_launch_fallback(ws, &main_class, rel_path, stop_on_entry)
+    {
+        plan.launch = fallback;
+    } else if let Ok(home) = crate::jdk::effective_java_home() {
+        let java = crate::jdk::java_bin(&home);
+        if java.is_file() {
+            plan.launch["javaExec"] = json!(java.display().to_string());
+        }
+    }
+    Ok(())
 }
 
 fn java_launch_plan(
@@ -729,8 +786,7 @@ fn java_launch_plan(
     Ok(LaunchPlan {
         language: language.into(),
         adapter,
-        pre_commands: Vec::new(),
-        prebuild_cwd: None,
+        prebuild_steps: Vec::new(),
         launch,
         use_jdtls_java,
     })
@@ -838,9 +894,16 @@ pub fn resolve_launch_program_after_prebuild(
     rel_path: &str,
 ) -> Result<()> {
     if plan.language == "Rust" {
-        let is_test = plan.pre_commands.iter().any(|c| c.contains("test --no-run"));
+        let is_test = plan
+            .prebuild_steps
+            .iter()
+            .any(|step| matches!(step, PrebuildStep::Shell { command, .. } if command.contains("test --no-run")));
         let cwd = plan
-            .prebuild_cwd
+            .prebuild_steps
+            .iter()
+            .find_map(|step| match step {
+                PrebuildStep::Shell { cwd, .. } | PrebuildStep::PlainJavac { cwd, .. } => Some(cwd.clone()),
+            })
             .clone()
             .unwrap_or_else(|| ws.to_path_buf());
         let binary = guess_rust_binary(&cwd, rel_path, is_test)?;
@@ -868,11 +931,22 @@ fn resolve_java_debug_backend() -> Result<(AdapterSpec, bool)> {
             true,
         ));
     }
+    if let Some(path) = config::bundled_java_debug_dap() {
+        return Ok((
+            adapter(
+                "java-debug (bundled)",
+                node_command(),
+                vec![path.display().to_string()],
+            ),
+            false,
+        ));
+    }
     if let Some(path) = find_vscode_adapter("vscjava.vscode-java-debug", "debugAdapter.js") {
         return Ok((adapter("java-debug", node_command(), vec![path]), false));
     }
     bail!(
-        "Java debugging requires bundled jdtls + java-debug (Reaper.app) or the VS Code Java Debug extension"
+        "Java debugging requires JDK 21+ to run jdtls, plus bundled java-debug (next to reaper.exe) \
+         or the VS Code Java Debug extension. Set JDK 17 in Settings → Java for your project."
     )
 }
 
@@ -890,16 +964,8 @@ fn find_workspace_js_debug(ws: &Path) -> Option<String> {
 }
 
 fn find_vscode_adapter(extension_prefix: &str, file_suffix: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    for root in [
-        format!("{home}/.cursor/extensions"),
-        format!("{home}/.vscode/extensions"),
-    ] {
-        let dir = PathBuf::from(&root);
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for root in crate::platform::editor_extension_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -1050,11 +1116,14 @@ fn node_command() -> String {
 }
 
 fn which(cmd: &str) -> bool {
-    command_ok("which", &[cmd])
+    command_ok(
+        if cfg!(windows) { "where" } else { "which" },
+        &[cmd],
+    )
 }
 
-fn command_ok(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
+fn command_ok(program: &str, args: &[&str]) -> bool {
+    crate::platform::command(program)
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1137,11 +1206,13 @@ mod tests {
         )
         .unwrap();
         let project = crate::workspace::run_project::RunProjectInfo::default();
-        let (cwd, cmd) = java_compile_prebuild(&dir, rel, &project).expect("plain prebuild");
-        assert_eq!(cwd, dir);
-        assert!(cmd.contains(".reaper/java-out"), "{cmd}");
-        assert!(cmd.contains(" -g "), "{cmd}");
-        assert!(cmd.contains("src/Hello.java") || cmd.contains("'src/Hello.java'"), "{cmd}");
+        match java_compile_prebuild(&dir, rel, &project).expect("plain prebuild") {
+            PrebuildStep::PlainJavac { cwd, rel_path } => {
+                assert_eq!(cwd, dir);
+                assert_eq!(rel_path, rel);
+            }
+            other => panic!("expected plain javac prebuild, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1167,9 +1238,31 @@ mod tests {
     }
 
     #[test]
-    fn plain_java_launch_fallback_skips_maven_projects() {
+    fn plain_java_launch_fallback_skips_maven_when_target_classes_exist() {
         let dir = std::env::temp_dir().join(format!(
             "reaper-plain-java-skip-maven-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/main/java")).unwrap();
+        std::fs::create_dir_all(dir.join(".reaper/java-out")).unwrap();
+        std::fs::create_dir_all(dir.join("target/classes")).unwrap();
+        std::fs::write(
+            dir.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion>
+            <groupId>t</groupId><artifactId>t</artifactId><version>1</version></project>"#,
+        )
+        .unwrap();
+        assert!(
+            plain_java_launch_fallback(&dir, "t.App", "src/main/java/App.java", true).is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_java_launch_fallback_allows_maven_without_target_classes() {
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-plain-java-maven-fallback-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1182,7 +1275,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plain_java_launch_fallback(&dir, "t.App", "src/main/java/App.java", true).is_none()
+            plain_java_launch_fallback(&dir, "t.App", "src/main/java/App.java", true).is_some()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

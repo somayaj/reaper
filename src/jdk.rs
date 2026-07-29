@@ -195,6 +195,14 @@ pub fn list_installed_jdks() -> Vec<JdkInstall> {
         }
     }
 
+    for install in scan_windows_jdks() {
+        let key = PathBuf::from(&install.path);
+        let key = key.canonicalize().unwrap_or(key);
+        if seen.insert(key) {
+            installs.push(install);
+        }
+    }
+
     if installs.is_empty() {
         if let Ok(home) = detect_java_home_auto() {
             if let Ok(version) = java_version_string(&home) {
@@ -208,6 +216,39 @@ pub fn list_installed_jdks() -> Vec<JdkInstall> {
     }
 
     installs
+}
+
+#[cfg(windows)]
+fn scan_windows_jdks() -> Vec<JdkInstall> {
+    let mut installs = Vec::new();
+    for base in [
+        PathBuf::from(r"C:\Program Files\Microsoft"),
+        PathBuf::from(r"C:\Program Files\Java"),
+        PathBuf::from(r"C:\Program Files\Eclipse Adoptium"),
+        PathBuf::from(r"C:\Program Files\Amazon Corretto"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !jdk_has_tool(&path, "java") {
+                continue;
+            }
+            let version = java_version_string(&path).unwrap_or_else(|_| "?".into());
+            installs.push(JdkInstall {
+                path: path.display().to_string(),
+                version: version.clone(),
+                label: format!("{version} — {}", path.file_name().and_then(|n| n.to_str()).unwrap_or("JDK")),
+            });
+        }
+    }
+    installs
+}
+
+#[cfg(not(windows))]
+fn scan_windows_jdks() -> Vec<JdkInstall> {
+    Vec::new()
 }
 
 #[cfg(target_os = "macos")]
@@ -252,8 +293,19 @@ pub fn jdk_settings_view(
     let effective_version = effective
         .as_ref()
         .and_then(|p| java_version_string(p).ok());
-    let gradle = gradle_java_home().ok();
-    let gradle_version = gradle.as_ref().and_then(|p| java_version_string(p).ok());
+    let (gradle, gradle_version) = if let Some(ref home) = effective {
+        if java_major_version(home).is_some_and(|m| (11..=25).contains(&m)) {
+            (Some(home.clone()), effective_version.clone())
+        } else {
+            let gradle = gradle_java_home().ok();
+            let gradle_version = gradle.as_ref().and_then(|p| java_version_string(p).ok());
+            (gradle, gradle_version)
+        }
+    } else {
+        let gradle = gradle_java_home().ok();
+        let gradle_version = gradle.as_ref().and_then(|p| java_version_string(p).ok());
+        (gradle, gradle_version)
+    };
 
     JdkSettingsView {
         configured: configured.is_some(),

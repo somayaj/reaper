@@ -53,10 +53,22 @@ pub(crate) fn windows_console_creation_flags() -> u32 {
     CREATE_NO_WINDOW | DETACHED_PROCESS
 }
 
+#[cfg(windows)]
+pub(crate) fn windows_user_process_creation_flags() -> u32 {
+    CREATE_NO_WINDOW
+}
+
 /// Spawn helper — always hides the console on Windows.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     hide_console_window(&mut cmd);
+    cmd
+}
+
+/// Like [`command`], but avoids `DETACHED_PROCESS` so GUI apps (Swing/JavaFX) can open windows.
+pub fn command_user_process(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    hide_console_window_user(&mut cmd);
     cmd
 }
 
@@ -93,6 +105,32 @@ pub fn async_command_path(program: &std::path::Path) -> tokio::process::Command 
     async_command(program)
 }
 
+/// User profile directory (`USERPROFILE` on Windows, `HOME` elsewhere).
+pub fn user_home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(std::path::PathBuf::from)
+    }
+}
+
+/// Cursor / VS Code extension install roots.
+pub fn editor_extension_roots() -> Vec<std::path::PathBuf> {
+    let Some(home) = user_home_dir() else {
+        return Vec::new();
+    };
+    [
+        home.join(".cursor").join("extensions"),
+        home.join(".vscode").join("extensions"),
+    ]
+    .into_iter()
+    .filter(|p| p.is_dir())
+    .collect()
+}
+
 /// Interactive shell for PTY / one-shot `-lc` wrappers.
 pub fn login_shell() -> String {
     #[cfg(windows)]
@@ -102,6 +140,26 @@ pub fn login_shell() -> String {
     #[cfg(not(windows))]
     {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
+    }
+}
+
+/// Quote a token for one-shot shell scripts (`cmd /C` on Windows, `bash -lc` on Unix).
+pub fn shell_quote_for_script(s: &str) -> String {
+    #[cfg(windows)]
+    {
+        if s.contains(' ') || s.contains('"') || s.contains('&') || s.contains('|') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if s.contains(' ') || s.contains('\'') {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        } else {
+            s.to_string()
+        }
     }
 }
 
@@ -123,6 +181,16 @@ pub fn hide_console_window(cmd: &mut std::process::Command) {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(windows_console_creation_flags());
+    }
+    let _ = cmd;
+}
+
+/// Hide the console for user-facing programs that may still open GUI windows.
+pub fn hide_console_window_user(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_user_process_creation_flags());
     }
     let _ = cmd;
 }

@@ -123,6 +123,35 @@ if [[ -f "$ROOT/resources/node-windows-x64/node.exe" ]]; then
   cp "$ROOT/resources/node-windows-x64/node.exe" "$STAGE/node/node.exe"
 fi
 
+echo "== Vendoring java-debug (windows-x64) =="
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoProfile -File "$ROOT/scripts/vendor-debug-adapters-windows.ps1"
+  pwsh -NoProfile -File "$ROOT/scripts/vendor-jdtls-windows.ps1"
+  pwsh -NoProfile -File "$ROOT/scripts/vendor-jdk-windows.ps1"
+elif command -v powershell >/dev/null 2>&1; then
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$ROOT/scripts/vendor-debug-adapters-windows.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$ROOT/scripts/vendor-jdtls-windows.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$ROOT/scripts/vendor-jdk-windows.ps1"
+else
+  echo "Warning: PowerShell not found — skipping java-debug/jdtls/jdk vendor" >&2
+fi
+JAVA_DEBUG_SRC="$ROOT/resources/debug-adapters-windows-x64/java-debug"
+if [[ -d "$JAVA_DEBUG_SRC/server" ]]; then
+  echo "== Staging bundled java-debug plugin =="
+  mkdir -p "$STAGE/debug-adapters"
+  rsync -a --delete "$JAVA_DEBUG_SRC/" "$STAGE/debug-adapters/java-debug/"
+fi
+JDTLS_SRC="$ROOT/resources/jdtls"
+if [[ -d "$JDTLS_SRC/plugins" ]]; then
+  echo "== Staging bundled jdtls =="
+  rsync -a --delete "$JDTLS_SRC/" "$STAGE/jdtls/"
+fi
+JDK21_SRC="$ROOT/resources/jdk-windows-x64"
+if [[ -x "$JDK21_SRC/bin/java.exe" || -f "$JDK21_SRC/bin/java.exe" ]]; then
+  echo "== Staging bundled JDK 21 for jdtls =="
+  rsync -a --delete "$JDK21_SRC/" "$STAGE/jdk-21/"
+fi
+
 if [[ -f "$ROOT/cursor-bridge/server.mjs" ]]; then
   echo "== Staging cursor-bridge (with node_modules; offline-ready) =="
   # Same as macOS: ship deps in the package. Runtime install hits npm/Cloudflare

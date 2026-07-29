@@ -14,8 +14,10 @@
 /resources/node-macos-*/
 /resources/node-windows-x64/
 /resources/jdk-macos-*/
+/resources/jdk-windows-x64/
 /resources/jdtls/
 /resources/debug-adapters-macos-*/
+/resources/debug-adapters-windows-x64/
 /resources/.cache/
 .reaper/
 dist/

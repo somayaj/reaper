@@ -1469,13 +1469,21 @@ pub fn try_stream_build_tool_java_main(
     }
     let main = java::parse_java_main(source, &super::safe_join(ws, &rel_path)?)?;
     match project.build_tool.as_str() {
-        "maven" => Ok(Some(stream_maven_java_main(
-            ws,
-            &rel_path,
-            &main.qualified_name,
-            source,
-            tx,
-        )?)),
+        "maven" => {
+            let module_root = super::maven::find_maven_root(ws, &rel_path)?
+                .ok_or_else(|| anyhow::anyhow!("not inside a Maven project"))?;
+            let mvn = super::maven::resolve_maven_command(&module_root);
+            if !super::maven::maven_command_available(&mvn) {
+                return Ok(None);
+            }
+            Ok(Some(stream_maven_java_main(
+                ws,
+                &rel_path,
+                &main.qualified_name,
+                source,
+                tx,
+            )?))
+        }
         "gradle" => Ok(Some(stream_gradle_java_main(
             ws,
             &rel_path,
@@ -1513,7 +1521,8 @@ fn stream_maven_java_main(
         &format!("$ java -cp <resolved Maven classpath> {main_class}\n"),
         "java",
     );
-    let mut java = std::process::Command::new("java");
+    let home = crate::jdk::effective_java_home()?;
+    let mut java = crate::platform::command_user_process(crate::jdk::java_bin(&home));
     java.current_dir(&module_root)
         .args(["-cp", &cp, main_class]);
     crate::jdk::apply_java_env(&mut java);
@@ -1552,7 +1561,8 @@ fn stream_gradle_java_main(
         &format!("$ java -cp <resolved Gradle classpath> {main_class}\n"),
         "java",
     );
-    let mut java = std::process::Command::new("java");
+    let home = crate::jdk::effective_java_home()?;
+    let mut java = crate::platform::command_user_process(crate::jdk::java_bin(&home));
     java.current_dir(&module_root)
         .args(["-cp", &cp, main_class]);
     crate::jdk::apply_java_env(&mut java);

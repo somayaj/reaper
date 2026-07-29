@@ -1,9 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::git::GitOutput;
+use crate::jdk;
 
 use super::{read_file, safe_join};
 use super::exec::run_java_command;
@@ -54,20 +56,18 @@ pub fn run_java_main(ws: &Path, rel_path: &str) -> Result<GitOutput> {
     let source = read_file(ws, rel_path)?;
     let info = parse_java_main(&source, &file_path)?;
 
-    let out_dir = ws.join(".reaper/java-out");
-    std::fs::create_dir_all(&out_dir)?;
-
     // safe_join canonicalizes paths; use the validated relative path for javac
     let rel = rel_path.replace('\\', "/");
 
     let mut compile_log = String::new();
     compile_log.push_str(&format!("$ javac -d .reaper/java-out {rel}\n"));
 
-    let compile = run_java_command(
-        ws,
-        "javac",
-        &["-d", ".reaper/java-out", "-encoding", "UTF-8", &rel],
-    )?;
+    let compile = plain_javac_output(ws, &rel, false)?;
+    let compile = GitOutput {
+        stdout: String::from_utf8_lossy(&compile.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&compile.stderr).into_owned(),
+        exit_code: compile.status.code().unwrap_or(-1),
+    };
     compile_log.push_str(&compile.stdout);
     compile_log.push_str(&compile.stderr);
 
@@ -127,6 +127,53 @@ pub fn parse_java_main(source: &str, file_path: &Path) -> Result<JavaMainInfo> {
         package,
         qualified_name,
     })
+}
+
+/// True when the source likely launches a desktop window (Swing/AWT/JavaFX).
+pub fn is_gui_java_source(source: &str) -> bool {
+    source.contains("javax.swing")
+        || source.contains("java.awt")
+        || source.contains("javafx.")
+        || source.contains("org.eclipse.swt")
+}
+
+/// Compile a single `.java` file into `.reaper/java-out` using the configured JDK.
+pub fn plain_javac_output(cwd: &Path, rel_path: &str, debug: bool) -> Result<Output> {
+    let home = jdk::effective_java_home()?;
+    std::fs::create_dir_all(cwd.join(".reaper/java-out"))?;
+    let rel = rel_path.replace('\\', "/");
+    let mut cmd = crate::platform::command_user_process(jdk::javac_bin(&home));
+    cmd.current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut args = vec![
+        "-d".to_string(),
+        ".reaper/java-out".to_string(),
+        "-encoding".to_string(),
+        "UTF-8".to_string(),
+    ];
+    if debug {
+        args.push("-g".to_string());
+    }
+    args.push(rel);
+    cmd.args(&args);
+    jdk::apply_java_env(&mut cmd);
+    cmd.output()
+        .with_context(|| format!("failed to run javac in {}", cwd.display()))
+}
+
+fn java_user_command(cwd: &Path, args: &[&str]) -> Result<Command> {
+    let home = jdk::effective_java_home()?;
+    let mut cmd = crate::platform::command_user_process(jdk::java_bin(&home));
+    cmd.current_dir(cwd)
+        .args(args);
+    jdk::apply_java_env(&mut cmd);
+    Ok(cmd)
+}
+
+/// Run a main class from `.reaper/java-out` using the configured JDK.
+pub fn plain_java_run_command(cwd: &Path, main_class: &str) -> Result<Command> {
+    java_user_command(cwd, &["-cp", ".reaper/java-out", main_class])
 }
 
 fn has_static_main(source: &str) -> bool {
