@@ -2410,6 +2410,35 @@ mod path_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn build_tree_level_never_returns_verbatim_or_absolute_paths() {
+        let root = std::env::temp_dir().join(format!("reaper-tree-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/main")).unwrap();
+        std::fs::write(root.join("src/main/App.java"), "class App {}").unwrap();
+        let ws = root.canonicalize().unwrap();
+        for nodes in [
+            build_tree_level(&ws, None).unwrap(),
+            build_tree_level(&ws, Some("src")).unwrap(),
+            build_tree_level(&ws, Some("src/main")).unwrap(),
+        ] {
+            for node in nodes {
+                assert!(
+                    !node.path.starts_with("//?/"),
+                    "tree path must be workspace-relative, got {}",
+                    node.path
+                );
+                assert!(
+                    !node.path.contains(":\\") && !node.path.starts_with('/'),
+                    "tree path must not be absolute, got {}",
+                    node.path
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn merge_reference_locations_dedupes_by_path_line_column() {
         let a = ReferenceLocation {

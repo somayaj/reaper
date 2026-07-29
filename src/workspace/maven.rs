@@ -147,7 +147,7 @@ pub fn run_maven(project_root: &Path, args: &[&str]) -> Result<std::process::Out
         bail!("Reaper is shutting down");
     }
     let cmd = resolve_maven_command(project_root);
-    let mut process = Command::new(&cmd.program);
+    let mut process = crate::platform::command_path(&cmd.program);
     process
         .current_dir(&cmd.cwd)
         .args(&cmd.project_args)
@@ -1187,7 +1187,7 @@ pub fn run_maven_from(cwd: &Path, args: &[&str]) -> Result<std::process::Output>
         } else {
             (system_maven_program(), cwd.to_path_buf())
         };
-    let mut process = Command::new(&program);
+    let mut process = crate::platform::command_path(&program);
     process.current_dir(&run_cwd).args(args);
     crate::process_registry::configure_command(&mut process);
     jdk::apply_java_env(&mut process);

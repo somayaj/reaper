@@ -148,7 +148,7 @@ fn java_home_for_formatter() -> Result<PathBuf> {
 
 fn try_java_jar_stdin(cwd: &Path, jar: &Path, content: &str) -> Result<String> {
     let java_home = java_home_for_formatter()?;
-    let java = java_home.join("bin/java");
+    let java = crate::jdk::java_bin(&java_home);
     if !java.is_file() {
         bail!("JDK not found for Google Java Format (missing {})", java.display());
     }

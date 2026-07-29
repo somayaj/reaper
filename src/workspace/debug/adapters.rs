@@ -682,7 +682,7 @@ pub fn plain_java_launch_fallback(
         "shortenCommandLine": "auto",
     });
     if let Ok(home) = crate::jdk::effective_java_home() {
-        let java = home.join("bin/java");
+        let java = crate::jdk::java_bin(&home);
         if java.is_file() {
             launch["javaExec"] = json!(java.display().to_string());
         }

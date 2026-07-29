@@ -28,6 +28,30 @@ pub fn set_configured_java_release(release: Option<u32>) {
     }
 }
 
+/// Resolve a JDK tool under `bin/` (`java.exe` on Windows, `java` elsewhere).
+pub fn jdk_bin(home: &Path, tool: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let exe = home.join("bin").join(format!("{tool}.exe"));
+        if exe.is_file() {
+            return exe;
+        }
+    }
+    home.join("bin").join(tool)
+}
+
+pub fn jdk_has_tool(home: &Path, tool: &str) -> bool {
+    jdk_bin(home, tool).is_file()
+}
+
+pub fn java_bin(home: &Path) -> PathBuf {
+    jdk_bin(home, "java")
+}
+
+pub fn javac_bin(home: &Path) -> PathBuf {
+    jdk_bin(home, "javac")
+}
+
 pub fn configured_java_release() -> Option<u32> {
     release_override_slot()
         .read()
@@ -194,7 +218,7 @@ fn parse_macos_java_home_line(line: &str) -> Option<JdkInstall> {
     }
     let (left, path) = trimmed.rsplit_once(' ')?;
     let path = path.trim();
-    if !path.starts_with('/') || !Path::new(path).join("bin/java").is_file() {
+    if !path.starts_with('/') || !jdk_has_tool(Path::new(path), "java") {
         return None;
     }
     let version = left
@@ -333,7 +357,7 @@ fn detect_java_home_for_max(max_major: u32) -> Result<PathBuf> {
 }
 
 pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
-    let java = home.join("bin/java");
+    let java = java_bin(home);
     if !java.is_file() {
         bail!("JDK not found at {} (missing bin/java)", home.display());
     }
@@ -342,7 +366,7 @@ pub fn validate_java_home(home: &Path) -> Result<PathBuf> {
 
 /// `javac` from the same JDK as [`effective_java_home`] (bundled JDK in Reaper.app).
 pub fn javac_path() -> Result<PathBuf> {
-    let javac = effective_java_home()?.join("bin/javac");
+    let javac = javac_bin(&effective_java_home()?);
     if !javac.is_file() {
         bail!("JDK missing bin/javac at {}", javac.display());
     }
@@ -374,7 +398,7 @@ fn detect_java_home_for_versions(versions: &[&str]) -> Result<PathBuf> {
             {
                 if out.status.success() {
                     let home = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-                    if home.join("bin/java").is_file() {
+                    if jdk_has_tool(&home, "java") {
                         return Ok(home);
                     }
                 }
@@ -391,7 +415,7 @@ fn detect_java_home_for_versions(versions: &[&str]) -> Result<PathBuf> {
 
     if let Ok(home) = std::env::var("JAVA_HOME") {
         let path = PathBuf::from(&home);
-        if path.join("bin/java").is_file() {
+        if jdk_has_tool(&path, "java") {
             return Ok(path);
         }
     }
@@ -420,7 +444,7 @@ fn java_home_from_java_cmd() -> Result<PathBuf> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("java.home = ") {
             let home = PathBuf::from(rest.trim());
-            if home.join("bin/java").is_file() {
+            if jdk_has_tool(&home, "java") {
                 return Ok(home);
             }
         }
@@ -429,7 +453,7 @@ fn java_home_from_java_cmd() -> Result<PathBuf> {
 }
 
 pub fn java_version_string(home: &Path) -> Result<String> {
-    let java = home.join("bin/java");
+    let java = java_bin(home);
     let out = crate::platform::command(&java)
         .arg("-version")
         .stdout(Stdio::null())
@@ -495,10 +519,14 @@ pub fn apply_java_home(cmd: &mut Command, home: &Path) {
     if bin.is_dir() {
         let path = std::env::var("PATH").unwrap_or_default();
         let prefix = bin.to_string_lossy();
+        #[cfg(windows)]
+        let sep = ";";
+        #[cfg(not(windows))]
+        let sep = ":";
         if path.is_empty() {
             cmd.env("PATH", prefix.as_ref());
         } else {
-            cmd.env("PATH", format!("{prefix}:{path}"));
+            cmd.env("PATH", format!("{prefix}{sep}{path}"));
         }
     }
 }
@@ -506,7 +534,121 @@ pub fn apply_java_home(cmd: &mut Command, home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::path::PathBuf;
+    use std::process::Command;
+
+    fn temp_jdk_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("reaper-jdk-test-{name}-{}", std::process::id()))
+    }
+
+    fn write_fake_jdk(root: &Path) {
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        #[cfg(windows)]
+        {
+            std::fs::write(root.join("bin/java.exe"), b"").unwrap();
+            std::fs::write(root.join("bin/javac.exe"), b"").unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::write(root.join("bin/java"), b"").unwrap();
+            std::fs::write(root.join("bin/javac"), b"").unwrap();
+        }
+    }
+
+    fn cleanup(root: &Path) {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_java_home_accepts_platform_bin_layout() {
+        let root = temp_jdk_root("valid");
+        cleanup(&root);
+        write_fake_jdk(&root);
+        assert!(validate_java_home(&root).is_ok());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn validate_java_home_rejects_missing_java_binary() {
+        let root = temp_jdk_root("missing-java");
+        cleanup(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        assert!(validate_java_home(&root).is_err());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn java_bin_resolves_platform_executable_name() {
+        let root = temp_jdk_root("java-bin");
+        cleanup(&root);
+        write_fake_jdk(&root);
+        #[cfg(windows)]
+        assert_eq!(java_bin(&root), root.join("bin/java.exe"));
+        #[cfg(not(windows))]
+        assert_eq!(java_bin(&root), root.join("bin/java"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn javac_path_resolves_platform_executable_name() {
+        let root = temp_jdk_root("javac-bin");
+        cleanup(&root);
+        write_fake_jdk(&root);
+        set_configured_java_home(Some(root.clone()));
+        let javac = javac_path().expect("javac_path");
+        #[cfg(windows)]
+        assert_eq!(javac, root.join("bin/javac.exe"));
+        #[cfg(not(windows))]
+        assert_eq!(javac, root.join("bin/javac"));
+        set_configured_java_home(None);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn apply_java_home_prepends_bin_with_platform_separator() {
+        let root = temp_jdk_root("path-sep");
+        cleanup(&root);
+        write_fake_jdk(&root);
+        let mut cmd = Command::new("echo");
+        apply_java_home(&mut cmd, &root);
+        let path = cmd
+            .get_envs()
+            .find_map(|(key, val)| {
+                if key == OsStr::new("PATH") {
+                    val.map(|v| v.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            })
+            .expect("PATH env");
+        let bin = root.join("bin").to_string_lossy().into_owned();
+        assert!(
+            path.starts_with(&bin),
+            "PATH should start with JDK bin ({bin}), got {path}"
+        );
+        #[cfg(windows)]
+        assert!(
+            path.contains(';'),
+            "Windows PATH should use ; separator: {path}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            path.contains(':'),
+            "Unix PATH should use : separator: {path}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn validate_java_home_accepts_windows_exe_layout() {
+        if let Ok(home) = std::env::var("JAVA_HOME") {
+            let path = PathBuf::from(home);
+            if jdk_has_tool(&path, "java") {
+                assert!(validate_java_home(&path).is_ok());
+            }
+        }
+    }
 
     #[test]
     fn homebrew_openjdk21_path_when_installed() {

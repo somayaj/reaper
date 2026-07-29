@@ -303,3 +303,15 @@ pub fn wait_on_child(child: &mut Child) -> std::io::Result<ExitStatus> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(windows)]
+    fn configure_command_uses_hidden_console_flags() {
+        assert_eq!(
+            crate::platform::windows_console_creation_flags(),
+            0x0800_0000 | 0x0000_0008
+        );
+    }
+}

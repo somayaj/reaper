@@ -210,7 +210,7 @@ pub fn bundled_jdtls_java_home() -> Option<PathBuf> {
                 resources.join(format!("jdk-21-{arch}/Contents/Home")),
                 resources.join("jdk-21/Contents/Home"),
             ] {
-                if candidate.join("bin/java").is_file() {
+                if crate::jdk::jdk_has_tool(&candidate, "java") {
                     return Some(candidate.canonicalize().unwrap_or(candidate));
                 }
             }
@@ -223,7 +223,7 @@ fn dev_bundled_jdtls_java_home() -> Option<PathBuf> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
     let arch = crate::platform::macos_host_arch();
     let home = base.join(format!("jdk-macos-{arch}/Contents/Home"));
-    if home.join("bin/java").is_file() {
+    if crate::jdk::jdk_has_tool(&home, "java") {
         Some(home)
     } else {
         None
@@ -365,4 +365,19 @@ fn discover_repos_inner(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn gui_config_uses_plain_http_on_windows() {
+        let cfg = Config::from_env();
+        assert!(
+            !cfg.uses_tls,
+            "Windows GUI should use HTTP loopback (uses_tls=false)"
+        );
+    }
 }

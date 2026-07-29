@@ -233,7 +233,7 @@ pub fn stream_gradle_command(
         step: Some("gradle".into()),
     });
 
-    let mut command = Command::new(&cmd.program);
+    let mut command = crate::platform::command_path(&cmd.program);
     command.args(&arg_refs).current_dir(&cmd.cwd);
     if let Ok(home) = super::gradle::gradle_java_home_for_project(&cmd.cwd) {
         jdk::apply_java_home(&mut command, &home);
@@ -364,7 +364,7 @@ pub fn stream_maven_command(
         step: Some("maven".into()),
     });
 
-    let mut command = Command::new(&cmd.program);
+    let mut command = crate::platform::command_path(&cmd.program);
     command.args(&arg_refs).current_dir(&cmd.cwd);
     jdk::apply_java_env(&mut command);
     let code = stream_process(&mut command, &tx)?;

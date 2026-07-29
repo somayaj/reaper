@@ -2134,7 +2134,7 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     }
 
     let java_home = crate::jdk::jdtls_java_home().context("JDK 21+ required for jdtls")?;
-    let java = java_home.join("bin").join("java");
+    let java = crate::jdk::java_bin(&java_home);
     if !java.is_file() {
         bail!("java executable not found at {}", java.display());
     }
@@ -2207,7 +2207,7 @@ fn spawn_bundled_jdtls_java(base: &Path, ws: &Path, data_dir: &Path) -> Result<C
     ensure_bundled_jdtls_configuration(base)?;
 
     let java_home = crate::jdk::jdtls_java_home().context("JDK 21+ required for jdtls")?;
-    let java = java_home.join("bin").join("java");
+    let java = crate::jdk::java_bin(&java_home);
     if !java.is_file() {
         bail!("java executable not found at {}", java.display());
     }
@@ -2265,7 +2265,7 @@ fn spawn_jdtls(ws: &Path) -> Result<Child> {
     let mut cmd = crate::platform::command(&jdtls);
     cmd.arg("-data").arg(data_dir.as_os_str());
     if let Ok(home) = crate::jdk::jdtls_java_home() {
-        let java = home.join("bin").join("java");
+        let java = crate::jdk::java_bin(&home);
         if java.is_file() {
             cmd.arg("--java-executable").arg(java);
         }

@@ -6573,7 +6573,7 @@ fn jdk_home_candidates() -> Result<Vec<PathBuf>> {
 }
 
 fn java_home_from_java_cmd() -> Result<PathBuf> {
-    let out = Command::new("java")
+    let out = crate::platform::command("java")
         .args(["-XshowSettings:properties", "-version"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -6599,7 +6599,7 @@ fn toolchain_java_home() -> Result<PathBuf> {
 
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
-    let status = Command::new("unzip")
+    let status = crate::platform::command("unzip")
         .args([
             "-qo",
             zip_path
@@ -7081,7 +7081,7 @@ fn read_path_class_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn read_jar_entry_bytes(jar: &Path, entry: &str) -> Option<Vec<u8>> {
-    let out = Command::new("unzip")
+    let out = crate::platform::command("unzip")
         .arg("-p")
         .arg(jar)
         .arg(entry)
@@ -7120,7 +7120,7 @@ fn should_index_jar_entry(fqcn: &str, kind: &str) -> bool {
 }
 
 fn list_jar_class_entries(jar: &Path) -> Result<Vec<(String, String)>> {
-    let out = Command::new("jar")
+    let out = crate::platform::command("jar")
         .arg("tf")
         .arg(jar)
         .output()

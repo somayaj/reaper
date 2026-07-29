@@ -219,11 +219,7 @@ pub fn run_gradle_with_command(cmd: &GradleCommand, args: &[&str]) -> Result<Git
         bail!("Reaper is shutting down");
     }
 
-    let mut process = Command::new(
-        cmd.program
-            .to_str()
-            .with_context(|| format!("gradle program path is not valid UTF-8: {}", cmd.program.display()))?,
-    );
+    let mut process = crate::platform::command_path(&cmd.program);
     process
         .args(args)
         .current_dir(&cmd.cwd)

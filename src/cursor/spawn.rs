@@ -227,7 +227,7 @@ fn find_node() -> Result<PathBuf> {
 
 #[cfg(windows)]
 fn which_node_windows() -> Result<PathBuf> {
-    let mut cmd = std::process::Command::new("where.exe");
+    let mut cmd = crate::platform::command("where.exe");
     cmd.arg("node");
     crate::platform::hide_console_window(&mut cmd);
     let output = cmd.output().context("failed to run where.exe node")?;
@@ -286,7 +286,7 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
 
     let install_script = dir.join("install-deps.mjs");
     if install_script.is_file() {
-        let mut install = Command::new(node);
+        let mut install = crate::platform::async_command(node);
         install.arg("install-deps.mjs").current_dir(dir);
         crate::platform::hide_console_window_async(&mut install);
         let status = install
@@ -303,7 +303,7 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         tracing::warn!("install-deps.mjs failed or incomplete; trying npm");
     }
 
-    let mut npm_ver = Command::new("npm");
+    let mut npm_ver = crate::platform::async_command("npm");
     npm_ver
         .arg("--version")
         .stdout(Stdio::null())
@@ -315,7 +315,7 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        let mut npm_install = Command::new("npm");
+        let mut npm_install = crate::platform::async_command("npm");
         npm_install.arg("install").current_dir(dir);
         crate::platform::hide_console_window_async(&mut npm_install);
         let status = npm_install
@@ -366,14 +366,34 @@ pub async fn reclaim_bridge_port() {
 async fn kill_listeners_on_port(port: u16) {
     #[cfg(windows)]
     {
-        let script = format!(
-            "$conns = Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue; \
-             foreach ($c in $conns) {{ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }}"
-        );
-        let mut kill = Command::new("powershell.exe");
-        kill.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
-        crate::platform::hide_console_window_async(&mut kill);
-        let _ = kill.status().await;
+        use std::collections::HashSet;
+
+        let mut netstat = crate::platform::async_command("netstat");
+        netstat.arg("-ano");
+        let output = match netstat.output().await {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+
+        let needle = format!(":{port}");
+        let mut pids = HashSet::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if !line.contains("LISTENING") || !line.contains(&needle) {
+                continue;
+            }
+            let Some(pid) = line.split_whitespace().last() else {
+                continue;
+            };
+            if pid.chars().all(|c| c.is_ascii_digit()) && pid != "0" {
+                pids.insert(pid.to_string());
+            }
+        }
+
+        for pid in pids {
+            let mut kill = crate::platform::async_command("taskkill");
+            kill.args(["/F", "/PID", &pid]);
+            let _ = kill.status().await;
+        }
     }
     #[cfg(not(windows))]
     {
@@ -445,7 +465,7 @@ pub async fn ensure_bridge_running() -> Result<()> {
     save_bridge_port(bridge_port);
     tracing::info!("Starting Cursor bridge on {url}…");
 
-    let mut child_cmd = Command::new(&node);
+    let mut child_cmd = crate::platform::async_command(&node);
     child_cmd
         .arg("server.mjs")
         .current_dir(&dir)
