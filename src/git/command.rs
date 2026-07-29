@@ -18,13 +18,12 @@ impl GitOutput {
 }
 
 pub fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<GitOutput> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::platform::command("git");
     cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    crate::platform::hide_console_window(&mut cmd);
 
     let output = cmd
         .output()

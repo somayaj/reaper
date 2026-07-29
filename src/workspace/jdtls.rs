@@ -2152,7 +2152,7 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&warm_data);
     std::fs::create_dir_all(&warm_data)?;
 
-    let mut cmd = Command::new(&java);
+    let mut cmd = crate::platform::command(&java);
     cmd.current_dir(base);
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
@@ -2219,7 +2219,7 @@ fn spawn_bundled_jdtls_java(base: &Path, ws: &Path, data_dir: &Path) -> Result<C
         config.to_string_lossy()
     );
 
-    let mut cmd = Command::new(&java);
+    let mut cmd = crate::platform::command(&java);
     cmd.current_dir(ws);
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
@@ -2262,7 +2262,7 @@ fn spawn_jdtls(ws: &Path) -> Result<Child> {
          or set REAPER_JDTLS in Settings → Compilers"
     })?;
 
-    let mut cmd = Command::new(&jdtls);
+    let mut cmd = crate::platform::command(&jdtls);
     cmd.arg("-data").arg(data_dir.as_os_str());
     if let Ok(home) = crate::jdk::jdtls_java_home() {
         let java = home.join("bin").join("java");

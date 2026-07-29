@@ -31,7 +31,9 @@ impl Config {
             metadata_dir: data_dir.join("metadata"),
             settings_path: data_dir.join("settings.json"),
             ui_preferences_path: data_dir.join("ui-preferences.json"),
-            uses_tls: !running_in_app_bundle(),
+            // macOS .app and Windows WebView2 GUI use plain HTTP loopback.
+            // Headless `--server` / `--no-gui` still advertise HTTPS (+ TLS in server mode).
+            uses_tls: wants_tls_from_args(),
             data_dir,
             static_dir,
         }
@@ -148,6 +150,25 @@ pub fn running_in_app_bundle() -> bool {
                 .unwrap_or(false)
         })
         .unwrap_or(false)
+}
+
+fn wants_tls_from_args() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let server_mode = args
+        .iter()
+        .any(|a| a == "--server" || a == "--no-gui");
+    if server_mode {
+        return true;
+    }
+    // Native GUI: never point WebView at https:// against the plain axum listener.
+    #[cfg(target_os = "windows")]
+    {
+        return false;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        !running_in_app_bundle()
+    }
 }
 
 /// Node.js shipped with the desktop package (Cursor agent bridge; not the host install).

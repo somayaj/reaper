@@ -46,7 +46,7 @@ pub fn validate_gradle_path(path: &str) -> Result<PathBuf> {
 }
 
 pub fn gradle_version_string(binary: &Path) -> Result<String> {
-    let out = Command::new(binary)
+    let out = crate::platform::command(binary)
         .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

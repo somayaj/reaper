@@ -112,9 +112,10 @@ pub fn stream_shell(ws: &Path, cwd_rel: Option<&str>, command: &str, tx: async_m
         bail!("command required");
     }
     let work_dir = shell::resolve_work_dir(ws, cwd_rel)?;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut cmd = Command::new(&shell);
-    cmd.args(["-lc", command]).current_dir(work_dir);
+    let shell = crate::platform::login_shell();
+    let mut cmd = crate::platform::command(&shell);
+    crate::platform::configure_shell_script(&mut cmd, command);
+    cmd.current_dir(work_dir);
     toolchain::apply_compiler_env(&mut cmd);
     let code = stream_process(&mut cmd, &tx)?;
     let _ = emit(&tx, ExecStreamEvent {
@@ -127,7 +128,7 @@ pub fn stream_shell(ws: &Path, cwd_rel: Option<&str>, command: &str, tx: async_m
 }
 
 pub fn stream_git(ws: &Path, args: &[&str], step: Option<&str>, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::platform::command("git");
     cmd.args(args).current_dir(ws);
     if let Some(step) = step {
         let _ = emit(&tx, ExecStreamEvent {

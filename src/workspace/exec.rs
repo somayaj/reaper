@@ -17,7 +17,7 @@ pub fn run_command_with_env(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Result<GitOutput> {
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::platform::command(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -25,7 +25,6 @@ pub fn run_command_with_env(
     for (key, value) in env {
         cmd.env(key, value);
     }
-    crate::platform::hide_console_window(&mut cmd);
 
     let output = cmd
         .output()
@@ -46,7 +45,7 @@ pub fn run_tool_command(cwd: &Path, tool_id: &str, args: &[&str]) -> Result<GitO
 
 /// Run java/javac with the configured JDK (Settings → Toolchains), not system default.
 pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitOutput> {
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::platform::command(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -66,10 +65,10 @@ pub fn run_java_command(cwd: &Path, program: &str, args: &[&str]) -> Result<GitO
 
 /// Run a command through bash login shell (PATH, nvm, brew, etc. in GUI apps).
 pub fn run_shell_command(cwd: &Path, command: &str) -> Result<GitOutput> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut cmd = Command::new(&shell);
-    cmd.args(["-lc", command])
-        .current_dir(cwd)
+    let shell = crate::platform::login_shell();
+    let mut cmd = crate::platform::command(&shell);
+    crate::platform::configure_shell_script(&mut cmd, command);
+    cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     toolchain::apply_compiler_env(&mut cmd);
@@ -135,10 +134,10 @@ pub fn try_shell_stdin_command(cwd: &Path, program: &str, args: &[&str], content
         command.push(' ');
         command.push_str(&shell_quote(arg));
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut child = Command::new(&shell)
-        .arg("-lc")
-        .arg(&command)
+    let shell = crate::platform::login_shell();
+    let mut child = crate::platform::command(&shell);
+    crate::platform::configure_shell_script(&mut child, &command);
+    let mut child = child
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -164,7 +163,8 @@ pub fn try_stdin_command(cwd: &Path, program: &str, args: &[&str], content: &str
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new(program)
+    let mut child = crate::platform::command(program);
+    let mut child = child
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::piped())

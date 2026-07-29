@@ -531,7 +531,7 @@ pub fn tool_version(id: &str, path: &Path) -> Option<String> {
         "gradle" => crate::gradle::gradle_version_string(path).ok(),
         "maven" => crate::maven::maven_version_string(path).ok(),
         _ => {
-            let out = Command::new(path)
+            let out = crate::platform::command(path)
                 .arg("--version")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

@@ -36,6 +36,44 @@ fn macos_uname_is_arm64() -> bool {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Spawn helper — always hides the console on Windows.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    hide_console_window(&mut cmd);
+    cmd
+}
+
+/// Async spawn helper — always hides the console on Windows.
+pub fn async_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    hide_console_window_async(&mut cmd);
+    cmd
+}
+
+/// Interactive shell for PTY / one-shot `-lc` wrappers.
+pub fn login_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
+    }
+}
+
+/// Configure a one-shot shell command (`bash -lc` on Unix, `cmd /C` on Windows).
+pub fn configure_shell_script(cmd: &mut std::process::Command, script: &str) {
+    #[cfg(windows)]
+    {
+        cmd.arg("/C").arg(script);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.args(["-lc", script]);
+    }
+}
+
 /// Prevent Windows from flashing a console window for background child processes.
 pub fn hide_console_window(cmd: &mut std::process::Command) {
     #[cfg(windows)]
@@ -58,12 +96,42 @@ pub fn hide_console_window_async(cmd: &mut tokio::process::Command) {
 
 /// Drop any inherited/attached console so GUI launches never leave a cmd window up.
 #[cfg(windows)]
-pub fn free_console() {
+pub fn hide_attached_console() {
     #[link(name = "kernel32")]
     extern "system" {
+        fn GetConsoleWindow() -> *mut core::ffi::c_void;
         fn FreeConsole() -> i32;
     }
+    #[link(name = "user32")]
+    extern "system" {
+        fn ShowWindow(hwnd: *mut core::ffi::c_void, n_cmd_show: i32) -> i32;
+    }
+    const SW_HIDE: i32 = 0;
     unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
         let _ = FreeConsole();
     }
+}
+
+/// Alias for [`hide_attached_console`].
+#[cfg(windows)]
+pub fn free_console() {
+    hide_attached_console();
+}
+
+/// Load the embedded 32×32 PNG generated from logo-icon.svg at build time.
+#[cfg(target_os = "windows")]
+pub fn app_window_icon() -> Option<tao::window::Icon> {
+    use std::io::BufReader;
+
+    const ICON_PNG: &[u8] = include_bytes!("../packaging/windows/icon-32.png");
+    let decoder = png::Decoder::new(BufReader::new(ICON_PNG));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let bytes = &buf[..info.buffer_size()];
+    tao::window::Icon::from_rgba(bytes.to_vec(), info.width, info.height).ok()
 }

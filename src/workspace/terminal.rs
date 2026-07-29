@@ -74,8 +74,9 @@ pub fn spawn_pty_session(
     };
     let pair = pty_system.openpty(size).context("openpty")?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let shell = crate::platform::login_shell();
     let mut cmd = CommandBuilder::new(&shell);
+    #[cfg(not(windows))]
     cmd.arg("-l");
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");

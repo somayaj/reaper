@@ -194,6 +194,7 @@ fn create_window(
         })
         .build(&window)?;
 
+    sync_webview_bounds(&window, &webview);
     Ok((window, webview))
 }
 
@@ -271,6 +272,23 @@ fn place_window_in_work_area(window: &tao::window::Window) {
     window.set_outer_position(tao::dpi::PhysicalPosition::new(x, y));
 }
 
+/// Keep the WebView2 surface matched to the native window (required on resize/maximize).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn sync_webview_bounds(window: &tao::window::Window, webview: &wry::WebView) {
+    use tao::dpi::{LogicalPosition, LogicalSize};
+
+    let scale = window.scale_factor();
+    let size = window.inner_size().to_logical::<u32>(scale);
+    let _ = webview.set_bounds(wry::Rect {
+        position: LogicalPosition::new(0, 0).into(),
+        size: LogicalSize::new(size.width.max(1), size.height.max(1)).into(),
+    });
+    let _ = webview.evaluate_script(
+        "window.dispatchEvent(new Event('resize'));\
+         if(typeof window.__reaperSyncLayout==='function')window.__reaperSyncLayout();",
+    );
+}
+
 #[cfg(target_os = "windows")]
 fn create_window(
     launch: &GuiLaunch,
@@ -284,11 +302,14 @@ fn create_window(
 
     let title = window_title_from_url(&launch.webview_url);
     // Windows: normal OS title bar (no macOS transparent chrome).
-    let window = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
-        .with_visible(false)
-        .build(event_loop)?;
+        .with_visible(false);
+    if let Some(icon) = crate::platform::app_window_icon() {
+        window_builder = window_builder.with_window_icon(Some(icon));
+    }
+    let window = window_builder.build(event_loop)?;
     place_window_in_work_area(&window);
 
     let window_id = window.id();
@@ -340,6 +361,7 @@ window.__reaperSplashAt=Date.now();
         })
         .build(&window)?;
 
+    sync_webview_bounds(&window, &webview);
     Ok((window, webview))
 }
 
@@ -370,26 +392,31 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                window_id,
-                ..
-            } => {
-                webviews.remove(&window_id);
-                if webviews.is_empty() {
-                    *control_flow = ControlFlow::Exit;
+            Event::WindowEvent { event, window_id, .. } => match event {
+                WindowEvent::CloseRequested => {
+                    webviews.remove(&window_id);
+                    if webviews.is_empty() {
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
+                WindowEvent::Resized(_) => {
+                    if let Some((window, webview)) = webviews.get(&window_id) {
+                        sync_webview_bounds(window, webview);
+                    }
+                }
+                _ => {}
             }
             Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
-                if let Some((window, _)) = webviews.get(&window_id) {
+                if let Some((window, webview)) = webviews.get(&window_id) {
                     #[cfg(target_os = "windows")]
                     place_window_in_work_area(window);
                     window.set_visible(true);
                     window.set_focus();
+                    sync_webview_bounds(window, webview);
                 }
             }
             Event::UserEvent(UserEvent::ToggleFullscreen(window_id)) => {
-                if let Some((window, _)) = webviews.get(&window_id) {
+                if let Some((window, webview)) = webviews.get(&window_id) {
                     use tao::window::Fullscreen;
                     let next = if window.fullscreen().is_some() {
                         None
@@ -397,6 +424,7 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
                         Some(Fullscreen::Borderless(None))
                     };
                     window.set_fullscreen(next);
+                    sync_webview_bounds(window, webview);
                 }
             }
             Event::UserEvent(UserEvent::OpenWindow(next_url)) => {

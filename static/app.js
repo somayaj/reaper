@@ -18617,6 +18617,16 @@ function fitActiveTerminal() {
   fitTerminal(getActiveTerminal());
 }
 
+function syncShellLayout() {
+  if (state.editor) {
+    try { state.editor.layout(); } catch { /* ignore */ }
+  }
+  if (state.terminalOpen || state.activePanel === 'terminal') {
+    fitActiveTerminal();
+  }
+}
+window.__reaperSyncLayout = syncShellLayout;
+
 function fitTerminal(term) {
   if (!term?.xterm) return;
   if (term.fitAddon) {
@@ -20702,15 +20712,9 @@ function bindEvents() {
   bindEditorTabs();
   const terminalHost = $('#terminal-xterm-host');
   if (terminalHost && typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => {
-      if (state.terminalOpen || state.activePanel === 'terminal') fitActiveTerminal();
-    }).observe(terminalHost);
+    new ResizeObserver(() => syncShellLayout()).observe(terminalHost);
   }
-  window.addEventListener('resize', () => {
-    if (state.terminalOpen || state.activePanel === 'terminal') {
-      fitActiveTerminal();
-    }
-  });
+  window.addEventListener('resize', () => syncShellLayout());
 
   $('#agent-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

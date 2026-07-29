@@ -408,7 +408,7 @@ pub fn java_major_version(home: &Path) -> Option<u32> {
 }
 
 fn java_home_from_java_cmd() -> Result<PathBuf> {
-    let out = Command::new("java")
+    let out = crate::platform::command("java")
         .args(["-XshowSettings:properties", "-version"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -430,7 +430,7 @@ fn java_home_from_java_cmd() -> Result<PathBuf> {
 
 pub fn java_version_string(home: &Path) -> Result<String> {
     let java = home.join("bin/java");
-    let out = Command::new(&java)
+    let out = crate::platform::command(&java)
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

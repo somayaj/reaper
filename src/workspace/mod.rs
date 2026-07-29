@@ -269,11 +269,7 @@ fn collect_children(ws: &Path, dir: &Path, nodes: &mut Vec<FileNode>, recursive:
         if should_skip_tree_name(&name, path.is_dir()) {
             continue;
         }
-        let rel = path
-            .strip_prefix(ws)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = workspace_relative_path(ws, &path);
 
         if path.is_dir() {
             let has_children = dir_has_listable_children(ws, &path);
@@ -2374,6 +2370,43 @@ mod path_tests {
             root.canonicalize().unwrap_or(root.clone())
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_relative_path_handles_canonical_prefix_mismatch() {
+        let root = std::env::temp_dir().join(format!("reaper-rel-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/main")).unwrap();
+        let ws = root.canonicalize().unwrap();
+        let child = root.join("src/main");
+        let rel = workspace_relative_path(&ws, &child);
+        assert_eq!(rel, "src/main");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_tree_level_returns_workspace_relative_paths() {
+        let root = std::env::temp_dir().join(format!("reaper-tree-level-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/main/java/com/example")).unwrap();
+        std::fs::write(
+            root.join("src/main/java/com/example/App.java"),
+            "class App {}",
+        )
+        .unwrap();
+        std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
+        let ws = root.canonicalize().unwrap();
+        let root_nodes = build_tree_level(&ws, None).unwrap();
+        assert!(root_nodes.iter().any(|n| n.path == "src"));
+        let src_nodes = build_tree_level(&ws, Some("src")).unwrap();
+        assert_eq!(src_nodes.len(), 1);
+        assert_eq!(src_nodes[0].path, "src/main");
+        let java_nodes =
+            build_tree_level(&ws, Some("src/main/java/com/example")).unwrap();
+        assert_eq!(java_nodes.len(), 1);
+        assert_eq!(java_nodes[0].path, "src/main/java/com/example/App.java");
         let _ = std::fs::remove_dir_all(&root);
     }
 

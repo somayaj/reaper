@@ -34,12 +34,16 @@ use ui_preferences::UiPreferencesStore;
 
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
-    windows_maybe_attach_console();
+    {
+        if wants_gui() {
+            crate::platform::hide_attached_console();
+        } else {
+            windows_maybe_attach_console();
+        }
+    }
 
     workspace::ensure_developer_path();
     if wants_gui() {
-        #[cfg(target_os = "windows")]
-        crate::platform::free_console();
         run_gui_mode()
     } else {
         tokio::runtime::Builder::new_multi_thread()
@@ -98,11 +102,14 @@ fn wants_gui() -> bool {
 fn init_tracing() {
     let data_dir = Config::resolve_data_dir();
     let log_path = Config::resolve_log_path();
+    let gui_mode = wants_gui();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!(
-            "reaper: could not create data directory {}: {e}",
-            data_dir.display()
-        );
+        if !gui_mode {
+            eprintln!(
+                "reaper: could not create data directory {}: {e}",
+                data_dir.display()
+            );
+        }
     }
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -115,26 +122,41 @@ fn init_tracing() {
     {
         Ok(log_file) => {
             let file_writer = Mutex::new(log_file);
-            tracing_subscriber::registry()
+            let registry = tracing_subscriber::registry()
                 .with(filter)
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_writer(file_writer)
                         .with_ansi(false)
                         .with_target(true),
-                )
-                .with(tracing_subscriber::fmt::layer())
-                .init();
+                );
+            if gui_mode {
+                registry.init();
+            } else {
+                registry.with(tracing_subscriber::fmt::layer()).init();
+            }
         }
         Err(e) => {
-            eprintln!(
-                "reaper: could not open log file {}: {e}",
-                log_path.display()
-            );
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .init();
+            if !gui_mode {
+                eprintln!(
+                    "reaper: could not open log file {}: {e}",
+                    log_path.display()
+                );
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .init();
+            } else {
+                // GUI: never attach stderr logging — it allocates a console on Windows.
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_writer(std::io::sink)
+                            .with_ansi(false),
+                    )
+                    .init();
+            }
         }
     }
 }
@@ -155,10 +177,12 @@ async fn prepare_state(bound_port: u16) -> anyhow::Result<AppState> {
             tracing::warn!(
                 "Cursor bridge unavailable: {msg} (agent chat disabled until bridge starts)"
             );
-            // Always print to the console so Windows users see this isn't fatal.
-            eprintln!(
-                "Note: Cursor agent bridge unavailable ({msg}). The IDE still runs without it."
-            );
+            // eprintln allocates a console on Windows GUI builds — log only.
+            if !wants_gui() {
+                eprintln!(
+                    "Note: Cursor agent bridge unavailable ({msg}). The IDE still runs without it."
+                );
+            }
         }
     }
 
