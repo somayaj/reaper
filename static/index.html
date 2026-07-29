@@ -3,26 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="475" />
+  <meta name="reaper-ui-build" content="476" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <style id="reaper-boot">
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
-    /* WebView2/UTM: animated SVG escapes its box — never paint splash/logo anims. */
+    /* WebView2: skip splash + macOS titlebar; keep static SVG logo (contain anim overflow). */
     html.ij-platform-windows #launch-splash{display:none!important;visibility:hidden!important;pointer-events:none!important}
     html.ij-platform-windows .ij-window-titlebar{display:none!important}
     html.ij-platform-windows body.ij-shell>:not(#launch-splash){visibility:visible!important}
+    html.ij-platform-windows .logo-mark{overflow:hidden!important;contain:paint}
+    html.ij-platform-windows .logo-mark svg{display:block!important;width:100%;height:100%;max-width:100%;max-height:100%}
     html.ij-platform-windows .reaper-logo-anim,
-    html.ij-platform-windows .reaper-logo-anim *{animation:none!important;filter:none!important}
-    html.ij-platform-windows .reaper-logo-anim .anim-layer,
-    html.ij-platform-windows .reaper-logo-anim .code-drop,
-    html.ij-platform-windows .reaper-logo-anim .console-line,
-    html.ij-platform-windows .reaper-logo-anim .intro-field,
-    html.ij-platform-windows .reaper-logo-anim .harvest-pile,
-    html.ij-platform-windows .reaper-logo-anim .stalk,
-    html.ij-platform-windows .reaper-logo-anim .harvest-bit{display:none!important}
+    html.ij-platform-windows .reaper-logo-anim *{animation:none!important}
+    html.ij-platform-windows .reaper-logo-anim .anim-layer{display:none!important}
   </style>
   <script>
     (function () {
@@ -45,7 +41,7 @@
       if (window.__reaperSkipSplash) return;
       var l = document.createElement('link');
       l.rel = 'stylesheet';
-      l.href = '/logo-animated.css?v=474';
+      l.href = '/logo-animated.css?v=476';
       document.head.appendChild(l);
     })();
   </script>
@@ -120,8 +116,8 @@
       document.head.appendChild(font);
     })();
   </script>
-  <link rel="stylesheet" href="/reaper-ui.css?v=475" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=475" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=476" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=476" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -157,8 +153,8 @@
       if (splash) splash.remove();
     })();
   </script>
-  <script src="/logo.js?v=475"></script>
-  <script src="/launch-splash.js?v=475"></script>
+  <script src="/logo.js?v=476"></script>
+  <script src="/launch-splash.js?v=476"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -1712,9 +1708,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=475"></script>
-  <script src="/monaco-languages.js?v=475" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=476"></script>
+  <script src="/monaco-languages.js?v=476" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=475"></script>
+  <script src="/app.js?v=476"></script>
 </body>
 </html>
