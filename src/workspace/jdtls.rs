@@ -27,6 +27,7 @@ pub struct JdtlsCodeAction {
 }
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(90);
+const JDTLS_CONFIG_WARM_TIMEOUT: Duration = Duration::from_secs(180);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 const REFERENCE_TIMEOUT: Duration = Duration::from_secs(25);
 const SESSION_IDLE: Duration = Duration::from_secs(300);
@@ -2130,6 +2131,21 @@ fn find_equinox_launcher(base: &Path) -> Result<PathBuf> {
         .with_context(|| format!("equinox launcher jar not found in {}", plugins.display()))
 }
 
+fn jvm_path_property(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn shared_config_area_arg(base: &Path) -> String {
+    format!(
+        "-Dosgi.sharedConfiguration.area={}",
+        jvm_path_property(&jdtls_shared_config_dir(base))
+    )
+}
+
+fn bundled_jdtls_java_command(java: &Path) -> Command {
+    crate::platform::command_user_process(java)
+}
+
 fn bundled_jdtls_configuration_ready(base: &Path) -> bool {
     base.join("configuration/org.eclipse.osgi").is_dir()
 }
@@ -2152,19 +2168,20 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     }
 
     let jar = find_equinox_launcher(base)?;
-    let config = jdtls_shared_config_dir(base);
-    let config_area = format!(
-        "-Dosgi.sharedConfiguration.area={}",
-        config.to_string_lossy()
-    );
+    let config_area = shared_config_area_arg(base);
     let warm_data = std::env::temp_dir().join(format!(
         "reaper-jdtls-warm-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&warm_data);
     std::fs::create_dir_all(&warm_data)?;
+    let stderr_log = std::env::temp_dir().join(format!(
+        "reaper-jdtls-warm-{}-stderr.log",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&stderr_log);
 
-    let mut cmd = crate::platform::command(&java);
+    let mut cmd = bundled_jdtls_java_command(&java);
     cmd.current_dir(base);
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
@@ -2187,23 +2204,37 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     .arg(&warm_data)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null());
+    .stderr(Stdio::from(
+        std::fs::File::create(&stderr_log)
+            .with_context(|| format!("create jdtls warm log {}", stderr_log.display()))?,
+    ));
     crate::jdk::apply_jdtls_java_env(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to warm-start bundled jdtls ({})", java.display()))?;
 
-    let deadline = Instant::now() + INIT_TIMEOUT;
+    let deadline = Instant::now() + JDTLS_CONFIG_WARM_TIMEOUT;
     while Instant::now() < deadline {
         if bundled_jdtls_configuration_ready(base) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_dir_all(&warm_data);
+            let _ = std::fs::remove_file(&stderr_log);
             return Ok(());
         }
         if child.try_wait()?.is_some() {
             let _ = std::fs::remove_dir_all(&warm_data);
+            let detail = std::fs::read_to_string(&stderr_log)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let _ = std::fs::remove_file(&stderr_log);
+            if let Some(detail) = detail {
+                bail!(
+                    "bundled jdtls warm-start exited before configuration was ready: {detail}"
+                );
+            }
             bail!("bundled jdtls warm-start exited before configuration was ready");
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -2212,6 +2243,7 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&warm_data);
+    let _ = std::fs::remove_file(&stderr_log);
     bail!("bundled jdtls warm-start timed out before configuration was ready")
 }
 
@@ -2225,13 +2257,9 @@ fn spawn_bundled_jdtls_java(base: &Path, ws: &Path, data_dir: &Path) -> Result<C
     }
 
     let jar = find_equinox_launcher(base)?;
-    let config = jdtls_shared_config_dir(base);
-    let config_area = format!(
-        "-Dosgi.sharedConfiguration.area={}",
-        config.to_string_lossy()
-    );
+    let config_area = shared_config_area_arg(base);
 
-    let mut cmd = crate::platform::command(&java);
+    let mut cmd = bundled_jdtls_java_command(&java);
     cmd.current_dir(ws);
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
