@@ -18492,6 +18492,7 @@ function xtermApi() {
 
 let loopbackWsPromise = null;
 let terminalMountGeneration = 0;
+let terminalFitTimer = null;
 
 function cacheLoopbackWs(value) {
   if (typeof value !== 'string' || !value.trim()) return;
@@ -18530,7 +18531,7 @@ function isTerminalCommandActive(term) {
 
 function restoreTerminalShellIfIdle(term) {
   if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
-  if (term.deferShellUntilInput) return;
+  if (term.deferShellUntilInput || term.guardRunOutput) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -18565,8 +18566,12 @@ function createTerminalSession(name) {
     streamColorPartial: '',
     commandStartLine: null,
     deferShellUntilInput: false,
-    suppressPromptOverwrite: false,
-    shellResumeAt: 0,
+    guardRunOutput: false,
+    wsConnecting: false,
+    shellInputBuffer: '',
+    shellPtyPartial: '',
+    shellConnectedAt: 0,
+    lastShellSize: null,
     linkProviderDisposable: null,
   };
 }
@@ -18606,8 +18611,11 @@ function destroyTerminalInstance(term) {
   term.streamLine = null;
   term.shellSuspended = false;
   term.deferShellUntilInput = false;
-  term.suppressPromptOverwrite = false;
-  term.shellResumeAt = 0;
+  term.wsConnecting = false;
+  term.shellInputBuffer = '';
+  term.shellPtyPartial = '';
+  term.guardRunOutput = false;
+  term.lastShellSize = null;
 }
 
 function spawnTerminalInstance(term, host) {
@@ -18636,7 +18644,8 @@ function syncShellLayout() {
     try { state.editor.layout(); } catch { /* ignore */ }
   }
   if (state.terminalOpen || state.activePanel === 'terminal') {
-    fitActiveTerminal();
+    clearTimeout(terminalFitTimer);
+    terminalFitTimer = setTimeout(() => fitActiveTerminal(), 100);
   }
 }
 window.__reaperSyncLayout = syncShellLayout;
@@ -18656,12 +18665,23 @@ function fitTerminal(term) {
   sendTerminalResize(term);
 }
 
+function releaseTerminalRunOutputGuard(term) {
+  if (!term?.guardRunOutput) return;
+  term.guardRunOutput = false;
+  sendTerminalResize(term);
+}
+
 function sendTerminalResize(term) {
   if (!term?.ws || term.ws.readyState !== WebSocket.OPEN || !term.xterm) return;
+  if (term.guardRunOutput) return;
+  const cols = term.xterm.cols;
+  const rows = term.xterm.rows;
+  if (term.lastShellSize?.cols === cols && term.lastShellSize?.rows === rows) return;
+  term.lastShellSize = { cols, rows };
   term.ws.send(JSON.stringify({
     type: 'resize',
-    cols: term.xterm.cols,
-    rows: term.xterm.rows,
+    cols,
+    rows,
   }));
 }
 
@@ -18677,6 +18697,8 @@ function disconnectTerminalWs(term, { silent = false } = {}) {
   if (silent) term.wsSilentClose = true;
   try { term.ws.close(); } catch { /* ignore */ }
   term.ws = null;
+  term.wsConnecting = false;
+  term.lastShellSize = null;
 }
 
 function decodeTerminalChunk(chunk) {
@@ -18691,27 +18713,59 @@ function decodeTerminalChunk(chunk) {
   return '';
 }
 
-function sanitizeShellOutputAfterResume(term, text) {
-  if (!text || !term.suppressPromptOverwrite) return text;
-  if (Date.now() - (term.shellResumeAt || 0) > 1000) {
-    term.suppressPromptOverwrite = false;
-    return text;
+function sanitizeShellPtyOutput(term, text) {
+  if (!text) return text;
+  let out = text;
+  if (term?.guardRunOutput) {
+    // cmd.exe clears the current row then redraws the prompt on shell reconnect/resize.
+    out = out.replace(/\x1b\[[0-9;]*[Kk]/g, '\r\n');
   }
-  // cmd.exe redraws the prompt with CR on the current row — move it to a fresh line.
-  if (/^\r(?!\n)/.test(text)) {
-    term.suppressPromptOverwrite = false;
-    return `\r\n${text.replace(/^\r+/, '')}`;
+  // Bare CR (not CRLF) redraws the current row — cmd.exe uses this for prompts on resize.
+  out = out.replace(/\r(?!\n)/g, '\r\n');
+  if (term?.guardRunOutput) {
+    out = out.replace(/([^\r\n])([A-Za-z]:[\\/][^\r\n]*>\s*)/g, '$1\r\n$2');
   }
-  return text;
+  return out;
+}
+
+function writeShellPtyToXterm(term, chunk) {
+  if (!term?.xterm || chunk == null) return;
+  const text = decodeTerminalChunk(chunk);
+  if (!text) return;
+  let combined = `${term.shellPtyPartial || ''}${text}`;
+  const trailingCr = combined.match(/\r(?!\n)$/);
+  if (trailingCr) {
+    term.shellPtyPartial = trailingCr[0];
+    combined = combined.slice(0, -trailingCr[0].length);
+  } else {
+    term.shellPtyPartial = '';
+  }
+  if (!combined) return;
+  combined = sanitizeShellPtyOutput(term, combined);
+  if (combined) term.xterm.write(combined);
+}
+
+function flushTerminalShellInputBuffer(term) {
+  if (!term?.shellInputBuffer || !term.ws || term.ws.readyState !== WebSocket.OPEN) return;
+  const pending = term.shellInputBuffer;
+  term.shellInputBuffer = '';
+  if (pending) term.ws.send(pending);
 }
 
 async function connectTerminalWs(term) {
   if (!state.repo || !term) return;
   if (term.shellSuspended || term.streamLine != null) return;
+  if (term.wsConnecting || term.ws?.readyState === WebSocket.OPEN) return;
+  if (term.ws?.readyState === WebSocket.CONNECTING) return;
+  term.wsConnecting = true;
   const base = await ensureLoopbackWsBase();
-  if (term.shellSuspended || term.streamLine != null) return;
+  if (term.shellSuspended || term.streamLine != null) {
+    term.wsConnecting = false;
+    return;
+  }
   const url = terminalWsUrl(term, base);
   if (!url) {
+    term.wsConnecting = false;
     toast('Terminal shell unavailable (loopback WebSocket not configured). Restart Reaper.', 'error');
     return;
   }
@@ -18720,25 +18774,32 @@ async function connectTerminalWs(term) {
   term.ws = ws;
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    term.wsConnecting = false;
     if (term.ws !== ws || term.shellSuspended || term.streamLine != null) {
       disconnectTerminalWs(term, { silent: true });
       return;
     }
-    fitTerminal(term);
+    term.shellConnectedAt = Date.now();
+    if (term.xterm) {
+      try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
+      if (term.guardRunOutput) {
+        term.xterm.write('\r\n\r\n');
+      }
+    }
+    requestAnimationFrame(() => {
+      if (term.ws !== ws) return;
+      fitTerminal(term);
+      flushTerminalShellInputBuffer(term);
+    });
   };
   ws.onerror = () => {
+    term.wsConnecting = false;
     if (term.ws !== ws || term.wsSilentClose || term.shellSuspended || term.streamLine != null) return;
     toast('Terminal shell connection failed. Try Restart Shell.', 'error');
   };
   ws.onmessage = (ev) => {
     if (!term.xterm || term.shellSuspended || isTerminalCommandActive(term)) return;
-    const writeChunk = (chunk) => {
-      if (!chunk) return;
-      let text = decodeTerminalChunk(chunk);
-      if (!text) return;
-      text = sanitizeShellOutputAfterResume(term, text);
-      term.xterm.write(text);
-    };
+    const writeChunk = (chunk) => writeShellPtyToXterm(term, chunk);
     if (ev.data instanceof ArrayBuffer) {
       writeChunk(ev.data);
     } else if (ArrayBuffer.isView(ev.data)) {
@@ -18750,6 +18811,7 @@ async function connectTerminalWs(term) {
     }
   };
   ws.onclose = () => {
+    term.wsConnecting = false;
     if (term.wsSilentClose) {
       term.wsSilentClose = false;
       return;
@@ -18799,6 +18861,13 @@ function initTerminalXterm(term, host) {
   }
   xterm.open(pane);
   registerTerminalFileLinkProvider(term, xterm);
+  const resumeShellIfDeferred = () => {
+    if (term.deferShellUntilInput && term.shellSuspended) {
+      resumeTerminalShell(term);
+    }
+  };
+  xterm.textarea?.addEventListener('focus', resumeShellIfDeferred);
+  pane.addEventListener('mousedown', resumeShellIfDeferred);
   xterm.onData((data) => {
     if (typeof data === 'string' && data.includes('\x03')) {
       if (term.streamLine != null) {
@@ -18806,10 +18875,12 @@ function initTerminalXterm(term, host) {
         return;
       }
     }
-    if (term.deferShellUntilInput && term.shellSuspended) {
-      resumeTerminalShell(term);
+    if (term.shellInputBuffer && term.ws?.readyState !== WebSocket.OPEN) {
+      term.shellInputBuffer += data;
+      return;
     }
     if (term.ws?.readyState === WebSocket.OPEN) {
+      releaseTerminalRunOutputGuard(term);
       term.ws.send(data);
     }
   });
@@ -18876,8 +18947,9 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
     requestAnimationFrame(() => {
       fitActiveTerminal();
       requestAnimationFrame(() => {
-        fitActiveTerminal();
-        term.xterm?.focus();
+        if (term.container?.contains(document.activeElement)) {
+          term.xterm?.focus();
+        }
       });
     });
   };
@@ -18963,11 +19035,11 @@ function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
   term.deferShellUntilInput = false;
-  term.suppressPromptOverwrite = true;
-  term.shellResumeAt = Date.now();
+  term.guardRunOutput = true;
+  term.shellPtyPartial = '';
   if (term.xterm) {
     try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-    term.xterm.write('\r\n');
+    term.xterm.write('\r\n\r\n');
   }
   void connectTerminalWs(term);
 }
@@ -19114,6 +19186,8 @@ function terminalCommandEnd(exitCode, terminalId) {
   }
   try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
   term.deferShellUntilInput = true;
+  term.guardRunOutput = true;
+  term.shellPtyPartial = '';
 }
 
 function beginTerminalStream(terminalId) {
@@ -19158,6 +19232,9 @@ function restartActiveTerminal() {
   const host = $('#terminal-xterm-host');
   if (!term || !host) return;
   term.deferShellUntilInput = false;
+  term.guardRunOutput = false;
+  term.shellInputBuffer = '';
+  term.shellPtyPartial = '';
   spawnTerminalInstance(term, host);
   mountActiveTerminal();
 }
