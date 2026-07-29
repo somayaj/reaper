@@ -61,6 +61,7 @@ fn pump_reader<R: Read + Send + 'static>(
 
 pub(crate) fn stream_process(cmd: &mut Command, tx: &async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
     process_registry::configure_command(cmd);
+    crate::platform::hide_console_window(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let label = cmd

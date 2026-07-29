@@ -87,6 +87,7 @@ pub fn is_shutdown_requested() -> bool {
 pub fn configure_command(cmd: &mut Command) {
     #[cfg(unix)]
     cmd.process_group(0);
+    crate::platform::hide_console_window(cmd);
 }
 
 pub struct ProcessGuard {

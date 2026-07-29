@@ -51,10 +51,13 @@ pub async fn advertise_refs(repo: &Path, service: GitService) -> Result<Response
         .into_owned();
 
     let binary = service.binary_name();
-    let output = Command::new(binary)
+    let mut advertise = Command::new(binary);
+    advertise
         .arg("--stateless-rpc")
         .arg("--advertise-refs")
-        .arg(&repo_str)
+        .arg(&repo_str);
+    crate::platform::hide_console_window_async(&mut advertise);
+    let output = advertise
         .output()
         .await
         .with_context(|| format!("failed to spawn {binary}"))?;
@@ -87,12 +90,14 @@ pub async fn rpc(repo: &Path, service: GitService, body: Bytes) -> Result<Respon
         .into_owned();
 
     let binary = service.binary_name();
-    let mut child = Command::new(binary)
-        .arg("--stateless-rpc")
+    let mut rpc = Command::new(binary);
+    rpc.arg("--stateless-rpc")
         .arg(&repo_str)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::platform::hide_console_window_async(&mut rpc);
+    let mut child = rpc
         .spawn()
         .with_context(|| format!("failed to spawn {binary}"))?;
 

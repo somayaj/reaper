@@ -537,9 +537,7 @@ html.ij-platform-windows .reaper-logo-anim .anim-layer {
   display: none !important;
 }
 
-html.ij-platform-windows .ij-action-card,
-html.ij-platform-windows .ij-welcome-carousel-track,
-html.ij-platform-windows .ij-welcome-carousel-dot {
+html.ij-platform-windows .ij-action-card {
   transform: none !important;
   transition: none !important;
   will-change: auto !important;

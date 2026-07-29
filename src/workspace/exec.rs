@@ -25,6 +25,7 @@ pub fn run_command_with_env(
     for (key, value) in env {
         cmd.env(key, value);
     }
+    crate::platform::hide_console_window(&mut cmd);
 
     let output = cmd
         .output()

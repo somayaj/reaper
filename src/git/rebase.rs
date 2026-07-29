@@ -97,10 +97,12 @@ pub fn start_interactive_rebase(ws: &Path, onto: &str, steps: &[RebaseStep]) -> 
         .to_str()
         .context("rebase editor script path is not valid UTF-8")?;
 
-    let result = std::process::Command::new("git")
-        .current_dir(ws)
+    let mut git = std::process::Command::new("git");
+    git.current_dir(ws)
         .env("GIT_SEQUENCE_EDITOR", script_str)
-        .args(["rebase", "-i", onto])
+        .args(["rebase", "-i", onto]);
+    crate::platform::hide_console_window(&mut git);
+    let result = git
         .output()
         .map(|o| GitOutput {
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),

@@ -1,4 +1,4 @@
-//! Host platform helpers (macOS arch detection for bundled runtimes).
+//! Host platform helpers (macOS arch detection, Windows console-less child processes).
 
 use std::sync::OnceLock;
 
@@ -29,4 +29,24 @@ fn macos_uname_is_arm64() -> bool {
         .ok()
         .filter(|o| o.status.success())
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "arm64")
+}
+
+/// Prevent Windows from flashing a console window for background child processes.
+pub fn hide_console_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+/// Same as [`hide_console_window`] for `tokio::process::Command`.
+pub fn hide_console_window_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
+    let _ = cmd;
 }

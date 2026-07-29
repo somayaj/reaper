@@ -227,10 +227,10 @@ fn find_node() -> Result<PathBuf> {
 
 #[cfg(windows)]
 fn which_node_windows() -> Result<PathBuf> {
-    let output = std::process::Command::new("where.exe")
-        .arg("node")
-        .output()
-        .context("failed to run where.exe node")?;
+    let mut cmd = std::process::Command::new("where.exe");
+    cmd.arg("node");
+    crate::platform::hide_console_window(&mut cmd);
+    let output = cmd.output().context("failed to run where.exe node")?;
     if !output.status.success() {
         bail!("node not on PATH");
     }
@@ -365,10 +365,10 @@ async fn kill_listeners_on_port(port: u16) {
             "$conns = Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue; \
              foreach ($c in $conns) {{ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }}"
         );
-        let _ = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
-            .status()
-            .await;
+        let mut kill = Command::new("powershell.exe");
+        kill.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
+        crate::platform::hide_console_window_async(&mut kill);
+        let _ = kill.status().await;
     }
     #[cfg(not(windows))]
     {
@@ -440,13 +440,16 @@ pub async fn ensure_bridge_running() -> Result<()> {
     save_bridge_port(bridge_port);
     tracing::info!("Starting Cursor bridge on {url}…");
 
-    let mut child = Command::new(&node)
+    let mut child_cmd = Command::new(&node);
+    child_cmd
         .arg("server.mjs")
         .current_dir(&dir)
         .env("REAPER_CURSOR_BRIDGE_PORT", bridge_port.to_string())
         .kill_on_drop(true)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::platform::hide_console_window_async(&mut child_cmd);
+    let mut child = child_cmd
         .spawn()
         .with_context(|| format!("failed to start cursor bridge with {}", node.display()))?;
 
