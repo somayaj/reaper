@@ -379,7 +379,7 @@ pub fn stream_maven(ws: &Path, rel_path: &str, goal: &str, tx: async_mpsc::Sende
     if is_maven_app_run_goal(&parts) {
         args.retain(|a| a != "-am");
     }
-    args.push("-q".to_string());
+    // Do not pass `-q`: it hides compiler-plugin/javac diagnostics on failure.
     args.push("--batch-mode".to_string());
     args.extend(parts);
     stream_maven_command(&cmd, &args, tx)
