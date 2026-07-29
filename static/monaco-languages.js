@@ -1858,13 +1858,17 @@
       diagHtml += '</div>';
       diagHtml += '<ul class="reaper-editor-hover-problems-list">';
       for (const m of markers) {
+        let msg = String(m.message || '').trim();
+        if (!msg) {
+          const src = String(m.source || '').trim();
+          msg = src
+            ? `${src} at line ${m.startLineNumber}, column ${m.startColumn}`
+            : `Problem at line ${m.startLineNumber}, column ${m.startColumn}`;
+        }
         const hint = typeof helpers?.diagnosticFriendlyHint === 'function'
           ? helpers.diagnosticFriendlyHint(m.message)
           : '';
-        const msg = String(m.message || '').trim() + hint;
-        if (msg) {
-          diagHtml += `<li>${escapeHtml(msg)}</li>`;
-        }
+        diagHtml += `<li>${escapeHtml(msg + hint)}</li>`;
       }
       diagHtml += '</ul>';
       if (errors.length) {
@@ -3059,13 +3063,17 @@
       diagHtml += '</div>';
       diagHtml += '<ul class="reaper-editor-hover-problems-list">';
       for (const m of markers) {
+        let msg = String(m.message || '').trim();
+        if (!msg) {
+          const src = String(m.source || '').trim();
+          msg = src
+            ? `${src} at line ${m.startLineNumber}, column ${m.startColumn}`
+            : `Problem at line ${m.startLineNumber}, column ${m.startColumn}`;
+        }
         const hint = typeof helpers?.diagnosticFriendlyHint === 'function'
           ? helpers.diagnosticFriendlyHint(m.message)
           : '';
-        const msg = String(m.message || '').trim() + hint;
-        if (msg) {
-          diagHtml += `<li>${escapeHtml(msg)}</li>`;
-        }
+        diagHtml += `<li>${escapeHtml(msg + hint)}</li>`;
       }
       diagHtml += '</ul>';
       if (errors.length) {
@@ -5722,6 +5730,10 @@
   const definitionCache = new Map();
   const definitionInflight = new Map();
   const hoverCache = new Map();
+  const hoverMissCache = new Map();
+  const HOVER_FETCH_TIMEOUT_MS = 4000;
+  const HOVER_MISS_TTL_MS = 15000;
+  const HOVER_JDOC_WAIT_MS = 350;
   const DEF_CACHE_MAX = 512;
   const DEF_NAV_GUARD_MS = 400;
   let lastDefinitionNavMs = 0;
@@ -5859,6 +5871,10 @@
     if (hoverCache.has(cacheKey)) {
       return hoverCache.get(cacheKey);
     }
+    const missAt = hoverMissCache.get(cacheKey);
+    if (missAt && Date.now() - missAt < HOVER_MISS_TTL_MS) {
+      return null;
+    }
 
     try {
       const url = helpers.repoApi(repo, '/workspace/hover');
@@ -5870,22 +5886,27 @@
         ...(member ? { member } : {}),
         ...(symbol ? { symbol } : {}),
       };
-      const hit = dirty || member || symbol
-        ? await helpers.api(url, { method: 'POST', body: JSON.stringify(payload) })
-        : await helpers.api(`${url}?${new URLSearchParams({
+      const request = dirty || member || symbol
+        ? helpers.api(url, { method: 'POST', body: JSON.stringify(payload), timeoutMs: HOVER_FETCH_TIMEOUT_MS })
+        : helpers.api(`${url}?${new URLSearchParams({
             path,
             line: String(line),
             column: String(column),
             ...(member ? { member } : {}),
             ...(symbol ? { symbol } : {}),
-          })}`);
+          })}`, { timeoutMs: HOVER_FETCH_TIMEOUT_MS });
+      const hit = await raceWithTimeout(request, HOVER_FETCH_TIMEOUT_MS, 'hover timed out');
       const info = hit && (hit.name || hit.signature || hit.documentation) ? hit : null;
       if (info) {
         if (hoverCache.size >= DEF_CACHE_MAX) hoverCache.clear();
         hoverCache.set(cacheKey, info);
+        hoverMissCache.delete(cacheKey);
+      } else {
+        hoverMissCache.set(cacheKey, Date.now());
       }
       return info;
     } catch {
+      hoverMissCache.set(cacheKey, Date.now());
       return null;
     }
   }
@@ -7315,22 +7336,28 @@
 
         // Merge symbol docs with diagnostics when both apply (Java, etc.).
         if (markers.length) {
-          return lookupSymbolHover(helpers, model, position).then((symInfo) => {
-            if (hoverInfoHasContent(symInfo)) {
-              const html = buildEditorHoverHtml(symInfo, markers);
-              if (html) {
-                return attachDebugValue({
-                  range,
-                  contents: [{
-                    value: html,
-                    supportHtml: true,
-                    isTrusted: true,
-                  }],
-                });
+          const markerResult = hoverResultForMarkers(model, position, markers, range);
+          return Promise.race([
+            lookupSymbolHover(helpers, model, position).then((symInfo) => {
+              if (hoverInfoHasContent(symInfo)) {
+                const html = buildEditorHoverHtml(symInfo, markers);
+                if (html) {
+                  return attachDebugValue({
+                    range,
+                    contents: [{
+                      value: html,
+                      supportHtml: true,
+                      isTrusted: true,
+                    }],
+                  });
+                }
               }
-            }
-            return attachDebugValue(hoverResultForMarkers(model, position, markers, range));
-          });
+              return attachDebugValue(markerResult);
+            }).catch(() => attachDebugValue(markerResult)),
+            new Promise((resolve) => {
+              setTimeout(() => resolve(attachDebugValue(markerResult)), HOVER_JDOC_WAIT_MS);
+            }),
+          ]);
         }
 
         return lookupSymbolHover(helpers, model, position).then((symInfo) => {

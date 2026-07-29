@@ -264,6 +264,42 @@ pub fn stream_gradle_command(
     Ok(code)
 }
 
+fn emit_javac_compiler_output(
+    tx: &async_mpsc::Sender<ExecStreamEvent>,
+    output: &std::process::Output,
+    step: &str,
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut combined = String::new();
+    if !stderr.is_empty() {
+        combined.push_str(&stderr);
+        if !stderr.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+    if !stdout.is_empty() {
+        combined.push_str(&stdout);
+    }
+    if combined.trim().is_empty() && !output.status.success() {
+        combined = format!(
+            "javac failed with exit code {}\n",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    if !combined.is_empty() {
+        let _ = emit(
+            tx,
+            ExecStreamEvent {
+                t: "stdout".into(),
+                text: Some(combined),
+                code: None,
+                step: Some(step.into()),
+            },
+        );
+    }
+}
+
 pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecStreamEvent>) -> Result<i32> {
     use super::java::parse_java_main;
     use super::run_project;
@@ -300,25 +336,8 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
     });
 
     let compile = super::java::plain_javac_output(ws, &rel, false)?;
+    emit_javac_compiler_output(&tx, &compile, "javac");
     if !compile.status.success() {
-        let stdout = String::from_utf8_lossy(&compile.stdout);
-        let stderr = String::from_utf8_lossy(&compile.stderr);
-        if !stdout.is_empty() {
-            let _ = emit(&tx, ExecStreamEvent {
-                t: "stdout".into(),
-                text: Some(stdout.into_owned()),
-                code: None,
-                step: Some("javac".into()),
-            });
-        }
-        if !stderr.is_empty() {
-            let _ = emit(&tx, ExecStreamEvent {
-                t: "stderr".into(),
-                text: Some(stderr.into_owned()),
-                code: None,
-                step: Some("javac".into()),
-            });
-        }
         let compile_code = compile.status.code().unwrap_or(-1);
         let _ = emit(&tx, ExecStreamEvent {
             t: "exit".into(),
@@ -327,24 +346,6 @@ pub fn stream_java_main(ws: &Path, rel_path: &str, tx: async_mpsc::Sender<ExecSt
             step: Some("javac".into()),
         });
         return Ok(compile_code);
-    }
-    let stdout = String::from_utf8_lossy(&compile.stdout);
-    let stderr = String::from_utf8_lossy(&compile.stderr);
-    if !stdout.is_empty() {
-        let _ = emit(&tx, ExecStreamEvent {
-            t: "stdout".into(),
-            text: Some(stdout.into_owned()),
-            code: None,
-            step: Some("javac".into()),
-        });
-    }
-    if !stderr.is_empty() {
-        let _ = emit(&tx, ExecStreamEvent {
-            t: "stderr".into(),
-            text: Some(stderr.into_owned()),
-            code: None,
-            step: Some("javac".into()),
-        });
     }
 
     let _ = emit(&tx, ExecStreamEvent {

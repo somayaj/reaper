@@ -680,6 +680,13 @@ pub fn find_hover(
     if !is_enabled() || !is_jdtls_path(rel_path) {
         return Ok(None);
     }
+    // Do not block hover on jdtls startup when no JDK is available.
+    if !workspace_ready(ws)
+        && crate::jdk::jdtls_java_home().is_err()
+        && crate::jdk::effective_java_home().is_err()
+    {
+        return Ok(None);
+    }
 
     let ws = ws
         .canonicalize()

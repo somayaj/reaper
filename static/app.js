@@ -215,6 +215,12 @@ function colorizeStreamLine(line) {
   if (/^FAILURE:/i.test(trimmed) || /^error:/i.test(trimmed) || /^ERROR\b/i.test(trimmed)) {
     return `${TERM_ESC.brightRed}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
   }
+  if (/:\s*error:\s/i.test(trimmed)) {
+    return `${TERM_ESC.brightRed}${line}${TERM_ESC.reset}`;
+  }
+  if (/:\s*warning:\s/i.test(trimmed)) {
+    return `${TERM_ESC.brightYellow}${line}${TERM_ESC.reset}`;
+  }
   if (/^\* What went wrong:/i.test(trimmed) || /^Caused by:/i.test(trimmed)) {
     return `${TERM_ESC.brightYellow}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
   }
@@ -15655,7 +15661,7 @@ function applyDiagnostics(path, diags) {
       : (d.severity === 'info' || d.severity === 'hint')
         ? monaco.MarkerSeverity.Info
         : monaco.MarkerSeverity.Error,
-    message: d.message,
+    message: String(d.message || '').trim() || `Problem at line ${d.line || 1}`,
     source: d.source || undefined,
   }));
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
@@ -19000,7 +19006,11 @@ function writeColorizedStreamChunk(term, text) {
 
 function terminalLog(text, terminalId) {
   const t = terminalForId(terminalId) || getActiveTerminal();
-  if (!t?.xterm || t.streamLine != null) return;
+  if (!t?.xterm) return;
+  if (t.streamLine != null) {
+    terminalStreamChunk(`${text}\n`, terminalId || t.id);
+    return;
+  }
   terminalWrite(t, `${TERM_ESC.dim}${text}${TERM_ESC.reset}`);
 }
 
