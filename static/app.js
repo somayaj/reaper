@@ -18485,6 +18485,7 @@ function xtermApi() {
 }
 
 let loopbackWsPromise = null;
+let terminalMountGeneration = 0;
 
 function cacheLoopbackWs(value) {
   if (typeof value !== 'string' || !value.trim()) return;
@@ -18523,7 +18524,6 @@ function isTerminalCommandActive(term) {
 
 function restoreTerminalShellIfIdle(term) {
   if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
-  if (term.deferShellUntilInput) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -18557,7 +18557,7 @@ function createTerminalSession(name) {
     streamLine: null,
     streamColorPartial: '',
     commandStartLine: null,
-    deferShellUntilInput: false,
+    suppressPromptOverwrite: false,
     linkProviderDisposable: null,
   };
 }
@@ -18596,6 +18596,7 @@ function destroyTerminalInstance(term) {
   }
   term.streamLine = null;
   term.shellSuspended = false;
+  term.suppressPromptOverwrite = false;
 }
 
 function spawnTerminalInstance(term, host) {
@@ -18696,7 +18697,12 @@ async function connectTerminalWs(term) {
     if (!term.xterm || term.shellSuspended || isTerminalCommandActive(term)) return;
     const writeChunk = (chunk) => {
       if (!chunk) return;
-      term.xterm.write(typeof chunk === 'string' ? chunk : new Uint8Array(chunk));
+      let out = typeof chunk === 'string' ? chunk : new Uint8Array(chunk);
+      if (typeof out === 'string' && term.suppressPromptOverwrite && /^\r/.test(out) && !/^\r\n/.test(out)) {
+        term.suppressPromptOverwrite = false;
+        out = `\r\n${out}`;
+      }
+      term.xterm.write(out);
     };
     if (ev.data instanceof ArrayBuffer) {
       writeChunk(ev.data);
@@ -18765,9 +18771,6 @@ function initTerminalXterm(term, host) {
         return;
       }
     }
-    if (term.deferShellUntilInput && term.shellSuspended) {
-      resumeTerminalShell(term);
-    }
     if (term.ws?.readyState === WebSocket.OPEN) {
       term.ws.send(data);
     }
@@ -18795,6 +18798,7 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!host || !term) return;
+  const mountGen = terminalMountGeneration;
 
   state.terminals.forEach((t) => {
     if (t.container) t.container.classList.add('hidden');
@@ -18807,8 +18811,17 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
     return;
   }
 
+  if (term.shellSuspended && term.xterm?.element?.isConnected) {
+    ensureTerminalPane(term, host);
+    term.container.classList.remove('hidden');
+    fitTerminal(term);
+    term.xterm.focus();
+    return;
+  }
+
   const xtermMissing = !term.xterm || !term.xterm.element?.isConnected;
   const spawn = () => {
+    if (mountGen !== terminalMountGeneration) return;
     if (fresh || xtermMissing) {
       spawnTerminalInstance(term, host);
     } else if (!term.ws || term.ws.readyState !== WebSocket.OPEN) {
@@ -18911,8 +18924,8 @@ function suspendTerminalShell(term) {
 function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
-  term.deferShellUntilInput = false;
-  if (term.xterm) term.xterm.write('\r\n');
+  term.suppressPromptOverwrite = true;
+  if (term.xterm) term.xterm.write('\r\n\r\n');
   void connectTerminalWs(term);
 }
 
@@ -19028,7 +19041,6 @@ function terminalCommandBegin(label, terminalId, { kind } = {}) {
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
   resetStreamCollapseState(term);
-  term.skipCommandEcho = true;
   term.commandStartLine = terminalBufferLine(term);
   const labelText = String(label || '').trim().replace(/^▶\s*/, '') || 'command';
   const isTest = kind === 'test' || (/\btest\b/i.test(labelText) && /\b(gradle|mvn|maven)\b/i.test(labelText));
@@ -19054,31 +19066,23 @@ function terminalCommandEnd(exitCode, terminalId) {
     term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n`);
   }
   try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-  // Keep shell disconnected so cmd.exe prompt does not overwrite run output.
-  // Press any key in the terminal (or Restart Shell) to restore the interactive shell.
+  resumeTerminalShell(term);
 }
 
 function beginTerminalStream(terminalId) {
+  terminalMountGeneration += 1;
   const term = resolveTerminal(terminalId);
   if (!term) return;
   suspendTerminalShell(term);
   term.streamLine = '';
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
-  term.deferShellUntilInput = true;
   resetStreamCollapseState(term);
 }
 
 function terminalStreamChunk(text, terminalId) {
   const term = resolveTerminal(terminalId);
   if (!term || term.streamLine == null) return;
-  if (term.skipCommandEcho) {
-    const trimmed = String(text || '').trimStart();
-    if (trimmed.startsWith('$')) {
-      term.skipCommandEcho = false;
-      return;
-    }
-  }
   term.streamLine += text;
   writeColorizedStreamChunk(term, text);
 }
@@ -19105,7 +19109,6 @@ function restartActiveTerminal() {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!term || !host) return;
-  term.deferShellUntilInput = false;
   spawnTerminalInstance(term, host);
   mountActiveTerminal();
 }
