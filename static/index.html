@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="474" />
+  <meta name="reaper-ui-build" content="475" />
   <meta name="reaper-app-version" content="0.1.4" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -120,8 +120,8 @@
       document.head.appendChild(font);
     })();
   </script>
-  <link rel="stylesheet" href="/reaper-ui.css?v=474" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=474" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=475" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=475" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -157,8 +157,8 @@
       if (splash) splash.remove();
     })();
   </script>
-  <script src="/logo.js?v=474"></script>
-  <script src="/launch-splash.js?v=474"></script>
+  <script src="/logo.js?v=475"></script>
+  <script src="/launch-splash.js?v=475"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -254,6 +254,7 @@
           <button type="button" class="ij-menu-trigger">View</button>
           <div class="ij-menu-dropdown">
             <button type="button" class="ij-menu-item" data-action="panel-explorer">Project<span class="ij-kbd">Alt+1</span></button>
+            <button type="button" class="ij-menu-item" data-action="panel-structure">Structure<span class="ij-kbd">Alt+7</span></button>
             <button type="button" class="ij-menu-item" data-action="panel-git">Commit<span class="ij-kbd">Alt+9</span></button>
             <button type="button" class="ij-menu-item" data-action="panel-history">Git Log</button>
             <button type="button" class="ij-menu-item" data-action="panel-terminal">Terminal</button>
@@ -382,6 +383,11 @@
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
         </span>
       </button>
+      <button data-panel="structure" class="activity-btn" title="Structure (Alt+7)" aria-label="Structure">
+        <span class="ij-activity-glyph" aria-hidden="true">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4h10M7 9h6M7 14h10M7 19h4"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v16"/></svg>
+        </span>
+      </button>
       <button data-panel="git" class="activity-btn" title="Commit (Alt+9)">
         <span class="ij-activity-glyph" aria-hidden="true">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M6 15l8.5-9"/></svg>
@@ -445,6 +451,19 @@
             <p class="text-xs text-gray-600">Select a repo to browse files</p>
           </div>
         </div>
+      </div>
+
+      <div id="panel-structure" class="panel hidden flex flex-col flex-1 min-h-0 ij-structure-panel">
+        <div class="ij-structure-toolbar">
+          <input id="structure-filter" type="search" class="ij-structure-filter" placeholder="Filter nodes…" autocomplete="off" spellcheck="false" aria-label="Filter structure" />
+          <div class="ij-structure-mode" role="group" aria-label="Structure view mode">
+            <button type="button" id="structure-mode-structure" class="ij-structure-mode-btn active" data-ast-mode="structure" title="Declarations / structure">Structure</button>
+            <button type="button" id="structure-mode-full" class="ij-structure-mode-btn" data-ast-mode="full" title="Full syntax tree">AST</button>
+          </div>
+          <button id="structure-refresh" type="button" class="ij-structure-icon-btn" title="Refresh" aria-label="Refresh structure">↻</button>
+        </div>
+        <div id="structure-subtitle" class="ij-structure-subtitle"></div>
+        <div id="structure-tree" class="ij-structure-body panel-scroll flex-1 min-h-0"></div>
       </div>
 
       <div id="panel-git" class="panel hidden flex-1 overflow-hidden flex flex-col min-h-0">
@@ -1693,9 +1712,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=474"></script>
-  <script src="/monaco-languages.js?v=474" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=475"></script>
+  <script src="/monaco-languages.js?v=475" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=474"></script>
+  <script src="/app.js?v=475"></script>
 </body>
 </html>

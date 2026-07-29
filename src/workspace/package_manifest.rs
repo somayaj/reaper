@@ -74,6 +74,8 @@ const MANIFEST_NAMES: &[(&str, &str)] = &[
     ("GNUmakefile", "make"),
     ("vcpkg.json", "vcpkg"),
     ("conanfile.txt", "conan"),
+    // Prefer ecosystem manifests when walking up; elide.pkl still matches when that file is open.
+    ("elide.pkl", "elide"),
 ];
 
 pub fn is_package_manifest_path(rel_path: &str) -> bool {
@@ -91,6 +93,7 @@ fn manifest_kind_for_path(path: &str) -> Option<&'static str> {
     let base = path.replace('\\', "/");
     let name = base.rsplit('/').next()?.to_ascii_lowercase();
     match name.as_str() {
+        "elide.pkl" => Some("elide"),
         "cargo.toml" => Some("cargo"),
         "pubspec.yaml" => Some("dart"),
         "pyproject.toml" => Some("python"),
@@ -170,6 +173,7 @@ fn parse_manifest(
     text: &str,
 ) -> Result<PackageManifestView> {
     match kind {
+        "elide" => parse_elide(manifest_rel, package_root, text),
         "cargo" => parse_cargo(manifest_rel, package_root, text),
         "dart" => parse_pubspec(manifest_rel, package_root, text),
         "python" => parse_pyproject(ws, manifest_rel, package_root, text),
@@ -185,6 +189,107 @@ fn parse_manifest(
         "conan" => parse_conan(manifest_rel, package_root, text),
         other => bail!("unsupported manifest kind: {other}"),
     }
+}
+
+fn parse_elide(manifest_rel: &str, package_root: &str, text: &str) -> Result<PackageManifestView> {
+    let info = super::elide_pkl::parse_elide_pkl(text);
+    let mut fields = Vec::new();
+    let mut sections = Vec::new();
+    let title = info
+        .name
+        .clone()
+        .unwrap_or_else(|| "Elide project".into());
+    if let Some(name) = &info.name {
+        fields.push(field("Name", name));
+    }
+    if let Some(version) = &info.version {
+        fields.push(field("Version", version));
+    }
+    if let Some(description) = &info.description {
+        fields.push(field("Description", description));
+    }
+    if let Some(main) = &info.jvm_main {
+        fields.push(field("JVM main", main));
+    }
+
+    if !info.source_sets.is_empty() {
+        let items: Vec<_> = info
+            .source_sets
+            .iter()
+            .map(|(n, t)| {
+                item(
+                    n,
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.clone())
+                    },
+                )
+            })
+            .collect();
+        sections.push(section("sources", "Source sets", items));
+    }
+
+    let mut deps = Vec::new();
+    for p in &info.maven_packages {
+        deps.push(item(p, Some("maven".into())));
+    }
+    for p in &info.maven_test_packages {
+        deps.push(item(p, Some("maven · test".into())));
+    }
+    if !deps.is_empty() {
+        sections.push(section("dependencies", "Dependencies", deps));
+    }
+
+    if !info.artifacts.is_empty() {
+        let items: Vec<_> = info
+            .artifacts
+            .iter()
+            .map(|(id, kind)| item(id, Some(kind.clone())))
+            .collect();
+        sections.push(section("artifacts", "Artifacts", items));
+    }
+
+    if !info.scripts.is_empty() {
+        let items: Vec<_> = info
+            .scripts
+            .iter()
+            .map(|(name, cmd)| item(name, Some(cmd.clone())))
+            .collect();
+        sections.push(section("scripts", "Scripts", items));
+    }
+
+    let mut actions = vec![
+        action("build", "Build", "elide build"),
+        action("test", "Test", "elide test"),
+        action("run", "Run", "elide run"),
+        action("install", "Install", "elide install"),
+    ];
+    for (name, cmd) in info.scripts.iter().take(8) {
+        if !matches!(name.as_str(), "build" | "test" | "run" | "install") {
+            actions.push(action(name, name, cmd));
+        }
+    }
+
+    let subtitle = if info.scripts.iter().any(|(n, _)| n.starts_with("pom"))
+        || info.scripts.iter().any(|(n, _)| n.starts_with("gradle"))
+        || info.scripts.iter().any(|(n, _)| n.starts_with("cargo"))
+    {
+        Some("Elide · scripts bridge Maven / Gradle / Cargo".into())
+    } else {
+        Some("Elide project".into())
+    };
+
+    Ok(PackageManifestView {
+        manifest_path: manifest_rel.to_string(),
+        package_root: package_root.to_string(),
+        ecosystem: "elide".into(),
+        title,
+        subtitle,
+        fields,
+        sections,
+        actions,
+    })
 }
 
 fn parse_cargo(manifest_rel: &str, package_root: &str, text: &str) -> Result<PackageManifestView> {
@@ -1193,6 +1298,111 @@ impl SectionExt for Vec<ManifestSection> {
         }
         self.push(section(id, title, vec![]));
         &mut self.last_mut().unwrap().items
+    }
+}
+
+#[cfg(test)]
+mod elide_tests {
+    use super::*;
+
+    const HELLO_ELIDE: &str = r#"
+amends "elide:project.pkl"
+name = "HelloElide Project"
+version = "1.0.0-SNAPSHOT"
+description = "A simple Maven Hello World application"
+jvm {
+  main = "com.example.Hello"
+}
+sources {
+  ["main"] = new Sources.SourceSetSpec {
+    paths { "src/main/java/**/*.java" }
+  }
+  ["test"] = new Sources.SourceSetSpec {
+    type = "test"
+    paths { "src/test/**/*.java" }
+  }
+}
+dependencies {
+  maven {
+    testPackages {
+      "org.junit.jupiter:junit-jupiter:5.11.4"
+    }
+  }
+}
+artifacts {
+  ["app"] = new Jvm.Jar {
+    name = "hello-world"
+  }
+}
+scripts {
+  ["build"] = "elide build"
+  ["test"] = "elide test"
+  ["pom"] = "elide mvn -- -q package"
+  ["gradle"] = "./gradlew build"
+  ["cargo"] = "cargo build --release"
+}
+"#;
+
+    #[test]
+    fn parse_elide_manifest_view_includes_scripts() {
+        let view = parse_elide("elide.pkl", "", HELLO_ELIDE).unwrap();
+        assert_eq!(view.ecosystem, "elide");
+        assert_eq!(view.title, "HelloElide Project");
+        assert!(view.sections.iter().any(|s| s.id == "scripts"));
+        assert!(view.actions.iter().any(|a| a.id == "pom"));
+    }
+
+    #[test]
+    fn parse_elide_manifest_view_has_deps_artifacts_sources() {
+        let view = parse_elide("elide.pkl", "", HELLO_ELIDE).unwrap();
+        assert!(view.fields.iter().any(|f| f.label == "JVM main"));
+        let deps = view
+            .sections
+            .iter()
+            .find(|s| s.id == "dependencies")
+            .expect("dependencies");
+        assert!(deps
+            .items
+            .iter()
+            .any(|i| i.name.contains("junit-jupiter")));
+        let arts = view
+            .sections
+            .iter()
+            .find(|s| s.id == "artifacts")
+            .expect("artifacts");
+        assert!(arts.items.iter().any(|i| i.name == "app"));
+        let sources = view
+            .sections
+            .iter()
+            .find(|s| s.id == "sources")
+            .expect("sources");
+        assert!(sources.items.iter().any(|i| i.name == "main"));
+        assert!(sources.items.iter().any(|i| i.name == "test"));
+        assert!(view
+            .subtitle
+            .as_deref()
+            .unwrap_or("")
+            .contains("Maven / Gradle / Cargo"));
+    }
+
+    #[test]
+    fn elide_pkl_is_package_manifest_path() {
+        assert!(is_package_manifest_path("elide.pkl"));
+        assert!(is_package_manifest_path("demo/elide.pkl"));
+        assert!(!is_package_manifest_path("pom.xml"));
+    }
+
+    #[test]
+    fn package_manifest_view_reads_elide_pkl_from_workspace() {
+        let tmp = std::env::temp_dir().join(format!("reaper-elide-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("elide.pkl"), HELLO_ELIDE).unwrap();
+        let view = package_manifest_view(&tmp, "elide.pkl").unwrap();
+        assert_eq!(view.ecosystem, "elide");
+        assert_eq!(view.manifest_path, "elide.pkl");
+        assert!(view.sections.iter().any(|s| s.id == "scripts"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

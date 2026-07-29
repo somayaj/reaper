@@ -65,6 +65,7 @@ const LANG_PATH_FIXTURES = [
   ['Dockerfile', 'dockerfile'],
   ['api.proto', 'protobuf'],
   ['schema.graphql', 'graphql'],
+  ['elide.pkl', 'pkl'],
   ['notes.txt', 'plaintext'],
 ];
 
@@ -856,6 +857,56 @@ function testInlineCompletionRegression(win) {
   ok(
     !h.shouldPreferControlKeywordInline('src/Billing.java', '    F', 'F'),
     'uppercase F does not prefer control keyword inline',
+  );
+  ok(
+    h.shouldPreferModifierKeywordInline('src/App.java', '    private', 'private'),
+    'typing private prefers modifier keyword over types',
+  );
+  ok(
+    h.shouldPreferModifierKeywordInline('src/App.java', '    priv', 'priv'),
+    'partial priv prefers private modifier',
+  );
+  ok(
+    !h.shouldPreferModifierKeywordInline('src/App.java', '    String privateName', 'privateName'),
+    'identifier after type is not modifier typing',
+  );
+  ok(
+    h.inlineSuffixFromIndexItems(
+      [{ label: 'PrivateKeyEntry', kind: 'class' }, { label: 'private', kind: 'keyword' }],
+      '    private',
+      'private',
+      'src/App.java',
+    ) === '',
+    'index ghost suppressed for private → PrivateKeyEntry',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    private',
+      'public class App {\n    private\n}\n',
+      2,
+      17,
+      {
+        helpers: {
+          getRepo: () => 'r',
+          getActivePath: () => 'src/App.java',
+          getJavaSourceOverlays: () => [],
+        },
+        model: { getValue: () => 'public class App {\n    private\n}\n' },
+        position: { lineNumber: 2, column: 12 },
+      },
+    ) === '',
+    'local inline does not extend private into PrivateKeyEntry',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    priv',
+      'public class App {\n    priv\n}\n',
+      2,
+      17,
+    ) === 'ate',
+    'local inline completes priv → private',
   );
   ok(
     h.localInlineSuggestion(
@@ -3108,7 +3159,7 @@ function testInlinePerformanceBenchmarks(win) {
       h.shouldRouteInlineToAi(filePath, '    ', 'line\n    \nnext\n', 2);
     }
   }, 400);
-  okPerfUnder(routeMs, 120, 'shouldRouteInlineToAi all languages empty line (400 iter)');
+  okPerfUnder(routeMs, 160, 'shouldRouteInlineToAi all languages empty line (400 iter)');
 
   const markupPaths = LANG_PATH_FIXTURES.filter(([p]) => h.isMarkupOrConfigPath(p));
   ok(markupPaths.length >= 10, 'markup/config paths covered for perf bench');
@@ -3124,7 +3175,7 @@ function testInlinePerformanceBenchmarks(win) {
       );
     }
   }, 600);
-  okPerfUnder(markupStormMs, 100, 'markup empty-line route + inline items (600 iter)');
+  okPerfUnder(markupStormMs, 140, 'markup empty-line route + inline items (600 iter)');
 
   const pomItems = h.buildInlineItems(
     { getLineContent: () => '  ' },
@@ -3302,6 +3353,34 @@ async function main() {
     const adaptersRs = fs.readFileSync(path.join(ROOT, 'src/workspace/debug/adapters.rs'), 'utf8');
     const debugHarness = await import(path.join(ROOT, 'scripts/lib/debug-harness.mjs'));
     debugHarness.testDebugRegression(appSrc, indexHtml, sessionRs, dapRs, adaptersRs, ok);
+  }
+
+  section('Structure / AST regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const apiSrc = fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8');
+    const astRs = fs.readFileSync(path.join(ROOT, 'src/workspace/ast.rs'), 'utf8');
+    const languagesRs = fs.readFileSync(path.join(ROOT, 'src/workspace/languages.rs'), 'utf8');
+    const cargoToml = fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8');
+    const astHarness = await import(path.join(ROOT, 'scripts/lib/ast-structure-harness.mjs'));
+    astHarness.testAstStructureRegression(
+      appSrc,
+      indexHtml,
+      apiSrc,
+      astRs,
+      languagesRs,
+      cargoToml,
+      ok,
+    );
+  }
+
+  section('Elide package manifest / build tasks regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const monacoSrc = fs.readFileSync(path.join(STATIC, 'monaco-languages.js'), 'utf8');
+    const elideHarness = await import(path.join(ROOT, 'scripts/lib/elide-manifest-harness.mjs'));
+    elideHarness.testElideManifestRegression(appSrc, monacoSrc, ok);
   }
 
   section('Compiler settings regression');

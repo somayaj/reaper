@@ -2976,6 +2976,219 @@ details.ij-tree-dir > summary::-webkit-details-marker { display: none; }
   font-size: 11px;
 }
 
+/* Structure / AST panel */
+.ij-structure-panel {
+  min-height: 0;
+}
+
+.ij-structure-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ij-border);
+  flex-shrink: 0;
+}
+
+.ij-structure-filter {
+  flex: 1;
+  min-width: 0;
+  background: var(--ij-bg);
+  border: 1px solid var(--ij-border);
+  border-radius: var(--ij-radius, 4px);
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--ij-text);
+}
+
+.ij-structure-filter:focus {
+  outline: none;
+  border-color: var(--ij-accent);
+  box-shadow: 0 0 0 1px var(--ij-accent-muted);
+}
+
+.ij-structure-mode {
+  display: inline-flex;
+  border: 1px solid var(--ij-border);
+  border-radius: var(--ij-radius, 4px);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ij-structure-mode-btn {
+  background: transparent;
+  border: 0;
+  padding: 3px 7px;
+  font-size: 10px;
+  color: var(--ij-muted);
+  cursor: pointer;
+}
+
+.ij-structure-mode-btn + .ij-structure-mode-btn {
+  border-left: 1px solid var(--ij-border);
+}
+
+.ij-structure-mode-btn:hover {
+  color: var(--ij-text);
+  background: var(--ij-hover);
+}
+
+.ij-structure-mode-btn.active {
+  color: var(--ij-text-bright);
+  background: var(--ij-selection);
+}
+
+.ij-structure-icon-btn {
+  background: transparent;
+  border: 0;
+  color: var(--ij-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: var(--ij-radius, 4px);
+}
+
+.ij-structure-icon-btn:hover {
+  color: var(--ij-text);
+  background: var(--ij-hover);
+}
+
+.ij-structure-subtitle {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  color: var(--ij-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ij-structure-subtitle:empty {
+  display: none;
+}
+
+.ij-structure-body {
+  overflow: auto;
+  padding: 2px 0 10px;
+}
+
+.ij-structure-tree {
+  padding: 2px 4px;
+}
+
+.ij-structure-tree details {
+  margin: 0;
+}
+
+.ij-structure-branch > summary {
+  list-style: none;
+}
+
+.ij-structure-branch > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ij-structure-branch[open] > .ij-structure-node-row .ij-tree-chevron {
+  transform: rotate(90deg);
+}
+
+.ij-structure-node-row {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ij-structure-node-row .ij-tree-label {
+  font-size: 11px;
+}
+
+.ij-structure-icon {
+  margin-right: 2px;
+}
+
+.ij-structure-icon svg text {
+  font-family: var(--ij-mono, Consolas, Menlo, monospace);
+  -webkit-font-smoothing: antialiased;
+}
+
+.ij-structure-node-detail {
+  color: var(--ij-muted);
+  font-size: 10px;
+  margin-left: 2px;
+  font-family: var(--ij-font-mono, ui-monospace, monospace);
+  flex-shrink: 0;
+}
+
+.ij-structure-node-name {
+  color: var(--ij-text-bright, var(--ij-text));
+  font-family: var(--ij-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-structure-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.ij-structure-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  text-transform: lowercase;
+  flex-shrink: 0;
+}
+
+.ij-structure-tag-kind {
+  color: var(--ij-accent, #6897bb);
+  background: color-mix(in srgb, var(--ij-accent, #6897bb) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ij-accent, #6897bb) 28%, transparent);
+}
+
+.ij-structure-tag-mod {
+  color: var(--ij-muted);
+  background: color-mix(in srgb, var(--ij-muted) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ij-border, #3c3f41) 80%, transparent);
+}
+
+.ij-structure-node-anon {
+  color: var(--ij-muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ij-structure-node-row.active,
+.ij-structure-node-row.caret-active {
+  background: var(--ij-selection);
+  box-shadow: inset 2px 0 0 var(--ij-accent);
+}
+
+.ij-structure-node-row.caret-active:not(.active) {
+  background: color-mix(in srgb, var(--ij-selection) 55%, transparent);
+}
+
+.ij-structure-empty {
+  padding: 14px 14px;
+  color: var(--ij-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .ij-package-manifest-dock {
   width: var(--ij-package-manifest-w, 340px);
   min-width: 260px;

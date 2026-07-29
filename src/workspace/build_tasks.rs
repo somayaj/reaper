@@ -54,6 +54,12 @@ pub fn build_tasks_tree(ws: &Path, rel_path: &str, compose_content: Option<&str>
             return Ok(tree);
         }
     }
+    // elide.pkl wins over ambient pom/gradle when that manifest is open (or nearest).
+    if super::elide_pkl::is_elide_manifest_path(&rel_path) {
+        if let Some(tree) = native_build_tasks::try_elide_tree(ws, &rel_path)? {
+            return Ok(tree);
+        }
+    }
     // Prefer Maven/Gradle for this file before ambient docker-compose in the repo root.
     if let Some(tree) = try_maven_tree(ws, &rel_path)? {
         return Ok(tree);
@@ -784,6 +790,47 @@ include 'services:inventory-service'
 
         let compose = build_tasks_tree(root, "docker-compose.yml", None).expect("compose tree");
         assert_eq!(compose.build_tool, "docker");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn elide_pkl_wins_over_sibling_pom_when_open() {
+        let tmp = std::env::temp_dir().join(format!("reaper-build-tasks-elide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <artifactId>demo</artifactId>
+</project>"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("elide.pkl"),
+            r#"
+amends "elide:project.pkl"
+name = "HelloElide"
+jvm { main = "com.example.Hello" }
+scripts {
+  ["pom"] = "elide mvn -- -q package"
+  ["cargo"] = "cargo build --release"
+}
+"#,
+        )
+        .unwrap();
+
+        let elide = build_tasks_tree(&tmp, "elide.pkl", None).expect("elide");
+        assert_eq!(elide.build_tool, "elide");
+        assert!(elide
+            .tree
+            .tasks
+            .iter()
+            .any(|t| t.command == "elide mvn -- -q package"));
+
+        let maven = build_tasks_tree(&tmp, "pom.xml", None).expect("maven");
+        assert_eq!(maven.build_tool, "maven");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

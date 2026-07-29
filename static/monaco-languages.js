@@ -73,6 +73,7 @@
       return 'makefile';
     }
     if (base === 'cmakelists.txt') return 'cmake';
+    if (base === 'elide.pkl' || base.endsWith('.pkl')) return 'pkl';
     if (base.endsWith('.gradle.kts')) return 'kotlin';
     if (base.endsWith('.gradle')) return 'groovy';
     if (base.endsWith('.properties') || base.endsWith('.gradle.properties')) return 'ini';
@@ -114,6 +115,7 @@
       proto: 'protobuf',
       graphql: 'graphql',
       gql: 'graphql',
+      pkl: 'pkl',
     };
     return map[ext] || 'plaintext';
   }
@@ -154,7 +156,7 @@
     const lang = langForPath(path);
     return [
       'markdown', 'plaintext', 'yaml', 'json', 'html', 'xml', 'toml', 'ini',
-      'css', 'scss', 'less', 'sql', 'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql',
+      'css', 'scss', 'less', 'sql', 'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'pkl',
     ].includes(lang);
   }
 
@@ -279,6 +281,7 @@
     if (dotQualifierFromLinePrefix(linePrefix)) return true;
     const token = extractInlinePartialToken(linePrefix);
     if (token && shouldPreferControlKeywordInline(path, linePrefix, token)) return false;
+    if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
     return shouldFetchIndexCompletions(linePrefix, token || '', path, { content, lineNumber });
   }
 
@@ -366,7 +369,7 @@
   function langLabel(lang) {
     const labels = {
       groovy: 'Groovy', kotlin: 'Kotlin', javascript: 'JavaScript', typescript: 'TypeScript',
-      plaintext: 'Plain Text', ini: 'Properties', cpp: 'C/C++',
+      plaintext: 'Plain Text', ini: 'Properties', cpp: 'C/C++', pkl: 'Pkl',
     };
     return labels[lang] || (lang.charAt(0).toUpperCase() + lang.slice(1));
   }
@@ -378,6 +381,7 @@
     if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(base)) return 'C++';
     if (base === 'makefile' || base === 'gnumakefile') return 'Makefile';
     if (base.endsWith('.mk') || base.startsWith('makefile.')) return 'Makefile';
+    if (base === 'elide.pkl' || base.endsWith('.pkl')) return 'Pkl (Elide)';
     return langLabel(langForPath(path));
   }
 
@@ -509,12 +513,80 @@
     });
   }
 
+  const PKL_KEYWORDS = [
+    'amends', 'amend', 'import', 'as', 'module', 'extends', 'class', 'typealias',
+    'local', 'const', 'fixed', 'hidden', 'open', 'abstract', 'external', 'new',
+    'if', 'else', 'when', 'for', 'in', 'let', 'function', 'read', 'throw',
+    'null', 'true', 'false', 'this', 'super', 'outer', 'Unknown',
+  ];
+
+  function registerPkl() {
+    if (window.__reaperPklRegistered) return;
+    window.__reaperPklRegistered = true;
+
+    try {
+      monaco.languages.register({ id: 'pkl', aliases: ['Pkl', 'pkl', 'Elide'] });
+    } catch {
+      /* already registered */
+    }
+
+    monaco.languages.setMonarchTokensProvider('pkl', {
+      defaultToken: '',
+      tokenPostfix: '.pkl',
+      keywords: PKL_KEYWORDS,
+      tokenizer: {
+        root: [
+          [/\/\/.*$/, 'comment'],
+          [/\/\*/, 'comment', '@comment'],
+          [/"([^"\\]|\\.)*"/, 'string'],
+          [/"([^"\\]|\\.)*$/, 'string.invalid'],
+          [/'([^'\\]|\\.)*'/, 'string'],
+          [/\b\d+(\.\d+)?\b/, 'number'],
+          // Match words via monarch cases (do not expand keywords into a regex).
+          [/[A-Z][\w.]*/, 'type.identifier'],
+          [/[a-z_][\w]*/, {
+            cases: {
+              '@keywords': 'keyword',
+              '@default': 'identifier',
+            },
+          }],
+          [/[\[\]]/, 'delimiter.square'],
+          [/[{}]/, 'delimiter.curly'],
+          [/[()]/, 'delimiter.parenthesis'],
+          [/[=:;,.]/, 'delimiter'],
+        ],
+        comment: [
+          [/[^/*]+/, 'comment'],
+          [/\*\//, 'comment', '@pop'],
+          [/[/*]/, 'comment'],
+        ],
+      },
+    });
+
+    monaco.languages.setLanguageConfiguration('pkl', {
+      comments: { lineComment: '//', blockComment: ['/*', '*/'] },
+      brackets: [
+        ['{', '}'],
+        ['[', ']'],
+        ['(', ')'],
+      ],
+      autoClosingPairs: [
+        { open: '{', close: '}' },
+        { open: '[', close: ']' },
+        { open: '(', close: ')' },
+        { open: '"', close: '"' },
+        { open: "'", close: "'" },
+      ],
+    });
+  }
+
   function ensureReaperCustomLanguage(lang) {
     if (lang === 'groovy') registerGroovy();
     if (lang === 'makefile') registerMakefile();
+    if (lang === 'pkl') registerPkl();
   }
 
-  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile']);
+  const REAPER_CUSTOM_LANGS = new Set(['groovy', 'makefile', 'pkl']);
 
   const DEF_PREFIXES = [
     'class', 'module', 'interface', 'enum', 'record', 'struct', 'trait', 'mod', 'type', 'object',
@@ -591,7 +663,7 @@
     'java', 'kotlin', 'groovy', 'rust', 'javascript', 'typescript', 'python', 'go',
     'csharp', 'ruby', 'php', 'swift', 'c', 'cpp', 'shell', 'lua', 'dart', 'r', 'sql',
     'html', 'css', 'scss', 'less', 'json', 'markdown', 'xml', 'yaml', 'toml', 'ini',
-    'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'plaintext',
+    'dockerfile', 'makefile', 'cmake', 'protobuf', 'graphql', 'pkl', 'plaintext',
   ];
 
   /** Reaper uses one Monaco model + setModelLanguage per tab (inmemory:// URIs). */
@@ -1513,8 +1585,8 @@
         || isSpringConfigFile(path)
         || shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber);
     }
-    const trimmedEnd = String(linePrefix || '').trimEnd();
     const token = extractInlinePartialToken(linePrefix);
+    if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
     if (dotQualifierFromLinePrefix(linePrefix)) {
       return supportsWorkspaceIndexInline(path);
     }
@@ -4189,6 +4261,13 @@
     if (isImportTypingLine(path, linePrefix)) return false;
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
     if (isDeclarationTyping(path, linePrefix)) return false;
+    // Modifier keyword gate only when typing a lowercase word — skip on empty-line
+    // AI routing (hot path in perf benches / pause prefetch).
+    const prefixTrimmed = String(linePrefix || '').trimEnd();
+    if (prefixTrimmed && /[a-z]$/.test(prefixTrimmed)) {
+      const modToken = extractInlinePartialToken(linePrefix);
+      if (modToken && shouldPreferModifierKeywordInline(path, linePrefix, modToken)) return false;
+    }
     if (localGhost) return false;
     if (shouldPreferAiStatementInline(path, linePrefix, content, lineNumber)) return true;
 
@@ -4286,6 +4365,32 @@
     if (!token || !isCodeStatementLanguage(path)) return false;
     if (shouldPreferJavaTypeInline(path, linePrefix, token)) return false;
     return isControlKeywordPrefix(token);
+  }
+
+  /** Access / member modifiers — never complete into types like PrivateKeyEntry. */
+  const JAVA_MODIFIER_KEYWORDS = [
+    'public', 'private', 'protected', 'static', 'final', 'abstract',
+    'synchronized', 'volatile', 'transient', 'native', 'default', 'sealed',
+  ];
+
+  function isModifierKeywordPrefix(token) {
+    if (!token || /[A-Z]/.test(token)) return false;
+    const lower = token.toLowerCase();
+    return JAVA_MODIFIER_KEYWORDS.some((kw) => kw.startsWith(lower));
+  }
+
+  /**
+   * Typing `private` / `public static` at a member start — prefer the keyword, not
+   * classpath types that share a prefix (PrivateKeyEntry, PublicKey, …).
+   */
+  function shouldPreferModifierKeywordInline(path, linePrefix, token) {
+    if (!token || !isJavaLikePath(path)) return false;
+    if (!isModifierKeywordPrefix(token)) return false;
+    const trimmed = String(linePrefix || '').trimStart();
+    // Optional full modifiers, then the partial token being typed.
+    return /^(?:(?:public|private|protected|static|final|abstract|synchronized|volatile|transient|native|default|sealed)\s+)*[a-z][a-z]*$/.test(
+      trimmed,
+    );
   }
 
   function rankIndexItemsForInline(items) {
@@ -5308,6 +5413,12 @@
         const kwSuffix = keywordInlineSuffix(path, token);
         if (kwSuffix) return kwSuffix;
       }
+      // `private` / `public` / … at member start: keyword only — not PrivateKeyEntry.
+      if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
+        const modSuffix = keywordInlineSuffix(path, token);
+        if (modSuffix) return modSuffix;
+        return '';
+      }
       if (indexCtx?.helpers && indexCtx?.model && indexCtx?.position) {
         const indexSuffix = inlineSuffixFromCachedIndex(
           indexCtx.helpers, indexCtx.model, indexCtx.position, linePrefix, token,
@@ -5429,6 +5540,11 @@
     const tokenPrefix = member
       ? (member.memberPrefix || '')
       : (prefix || extractInlinePartialToken(linePrefix) || '');
+
+    // Never turn `private` into PrivateKeyEntry (or similar) via index ghosts.
+    if (!member && shouldPreferModifierKeywordInline(path, linePrefix, tokenPrefix)) {
+      return '';
+    }
 
     const useServerOrder = member || supportsWorkspaceIndexInline(path);
     const ordered = useServerOrder ? items : rankIndexItemsForInline(items);
@@ -8450,6 +8566,8 @@
         const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
         const suggestions = [...local.suggestions];
         const seen = new Set(suggestions.map((s) => s.label));
+        const modifierTyping = !memberContext
+          && shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix);
 
         const report = (tag, extra = '') => {
           const labels = suggestions.slice(0, 6).map((s) => s.label).join(', ');
@@ -8462,6 +8580,15 @@
             extra,
           ], { warn: !!(memberContext && suggestions.length === 0) });
         };
+
+        // Typing `private` / `public` — local keywords only (never PrivateKeyEntry from index).
+        if (modifierTyping && !manual) {
+          if (suggestions.length > 0 && ed) {
+            presentCompletionSuggestions(ed, suggestions, { content, path });
+          }
+          report('modifier keyword only');
+          return { suggestions: [], incomplete: false };
+        }
 
         if (!helpers.repoApi || !helpers.getRepo?.()) {
           if (suggestions.length > 0 && ed) {
@@ -9699,6 +9826,8 @@
       statementKeywordsForPath,
       shouldPreferJavaTypeInline,
       shouldPreferControlKeywordInline,
+      shouldPreferModifierKeywordInline,
+      isModifierKeywordPrefix,
       controlStructureInlineSuffix,
       rankIndexItemsForInline,
       buildInlineItems,

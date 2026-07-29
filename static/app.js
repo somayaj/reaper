@@ -11,6 +11,13 @@ const BUILD_TASKS_DOCK_KEY = 'reaper-build-tasks-dock';
 const BUILD_TASKS_WIDTH_KEY = 'reaper-build-tasks-w';
 const PACKAGE_MANIFEST_DOCK_KEY = 'reaper-package-manifest-dock';
 const PACKAGE_MANIFEST_WIDTH_KEY = 'reaper-package-manifest-w';
+const STRUCTURE_MODE_KEY = 'reaper-structure-mode';
+const STRUCTURE_REFRESH_DELAY_MS = 350;
+const AST_LANG_EXTS = new Set([
+  'java', 'py', 'pyw', 'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx',
+  'go', 'rs', 'c', 'h', 'cpp', 'cc', 'cxx', 'hpp', 'hh',
+  'json', 'jsonc', 'yml', 'yaml',
+]);
 const DB_VIEWER_RIGHT_WIDTH_KEY = 'reaper-db-viewer-right-w';
 const DB_VIEWER_SCHEMA_RAIL_WIDTH_KEY = 'reaper-db-schema-rail-w';
 const GIT_VIEWER_RIGHT_WIDTH_KEY = 'reaper-git-viewer-right-w';
@@ -511,6 +518,11 @@ const state = {
   editor: null,
   dirty: new Set(),
   activePanel: 'explorer',
+  structureMode: localStorage.getItem(STRUCTURE_MODE_KEY) === 'full' ? 'full' : 'structure',
+  structureFilter: '',
+  structureAst: null,
+  structurePath: null,
+  structureSeq: 0,
   agentDock: localStorage.getItem(AGENT_DOCK_KEY) || 'left',
   terminalDock: localStorage.getItem(TERMINAL_DOCK_KEY) || 'bottom',
   dockerLogsOpen: false,
@@ -3547,6 +3559,7 @@ function fileIcon(name) {
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.sql')) return 'sql';
   if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return 'docker';
+  if (lower === 'elide.pkl' || lower.endsWith('.pkl')) return 'elide';
   if (lower === '.gitignore' || lower === '.gitattributes') return 'git';
   return 'file';
 }
@@ -3573,6 +3586,7 @@ function treeIconSvg(kind) {
     go: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="7" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">Go</text></svg>',
     sql: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">SQL</text></svg>',
     docker: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#6897bb" fill-opacity=".15"/><text x="8" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#6897bb" font-family="Inter,sans-serif">D</text></svg>',
+    elide: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#2E8B9A" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="7" font-weight="700" fill="#2E8B9A" font-family="Consolas,Menlo,monospace">E</text></svg>',
     git: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="#f14c28" fill-opacity=".22"/><text x="8" y="11.5" text-anchor="middle" font-size="8" font-weight="700" fill="#f14c28" font-family="Consolas,Menlo,monospace">G</text></svg>',
     file: '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2.5h5.5L12 5v8.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1Z" fill="currentColor" fill-opacity=".28"/><path d="M9.5 2.5V5H12" stroke="currentColor" stroke-opacity=".55" stroke-width=".8"/></svg>',
   };
@@ -4464,6 +4478,8 @@ function isProjectBuildFile(path) {
   if (base === 'cargo.toml') return true;
   // Dart / Flutter
   if (base === 'pubspec.yaml') return true;
+  // Elide (scripts + native :targets)
+  if (base === 'elide.pkl') return true;
   // Generic Gradle/Kotlin files
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   // Generic TOML (project manifests)
@@ -4496,6 +4512,7 @@ function buildTasksPanelTitle(buildTool) {
     pdm: 'PDM tasks',
     pipenv: 'Pipenv tasks',
     docker: 'Docker tasks',
+    elide: 'Elide tasks',
   };
   return labels[buildTool] || 'Build tasks';
 }
@@ -4512,7 +4529,7 @@ function buildTaskWorkdir(modulePath) {
   const manifestNames = new Set([
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
     'package.json', 'pyproject.toml', 'manage.py', 'go.mod', 'rakefile', 'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
-    'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'pubspec.yaml',
+    'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'pubspec.yaml', 'elide.pkl', 'cargo.toml',
     'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'dockerfile',
   ]);
   if (!manifestNames.has(lowerBase) && !lowerBase.startsWith('dockerfile.')) return undefined;
@@ -4525,6 +4542,7 @@ function packageManifestKindForPath(path) {
   const normalized = path.replace(/\\/g, '/');
   const base = normalized.split('/').pop() || '';
   const lower = base.toLowerCase();
+  // elide.pkl is build-tasks only (not Package Manifest) — like pom/gradle.
   if (lower === 'cargo.toml') return 'cargo';
   if (lower === 'pubspec.yaml') return 'dart';
   if (lower === 'pyproject.toml') return 'python';
@@ -4591,6 +4609,7 @@ function projectProfileSupportsBuildTasks(path) {
   if (base.endsWith('.gradle') || base.endsWith('.gradle.kts')) return true;
   if (base === 'cargo.toml') return true;
   if (base === 'pubspec.yaml') return true;
+  if (base === 'elide.pkl') return true;
   
   return true;
 }
@@ -4832,6 +4851,406 @@ async function runManifestCommand(command, packageRoot) {
 
 let buildTasksTimer = null;
 let buildTasksRequestId = 0;
+let structureRefreshTimer = null;
+let structureCaretTimer = null;
+
+function isAstSupportedPath(path) {
+  if (!path || isExternalEditorPath(path)) return false;
+  const base = String(path).replace(/\\/g, '/').split('/').pop() || '';
+  const lower = base.toLowerCase();
+  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return false;
+  const ext = lower.includes('.') ? lower.split('.').pop() : '';
+  return AST_LANG_EXTS.has(ext);
+}
+
+function syncStructureModeButtons() {
+  const mode = state.structureMode === 'full' ? 'full' : 'structure';
+  $$('[data-ast-mode]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.astMode === mode);
+  });
+}
+
+function setStructureMode(mode) {
+  const next = mode === 'full' ? 'full' : 'structure';
+  if (state.structureMode === next) return;
+  state.structureMode = next;
+  localStorage.setItem(STRUCTURE_MODE_KEY, next);
+  syncStructureModeButtons();
+  void refreshStructurePanel({ force: true });
+}
+
+function scheduleStructureRefresh() {
+  if (state.activePanel !== 'structure') return;
+  clearTimeout(structureRefreshTimer);
+  structureRefreshTimer = setTimeout(() => {
+    structureRefreshTimer = null;
+    void refreshStructurePanel();
+  }, STRUCTURE_REFRESH_DELAY_MS);
+}
+
+function scheduleStructureCaretHighlight() {
+  if (state.activePanel !== 'structure') return;
+  clearTimeout(structureCaretTimer);
+  structureCaretTimer = setTimeout(() => {
+    structureCaretTimer = null;
+    highlightStructureUnderCaret();
+  }, 80);
+}
+
+function structureNodeMatchesFilter(node, filter) {
+  if (!filter) return true;
+  const mods = Array.isArray(node.modifiers) ? node.modifiers.join(' ') : '';
+  const hay = `${node.kind || ''} ${node.name || ''} ${node.label || ''} ${node.detail || ''} ${mods}`.toLowerCase();
+  if (hay.includes(filter)) return true;
+  return (node.children || []).some((c) => structureNodeMatchesFilter(c, filter));
+}
+
+/** Map tree-sitter / outline node kinds → Structure icon buckets. */
+function structureIconKind(kind) {
+  const k = String(kind || '').toLowerCase();
+  // Exact outline kinds first (avoid "constructor".includes("struct")).
+  if (k === 'constructor') return 'constructor';
+  if (k === 'method' || k === 'function') return 'method';
+  if (k === 'field' || k === 'property') return 'field';
+  if (k === 'class' || k === 'record') return 'class';
+  if (k === 'interface') return 'interface';
+  if (k === 'enum') return 'enum';
+  if (k === 'annotation') return 'annotation';
+  if (k === 'struct') return 'struct';
+  if (k === 'trait') return 'trait';
+  if (!k || k === 'error' || k.includes('missing')) return 'error';
+  if (k.includes('interface')) return 'interface';
+  if (k.includes('enum')) return 'enum';
+  if (k.includes('annotation')) return 'annotation';
+  if (k.includes('constructor')) return 'constructor';
+  if (k.includes('record') || k.includes('class')) return 'class';
+  if (k.includes('struct')) return 'struct';
+  if (k.includes('trait') || k.includes('protocol')) return 'trait';
+  if (k.includes('impl')) return 'impl';
+  if (
+    k.includes('method')
+    || k.includes('function')
+    || k === 'fn_item'
+    || k.includes('arrow_function')
+    || k.includes('function_item')
+  ) {
+    return 'method';
+  }
+  if (
+    k.includes('field')
+    || k.includes('property')
+    || k.includes('variable_declarator')
+    || k.includes('variable_declaration')
+    || k.includes('lexical_declaration')
+  ) {
+    return 'field';
+  }
+  if (k.includes('const') || k.includes('static_item') || k.includes('constant')) return 'const';
+  if (
+    k.includes('type_alias')
+    || k.includes('type_item')
+    || k.includes('type_definition')
+    || k.includes('type_declaration')
+  ) {
+    return 'type';
+  }
+  if (
+    k.includes('package')
+    || k.includes('module')
+    || k.includes('namespace')
+    || k === 'mod_item'
+    || k === 'program'
+    || k === 'source_file'
+    || k === 'compilation_unit'
+    || k === 'document'
+  ) {
+    return 'module';
+  }
+  if (k.includes('import') || k.includes('export') || k.includes('use_declaration')) return 'import';
+  if (k === 'pair' || k.includes('mapping_pair')) return 'key';
+  return 'node';
+}
+
+function structureIconSvg(iconKind) {
+  const badges = {
+    class: ['C', '#9876aa'],
+    interface: ['I', '#6a8759'],
+    enum: ['E', '#cc7832'],
+    struct: ['S', '#9876aa'],
+    trait: ['T', '#6a8759'],
+    impl: ['i', '#6897bb'],
+    method: ['m', '#ffc66d'],
+    constructor: ['+', '#ffc66d'],
+    field: ['f', '#6897bb'],
+    const: ['=', '#6897bb'],
+    type: ['t', '#a9b7c6'],
+    module: ['P', '#bbb529'],
+    import: ['→', '#a9b7c6'],
+    key: ['k', '#cc7832'],
+    annotation: ['@', '#bbb529'],
+    error: ['!', '#bc3f3c'],
+    node: ['·', '#808080'],
+  };
+  const [letter, color] = badges[iconKind] || badges.node;
+  const fontSize = 8;
+  return `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="${color}" fill-opacity=".2"/><text x="8" y="11.2" text-anchor="middle" font-size="${fontSize}" font-weight="700" fill="${color}" font-family="Consolas,Menlo,monospace">${letter}</text></svg>`;
+}
+
+function shortAstKind(kind) {
+  const k = String(kind || '');
+  if (!k) return 'node';
+  const mapped = {
+    method_declaration: 'method',
+    method_definition: 'method',
+    function_declaration: 'function',
+    function_definition: 'function',
+    function_item: 'function',
+    arrow_function: 'function',
+    class_declaration: 'class',
+    class_definition: 'class',
+    class_specifier: 'class',
+    interface_declaration: 'interface',
+    enum_declaration: 'enum',
+    enum_item: 'enum',
+    struct_item: 'struct',
+    trait_item: 'trait',
+    impl_item: 'impl',
+    field_declaration: 'field',
+    property_identifier: 'property',
+    package_declaration: 'package',
+    import_declaration: 'import',
+    import_statement: 'import',
+    export_statement: 'export',
+    use_declaration: 'use',
+    type_alias_declaration: 'type',
+    type_item: 'type',
+    lexical_declaration: 'var',
+    variable_declaration: 'var',
+    variable_declarator: 'var',
+    const_item: 'const',
+    pair: 'key',
+    block_mapping_pair: 'key',
+    program: 'file',
+    source_file: 'file',
+    compilation_unit: 'file',
+  };
+  if (mapped[k]) return mapped[k];
+  return k
+    .replace(/_declaration$/i, '')
+    .replace(/_definition$/i, '')
+    .replace(/_statement$/i, '')
+    .replace(/_item$/i, '')
+    .replace(/_/g, ' ');
+}
+
+function prettyAstKind(kind) {
+  return String(kind || '')
+    .split('_')
+    .filter(Boolean)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(' ');
+}
+
+function structureKindTag(kind) {
+  const k = String(kind || '').toLowerCase();
+  if (['class', 'interface', 'enum', 'record', 'annotation', 'method', 'field', 'constructor', 'struct', 'trait', 'function'].includes(k)) {
+    return k;
+  }
+  return shortAstKind(kind);
+}
+
+function structureModifierTagsHtml(modifiers) {
+  if (!Array.isArray(modifiers) || !modifiers.length) return '';
+  return `<span class="ij-structure-tags">${modifiers.map((m) => (
+    `<span class="ij-structure-tag ij-structure-tag-mod">${escapeHtml(m)}</span>`
+  )).join('')}</span>`;
+}
+
+function structureNodeLabelHtml(node) {
+  const iconKind = structureIconKind(node.kind);
+  const icon = `<span class="ij-tree-icon ij-structure-icon ij-structure-icon-${escapeHtml(iconKind)}" aria-hidden="true">${structureIconSvg(iconKind)}</span>`;
+  const fullMode = state.structureMode === 'full';
+
+  if (fullMode) {
+    const text = node.label || node.name || prettyAstKind(node.kind);
+    return `${icon}<span class="ij-structure-node-anon">${escapeHtml(text)}</span>`;
+  }
+
+  // Structure: icon · name · modifier tags · return/field type
+  // Kind is conveyed by the icon (class/method/field); avoid redundant kind chips.
+  const displayName = node.name || node.label || shortAstKind(node.kind);
+  const modsHtml = structureModifierTagsHtml(node.modifiers);
+  const detailHtml = node.detail
+    ? `<span class="ij-structure-node-detail">${escapeHtml(node.detail)}</span>`
+    : '';
+  return `${icon}<span class="ij-structure-node-name">${escapeHtml(displayName)}</span>${modsHtml}${detailHtml}`;
+}
+
+function renderStructureNode(node, depth, filter) {
+  // Skip invisible file wrapper — show class roots directly.
+  if (node.kind === 'file' || node.kind === 'package') {
+    return (node.children || [])
+      .filter((c) => structureNodeMatchesFilter(c, filter))
+      .map((c) => renderStructureNode(c, depth, filter))
+      .join('');
+  }
+  if (!structureNodeMatchesFilter(node, filter)) return '';
+  const kids = (node.children || []).filter((c) => structureNodeMatchesFilter(c, filter));
+  const hasKids = kids.length > 0;
+  const label = structureNodeLabelHtml(node);
+  const titleParts = [
+    node.kind,
+    node.name,
+    ...(node.modifiers || []),
+    node.detail,
+  ].filter(Boolean);
+  const title = escapeHtml(titleParts.join(' · '));
+  const data = `data-sl="${node.start_line || 1}" data-sc="${node.start_column || 1}" data-el="${node.end_line || 1}" data-ec="${node.end_column || 1}" data-kind="${escapeHtml(node.kind || '')}"`;
+  const open = depth < 2 || !!filter;
+  if (!hasKids) {
+    return `<div class="ij-tree-row ij-structure-node-row" style="--depth:${depth}" ${data} title="${title}">${label}</div>`;
+  }
+  const childHtml = kids.map((c) => renderStructureNode(c, depth + 1, filter)).join('');
+  return `<details class="ij-structure-branch" ${open ? 'open' : ''}>
+    <summary class="ij-tree-row ij-tree-dir-row ij-structure-node-row" style="--depth:${depth}" ${data} title="${title}" aria-expanded="${open ? 'true' : 'false'}">
+      <span class="ij-tree-chevron" aria-hidden="true"></span>
+      ${label}
+    </summary>
+    <div class="ij-structure-children">${childHtml}</div>
+  </details>`;
+}
+
+function renderStructureTree(ast) {
+  const tree = $('#structure-tree');
+  const subtitle = $('#structure-subtitle');
+  if (!tree) return;
+  if (!ast?.root) {
+    tree.innerHTML = `<div class="ij-structure-empty">Open a supported source file to view its structure.</div>`;
+    if (subtitle) subtitle.textContent = '';
+    return;
+  }
+  const filter = (state.structureFilter || '').trim().toLowerCase();
+  if (subtitle) {
+    const modeLabel = ast.mode === 'full' ? 'AST' : 'Structure';
+    subtitle.textContent = `${ast.language || '?'} · ${modeLabel} · ${ast.path || ''}`;
+  }
+  const html = renderStructureNode(ast.root, 0, filter);
+  tree.innerHTML = html
+    ? `<div class="ij-structure-tree">${html}</div>`
+    : `<div class="ij-structure-empty">No nodes match this filter.</div>`;
+  highlightStructureUnderCaret();
+}
+
+async function refreshStructurePanel({ force = false } = {}) {
+  const tree = $('#structure-tree');
+  const subtitle = $('#structure-subtitle');
+  if (!tree) return;
+  if (!state.repo) {
+    state.structureAst = null;
+    state.structurePath = null;
+    tree.innerHTML = `<div class="ij-structure-empty">Select a repo to browse structure.</div>`;
+    if (subtitle) subtitle.textContent = '';
+    return;
+  }
+  const path = state.activeTab;
+  if (!path || !isAstSupportedPath(path)) {
+    state.structureAst = null;
+    state.structurePath = path || null;
+    tree.innerHTML = `<div class="ij-structure-empty">Structure is available for Java, Python, JS/TS, Go, Rust, C/C++, JSON, and YAML.</div>`;
+    if (subtitle) subtitle.textContent = path ? path : '';
+    return;
+  }
+  if (!force && state.structureAst && state.structurePath === path && state.activePanel !== 'structure') {
+    return;
+  }
+  const seq = ++state.structureSeq;
+  const mode = state.structureMode === 'full' ? 'full' : 'structure';
+  const content = state.editor && state.activeTab === path
+    ? state.editor.getValue()
+    : (state.tabContents.get(path) ?? null);
+  try {
+    const body = { path, mode };
+    if (content != null) body.content = content;
+    const ast = await api(repoApi(state.repo, '/workspace/ast'), {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 30_000,
+    });
+    if (seq !== state.structureSeq) return;
+    state.structureAst = ast;
+    state.structurePath = path;
+    renderStructureTree(ast);
+  } catch (err) {
+    if (seq !== state.structureSeq) return;
+    state.structureAst = null;
+    state.structurePath = path;
+    tree.innerHTML = `<div class="ij-structure-empty">${escapeHtml(err.message || 'Failed to parse AST')}</div>`;
+    if (subtitle) subtitle.textContent = path;
+  }
+}
+
+function positionInAstRange(line, column, node) {
+  const sl = node.start_line || 1;
+  const sc = node.start_column || 1;
+  const el = node.end_line || sl;
+  const ec = node.end_column || sc;
+  if (line < sl || line > el) return false;
+  if (line === sl && column < sc) return false;
+  if (line === el && column > ec) return false;
+  return true;
+}
+
+function findDeepestAstNode(node, line, column, best = null) {
+  if (!node || !positionInAstRange(line, column, node)) return best;
+  let next = node;
+  for (const child of node.children || []) {
+    const hit = findDeepestAstNode(child, line, column, null);
+    if (hit) next = hit;
+  }
+  return next;
+}
+
+function highlightStructureUnderCaret() {
+  const tree = $('#structure-tree');
+  if (!tree || !state.structureAst?.root || !state.editor) return;
+  const pos = state.editor.getPosition();
+  if (!pos) return;
+  const hit = findDeepestAstNode(state.structureAst.root, pos.lineNumber, pos.column);
+  tree.querySelectorAll('.ij-structure-node-row.caret-active').forEach((el) => {
+    el.classList.remove('caret-active');
+  });
+  if (!hit) return;
+  const selector = `.ij-structure-node-row[data-sl="${hit.start_line}"][data-sc="${hit.start_column}"][data-el="${hit.end_line}"][data-ec="${hit.end_column}"]`;
+  const row = tree.querySelector(selector);
+  if (!row) return;
+  row.classList.add('caret-active');
+  let details = row.closest('details');
+  while (details) {
+    details.open = true;
+    details = details.parentElement?.closest('details') || null;
+  }
+}
+
+function onStructureTreeClick(e) {
+  const row = e.target.closest('.ij-structure-node-row');
+  if (!row) return;
+  if (e.target.closest('.ij-tree-chevron')) return;
+  // Keep Structure open — don't route through openFileAt/activateTabShell
+  // (those call revealFileInExplorer and switch to Project).
+  e.preventDefault();
+  e.stopPropagation();
+  const line = Number(row.dataset.sl || 1);
+  const column = Number(row.dataset.sc || 1);
+  $('#structure-tree')?.querySelectorAll('.ij-structure-node-row.active').forEach((el) => {
+    el.classList.remove('active');
+  });
+  row.classList.add('active');
+  if (!state.editor || !state.activeTab) return;
+  state.editor.revealLineInCenter(line);
+  state.editor.setPosition({ lineNumber: line, column });
+  state.editor.focus();
+  highlightStructureUnderCaret();
+}
 
 function scheduleBuildTasksRefresh(options = {}) {
   const { fromDisk = false } = options;
@@ -5041,6 +5460,7 @@ function buildTaskModuleKeyFromPath(path) {
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json', 'rakefile',
     'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
     'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'go.mod',
+    'elide.pkl', 'cargo.toml', 'pubspec.yaml',
   ]);
   if (buildManifestNames.has(lower)) {
     return p.slice(0, p.length - base.length).replace(/\/$/, '');
@@ -5059,6 +5479,7 @@ function buildTaskNodeModuleKey(node) {
     'pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json', 'rakefile',
     'cmakelists.txt', 'meson.build', 'makefile', 'gnumakefile',
     'vcpkg.json', 'conanfile.txt', 'conanfile.py', 'go.mod',
+    'elide.pkl', 'cargo.toml', 'pubspec.yaml',
   ]);
   if (buildManifestNames.has(lower)) {
     return p.slice(0, p.length - base.length).replace(/\/$/, '');
@@ -5651,6 +6072,7 @@ function welcomeScreenHtml() {
         <div class="ij-shortcut"><dt>⌘N</dt><dd>New file</dd></div>
         <div class="ij-shortcut"><dt>⌘W</dt><dd>Close tab</dd></div>
         <div class="ij-shortcut"><dt>Alt+1</dt><dd>Project tool window</dd></div>
+        <div class="ij-shortcut"><dt>Alt+7</dt><dd>Structure tool window</dd></div>
       </dl>
     </div>
     ${welcomeShowcaseHtml()}
@@ -5789,6 +6211,7 @@ function runMenuAction(action) {
     publish: showPublishModal,
     'repo-info': showRepoInfoModal,
     'panel-explorer': () => switchPanel('explorer'),
+    'panel-structure': () => switchPanel('structure'),
     'panel-git': () => switchPanel('git'),
     'panel-history': () => switchPanel('history'),
     'panel-terminal': () => showTerminal(),
@@ -5866,6 +6289,7 @@ const PALETTE_COMMANDS = [
   { id: 'publish', label: 'Publish to remote…', run: showPublishModal, needsRepo: true },
   { id: 'repo-info', label: 'Repository details', run: showRepoInfoModal, needsRepo: true },
   { id: 'explorer', label: 'Show Project', kbd: 'Alt+1', run: () => switchPanel('explorer') },
+  { id: 'structure', label: 'Show Structure', kbd: 'Alt+7', run: () => switchPanel('structure'), needsRepo: true },
   { id: 'git-panel', label: 'Show Commit', kbd: 'Alt+9', run: () => switchPanel('git') },
   { id: 'terminal', label: 'Show Terminal', run: () => showTerminal() },
   { id: 'terminal-new', label: 'New Terminal', kbd: '⌘⇧`', run: () => newTerminal(), needsRepo: true },
@@ -11877,6 +12301,7 @@ function initEditor() {
       scheduleRenderTabs();
       scheduleAutoSave();
       scheduleDiagnostics();
+      scheduleStructureRefresh();
       if (shouldAutoOpenBuildTasks(state.activeTab)) {
         if (state.buildTasksPanelOpen) scheduleBuildTasksRefresh();
       } else if (shouldAutoOpenPackageManifest(state.activeTab)) {
@@ -11900,6 +12325,7 @@ function initEditor() {
     });
     state.editor.onDidChangeCursorPosition((e) => {
       updateEditorStatus(e.position);
+      scheduleStructureCaretHighlight();
       if (state.activeTab?.endsWith('.java') || state.activeTab?.endsWith('.rb')
         || state.activeTab?.endsWith('.py') || state.activeTab?.endsWith('.pyw')
         || state.activeTab?.endsWith('.go') || isNativeSourcePath(state.activeTab)) updateRunButtons();
@@ -14387,6 +14813,7 @@ function activateTab(path, { skipFlush = false } = {}) {
   // setEditorContent here used to wipe red dots after tab switches.
   activateTabShell(path);
   scheduleRenderTabs({ immediate: true });
+  if (state.activePanel === 'structure') scheduleStructureRefresh();
 }
 
 function isDiagnosablePath(path) {
@@ -19895,6 +20322,7 @@ function switchPanel(name) {
   syncActivityButtons();
   const titles = {
     explorer: 'Project',
+    structure: 'Structure',
     git: 'Commit',
     history: 'Git Log',
     terminal: 'Terminal',
@@ -19911,6 +20339,10 @@ function switchPanel(name) {
   applyDockerLogsDock();
   if (name === 'git') refreshGitStatus();
   else if (name === 'history') refreshHistory();
+  else if (name === 'structure') {
+    syncStructureModeButtons();
+    void refreshStructurePanel({ force: true });
+  }
   if (name === 'agent') {
     loadCursorStatus();
     setTimeout(() => $('#agent-input')?.focus(), 50);
@@ -20169,6 +20601,16 @@ function bindEvents() {
   });
   $('#build-tasks-close')?.addEventListener('click', () => hideBuildTasksPanel());
   $('#btn-build-tasks')?.addEventListener('click', () => toggleBuildTasksPanel());
+  $('#structure-refresh')?.addEventListener('click', () => void refreshStructurePanel({ force: true }));
+  $('#structure-filter')?.addEventListener('input', (e) => {
+    state.structureFilter = e.target.value || '';
+    if (state.structureAst) renderStructureTree(state.structureAst);
+  });
+  $$('[data-ast-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => setStructureMode(btn.dataset.astMode));
+  });
+  $('#structure-tree')?.addEventListener('click', onStructureTreeClick);
+  syncStructureModeButtons();
   $('#package-manifest-refresh')?.addEventListener('click', () => {
     void loadPackageManifest(state.activeTab);
   });
@@ -20295,6 +20737,16 @@ function bindEvents() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#tree-context-menu')?.classList.contains('hidden')) {
       hideTreeContextMenu();
+      return;
+    }
+    if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.key === '1' || e.code === 'Digit1')) {
+      e.preventDefault();
+      switchPanel('explorer');
+      return;
+    }
+    if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && (e.key === '7' || e.code === 'Digit7')) {
+      e.preventDefault();
+      switchPanel('structure');
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
