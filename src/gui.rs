@@ -197,6 +197,80 @@ fn create_window(
     Ok((window, webview))
 }
 
+/// Fit and center the window inside the Windows work area (screen minus taskbar/menu bar)
+/// so the full IDE chrome is visible and not cropped.
+#[cfg(target_os = "windows")]
+fn place_window_in_work_area(window: &tao::window::Window) {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(
+            ui_action: u32,
+            ui_param: u32,
+            pv_param: *mut core::ffi::c_void,
+            f_win_ini: u32,
+        ) -> i32;
+    }
+
+    const SPI_GETWORKAREA: u32 = 0x0030;
+    let mut work = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut work as *mut Rect as *mut core::ffi::c_void,
+            0,
+        )
+    };
+    if ok == 0 {
+        return;
+    }
+
+    let work_w = (work.right - work.left).max(1);
+    let work_h = (work.bottom - work.top).max(1);
+    let margin = 16i32;
+
+    let outer = window.outer_size();
+    let inner = window.inner_size();
+    let chrome_w = outer.width.saturating_sub(inner.width) as i32;
+    let chrome_h = outer.height.saturating_sub(inner.height) as i32;
+
+    let max_outer_w = (work_w - margin).max(400);
+    let max_outer_h = (work_h - margin).max(300);
+    let mut outer_w = outer.width as i32;
+    let mut outer_h = outer.height as i32;
+
+    if outer_w > max_outer_w || outer_h > max_outer_h {
+        outer_w = outer_w.min(max_outer_w);
+        outer_h = outer_h.min(max_outer_h);
+        let inner_w = (outer_w - chrome_w).max(400) as u32;
+        let inner_h = (outer_h - chrome_h).max(300) as u32;
+        window.set_inner_size(tao::dpi::PhysicalSize::new(inner_w, inner_h));
+        let outer = window.outer_size();
+        outer_w = outer.width as i32;
+        outer_h = outer.height as i32;
+    }
+
+    let x = work.left + ((work_w - outer_w) / 2).max(0);
+    // Prefer sitting fully above the taskbar/menu bar (work.bottom).
+    let y = work.top + ((work_h - outer_h) / 2).max(0);
+    let y = y.min(work.bottom - outer_h).max(work.top);
+    let x = x.min(work.right - outer_w).max(work.left);
+    window.set_outer_position(tao::dpi::PhysicalPosition::new(x, y));
+}
+
 #[cfg(target_os = "windows")]
 fn create_window(
     launch: &GuiLaunch,
@@ -215,6 +289,7 @@ fn create_window(
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
         .with_visible(false)
         .build(event_loop)?;
+    place_window_in_work_area(&window);
 
     let window_id = window.id();
     let show_proxy = proxy.clone();
@@ -307,6 +382,8 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
             }
             Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
                 if let Some((window, _)) = webviews.get(&window_id) {
+                    #[cfg(target_os = "windows")]
+                    place_window_in_work_area(window);
                     window.set_visible(true);
                     window.set_focus();
                 }

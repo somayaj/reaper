@@ -5735,13 +5735,21 @@ main { background: var(--ij-bg); }
   font-size: 11px;
   font-family: inherit;
   padding: 0 14px 0 0;
-  max-width: 148px;
+  max-width: 168px;
   cursor: pointer;
   outline: none;
+  color-scheme: inherit;
 }
 
 #theme-select:hover,
 #theme-select:focus {
+  color: var(--ij-text);
+}
+
+#theme-select option,
+.ij-theme-menu-select option,
+#editor-font-size-status option {
+  background-color: var(--ij-panel);
   color: var(--ij-text);
 }
 
@@ -10046,8 +10054,9 @@ html[data-theme="offwhite"] .ij-welcome .ij-welcome-logo.logo-mark,
   color: var(--ij-text-bright);
   font-size: 11px;
   padding: 2px 20px 2px 8px;
-  max-width: 160px;
+  max-width: 168px;
   cursor: pointer;
+  color-scheme: inherit;
 }
 
 .ij-theme-menu-select:focus {
@@ -10089,6 +10098,7 @@ html[data-theme="offwhite"] .ij-welcome .ij-welcome-logo.logo-mark,
   max-width: 56px;
   cursor: pointer;
   outline: none;
+  color-scheme: inherit;
 }
 
 #editor-font-size-status:hover,

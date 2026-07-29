@@ -357,6 +357,9 @@
     root.dataset.theme = theme.id;
     root.classList.toggle('dark', theme.dark);
     root.classList.toggle('theme-light', !theme.dark);
+    // Native <select> popups (footer theme/font) follow color-scheme; without this,
+    // WebView2/Windows often renders option text invisible against the wrong system colors.
+    root.style.colorScheme = theme.dark ? 'dark' : 'light';
     if (persist) void persistThemePref(theme.id);
     syncThemeSelects(theme.id);
     syncMonacoOverflowWidgetTheme(theme.dark);

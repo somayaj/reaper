@@ -496,14 +496,17 @@ pub fn reveal_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let status = if target.is_dir() {
-            Command::new("explorer").arg(&target).status()
+        let mut cmd = if target.is_dir() {
+            let mut c = Command::new("explorer");
+            c.arg(&target);
+            c
         } else {
-            Command::new("explorer")
-                .arg(format!("/select,{}", target.display()))
-                .status()
-        }
-        .context("open in Explorer")?;
+            let mut c = Command::new("explorer");
+            c.arg(format!("/select,{}", target.display()));
+            c
+        };
+        crate::platform::hide_console_window(&mut cmd);
+        let status = cmd.status().context("open in Explorer")?;
         if !status.success() {
             bail!("failed to reveal in Explorer");
         }
@@ -1203,10 +1206,10 @@ pub fn open_in_system(ws: &Path, rel_path: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let status = Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .status()
-            .context("open in default application")?;
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", &path.to_string_lossy()]);
+        crate::platform::hide_console_window(&mut cmd);
+        let status = cmd.status().context("open in default application")?;
         if !status.success() {
             bail!("failed to open path");
         }

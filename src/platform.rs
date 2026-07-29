@@ -32,12 +32,15 @@ fn macos_uname_is_arm64() -> bool {
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "arm64")
 }
 
+/// CREATE_NO_WINDOW — console subsystem children (node, git, where, etc.) stay invisible.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Prevent Windows from flashing a console window for background child processes.
 pub fn hide_console_window(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let _ = cmd;
@@ -47,7 +50,20 @@ pub fn hide_console_window(cmd: &mut std::process::Command) {
 pub fn hide_console_window_async(cmd: &mut tokio::process::Command) {
     #[cfg(windows)]
     {
-        cmd.creation_flags(0x0800_0000);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let _ = cmd;
+}
+
+/// Drop any inherited/attached console so GUI launches never leave a cmd window up.
+#[cfg(windows)]
+pub fn free_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn FreeConsole() -> i32;
+    }
+    unsafe {
+        let _ = FreeConsole();
+    }
 }

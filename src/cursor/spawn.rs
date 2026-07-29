@@ -286,9 +286,10 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
 
     let install_script = dir.join("install-deps.mjs");
     if install_script.is_file() {
-        let status = Command::new(node)
-            .arg("install-deps.mjs")
-            .current_dir(dir)
+        let mut install = Command::new(node);
+        install.arg("install-deps.mjs").current_dir(dir);
+        crate::platform::hide_console_window_async(&mut install);
+        let status = install
             .status()
             .await
             .context("install-deps.mjs failed to start")?;
@@ -302,18 +303,22 @@ async fn ensure_node_modules(node: &Path, dir: &Path) -> Result<()> {
         tracing::warn!("install-deps.mjs failed or incomplete; trying npm");
     }
 
-    if Command::new("npm")
+    let mut npm_ver = Command::new("npm");
+    npm_ver
         .arg("--version")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::platform::hide_console_window_async(&mut npm_ver);
+    if npm_ver
         .status()
         .await
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        let status = Command::new("npm")
-            .arg("install")
-            .current_dir(dir)
+        let mut npm_install = Command::new("npm");
+        npm_install.arg("install").current_dir(dir);
+        crate::platform::hide_console_window_async(&mut npm_install);
+        let status = npm_install
             .status()
             .await
             .context("npm install failed to start")?;

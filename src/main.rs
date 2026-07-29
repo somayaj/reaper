@@ -38,6 +38,8 @@ fn main() -> anyhow::Result<()> {
 
     workspace::ensure_developer_path();
     if wants_gui() {
+        #[cfg(target_os = "windows")]
+        crate::platform::free_console();
         run_gui_mode()
     } else {
         tokio::runtime::Builder::new_multi_thread()
