@@ -18524,6 +18524,7 @@ function isTerminalCommandActive(term) {
 
 function restoreTerminalShellIfIdle(term) {
   if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
+  if (term.deferShellUntilInput) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -18557,7 +18558,9 @@ function createTerminalSession(name) {
     streamLine: null,
     streamColorPartial: '',
     commandStartLine: null,
+    deferShellUntilInput: false,
     suppressPromptOverwrite: false,
+    shellResumeAt: 0,
     linkProviderDisposable: null,
   };
 }
@@ -18596,7 +18599,9 @@ function destroyTerminalInstance(term) {
   }
   term.streamLine = null;
   term.shellSuspended = false;
+  term.deferShellUntilInput = false;
   term.suppressPromptOverwrite = false;
+  term.shellResumeAt = 0;
 }
 
 function spawnTerminalInstance(term, host) {
@@ -18668,6 +18673,32 @@ function disconnectTerminalWs(term, { silent = false } = {}) {
   term.ws = null;
 }
 
+function decodeTerminalChunk(chunk) {
+  if (chunk == null) return '';
+  if (typeof chunk === 'string') return chunk;
+  if (chunk instanceof ArrayBuffer) return new TextDecoder('utf-8', { fatal: false }).decode(chunk);
+  if (ArrayBuffer.isView(chunk)) {
+    return new TextDecoder('utf-8', { fatal: false }).decode(
+      chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength),
+    );
+  }
+  return '';
+}
+
+function sanitizeShellOutputAfterResume(term, text) {
+  if (!text || !term.suppressPromptOverwrite) return text;
+  if (Date.now() - (term.shellResumeAt || 0) > 1000) {
+    term.suppressPromptOverwrite = false;
+    return text;
+  }
+  // cmd.exe redraws the prompt with CR on the current row — move it to a fresh line.
+  if (/^\r(?!\n)/.test(text)) {
+    term.suppressPromptOverwrite = false;
+    return `\r\n${text.replace(/^\r+/, '')}`;
+  }
+  return text;
+}
+
 async function connectTerminalWs(term) {
   if (!state.repo || !term) return;
   if (term.shellSuspended || term.streamLine != null) return;
@@ -18697,12 +18728,10 @@ async function connectTerminalWs(term) {
     if (!term.xterm || term.shellSuspended || isTerminalCommandActive(term)) return;
     const writeChunk = (chunk) => {
       if (!chunk) return;
-      let out = typeof chunk === 'string' ? chunk : new Uint8Array(chunk);
-      if (typeof out === 'string' && term.suppressPromptOverwrite && /^\r/.test(out) && !/^\r\n/.test(out)) {
-        term.suppressPromptOverwrite = false;
-        out = `\r\n${out}`;
-      }
-      term.xterm.write(out);
+      let text = decodeTerminalChunk(chunk);
+      if (!text) return;
+      text = sanitizeShellOutputAfterResume(term, text);
+      term.xterm.write(text);
     };
     if (ev.data instanceof ArrayBuffer) {
       writeChunk(ev.data);
@@ -18771,6 +18800,9 @@ function initTerminalXterm(term, host) {
         return;
       }
     }
+    if (term.deferShellUntilInput && term.shellSuspended) {
+      resumeTerminalShell(term);
+    }
     if (term.ws?.readyState === WebSocket.OPEN) {
       term.ws.send(data);
     }
@@ -18811,7 +18843,7 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
     return;
   }
 
-  if (term.shellSuspended && term.xterm?.element?.isConnected) {
+  if ((term.shellSuspended || term.deferShellUntilInput) && term.xterm?.element?.isConnected) {
     ensureTerminalPane(term, host);
     term.container.classList.remove('hidden');
     fitTerminal(term);
@@ -18924,8 +18956,13 @@ function suspendTerminalShell(term) {
 function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
+  term.deferShellUntilInput = false;
   term.suppressPromptOverwrite = true;
-  if (term.xterm) term.xterm.write('\r\n\r\n');
+  term.shellResumeAt = Date.now();
+  if (term.xterm) {
+    try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
+    term.xterm.write('\r\n');
+  }
   void connectTerminalWs(term);
 }
 
@@ -19066,7 +19103,7 @@ function terminalCommandEnd(exitCode, terminalId) {
     term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n`);
   }
   try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-  resumeTerminalShell(term);
+  term.deferShellUntilInput = true;
 }
 
 function beginTerminalStream(terminalId) {
@@ -19077,6 +19114,7 @@ function beginTerminalStream(terminalId) {
   term.streamLine = '';
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
+  term.deferShellUntilInput = true;
   resetStreamCollapseState(term);
 }
 
@@ -19109,6 +19147,7 @@ function restartActiveTerminal() {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!term || !host) return;
+  term.deferShellUntilInput = false;
   spawnTerminalInstance(term, host);
   mountActiveTerminal();
 }
