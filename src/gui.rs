@@ -220,15 +220,12 @@ fn create_window(
     let show_proxy = proxy.clone();
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
-    // WebView2/UTM: skip splash; disable GPU compositing (black bands / layer bleed in VMs).
+    // WebView2: static splash + logo (skip animated harvest layers via CSS).
     let init_script = format!(
-        r#"document.documentElement.classList.add('ij-platform-windows','reaper-ui-ready');
-window.__reaperSkipSplash=true;
-document.addEventListener('DOMContentLoaded',function(){{
-  document.body&&document.body.classList.add('reaper-ui-ready');
-  var s=document.getElementById('launch-splash');
-  if(s)s.remove();
-}});
+        r#"document.documentElement.classList.add('ij-platform-windows');
+window.__reaperWindowsSplash=true;
+window.__reaperSkipSplash=false;
+window.__reaperSplashAt=Date.now();
 {}"#,
         launch.init_script
     );

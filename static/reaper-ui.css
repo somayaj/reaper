@@ -489,15 +489,14 @@ html.ij-platform-windows .ij-window-titlebar {
   display: none !important;
 }
 
-/* WebView2/UTM: SVG + blur + GPU layers paint outside boxes (black bands / bleed-through). */
+/* WebView2: keep macOS titlebar hidden; splash shows static logo. */
 html.ij-platform-windows #launch-splash {
-  display: none !important;
-  visibility: hidden !important;
-  pointer-events: none !important;
+  background: #0a0a0a !important;
 }
 
-html.ij-platform-windows body.ij-shell > :not(#launch-splash) {
-  visibility: visible !important;
+html.ij-platform-windows #launch-splash .logo-mark {
+  overflow: hidden !important;
+  contain: paint;
 }
 
 html.ij-platform-windows,
