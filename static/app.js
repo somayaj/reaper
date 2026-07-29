@@ -18523,6 +18523,7 @@ function isTerminalCommandActive(term) {
 
 function restoreTerminalShellIfIdle(term) {
   if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
+  if (term.deferShellUntilInput) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -18556,6 +18557,7 @@ function createTerminalSession(name) {
     streamLine: null,
     streamColorPartial: '',
     commandStartLine: null,
+    deferShellUntilInput: false,
     linkProviderDisposable: null,
   };
 }
@@ -18763,6 +18765,9 @@ function initTerminalXterm(term, host) {
         return;
       }
     }
+    if (term.deferShellUntilInput && term.shellSuspended) {
+      resumeTerminalShell(term);
+    }
     if (term.ws?.readyState === WebSocket.OPEN) {
       term.ws.send(data);
     }
@@ -18906,6 +18911,8 @@ function suspendTerminalShell(term) {
 function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
+  term.deferShellUntilInput = false;
+  if (term.xterm) term.xterm.write('\r\n');
   void connectTerminalWs(term);
 }
 
@@ -19044,14 +19051,11 @@ function terminalCommandEnd(exitCode, terminalId) {
   }
   if (typeof exitCode === 'number') {
     const icon = exitCode === 0 ? TERM_ESC.brightGreen : TERM_ESC.brightRed;
-    term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n\r\n`);
+    term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n`);
   }
-  if (typeof exitCode === 'number' && exitCode !== 0) {
-    try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-  } else {
-    scrollTerminalToLine(term, term.commandStartLine ?? terminalBufferLine(term));
-  }
-  resumeTerminalShell(term);
+  try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
+  // Keep shell disconnected so cmd.exe prompt does not overwrite run output.
+  // Press any key in the terminal (or Restart Shell) to restore the interactive shell.
 }
 
 function beginTerminalStream(terminalId) {
@@ -19061,6 +19065,7 @@ function beginTerminalStream(terminalId) {
   term.streamLine = '';
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
+  term.deferShellUntilInput = true;
   resetStreamCollapseState(term);
 }
 
@@ -19084,9 +19089,6 @@ function finalizeTerminalStream(terminalId) {
   stopCommandStatus(term);
   term.streamLine = null;
   term.streamColorPartial = '';
-  if (term.shellSuspended && !term.execAbortController) {
-    resumeTerminalShell(term);
-  }
 }
 
 function clearActiveTerminal() {
@@ -19103,6 +19105,7 @@ function restartActiveTerminal() {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!term || !host) return;
+  term.deferShellUntilInput = false;
   spawnTerminalInstance(term, host);
   mountActiveTerminal();
 }
