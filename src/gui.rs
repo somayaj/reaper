@@ -22,7 +22,18 @@ pub fn show_error(message: &str) {
     eprintln!("{message}");
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn show_error(message: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_title("Reaper")
+        .set_description(message)
+        .set_level(rfd::MessageLevel::Error)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    eprintln!("{message}");
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn show_error(message: &str) {
     eprintln!("{message}");
 }

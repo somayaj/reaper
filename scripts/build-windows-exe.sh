@@ -101,7 +101,7 @@ Setup:
      https://go.microsoft.com/fwlink/p/?LinkId=2124703
   3. Double-click reaper.exe
 
-If only a black console appears and no window:
+If the native window fails to open:
   - Install WebView2 Runtime (link above), then try again
   - Or run:  reaper.exe --server
     then open the https://127.0.0.1:… URL printed in the console

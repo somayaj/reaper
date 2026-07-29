@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod platform;
 mod config;
 mod cursor;
@@ -31,6 +33,9 @@ use state::AppState;
 use ui_preferences::UiPreferencesStore;
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    windows_maybe_attach_console();
+
     workspace::ensure_developer_path();
     if wants_gui() {
         run_gui_mode()
@@ -39,6 +44,31 @@ fn main() -> anyhow::Result<()> {
             .enable_all()
             .build()?
             .block_on(run_server_mode())
+    }
+}
+
+/// GUI builds use the Windows subsystem (no black cmd window on double-click).
+/// `--server` still gets a console so the bind URL is visible.
+#[cfg(target_os = "windows")]
+fn windows_maybe_attach_console() {
+    let args: Vec<String> = std::env::args().collect();
+    let wants_console = args
+        .iter()
+        .any(|a| a == "--server" || a == "--no-gui" || a == "--help" || a == "-h");
+    if !wants_console {
+        return;
+    }
+    // ATTACH_PARENT_PROCESS = (DWORD)-1
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+        fn AllocConsole() -> i32;
+    }
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            let _ = AllocConsole();
+        }
     }
 }
 
@@ -371,20 +401,16 @@ fn run_gui_mode() -> anyhow::Result<()> {
 
     let gui_result = gui::run(&launch, protocol_bridge);
     if let Err(ref e) = gui_result {
-        eprintln!();
-        eprintln!("Native window failed: {e:#}");
         #[cfg(target_os = "windows")]
         {
-            eprintln!();
-            eprintln!("Common fix: install WebView2 Runtime, then re-run reaper.exe");
-            eprintln!("  https://go.microsoft.com/fwlink/p/?LinkId=2124703");
-            // Keep the console visible so the user can read the error.
-            eprintln!();
-            eprintln!("Press Enter to exit…");
-            let _ = std::io::stdin().read_line(&mut String::new());
+            gui::show_error(&format!(
+                "Native window failed:\n\n{e:#}\n\nCommon fix: install WebView2 Runtime, then re-run reaper.exe\nhttps://go.microsoft.com/fwlink/p/?LinkId=2124703"
+            ));
         }
         #[cfg(not(target_os = "windows"))]
         {
+            eprintln!();
+            eprintln!("Native window failed: {e:#}");
             gui::show_error(&format!("Reaper window failed:\n\n{e:#}"));
         }
     }
