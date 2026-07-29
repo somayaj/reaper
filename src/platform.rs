@@ -1,5 +1,6 @@
 //! Host platform helpers (macOS arch detection, Windows console-less child processes).
 
+#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 
 /// macOS host CPU arch: `arm64` or `x86_64`. Falls back to compile-time arch elsewhere.
