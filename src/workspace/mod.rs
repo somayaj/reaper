@@ -115,7 +115,7 @@ pub fn spawn_jdtls_warm(ws: &Path) {
     }
     std::thread::spawn(move || {
         if let Err(e) = warm_jdtls_workspace(&ws) {
-            tracing::debug!("jdtls warm on workspace open: {e:#}");
+            tracing::warn!("jdtls warm on workspace open: {e:#}");
         } else {
             tracing::info!("jdtls ready for {}", ws.display());
         }

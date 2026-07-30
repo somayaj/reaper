@@ -4403,7 +4403,9 @@ function updateProjectIndexUi(status) {
     state.projectIndexNotified = true;
     state.projectReloadBackground = false;
     if (!state.projectReloadPending) {
-      toast(`Project indexing failed: ${status.error || status.java?.error || 'unknown error'}`, 'error');
+      const errMsg = status.error || status.java?.error || 'unknown error';
+      toast(`Project indexing failed: ${errMsg}`, 'error');
+      terminalLogError(`Project indexing failed: ${errMsg}`);
     }
   }
 
@@ -5861,7 +5863,10 @@ async function reloadProjectIndex(options = {}) {
   } catch (err) {
     state.projectIndexRunning = false;
     updateProjectReloadButton();
-    if (!silent) toast(err.message || 'Failed to reload project', 'error');
+    if (!silent) {
+      toast(err.message || 'Failed to reload project', 'error');
+      terminalLogError(err.message || 'Failed to reload project');
+    }
   }
 }
 
@@ -9032,6 +9037,7 @@ async function startDebugSession() {
     if (state._debugStarting) {
       state._debugStarting = false;
       toast('Debug start timed out — try again', 'error');
+      terminalLogError('Debug start timed out — try again', { label: 'debug' });
       syncDebugToolbar();
     }
   }, 560_000);
@@ -9108,7 +9114,9 @@ async function startDebugSession() {
     state.debugActive = false;
     state.debugState = { status: 'idle', frames: [], variables: [], breakpoints: [] };
     syncDebugToolbar();
-    toast(e.message || 'Debug start failed', 'error');
+    const errMsg = e.message || 'Debug start failed';
+    toast(errMsg, 'error');
+    terminalLogError(errMsg, { label: 'debug' });
   } finally {
     clearTimeout(unlockTimer);
     state._debugStarting = false;
@@ -9123,7 +9131,9 @@ async function stopDebugSession() {
     disconnectDebugWs();
     highlightDebugCurrentLine();
   } catch (e) {
-    toast(e.message || 'Stop failed', 'error');
+    const errMsg = e.message || 'Stop failed';
+    toast(errMsg, 'error');
+    terminalLogError(errMsg, { label: 'debug' });
   }
 }
 
@@ -9138,7 +9148,9 @@ async function debugContinue() {
     });
     applyDebugState(st);
   } catch (e) {
-    toast(e.message || 'Continue failed', 'error');
+    const errMsg = e.message || 'Continue failed';
+    toast(errMsg, 'error');
+    terminalLogError(errMsg, { label: 'debug' });
     state._debugStepping = false;
   }
 }
@@ -9156,7 +9168,9 @@ async function debugStep(kind) {
     });
     applyDebugState(st);
   } catch (e) {
-    toast(e.message || 'Step failed', 'error');
+    const errMsg = e.message || 'Step failed';
+    toast(errMsg, 'error');
+    terminalLogError(errMsg, { label: 'debug' });
     state._debugStepping = false;
   }
 }
@@ -17538,7 +17552,7 @@ async function runJavaMain(qualifiedName) {
       { label: `java ${name}`, terminalId: term.id },
     );
   } catch (e) {
-    terminalLog(`error: ${e.message}`);
+    if (e?.name !== 'AbortError') terminalLogError(e.message, { label: 'run', show: false });
   }
 }
 
@@ -19084,6 +19098,22 @@ function terminalLog(text, terminalId) {
     return;
   }
   terminalWrite(t, `${TERM_ESC.dim}${text}${TERM_ESC.reset}`);
+}
+
+/** Mirror API/debug/index failures into the terminal (backend logs stay in reaper.log). */
+function terminalLogError(text, { label = 'error', show = true } = {}) {
+  if (text == null || text === '') return;
+  const msg = String(text).trim();
+  if (!msg) return;
+  if (show) showTerminal();
+  const t = getActiveTerminal();
+  if (!t?.xterm) return;
+  const line = label ? `${label}: ${msg}` : msg;
+  if (t.streamLine != null) {
+    terminalStreamChunk(`${line}\n`, t.id);
+    return;
+  }
+  terminalWrite(t, `${TERM_ESC.brightRed}${line}${TERM_ESC.reset}`);
 }
 
 function resolveTerminal(terminalId) {
