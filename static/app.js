@@ -20400,7 +20400,7 @@ async function runAgentChat(prompt, opts = {}) {
   }
   state.agentBusy = true;
   state.agentStopRequested = false;
-  state.agentActivity = 'Starting…';
+  state.agentActivity = 'Connecting…';
   state.agentAbortController = new AbortController();
   state.agentLiveFollow = !!def.capabilities.liveFollow && state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
@@ -20425,9 +20425,15 @@ async function runAgentChat(prompt, opts = {}) {
     if (def.id === 'cursor') {
       const modelErr = cursorModelStatusError();
       if (modelErr) throw new Error(modelErr);
-      await warmCursorSession(state.repo);
+      setAgentActivity('Connecting…');
+      // Don't block chat forever if warm hangs while the bridge boots.
+      await Promise.race([
+        warmCursorSession(state.repo),
+        new Promise((resolve) => setTimeout(resolve, 12_000)),
+      ]);
     }
 
+    setAgentActivity('Waiting for reply…');
     const chatUrl = repoApi(state.repo, def.chatPath);
     const res = await fetch(chatUrl, {
       method: 'POST',
@@ -20449,6 +20455,7 @@ async function runAgentChat(prompt, opts = {}) {
     const decoder = new TextDecoder();
     let sseBuffer = '';
     window.ReaperAgentMarkdown?.renderPlain(assistantEl, '');
+    setAgentActivity('Thinking…');
 
     while (true) {
       const { done, value } = await reader.read();

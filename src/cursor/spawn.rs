@@ -16,6 +16,7 @@ use super::{CursorBridge, bridge_url, load_saved_bridge_url, save_bridge_port, s
 
 static BRIDGE_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 static BRIDGE_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static BRIDGE_START: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn bridge_child_slot() -> &'static Mutex<Option<Child>> {
     BRIDGE_CHILD.get_or_init(|| Mutex::new(None))
@@ -23,6 +24,10 @@ fn bridge_child_slot() -> &'static Mutex<Option<Child>> {
 
 fn bridge_error_slot() -> &'static Mutex<Option<String>> {
     BRIDGE_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+fn bridge_start_lock() -> &'static Mutex<()> {
+    BRIDGE_START.get_or_init(|| Mutex::new(()))
 }
 
 pub async fn last_bridge_error() -> Option<String> {
@@ -413,6 +418,9 @@ async fn kill_listeners_on_port(port: u16) {
 }
 
 pub async fn ensure_bridge_running() -> Result<()> {
+    // Serialize starts — concurrent warm/chat/auto-retry used to spawn multiple
+    // Node bridges that kill each other (kill_on_drop) and leave agent chat dead.
+    let _start_guard = bridge_start_lock().lock().await;
     set_bridge_error(None).await;
 
     if let Some(url) = load_saved_bridge_url() {
@@ -421,27 +429,10 @@ pub async fn ensure_bridge_running() -> Result<()> {
 
     let bridge = CursorBridge::new();
     if bridge.health().await {
-        let owned = bridge_child_slot().lock().await.is_some();
-        if owned {
-            tracing::debug!("Cursor bridge already running at {}", bridge_url());
-            return Ok(());
-        }
-        tracing::warn!(
-            "Replacing orphan Cursor bridge at {} (not managed by this Reaper process)",
-            bridge_url()
-        );
-        if let Some(url) = load_saved_bridge_url() {
-            if let Some(port) = url
-                .trim_start_matches("http://")
-                .split('/')
-                .next()
-                .and_then(|host_port| host_port.rsplit(':').next())
-                .and_then(|p| p.parse::<u16>().ok())
-            {
-                kill_listeners_on_port(port).await;
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        }
+        // Prefer a healthy bridge whether or not this process owns the child.
+        // Killing "orphans" here raced with startup and tore down agent chat.
+        tracing::debug!("Cursor bridge already running at {}", bridge_url());
+        return Ok(());
     }
 
     if std::env::var("REAPER_CURSOR_BRIDGE_DISABLE").is_ok() {
@@ -474,11 +465,8 @@ pub async fn ensure_bridge_running() -> Result<()> {
     tracing::info!("Starting Cursor bridge on {url}…");
 
     let mut child_cmd = crate::platform::async_command(&node);
-    if dir.join("windows-hide-patch.mjs").is_file() {
-        // Relative path required: Node --import rejects bare Windows `C:\...` paths.
-        // cwd is already the bridge dir below.
-        child_cmd.arg("--import").arg("./windows-hide-patch.mjs");
-    }
+    // Patch is loaded via `import` in server.mjs — do not also pass `--import`
+    // (double-load + absolute Windows paths previously broke ESM startup).
     child_cmd
         .arg("server.mjs")
         .current_dir(&dir)
@@ -503,6 +491,14 @@ pub async fn ensure_bridge_running() -> Result<()> {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::warn!("cursor-bridge: {line}");
+                let lower = line.to_ascii_lowercase();
+                if lower.contains("[windows-hide-patch]")
+                    || lower.contains("experimentalwarning")
+                    || lower.contains("sqlite is an experimental")
+                    || lower.contains("trace-warnings")
+                {
+                    continue;
+                }
                 set_bridge_error(Some(line)).await;
             }
         });
