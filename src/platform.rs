@@ -143,6 +143,51 @@ pub fn login_shell() -> String {
     }
 }
 
+/// Strip Windows `\\?\` / `//?/` extended-length prefixes.
+///
+/// `Path::canonicalize()` often returns `\\?\C:\…`. The JVM cannot open JARs or
+/// classpath directories with that prefix (ClassNotFoundException for otherwise
+/// valid classes / `org.eclipse.equinox.launcher.Main`).
+pub fn path_for_jvm(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+        if let Some(rest) = s.strip_prefix("//?/") {
+            return std::path::PathBuf::from(rest.replace('/', "\\"));
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Path string safe for Java `-cp` / DAP `classPaths` / `-D` path properties.
+pub fn jvm_path_string(path: &std::path::Path) -> String {
+    path_for_jvm(path).to_string_lossy().replace('\\', "/")
+}
+
+/// Strip a `\\?\` prefix from an already-stringified path (e.g. jdtls classpath entries).
+pub fn jvm_path_string_from_str(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        let trimmed = path
+            .strip_prefix(r"\\?\UNC\")
+            .map(|r| format!(r"\\{r}"))
+            .or_else(|| path.strip_prefix(r"\\?\").map(|r| r.to_string()))
+            .or_else(|| path.strip_prefix("//?/").map(|r| r.replace('/', "\\")))
+            .unwrap_or_else(|| path.to_string());
+        return trimmed.replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
 /// Quote a token for one-shot shell scripts (`cmd /C` on Windows, `bash -lc` on Unix).
 pub fn shell_quote_for_script(s: &str) -> String {
     #[cfg(windows)]

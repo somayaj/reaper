@@ -3,11 +3,11 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -58,6 +58,8 @@ struct CompletionCacheKey {
 
 struct JdtlsSession {
     child: Child,
+    /// Rolling tail of jdtls stderr (for crash diagnostics).
+    stderr_tail: Arc<Mutex<String>>,
     last_used: Instant,
     open_docs: HashMap<String, OpenDoc>,
     service_ready: bool,
@@ -77,9 +79,10 @@ fn new_open_doc(version: i64, content_hash: u64) -> OpenDoc {
     }
 }
 
-fn new_jdtls_session(child: Child, now: Instant) -> JdtlsSession {
+fn new_jdtls_session(child: Child, stderr_tail: Arc<Mutex<String>>, now: Instant) -> JdtlsSession {
     JdtlsSession {
         child,
+        stderr_tail,
         last_used: now,
         open_docs: HashMap::new(),
         service_ready: true,
@@ -87,6 +90,96 @@ fn new_jdtls_session(child: Child, now: Instant) -> JdtlsSession {
         diagnostics: HashMap::new(),
         completion_cache: HashMap::new(),
     }
+}
+
+fn kill_jdtls_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn drain_jdtls_stderr(stderr: impl Read, tail: Arc<Mutex<String>>) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = String::new();
+    while reader.read_line(&mut line).ok().filter(|n| *n > 0).is_some() {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            tracing::warn!("jdtls: {trimmed}");
+            if let Ok(mut guard) = tail.lock() {
+                guard.push_str(trimmed);
+                guard.push('\n');
+                const MAX: usize = 8192;
+                if guard.len() > MAX {
+                    let drain = guard.len() - MAX;
+                    guard.drain(..drain);
+                }
+            }
+        }
+        line.clear();
+    }
+}
+
+fn attach_jdtls_stderr(child: &mut Child) -> Arc<Mutex<String>> {
+    let tail = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let tail_clone = Arc::clone(&tail);
+        std::thread::Builder::new()
+            .name("jdtls-stderr".into())
+            .spawn(move || drain_jdtls_stderr(stderr, tail_clone))
+            .ok();
+    }
+    tail
+}
+
+fn stderr_tail_snippet(tail: &Arc<Mutex<String>>) -> Option<String> {
+    tail.lock()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn jdtls_disconnect_error(child: &mut Child, stderr_tail: &Arc<Mutex<String>>, cause: anyhow::Error) -> anyhow::Error {
+    let status = match child.try_wait() {
+        Ok(Some(s)) => s
+            .code()
+            .map(|c| format!("exit {c}"))
+            .unwrap_or_else(|| s.to_string()),
+        Ok(None) => "still running".into(),
+        Err(_) => "unknown".into(),
+    };
+    if let Some(detail) = stderr_tail_snippet(stderr_tail) {
+        let brief = detail
+            .lines()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        anyhow::anyhow!("jdtls exited unexpectedly ({status}): {brief}")
+    } else {
+        let msg = format!("{cause:#}");
+        if msg.contains("jdtls closed stdout") || msg.contains("failed to fill whole buffer") {
+            anyhow::anyhow!(
+                "jdtls exited unexpectedly ({status}) — language server disconnected before responding"
+            )
+        } else {
+            anyhow::anyhow!("jdtls exited unexpectedly ({status}): {msg}")
+        }
+    }
+}
+
+/// Spawn jdtls, initialize LSP, and kill the child on failure so `.reaper/jdtls-data` is not left locked.
+fn start_jdtls_session(ws: &Path) -> Result<(Child, Arc<Mutex<String>>)> {
+    let mut child = spawn_jdtls(ws)?;
+    let stderr_tail = attach_jdtls_stderr(&mut child);
+    let root_uri = file_uri(ws)?;
+    if let Err(e) = initialize_session(&mut child, &root_uri, ws) {
+        let err = jdtls_disconnect_error(&mut child, &stderr_tail, e);
+        kill_jdtls_child(&mut child);
+        return Err(err);
+    }
+    Ok((child, stderr_tail))
 }
 
 fn content_fingerprint(content: &str) -> u64 {
@@ -205,7 +298,7 @@ pub fn prepare_java_launch(ws: &Path, main_class: &str, rel_path: Option<&str>) 
                 tracing::warn!(
                     "resolveClasspath failed; using .reaper/java-out for plain Java: {e:#}"
                 );
-                json!([[], [java_out.display().to_string()]])
+                json!([[], [crate::platform::jvm_path_string(&java_out)]])
             } else {
                 tracing::warn!("resolveClasspath failed, retrying: {e:#}");
                 std::thread::sleep(Duration::from_millis(1200));
@@ -328,7 +421,7 @@ fn prefer_build_tool_classpath(
     // launches against real javac output instead of empty/stripped Eclipse bin/.
     let java_out = ws.join(".reaper/java-out");
     if java_out.is_dir() {
-        let s = java_out.display().to_string();
+        let s = crate::platform::jvm_path_string(&java_out);
         if seen.insert(s.clone()) {
             out.push(s);
         }
@@ -348,7 +441,7 @@ fn prefer_build_tool_classpath(
         ] {
             let p = root.join(rel);
             if p.is_dir() {
-                let s = p.display().to_string();
+                let s = crate::platform::jvm_path_string(&p);
                 if seen.insert(s.clone()) {
                     out.push(s);
                 }
@@ -361,8 +454,9 @@ fn prefer_build_tool_classpath(
         if is_eclipse_compiler_output(&rewritten) {
             continue;
         }
-        if seen.insert(rewritten.clone()) {
-            out.push(rewritten);
+        let sanitized = crate::platform::jvm_path_string_from_str(&rewritten);
+        if seen.insert(sanitized.clone()) {
+            out.push(sanitized);
         }
     }
     out
@@ -374,12 +468,21 @@ fn ensure_plain_java_out_on_classpath(ws: &Path, mut class_paths: Vec<String>) -
     if !java_out.is_dir() {
         return class_paths;
     }
-    let s = java_out.display().to_string();
-    if class_paths.iter().any(|p| p == &s) {
-        return class_paths;
+    let s = crate::platform::jvm_path_string(&java_out);
+    if class_paths
+        .iter()
+        .any(|p| crate::platform::jvm_path_string_from_str(p) == s)
+    {
+        return class_paths
+            .into_iter()
+            .map(|p| crate::platform::jvm_path_string_from_str(&p))
+            .collect();
     }
     class_paths.insert(0, s);
     class_paths
+        .into_iter()
+        .map(|p| crate::platform::jvm_path_string_from_str(&p))
+        .collect()
 }
 
 /// Append JARs / output dirs from Reaper's Maven/Gradle classpath cache so runtime
@@ -397,17 +500,23 @@ fn merge_build_tool_dependency_jars(
     };
     let content = std::fs::read_to_string(ws.join(rel)).unwrap_or_default();
     let extra = super::classpath::resolve_javac_classpath_for_file(&project_root, rel, &content);
-    let mut seen: std::collections::HashSet<String> = class_paths.iter().cloned().collect();
+    let mut seen: std::collections::HashSet<String> = class_paths
+        .iter()
+        .map(|p| crate::platform::jvm_path_string_from_str(p))
+        .collect();
     for p in extra {
         if !p.exists() {
             continue;
         }
-        let s = p.display().to_string();
+        let s = crate::platform::jvm_path_string(&p);
         if seen.insert(s.clone()) {
             class_paths.push(s);
         }
     }
     class_paths
+        .into_iter()
+        .map(|p| crate::platform::jvm_path_string_from_str(&p))
+        .collect()
 }
 
 fn is_eclipse_compiler_output(path: &str) -> bool {
@@ -582,8 +691,7 @@ pub fn restart_workspace(ws: &Path) -> Result<()> {
     {
         let mut map = SESSIONS.lock().expect("jdtls sessions");
         if let Some(mut session) = map.remove(&ws) {
-            let _ = session.child.kill();
-            let _ = session.child.wait();
+            kill_jdtls_child(&mut session.child);
         }
     }
     warm_workspace(&ws)
@@ -603,11 +711,9 @@ pub fn warm_workspace(ws: &Path) -> Result<()> {
         return Ok(());
     }
     map.remove(&ws);
-    let mut child = spawn_jdtls(&ws)?;
-    let root_uri = file_uri(&ws)?;
-    initialize_session(&mut child, &root_uri, &ws)?;
+    let (child, stderr_tail) = start_jdtls_session(&ws)?;
     let now = Instant::now();
-    map.insert(ws, new_jdtls_session(child, now));
+    map.insert(ws, new_jdtls_session(child, stderr_tail, now));
     Ok(())
 }
 
@@ -666,8 +772,7 @@ pub fn drop_workspace_session(ws: &Path) {
     };
     let mut map = SESSIONS.lock().expect("jdtls sessions");
     if let Some(mut session) = map.remove(&ws) {
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+        kill_jdtls_child(&mut session.child);
     }
 }
 
@@ -1494,11 +1599,9 @@ fn lsp_request(
 
     if !session_alive(map.get_mut(ws)) {
         map.remove(ws);
-        let mut child = spawn_jdtls(ws)?;
-        let root_uri = file_uri(ws)?;
-        initialize_session(&mut child, &root_uri, ws)?;
+        let (child, stderr_tail) = start_jdtls_session(ws)?;
         let now = Instant::now();
-        map.insert(ws.to_path_buf(), new_jdtls_session(child, now));
+        map.insert(ws.to_path_buf(), new_jdtls_session(child, stderr_tail, now));
     }
 
     let session = map.get_mut(ws).context("jdtls session")?;
@@ -1510,11 +1613,19 @@ fn lsp_request(
 
     write_message(stdin, &request)?;
     let result = wait_for_id(stdout, id, deadline, Some(ws));
-    if result.is_err() {
+    if let Err(e) = &result {
+        let err = {
+            let session = map.get_mut(ws);
+            if let Some(session) = session {
+                jdtls_disconnect_error(&mut session.child, &session.stderr_tail, anyhow::anyhow!("{e:#}"))
+            } else {
+                anyhow::anyhow!("{e:#}")
+            }
+        };
         if let Some(mut session) = map.remove(ws) {
-            let _ = session.child.kill();
-            let _ = session.child.wait();
+            kill_jdtls_child(&mut session.child);
         }
+        return Err(err);
     }
     result
 }
@@ -1602,8 +1713,12 @@ fn session_alive(session: Option<&mut JdtlsSession>) -> bool {
 
 fn purge_stale_sessions(map: &mut HashMap<PathBuf, JdtlsSession>) {
     map.retain(|_, session| {
-        session.last_used.elapsed() <= SESSION_IDLE
-            && matches!(session.child.try_wait(), Ok(None))
+        let keep = session.last_used.elapsed() <= SESSION_IDLE
+            && matches!(session.child.try_wait(), Ok(None));
+        if !keep {
+            kill_jdtls_child(&mut session.child);
+        }
+        keep
     });
 }
 
@@ -1804,7 +1919,9 @@ fn project_settings_probe_path(ws: &Path) -> String {
 fn jdtls_initialization_options() -> Value {
     let mut opts = json!({});
     if let Some(jar) = java_debug_plugin_jar() {
-        opts["bundles"] = json!([jar.display().to_string()]);
+        // Eclipse OSGi on Windows expects forward-slash bundle paths (no \\?\ prefix).
+        let path = jvm_path_property(&jar);
+        opts["bundles"] = json!([path]);
     }
     opts
 }
@@ -1942,11 +2059,9 @@ fn lsp_execute_command(
 
     if !session_alive(map.get_mut(ws)) {
         map.remove(ws);
-        let mut child = spawn_jdtls(ws)?;
-        let root_uri = file_uri(ws)?;
-        initialize_session(&mut child, &root_uri, ws)?;
+        let (child, stderr_tail) = start_jdtls_session(ws)?;
         let now = Instant::now();
-        map.insert(ws.to_path_buf(), new_jdtls_session(child, now));
+        map.insert(ws.to_path_buf(), new_jdtls_session(child, stderr_tail, now));
     }
 
     let session = map.get_mut(ws).context("jdtls session")?;
@@ -1968,11 +2083,23 @@ fn lsp_execute_command(
         }),
     )?;
     let result = wait_for_id(stdout, id, deadline, Some(ws));
-    if result.is_err() {
+    if let Err(e) = &result {
+        let err = {
+            let session = map.get_mut(ws);
+            if let Some(session) = session {
+                jdtls_disconnect_error(
+                    &mut session.child,
+                    &session.stderr_tail,
+                    anyhow::anyhow!("{e:#}"),
+                )
+            } else {
+                anyhow::anyhow!("{e:#}")
+            }
+        };
         if let Some(mut session) = map.remove(ws) {
-            let _ = session.child.kill();
-            let _ = session.child.wait();
+            kill_jdtls_child(&mut session.child);
         }
+        return Err(err);
     }
     result
 }
@@ -2132,7 +2259,11 @@ fn find_equinox_launcher(base: &Path) -> Result<PathBuf> {
 }
 
 fn jvm_path_property(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::platform::jvm_path_string(path)
+}
+
+fn path_for_jvm(path: &Path) -> PathBuf {
+    crate::platform::path_for_jvm(path)
 }
 
 fn shared_config_area_arg(base: &Path) -> String {
@@ -2143,7 +2274,7 @@ fn shared_config_area_arg(base: &Path) -> String {
 }
 
 fn bundled_jdtls_java_command(java: &Path) -> Command {
-    crate::platform::command_user_process(java)
+    crate::platform::command_user_process(path_for_jvm(java))
 }
 
 fn bundled_jdtls_configuration_ready(base: &Path) -> bool {
@@ -2182,7 +2313,7 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
     let _ = std::fs::remove_file(&stderr_log);
 
     let mut cmd = bundled_jdtls_java_command(&java);
-    cmd.current_dir(base);
+    cmd.current_dir(path_for_jvm(base));
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
         "-Dosgi.bundles.defaultStartLevel=4",
@@ -2199,9 +2330,9 @@ fn ensure_bundled_jdtls_configuration(base: &Path) -> Result<()> {
         "java.base/java.lang=ALL-UNNAMED",
     ])
     .arg("-jar")
-    .arg(&jar)
+    .arg(path_for_jvm(&jar))
     .arg("-data")
-    .arg(&warm_data)
+    .arg(path_for_jvm(&warm_data))
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::from(
@@ -2260,7 +2391,7 @@ fn spawn_bundled_jdtls_java(base: &Path, ws: &Path, data_dir: &Path) -> Result<C
     let config_area = shared_config_area_arg(base);
 
     let mut cmd = bundled_jdtls_java_command(&java);
-    cmd.current_dir(ws);
+    cmd.current_dir(path_for_jvm(ws));
     cmd.args([
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
         "-Dosgi.bundles.defaultStartLevel=4",
@@ -2277,12 +2408,12 @@ fn spawn_bundled_jdtls_java(base: &Path, ws: &Path, data_dir: &Path) -> Result<C
         "java.base/java.lang=ALL-UNNAMED",
     ])
     .arg("-jar")
-    .arg(&jar)
+    .arg(path_for_jvm(&jar))
     .arg("-data")
-    .arg(data_dir)
+    .arg(path_for_jvm(data_dir))
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    .stderr(Stdio::piped());
     crate::jdk::apply_jdtls_java_env(&mut cmd);
 
     cmd.spawn()
@@ -2313,7 +2444,7 @@ fn spawn_jdtls(ws: &Path) -> Result<Child> {
     cmd.current_dir(ws);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     crate::jdk::apply_jdtls_java_env(&mut cmd);
 
     cmd.spawn()
@@ -2443,13 +2574,23 @@ fn parse_lsp_diagnostic(
     })
 }
 
+fn read_exact_lsp(r: &mut impl Read, buf: &mut [u8]) -> Result<()> {
+    match r.read_exact(buf) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            bail!("jdtls closed stdout unexpectedly (server disconnected)")
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn read_message(r: &mut impl Read) -> Result<Value> {
     let mut header = String::new();
     let mut buf = [0u8; 1];
     loop {
         header.clear();
         loop {
-            r.read_exact(&mut buf)?;
+            read_exact_lsp(r, &mut buf)?;
             header.push(buf[0] as char);
             if header.ends_with("\r\n\r\n") {
                 break;
@@ -2467,7 +2608,7 @@ fn read_message(r: &mut impl Read) -> Result<Value> {
         }
         let len = content_length.context("missing Content-Length")?;
         let mut body = vec![0u8; len];
-        r.read_exact(&mut body)?;
+        read_exact_lsp(r, &mut body)?;
         let msg: Value = serde_json::from_slice(&body)?;
         return Ok(msg);
     }
@@ -3250,6 +3391,53 @@ mod tests {
         assert!(prefs.contains("compiler.compliance=17"));
         assert!(prefs.contains("compiler.source=17"));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn read_exact_lsp_maps_unexpected_eof() {
+        let mut empty: &[u8] = &[];
+        let mut buf = [0u8; 1];
+        let err = super::read_exact_lsp(&mut empty, &mut buf)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("jdtls closed stdout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn path_for_jvm_strips_extended_prefix() {
+        let extended = PathBuf::from(r"\\?\C:\Users\coder\jdtls\plugins\launcher.jar");
+        let stripped = crate::platform::path_for_jvm(&extended);
+        assert_eq!(
+            stripped,
+            PathBuf::from(r"C:\Users\coder\jdtls\plugins\launcher.jar")
+        );
+        let prop = crate::platform::jvm_path_string(&extended);
+        assert_eq!(prop, "C:/Users/coder/jdtls/plugins/launcher.jar");
+        assert!(!prop.contains('?'));
+        assert_eq!(
+            crate::platform::jvm_path_string_from_str(
+                r"\\?\C:\Users\coder\reaper\workspaces\my-project\.reaper\java-out"
+            ),
+            "C:/Users/coder/reaper/workspaces/my-project/.reaper/java-out"
+        );
+    }
+
+    #[test]
+    fn jdtls_initialization_options_uses_forward_slash_bundles() {
+        let opts = super::jdtls_initialization_options();
+        if let Some(bundles) = opts.get("bundles").and_then(|v| v.as_array()) {
+            for b in bundles {
+                let path = b.as_str().unwrap_or("");
+                assert!(
+                    !path.contains('\\'),
+                    "bundle path should use forward slashes: {path}"
+                );
+            }
+        }
     }
 
     #[test]

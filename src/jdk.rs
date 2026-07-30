@@ -566,7 +566,9 @@ pub fn apply_java_env(cmd: &mut Command) {
 }
 
 pub fn apply_java_home(cmd: &mut Command, home: &Path) {
-    cmd.env("JAVA_HOME", home);
+    // Java rejects Windows `\\?\` extended paths in JAVA_HOME / -jar args.
+    let home = crate::platform::path_for_jvm(home);
+    cmd.env("JAVA_HOME", &home);
     let bin = home.join("bin");
     if bin.is_dir() {
         let path = std::env::var("PATH").unwrap_or_default();

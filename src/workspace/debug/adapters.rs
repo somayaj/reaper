@@ -674,9 +674,9 @@ pub fn plain_java_launch_fallback(
         "type": "java",
         "request": "launch",
         "mainClass": main_class,
-        "classPaths": [out.display().to_string()],
+        "classPaths": [crate::platform::jvm_path_string(&out)],
         "modulePaths": [],
-        "cwd": ws.display().to_string(),
+        "cwd": crate::platform::jvm_path_string(ws),
         "projectName": project_name,
         "stopOnEntry": stop_on_entry,
         "console": "internalConsole",
@@ -685,7 +685,7 @@ pub fn plain_java_launch_fallback(
     if let Ok(home) = crate::jdk::effective_java_home() {
         let java = crate::jdk::java_bin(&home);
         if java.is_file() {
-            launch["javaExec"] = json!(java.display().to_string());
+            launch["javaExec"] = json!(crate::platform::jvm_path_string(&java));
         }
     }
     Some(launch)
@@ -799,13 +799,23 @@ fn java_launch_from_jdtls(
     stop_on_entry: bool,
 ) -> Result<Value> {
     let args = jdtls::prepare_java_launch(ws, main_class, Some(rel_path))?;
+    let class_paths: Vec<String> = args
+        .class_paths
+        .iter()
+        .map(|p| crate::platform::jvm_path_string_from_str(p))
+        .collect();
+    let module_paths: Vec<String> = args
+        .module_paths
+        .iter()
+        .map(|p| crate::platform::jvm_path_string_from_str(p))
+        .collect();
     let mut launch = json!({
         "type": "java",
         "request": "launch",
         "mainClass": args.main_class,
-        "classPaths": args.class_paths,
-        "modulePaths": args.module_paths,
-        "cwd": args.cwd.display().to_string(),
+        "classPaths": class_paths,
+        "modulePaths": module_paths,
+        "cwd": crate::platform::jvm_path_string(&args.cwd),
         "stopOnEntry": stop_on_entry,
         "console": "internalConsole",
         "shortenCommandLine": "auto",
@@ -823,7 +833,7 @@ fn java_launch_from_jdtls(
         });
     launch["projectName"] = json!(project_name);
     if let Some(java_exec) = args.java_exec.filter(|s| !s.is_empty()) {
-        launch["javaExec"] = json!(java_exec);
+        launch["javaExec"] = json!(crate::platform::jvm_path_string_from_str(&java_exec));
     }
     Ok(launch)
 }
@@ -1233,6 +1243,11 @@ mod tests {
             cps.iter()
                 .any(|v| v.as_str().is_some_and(|s| s.contains(".reaper/java-out"))),
             "{launch}"
+        );
+        assert!(
+            cps.iter()
+                .all(|v| v.as_str().is_some_and(|s| !s.contains(r"\\?"))),
+            "classpath must not use Windows extended paths: {launch}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
