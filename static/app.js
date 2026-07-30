@@ -555,6 +555,8 @@ const state = {
   cursorModelsError: null,
   agentBusy: false,
   agentMessageQueue: [],
+  /** Live one-line activity while the agent runs (tool name / path). */
+  agentActivity: null,
   agentAbortController: null,
   agentStopRequested: false,
   agentLastRevertibleTurn: null,
@@ -19346,6 +19348,79 @@ async function restoreAgentWorkspacePaths(paths) {
   }
 }
 
+function shortAgentActivityPath(path) {
+  if (!path) return null;
+  const parts = String(path).replace(/\\/g, '/').split('/').filter(Boolean);
+  if (!parts.length) return null;
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
+}
+
+/** Friendly one-liner for the work bar from an SSE tool/text event. */
+function formatAgentActivity(data) {
+  if (!data || typeof data !== 'object') return null;
+  const status = data.status;
+  if (status === 'completed' || status === 'error') return null;
+
+  const toolRaw = data.tool || '';
+  const tool = toolRaw.toLowerCase();
+  const path = shortAgentActivityPath(data.path);
+  const text = typeof data.text === 'string' ? data.text.trim() : '';
+
+  if (tool.includes('read') || tool === 'readfile') {
+    return path ? `Reading ${path}…` : 'Reading…';
+  }
+  if (
+    tool.includes('write')
+    || tool.includes('edit')
+    || tool.includes('strreplace')
+    || tool.includes('search_replace')
+    || tool.includes('apply_patch')
+  ) {
+    return path ? `Editing ${path}…` : 'Editing…';
+  }
+  if (tool.includes('shell') || tool.includes('bash') || tool.includes('terminal') || tool.includes('powershell')) {
+    return 'Running command…';
+  }
+  if (tool.includes('grep') || tool.includes('glob') || tool.includes('search') || tool.includes('semsearch')) {
+    return path ? `Searching ${path}…` : 'Searching…';
+  }
+  if (tool.includes('delete')) {
+    return path ? `Deleting ${path}…` : 'Deleting…';
+  }
+  if (tool.includes('task') || tool.includes('agent')) {
+    return 'Delegating…';
+  }
+  if (tool.includes('web') || tool.includes('fetch')) {
+    return 'Fetching…';
+  }
+  if (text.startsWith('…') || /^thinking/i.test(text)) {
+    return 'Thinking…';
+  }
+  if (toolRaw) {
+    return path ? `${toolRaw}: ${path}` : `${toolRaw}…`;
+  }
+  if (text) {
+    const cleaned = text.replace(/^[→✓✗]\s*/, '').replace(/\n.*/s, '').trim();
+    if (!cleaned) return 'Working…';
+    return cleaned.length > 56 ? `${cleaned.slice(0, 55)}…` : cleaned;
+  }
+  return null;
+}
+
+function setAgentActivity(detail) {
+  const next = detail && String(detail).trim() ? String(detail).trim() : null;
+  if (state.agentActivity === next) return;
+  state.agentActivity = next;
+  updateAgentUi();
+}
+
+function clearAgentActivity() {
+  if (state.agentActivity == null) return;
+  state.agentActivity = null;
+  updateAgentUi();
+}
+
 async function stopAgentChat() {
   if (!state.agentBusy || !state.repo) return;
   state.agentStopRequested = true;
@@ -19639,7 +19714,10 @@ function updateAgentUi() {
     status = def.notReadyHint?.() || 'Not ready';
   } else if (state.agentBusy) {
     const queued = state.agentMessageQueue.length;
-    status = queued ? `Working… · ${queued} queued` : 'Working…';
+    const detail = state.agentActivity;
+    status = detail
+      ? (queued ? `${detail} · ${queued} queued` : detail)
+      : (queued ? `Working… · ${queued} queued` : 'Working…');
   } else if (!state.repo) {
     status = 'Select a repo';
   } else if (def.id === 'cursor') {
@@ -19663,9 +19741,11 @@ function updateAgentUi() {
     workBar.classList.toggle('hidden', !showWorkBar);
     workBar.classList.toggle('is-working', state.agentBusy);
     if (state.agentBusy && queued > 0) {
-      workText.textContent = `Working… · ${queued} queued`;
+      workText.textContent = state.agentActivity
+        ? `${state.agentActivity} · ${queued} queued`
+        : `Working… · ${queued} queued`;
     } else if (state.agentBusy) {
-      workText.textContent = 'Working…';
+      workText.textContent = state.agentActivity || 'Working…';
     } else if (queued > 0) {
       workText.textContent = `${queued} queued…`;
     }
@@ -20148,6 +20228,7 @@ async function runAgentChat(prompt, opts = {}) {
   }
   state.agentBusy = true;
   state.agentStopRequested = false;
+  state.agentActivity = 'Starting…';
   state.agentAbortController = new AbortController();
   state.agentLiveFollow = !!def.capabilities.liveFollow && state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
@@ -20211,12 +20292,15 @@ async function runAgentChat(prompt, opts = {}) {
           buffer += data.text;
           textBuffer += data.text;
           assistantWrap.classList.remove('is-waiting');
+          setAgentActivity('Writing reply…');
           window.ReaperAgentMarkdown?.renderPlain(assistantEl, textBuffer);
           scheduleAgentMarkdownPreview(assistantEl, textBuffer);
           scrollAgentToBottom();
         } else if (data.type === 'tool') {
           buffer += data.text;
           assistantWrap.classList.remove('is-waiting');
+          const activity = formatAgentActivity(data);
+          if (activity) setAgentActivity(activity);
           window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer);
           scrollAgentToBottom();
           scheduleAgentWorkspaceRefresh(data.path || null);
@@ -20286,6 +20370,7 @@ async function runAgentChat(prompt, opts = {}) {
     }
   } finally {
     assistantWrap.classList.remove('is-streaming', 'is-waiting');
+    clearAgentActivity();
     state.agentBusy = false;
     state.agentStopRequested = false;
     state.agentAbortController = null;
