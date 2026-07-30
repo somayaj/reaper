@@ -55,6 +55,14 @@ fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
         .unwrap_or(false);
 
     if ready && same_version && dest.join("server.mjs").is_file() {
+        // Always refresh bridge entry scripts so Windows hide patches ship without a version bump.
+        for name in ["server.mjs", "windows-hide-patch.mjs", "install-deps.mjs"] {
+            let from = source.join(name);
+            let to = dest.join(name);
+            if from.is_file() {
+                let _ = fs::copy(&from, &to);
+            }
+        }
         return Ok(());
     }
 
@@ -466,6 +474,11 @@ pub async fn ensure_bridge_running() -> Result<()> {
     tracing::info!("Starting Cursor bridge on {url}…");
 
     let mut child_cmd = crate::platform::async_command(&node);
+    if dir.join("windows-hide-patch.mjs").is_file() {
+        // Relative path required: Node --import rejects bare Windows `C:\...` paths.
+        // cwd is already the bridge dir below.
+        child_cmd.arg("--import").arg("./windows-hide-patch.mjs");
+    }
     child_cmd
         .arg("server.mjs")
         .current_dir(&dir)
@@ -474,6 +487,13 @@ pub async fn ensure_bridge_running() -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::hide_console_window_async(&mut child_cmd);
+    // Prefer CREATE_NO_WINDOW only (no DETACHED_PROCESS) so SDK Shell children
+    // do not allocate brand-new visible consoles as easily on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        child_cmd.creation_flags(crate::platform::windows_user_process_creation_flags());
+    }
     let mut child = child_cmd
         .spawn()
         .with_context(|| format!("failed to start cursor bridge with {}", node.display()))?;

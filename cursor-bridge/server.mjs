@@ -1,3 +1,4 @@
+import "./windows-hide-patch.mjs";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { Agent, Cursor } from "@cursor/sdk";
