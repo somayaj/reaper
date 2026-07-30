@@ -134,3 +134,7 @@ for (const [name, range] of Object.entries(pkg.dependencies || {})) {
 }
 
 console.log("cursor-bridge dependencies installed");
+
+if (process.platform === "win32") {
+  await import("./patch-sdk-windows-hide.mjs");
+}

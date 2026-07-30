@@ -61,7 +61,12 @@ fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
 
     if ready && same_version && dest.join("server.mjs").is_file() {
         // Always refresh bridge entry scripts so Windows hide patches ship without a version bump.
-        for name in ["server.mjs", "windows-hide-patch.mjs", "install-deps.mjs"] {
+        for name in [
+            "server.mjs",
+            "windows-hide-patch.mjs",
+            "patch-sdk-windows-hide.mjs",
+            "install-deps.mjs",
+        ] {
             let from = source.join(name);
             let to = dest.join(name);
             if from.is_file() {
