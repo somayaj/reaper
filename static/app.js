@@ -215,12 +215,6 @@ function colorizeStreamLine(line) {
   if (/^FAILURE:/i.test(trimmed) || /^error:/i.test(trimmed) || /^ERROR\b/i.test(trimmed)) {
     return `${TERM_ESC.brightRed}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
   }
-  if (/:\s*error:\s/i.test(trimmed)) {
-    return `${TERM_ESC.brightRed}${line}${TERM_ESC.reset}`;
-  }
-  if (/:\s*warning:\s/i.test(trimmed)) {
-    return `${TERM_ESC.brightYellow}${line}${TERM_ESC.reset}`;
-  }
   if (/^\* What went wrong:/i.test(trimmed) || /^Caused by:/i.test(trimmed)) {
     return `${TERM_ESC.brightYellow}${TERM_ESC.bold}${line}${TERM_ESC.reset}`;
   }
@@ -4405,9 +4399,7 @@ function updateProjectIndexUi(status) {
     state.projectIndexNotified = true;
     state.projectReloadBackground = false;
     if (!state.projectReloadPending) {
-      const errMsg = status.error || status.java?.error || 'unknown error';
-      toast(`Project indexing failed: ${errMsg}`, 'error');
-      terminalLogError(`Project indexing failed: ${errMsg}`);
+      toast(`Project indexing failed: ${status.error || status.java?.error || 'unknown error'}`, 'error');
     }
   }
 
@@ -5865,10 +5857,7 @@ async function reloadProjectIndex(options = {}) {
   } catch (err) {
     state.projectIndexRunning = false;
     updateProjectReloadButton();
-    if (!silent) {
-      toast(err.message || 'Failed to reload project', 'error');
-      terminalLogError(err.message || 'Failed to reload project');
-    }
+    if (!silent) toast(err.message || 'Failed to reload project', 'error');
   }
 }
 
@@ -9039,7 +9028,6 @@ async function startDebugSession() {
     if (state._debugStarting) {
       state._debugStarting = false;
       toast('Debug start timed out — try again', 'error');
-      terminalLogError('Debug start timed out — try again', { label: 'debug' });
       syncDebugToolbar();
     }
   }, 560_000);
@@ -9116,9 +9104,7 @@ async function startDebugSession() {
     state.debugActive = false;
     state.debugState = { status: 'idle', frames: [], variables: [], breakpoints: [] };
     syncDebugToolbar();
-    const errMsg = e.message || 'Debug start failed';
-    toast(errMsg, 'error');
-    terminalLogError(errMsg, { label: 'debug' });
+    toast(e.message || 'Debug start failed', 'error');
   } finally {
     clearTimeout(unlockTimer);
     state._debugStarting = false;
@@ -9133,9 +9119,7 @@ async function stopDebugSession() {
     disconnectDebugWs();
     highlightDebugCurrentLine();
   } catch (e) {
-    const errMsg = e.message || 'Stop failed';
-    toast(errMsg, 'error');
-    terminalLogError(errMsg, { label: 'debug' });
+    toast(e.message || 'Stop failed', 'error');
   }
 }
 
@@ -9150,9 +9134,7 @@ async function debugContinue() {
     });
     applyDebugState(st);
   } catch (e) {
-    const errMsg = e.message || 'Continue failed';
-    toast(errMsg, 'error');
-    terminalLogError(errMsg, { label: 'debug' });
+    toast(e.message || 'Continue failed', 'error');
     state._debugStepping = false;
   }
 }
@@ -9170,9 +9152,7 @@ async function debugStep(kind) {
     });
     applyDebugState(st);
   } catch (e) {
-    const errMsg = e.message || 'Step failed';
-    toast(errMsg, 'error');
-    terminalLogError(errMsg, { label: 'debug' });
+    toast(e.message || 'Step failed', 'error');
     state._debugStepping = false;
   }
 }
@@ -15677,7 +15657,7 @@ function applyDiagnostics(path, diags) {
       : (d.severity === 'info' || d.severity === 'hint')
         ? monaco.MarkerSeverity.Info
         : monaco.MarkerSeverity.Error,
-    message: String(d.message || '').trim() || `Problem at line ${d.line || 1}`,
+    message: d.message,
     source: d.source || undefined,
   }));
   monaco.editor.setModelMarkers(model, 'reaper-diagnostics', markers);
@@ -17554,7 +17534,7 @@ async function runJavaMain(qualifiedName) {
       { label: `java ${name}`, terminalId: term.id },
     );
   } catch (e) {
-    if (e?.name !== 'AbortError') terminalLogError(e.message, { label: 'run', show: false });
+    terminalLog(`error: ${e.message}`);
   }
 }
 
@@ -18507,8 +18487,6 @@ function xtermApi() {
 }
 
 let loopbackWsPromise = null;
-let terminalMountGeneration = 0;
-let terminalFitTimer = null;
 
 function cacheLoopbackWs(value) {
   if (typeof value !== 'string' || !value.trim()) return;
@@ -18547,7 +18525,6 @@ function isTerminalCommandActive(term) {
 
 function restoreTerminalShellIfIdle(term) {
   if (!term || isTerminalCommandActive(term) || term.shellSuspended) return;
-  if (term.deferShellUntilInput || term.guardRunOutput) return;
   if (term.streamLine != null) {
     term.streamLine = null;
     term.streamColorPartial = '';
@@ -18581,13 +18558,6 @@ function createTerminalSession(name) {
     streamLine: null,
     streamColorPartial: '',
     commandStartLine: null,
-    deferShellUntilInput: false,
-    guardRunOutput: false,
-    wsConnecting: false,
-    shellInputBuffer: '',
-    shellPtyPartial: '',
-    shellConnectedAt: 0,
-    lastShellSize: null,
     linkProviderDisposable: null,
   };
 }
@@ -18626,12 +18596,6 @@ function destroyTerminalInstance(term) {
   }
   term.streamLine = null;
   term.shellSuspended = false;
-  term.deferShellUntilInput = false;
-  term.wsConnecting = false;
-  term.shellInputBuffer = '';
-  term.shellPtyPartial = '';
-  term.guardRunOutput = false;
-  term.lastShellSize = null;
 }
 
 function spawnTerminalInstance(term, host) {
@@ -18655,17 +18619,6 @@ function fitActiveTerminal() {
   fitTerminal(getActiveTerminal());
 }
 
-function syncShellLayout() {
-  if (state.editor) {
-    try { state.editor.layout(); } catch { /* ignore */ }
-  }
-  if (state.terminalOpen || state.activePanel === 'terminal') {
-    clearTimeout(terminalFitTimer);
-    terminalFitTimer = setTimeout(() => fitActiveTerminal(), 100);
-  }
-}
-window.__reaperSyncLayout = syncShellLayout;
-
 function fitTerminal(term) {
   if (!term?.xterm) return;
   if (term.fitAddon) {
@@ -18681,23 +18634,12 @@ function fitTerminal(term) {
   sendTerminalResize(term);
 }
 
-function releaseTerminalRunOutputGuard(term) {
-  if (!term?.guardRunOutput) return;
-  term.guardRunOutput = false;
-  sendTerminalResize(term);
-}
-
 function sendTerminalResize(term) {
   if (!term?.ws || term.ws.readyState !== WebSocket.OPEN || !term.xterm) return;
-  if (term.guardRunOutput) return;
-  const cols = term.xterm.cols;
-  const rows = term.xterm.rows;
-  if (term.lastShellSize?.cols === cols && term.lastShellSize?.rows === rows) return;
-  term.lastShellSize = { cols, rows };
   term.ws.send(JSON.stringify({
     type: 'resize',
-    cols,
-    rows,
+    cols: term.xterm.cols,
+    rows: term.xterm.rows,
   }));
 }
 
@@ -18713,75 +18655,15 @@ function disconnectTerminalWs(term, { silent = false } = {}) {
   if (silent) term.wsSilentClose = true;
   try { term.ws.close(); } catch { /* ignore */ }
   term.ws = null;
-  term.wsConnecting = false;
-  term.lastShellSize = null;
-}
-
-function decodeTerminalChunk(chunk) {
-  if (chunk == null) return '';
-  if (typeof chunk === 'string') return chunk;
-  if (chunk instanceof ArrayBuffer) return new TextDecoder('utf-8', { fatal: false }).decode(chunk);
-  if (ArrayBuffer.isView(chunk)) {
-    return new TextDecoder('utf-8', { fatal: false }).decode(
-      chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength),
-    );
-  }
-  return '';
-}
-
-function sanitizeShellPtyOutput(term, text) {
-  if (!text) return text;
-  let out = text;
-  if (term?.guardRunOutput) {
-    // cmd.exe clears the current row then redraws the prompt on shell reconnect/resize.
-    out = out.replace(/\x1b\[[0-9;]*[Kk]/g, '\r\n');
-  }
-  // Bare CR (not CRLF) redraws the current row — cmd.exe uses this for prompts on resize.
-  out = out.replace(/\r(?!\n)/g, '\r\n');
-  if (term?.guardRunOutput) {
-    out = out.replace(/([^\r\n])([A-Za-z]:[\\/][^\r\n]*>\s*)/g, '$1\r\n$2');
-  }
-  return out;
-}
-
-function writeShellPtyToXterm(term, chunk) {
-  if (!term?.xterm || chunk == null) return;
-  const text = decodeTerminalChunk(chunk);
-  if (!text) return;
-  let combined = `${term.shellPtyPartial || ''}${text}`;
-  const trailingCr = combined.match(/\r(?!\n)$/);
-  if (trailingCr) {
-    term.shellPtyPartial = trailingCr[0];
-    combined = combined.slice(0, -trailingCr[0].length);
-  } else {
-    term.shellPtyPartial = '';
-  }
-  if (!combined) return;
-  combined = sanitizeShellPtyOutput(term, combined);
-  if (combined) term.xterm.write(combined);
-}
-
-function flushTerminalShellInputBuffer(term) {
-  if (!term?.shellInputBuffer || !term.ws || term.ws.readyState !== WebSocket.OPEN) return;
-  const pending = term.shellInputBuffer;
-  term.shellInputBuffer = '';
-  if (pending) term.ws.send(pending);
 }
 
 async function connectTerminalWs(term) {
   if (!state.repo || !term) return;
   if (term.shellSuspended || term.streamLine != null) return;
-  if (term.wsConnecting || term.ws?.readyState === WebSocket.OPEN) return;
-  if (term.ws?.readyState === WebSocket.CONNECTING) return;
-  term.wsConnecting = true;
   const base = await ensureLoopbackWsBase();
-  if (term.shellSuspended || term.streamLine != null) {
-    term.wsConnecting = false;
-    return;
-  }
+  if (term.shellSuspended || term.streamLine != null) return;
   const url = terminalWsUrl(term, base);
   if (!url) {
-    term.wsConnecting = false;
     toast('Terminal shell unavailable (loopback WebSocket not configured). Restart Reaper.', 'error');
     return;
   }
@@ -18790,32 +18672,22 @@ async function connectTerminalWs(term) {
   term.ws = ws;
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
-    term.wsConnecting = false;
     if (term.ws !== ws || term.shellSuspended || term.streamLine != null) {
       disconnectTerminalWs(term, { silent: true });
       return;
     }
-    term.shellConnectedAt = Date.now();
-    if (term.xterm) {
-      try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-      if (term.guardRunOutput) {
-        term.xterm.write('\r\n\r\n');
-      }
-    }
-    requestAnimationFrame(() => {
-      if (term.ws !== ws) return;
-      fitTerminal(term);
-      flushTerminalShellInputBuffer(term);
-    });
+    fitTerminal(term);
   };
   ws.onerror = () => {
-    term.wsConnecting = false;
     if (term.ws !== ws || term.wsSilentClose || term.shellSuspended || term.streamLine != null) return;
     toast('Terminal shell connection failed. Try Restart Shell.', 'error');
   };
   ws.onmessage = (ev) => {
     if (!term.xterm || term.shellSuspended || isTerminalCommandActive(term)) return;
-    const writeChunk = (chunk) => writeShellPtyToXterm(term, chunk);
+    const writeChunk = (chunk) => {
+      if (!chunk) return;
+      term.xterm.write(typeof chunk === 'string' ? chunk : new Uint8Array(chunk));
+    };
     if (ev.data instanceof ArrayBuffer) {
       writeChunk(ev.data);
     } else if (ArrayBuffer.isView(ev.data)) {
@@ -18827,7 +18699,6 @@ async function connectTerminalWs(term) {
     }
   };
   ws.onclose = () => {
-    term.wsConnecting = false;
     if (term.wsSilentClose) {
       term.wsSilentClose = false;
       return;
@@ -18877,13 +18748,6 @@ function initTerminalXterm(term, host) {
   }
   xterm.open(pane);
   registerTerminalFileLinkProvider(term, xterm);
-  const resumeShellIfDeferred = () => {
-    if (term.deferShellUntilInput && term.shellSuspended) {
-      resumeTerminalShell(term);
-    }
-  };
-  xterm.textarea?.addEventListener('focus', resumeShellIfDeferred);
-  pane.addEventListener('mousedown', resumeShellIfDeferred);
   xterm.onData((data) => {
     if (typeof data === 'string' && data.includes('\x03')) {
       if (term.streamLine != null) {
@@ -18891,12 +18755,7 @@ function initTerminalXterm(term, host) {
         return;
       }
     }
-    if (term.shellInputBuffer && term.ws?.readyState !== WebSocket.OPEN) {
-      term.shellInputBuffer += data;
-      return;
-    }
     if (term.ws?.readyState === WebSocket.OPEN) {
-      releaseTerminalRunOutputGuard(term);
       term.ws.send(data);
     }
   });
@@ -18923,7 +18782,6 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!host || !term) return;
-  const mountGen = terminalMountGeneration;
 
   state.terminals.forEach((t) => {
     if (t.container) t.container.classList.add('hidden');
@@ -18936,17 +18794,8 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
     return;
   }
 
-  if ((term.shellSuspended || term.deferShellUntilInput) && term.xterm?.element?.isConnected) {
-    ensureTerminalPane(term, host);
-    term.container.classList.remove('hidden');
-    fitTerminal(term);
-    term.xterm.focus();
-    return;
-  }
-
   const xtermMissing = !term.xterm || !term.xterm.element?.isConnected;
   const spawn = () => {
-    if (mountGen !== terminalMountGeneration) return;
     if (fresh || xtermMissing) {
       spawnTerminalInstance(term, host);
     } else if (!term.ws || term.ws.readyState !== WebSocket.OPEN) {
@@ -18963,9 +18812,8 @@ function mountActiveTerminal({ fresh = false, sync = false } = {}) {
     requestAnimationFrame(() => {
       fitActiveTerminal();
       requestAnimationFrame(() => {
-        if (term.container?.contains(document.activeElement)) {
-          term.xterm?.focus();
-        }
+        fitActiveTerminal();
+        term.xterm?.focus();
       });
     });
   };
@@ -19050,13 +18898,6 @@ function suspendTerminalShell(term) {
 function resumeTerminalShell(term) {
   if (!term || !term.shellSuspended) return;
   term.shellSuspended = false;
-  term.deferShellUntilInput = false;
-  term.guardRunOutput = true;
-  term.shellPtyPartial = '';
-  if (term.xterm) {
-    try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-    term.xterm.write('\r\n\r\n');
-  }
   void connectTerminalWs(term);
 }
 
@@ -19094,28 +18935,8 @@ function writeColorizedStreamChunk(term, text) {
 
 function terminalLog(text, terminalId) {
   const t = terminalForId(terminalId) || getActiveTerminal();
-  if (!t?.xterm) return;
-  if (t.streamLine != null) {
-    terminalStreamChunk(`${text}\n`, terminalId || t.id);
-    return;
-  }
+  if (!t?.xterm || t.streamLine != null) return;
   terminalWrite(t, `${TERM_ESC.dim}${text}${TERM_ESC.reset}`);
-}
-
-/** Mirror API/debug/index failures into the terminal (backend logs stay in reaper.log). */
-function terminalLogError(text, { label = 'error', show = true } = {}) {
-  if (text == null || text === '') return;
-  const msg = String(text).trim();
-  if (!msg) return;
-  if (show) showTerminal();
-  const t = getActiveTerminal();
-  if (!t?.xterm) return;
-  const line = label ? `${label}: ${msg}` : msg;
-  if (t.streamLine != null) {
-    terminalStreamChunk(`${line}\n`, t.id);
-    return;
-  }
-  terminalWrite(t, `${TERM_ESC.brightRed}${line}${TERM_ESC.reset}`);
 }
 
 function resolveTerminal(terminalId) {
@@ -19192,6 +19013,7 @@ function terminalCommandBegin(label, terminalId, { kind } = {}) {
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
   resetStreamCollapseState(term);
+  term.skipCommandEcho = true;
   term.commandStartLine = terminalBufferLine(term);
   const labelText = String(label || '').trim().replace(/^▶\s*/, '') || 'command';
   const isTest = kind === 'test' || (/\btest\b/i.test(labelText) && /\b(gradle|mvn|maven)\b/i.test(labelText));
@@ -19214,29 +19036,36 @@ function terminalCommandEnd(exitCode, terminalId) {
   }
   if (typeof exitCode === 'number') {
     const icon = exitCode === 0 ? TERM_ESC.brightGreen : TERM_ESC.brightRed;
-    term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n`);
+    term.xterm.write(`\r\n${icon} exit ${exitCode}${TERM_ESC.reset}\r\n\r\n`);
   }
-  try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
-  term.deferShellUntilInput = true;
-  term.guardRunOutput = true;
-  term.shellPtyPartial = '';
+  if (typeof exitCode === 'number' && exitCode !== 0) {
+    try { term.xterm.scrollToBottom(); } catch { /* ignore */ }
+  } else {
+    scrollTerminalToLine(term, term.commandStartLine ?? terminalBufferLine(term));
+  }
+  resumeTerminalShell(term);
 }
 
 function beginTerminalStream(terminalId) {
-  terminalMountGeneration += 1;
   const term = resolveTerminal(terminalId);
   if (!term) return;
   suspendTerminalShell(term);
   term.streamLine = '';
   term.streamColorPartial = '';
   term.streamBlankRun = 0;
-  term.deferShellUntilInput = true;
   resetStreamCollapseState(term);
 }
 
 function terminalStreamChunk(text, terminalId) {
   const term = resolveTerminal(terminalId);
   if (!term || term.streamLine == null) return;
+  if (term.skipCommandEcho) {
+    const trimmed = String(text || '').trimStart();
+    if (trimmed.startsWith('$')) {
+      term.skipCommandEcho = false;
+      return;
+    }
+  }
   term.streamLine += text;
   writeColorizedStreamChunk(term, text);
 }
@@ -19247,6 +19076,9 @@ function finalizeTerminalStream(terminalId) {
   stopCommandStatus(term);
   term.streamLine = null;
   term.streamColorPartial = '';
+  if (term.shellSuspended && !term.execAbortController) {
+    resumeTerminalShell(term);
+  }
 }
 
 function clearActiveTerminal() {
@@ -19263,10 +19095,6 @@ function restartActiveTerminal() {
   const term = getActiveTerminal();
   const host = $('#terminal-xterm-host');
   if (!term || !host) return;
-  term.deferShellUntilInput = false;
-  term.guardRunOutput = false;
-  term.shellInputBuffer = '';
-  term.shellPtyPartial = '';
   spawnTerminalInstance(term, host);
   mountActiveTerminal();
 }
@@ -20978,9 +20806,15 @@ function bindEvents() {
   bindEditorTabs();
   const terminalHost = $('#terminal-xterm-host');
   if (terminalHost && typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => syncShellLayout()).observe(terminalHost);
+    new ResizeObserver(() => {
+      if (state.terminalOpen || state.activePanel === 'terminal') fitActiveTerminal();
+    }).observe(terminalHost);
   }
-  window.addEventListener('resize', () => syncShellLayout());
+  window.addEventListener('resize', () => {
+    if (state.terminalOpen || state.activePanel === 'terminal') {
+      fitActiveTerminal();
+    }
+  });
 
   $('#agent-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
