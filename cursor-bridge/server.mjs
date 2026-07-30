@@ -1,4 +1,6 @@
-import "./windows-hide-patch.mjs";
+// Do NOT import windows-hide-patch.mjs here by default.
+// Patching node:child_process (even PowerShell-only) hangs @cursor/sdk agent runs
+// on Windows (chat streams never emit). Leave the patch file for opt-in experiments.
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { Agent, Cursor } from "@cursor/sdk";

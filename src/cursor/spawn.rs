@@ -360,7 +360,10 @@ pub async fn reclaim_bridge_port() {
     };
     set_bridge_url(url.clone());
     let bridge = CursorBridge::new();
-    if !bridge.health().await {
+    // Keep a healthy leftover bridge — killing it on every startup forced a
+    // ~20s cold boot and made the first agent chat hang on "Connecting…".
+    if bridge.health().await {
+        tracing::info!("Reusing existing Cursor bridge at {url}");
         return;
     }
 
@@ -371,7 +374,7 @@ pub async fn reclaim_bridge_port() {
         .and_then(|host_port| host_port.rsplit(':').next())
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8091);
-    tracing::info!("Stopping orphaned Cursor bridge on port {port}…");
+    tracing::info!("Stopping dead Cursor bridge listener on port {port}…");
     kill_listeners_on_port(port).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 }

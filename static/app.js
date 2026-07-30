@@ -20429,7 +20429,7 @@ async function runAgentChat(prompt, opts = {}) {
       // Don't block chat forever if warm hangs while the bridge boots.
       await Promise.race([
         warmCursorSession(state.repo),
-        new Promise((resolve) => setTimeout(resolve, 12_000)),
+        new Promise((resolve) => setTimeout(resolve, 45_000)),
       ]);
     }
 

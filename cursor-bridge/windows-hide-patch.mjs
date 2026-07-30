@@ -4,10 +4,8 @@
  * After mutating the CJS exports, call syncBuiltinESMExports() so ESM `spawn`
  * sees the patched function too.
  *
- * Also:
- * - force windowsHide: true
- * - force detached: false (SDK sets detached:true → new console on Windows)
- * - inject powershell -WindowStyle Hidden
+ * Only force hide options for PowerShell — applying detached:false / windowsHide
+ * to every SDK child previously hung agent chat on Windows.
  */
 import childProcess from "node:child_process";
 import module from "node:module";
@@ -41,7 +39,8 @@ if (process.platform === "win32") {
     return ["-NoProfile", "-WindowStyle", "Hidden", ...list];
   }
 
-  function withHideOptions(options) {
+  function withPowerShellHideOptions(command, options) {
+    if (!isPowerShell(command)) return options;
     if (options == null || typeof options !== "object") {
       return { windowsHide: true, detached: false };
     }
@@ -57,14 +56,15 @@ if (process.platform === "win32") {
     if (typeof original !== "function") return;
 
     childProcess[name] = function patched(command, args, options) {
+      // spawn(command, options) overload
       if (args != null && !Array.isArray(args) && typeof args === "object") {
-        return original.call(this, command, withHideOptions(args));
+        return original.call(this, command, withPowerShellHideOptions(command, args));
       }
       return original.call(
         this,
         command,
         withPowerShellHiddenArgs(command, args),
-        withHideOptions(options),
+        withPowerShellHideOptions(command, options),
       );
     };
 
@@ -84,14 +84,11 @@ if (process.platform === "win32") {
     patch(name);
   }
 
-  // Critical: sync ESM namespace bindings used by @cursor/sdk's ESM bundle.
   try {
     module.syncBuiltinESMExports();
   } catch (e) {
     log("syncBuiltinESMExports failed:", e?.message || e);
   }
 
-  log(
-    "active — CJS+ESM child_process patched (windowsHide, no detached, PS Hidden)",
-  );
+  log("active — PowerShell-only hide (windowsHide, no detached)");
 }
