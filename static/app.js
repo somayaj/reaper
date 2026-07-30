@@ -19287,6 +19287,14 @@ function appendAgentMessage(role, text, opts = {}) {
     content.textContent = text;
   }
   wrap.appendChild(content);
+  if (role === 'assistant') {
+    const caret = document.createElement('span');
+    caret.className = 'agent-stream-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    wrap.appendChild(caret);
+  }
+  wrap.classList.add('agent-msg-enter');
+  wrap.addEventListener('animationend', () => wrap.classList.remove('agent-msg-enter'), { once: true });
   box.appendChild(wrap);
   scrollAgentToBottom();
   if (role === 'assistant' && text && text !== '…' && window.ReaperAgentMarkdown) {
@@ -20154,6 +20162,7 @@ async function runAgentChat(prompt, opts = {}) {
   if (state.agentLiveFollow) showAgentDiffPlaceholder();
 
   const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…', { provider: chatProvider });
+  assistantWrap.classList.add('is-streaming', 'is-waiting');
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
@@ -20201,11 +20210,13 @@ async function runAgentChat(prompt, opts = {}) {
         if (data.type === 'text') {
           buffer += data.text;
           textBuffer += data.text;
+          assistantWrap.classList.remove('is-waiting');
           window.ReaperAgentMarkdown?.renderPlain(assistantEl, textBuffer);
           scheduleAgentMarkdownPreview(assistantEl, textBuffer);
           scrollAgentToBottom();
         } else if (data.type === 'tool') {
           buffer += data.text;
+          assistantWrap.classList.remove('is-waiting');
           window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer);
           scrollAgentToBottom();
           scheduleAgentWorkspaceRefresh(data.path || null);
@@ -20274,6 +20285,7 @@ async function runAgentChat(prompt, opts = {}) {
       window.ReaperAgentMarkdown?.renderPlain(assistantEl, msg);
     }
   } finally {
+    assistantWrap.classList.remove('is-streaming', 'is-waiting');
     state.agentBusy = false;
     state.agentStopRequested = false;
     state.agentAbortController = null;
