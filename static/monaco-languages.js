@@ -6876,22 +6876,51 @@
     }
 
     function completionEscapedRecently(ed) {
-      return !!(ed?._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil);
+      return isEditorFreeTyping(ed);
     }
 
-    /** Escape: clear suggest/ghosts, keep focus in the editor, briefly suppress reopen. */
-    function escapeEditorCompletionUi(ed) {
-      if (!ed) return false;
-      const ctx = ed._contextKeyService;
-      const had = !!(
-        memberFallbackEl
-        || ctx?.getContextKeyValue('suggestWidgetVisible')
-        || ctx?.getContextKeyValue('parameterHintsVisible')
-        || ctx?.getContextKeyValue('inlineSuggestionVisible')
-        || aiInlineCache.text
-        || aiInlineCache.controlSnippet
-        || ed._reaperPendingControlSnippet
-      );
+    function applyEditorFreeTypingOptions(ed, free) {
+      if (!ed?.updateOptions) return;
+      if (free) {
+        ed.updateOptions({
+          quickSuggestions: { other: false, strings: false, comments: false },
+          suggestOnTriggerCharacters: false,
+          tabCompletion: 'off',
+          inlineSuggest: { enabled: false },
+        });
+      } else {
+        ed.updateOptions({
+          quickSuggestions: { other: true, strings: true, comments: false },
+          suggestOnTriggerCharacters: true,
+          tabCompletion: 'on',
+          inlineSuggest: {
+            enabled: true,
+            showToolbar: false,
+            suppressSuggestions: false,
+            mode: 'prefix',
+          },
+        });
+      }
+    }
+
+    function clearEditorFreeTyping(ed) {
+      if (!ed || !ed._reaperFreeTyping) return;
+      ed._reaperFreeTyping = false;
+      ed._reaperFreeTypingLine = null;
+      ed._reaperSuggestEscapedUntil = 0;
+      applyEditorFreeTypingOptions(ed, false);
+    }
+
+    /**
+     * Latch free-typing on the current line: no suggest/AI/tab-complete until the
+     * caret leaves the line or the statement ends (`=` / `;`). Escape always enters this.
+     */
+    function armEditorFreeTyping(ed) {
+      if (!ed) return;
+      const pos = ed.getPosition();
+      ed._reaperFreeTyping = true;
+      ed._reaperFreeTypingLine = pos?.lineNumber ?? null;
+      ed._reaperSuggestEscapedUntil = Date.now() + 60_000;
       clearTimeout(ed._reaperSuggestTimer);
       clearTimeout(ed._reaperMemberSuggestTimer);
       clearTimeout(ed._reaperInlinePauseTimer);
@@ -6901,16 +6930,74 @@
       cancelAiInlineFetch();
       dismissSuggestUi(ed);
       dismissInlineGhost(ed);
+      applyEditorFreeTypingOptions(ed, true);
       try {
         ed.trigger('keyboard', 'closeParameterHints', null);
       } catch {
         /* best-effort */
       }
-      if (had) {
-        ed._reaperSuggestEscapedUntil = Date.now() + 1200;
+    }
+
+    function isEditorFreeTyping(ed, path, linePrefix) {
+      if (!ed) return false;
+      if (ed._reaperFreeTyping) {
+        const pos = ed.getPosition();
+        const line = ed._reaperFreeTypingLine;
+        if (line != null && pos && pos.lineNumber !== line) {
+          clearEditorFreeTyping(ed);
+        } else if (linePrefix != null && /[=;]\s*$/.test(String(linePrefix).trimEnd())) {
+          clearEditorFreeTyping(ed);
+        } else {
+          return !!ed._reaperFreeTyping;
+        }
       }
+      if (ed._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil) {
+        return true;
+      }
+      const p = path ?? (helpers.getActivePath?.() || '');
+      const prefix = linePrefix ?? (() => {
+        const model = ed.getModel();
+        const pos = ed.getPosition();
+        return model && pos ? editorLinePrefix(model, pos) : '';
+      })();
+      const tok = extractInlinePartialToken(prefix) || '';
+      return isModifierLeadInFreeTyping(p, prefix, tok)
+        || isDeclarativeLeadInFreeTyping(p, prefix)
+        || isDeclarationTyping(p, prefix);
+    }
+
+    /** Keep free-typing armed while `var` / `Type name` declarations are in progress. */
+    function syncDeclarationFreeTyping(ed) {
+      if (!ed) return;
+      const model = ed.getModel();
+      const pos = ed.getPosition();
+      if (!model || !pos) return;
+      const path = helpers.getActivePath?.() || '';
+      const linePrefix = editorLinePrefix(model, pos);
+      if (/[=;]\s*$/.test(linePrefix.trimEnd()) || pos.lineNumber !== ed._reaperFreeTypingLine) {
+        if (ed._reaperFreeTyping && pos.lineNumber !== ed._reaperFreeTypingLine) {
+          clearEditorFreeTyping(ed);
+        } else if (ed._reaperFreeTyping && /[=;]\s*$/.test(linePrefix.trimEnd())) {
+          clearEditorFreeTyping(ed);
+        }
+      }
+      if (
+        !ed._reaperFreeTyping
+        && (
+          isDeclarativeLeadInFreeTyping(path, linePrefix)
+          || isDeclarationTyping(path, linePrefix)
+        )
+      ) {
+        armEditorFreeTyping(ed);
+      }
+    }
+
+    /** Escape: clear suggest/ghosts, focus editor, latch free-typing on this line. */
+    function escapeEditorCompletionUi(ed) {
+      if (!ed) return false;
+      armEditorFreeTyping(ed);
       ed.focus();
-      return had;
+      return true;
     }
 
     function completionUiBlocksTyping(ed) {
@@ -7121,15 +7208,21 @@
       const model = ed.getModel();
       const position = ed.getPosition();
       if (!model || !position) return;
-      if (!force && completionEscapedRecently(ed)) return;
       const path = helpers.getActivePath?.() || '';
+      const { linePrefix, prefix } = completionContext(model, position);
+      if (!force && isEditorFreeTyping(ed, path, linePrefix)) {
+        dismissSuggestUi(ed);
+        dismissInlineGhost(ed);
+        return;
+      }
       if (!path) {
         if (force) helpers.toast?.('Open a file first', 'info');
         return;
       }
+      // Explicit Ctrl+Space leaves free-typing so suggest can open.
+      if (force) clearEditorFreeTyping(ed);
       const repo = helpers.getRepo?.();
 
-      const { linePrefix, prefix } = completionContext(model, position);
       const memberContext = dotQualifierFromLinePrefix(linePrefix);
       const completionPrefix = memberContext
         ? (memberContext.memberPrefix || prefix || '')
@@ -7141,7 +7234,7 @@
       ) {
         return;
       }
-      // Finished modifier only — keep suggest available while naming vars.
+      // Finished modifier — never open index popup.
       if (
         !memberContext
         && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)
@@ -8681,6 +8774,12 @@
       const model = ed.getModel();
       const position = ed.getPosition();
       if (!model || !position) return;
+      if (isEditorFreeTyping(ed)) {
+        dismissInlineGhost(ed);
+        dismissSuggestUi(ed);
+        if (newlineOnRedundantBrace) ed.trigger('keyboard', 'type', { text: '\n' });
+        return;
+      }
 
       const linePrefix = editorLinePrefix(model, position);
       const cacheKey = inlineCacheKey(model, position, linePrefix);
@@ -8746,6 +8845,12 @@
     }
 
     function handleEditorTab(ed) {
+      if (isEditorFreeTyping(ed)) {
+        dismissSuggestUi(ed);
+        dismissInlineGhost(ed);
+        ed.trigger('reaper', 'tab', null);
+        return;
+      }
       if (memberFallbackEl) {
         hideMemberSuggestFallback();
         ed.trigger('reaper', 'tab', null);
@@ -8769,6 +8874,8 @@
 
     function shouldAutoOpenSuggest(model, position, path, content) {
       const linePrefix = editorLinePrefix(model, position);
+      const ed = activeEditor();
+      if (ed && isEditorFreeTyping(ed, path, linePrefix)) return false;
       if (
         path && content && shouldPreferAiStatementInline(
           path, linePrefix, content, position.lineNumber,
@@ -8815,6 +8922,16 @@
           : (prefix || '');
         const springConfig = isSpringConfigFile(path);
         const content = editorContent(activeEditor(), model);
+        const edForFree = activeEditor();
+        if (
+          !manual
+          && edForFree
+          && isEditorFreeTyping(edForFree, path, linePrefix)
+        ) {
+          dismissSuggestUi(edForFree);
+          dismissInlineGhost(edForFree);
+          return { suggestions: [], incomplete: false };
+        }
         if (
           !manual
           && shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
@@ -9506,6 +9623,10 @@
         const linePrefix = editorLinePrefix(model, position);
         if (!inlineTypingReady()) return { items: [] };
         const content = editorContent(editor, model);
+        if (isEditorFreeTyping(editor, path, linePrefix)) {
+          clearInlineCache(editor);
+          return { items: [] };
+        }
         {
           const tok = extractInlinePartialToken(linePrefix);
           if (isModifierLeadInFreeTyping(path, linePrefix, tok)
@@ -9726,6 +9847,12 @@
       if (model) editor._reaperContent = model.getValue();
       queueMicrotask(() => maybeExpandEmptyBraceBlock(editor));
       queueMicrotask(() => maybeInsertJavaAssignSpace(editor));
+      syncDeclarationFreeTyping(editor);
+      if (isEditorFreeTyping(editor)) {
+        dismissSuggestUi(editor);
+        dismissInlineGhost(editor);
+        return;
+      }
       if (!editorAcceptsInlineAi(editor)) return;
       refreshInlineLocalFast(editor);
       scheduleInlineOnPause(editor);
@@ -9734,19 +9861,24 @@
     editor.onKeyDown((e) => {
       const ev = e.browserEvent;
       if (ev?.key === 'Escape' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-        if (escapeEditorCompletionUi(editor)) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
+        escapeEditorCompletionUi(editor);
+        e.preventDefault();
+        e.stopPropagation();
         return;
       }
       if (ev?.key === ' ' && ev.ctrlKey && !ev.metaKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();
+        clearEditorFreeTyping(editor);
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
       if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+        if (isEditorFreeTyping(editor)) {
+          dismissInlineGhost(editor);
+          dismissSuggestUi(editor);
+          return;
+        }
         if (hasActiveInlineSuggestion(editor)) {
           const model = editor.getModel();
           const position = editor.getPosition();
@@ -9797,6 +9929,12 @@
     editor.onDidChangeCursorPosition((e) => {
       if (cursorMoveFromMouse(e)) {
         if (editorAcceptsInlineAi(editor)) dismissCompletionOnCursorClick(editor);
+        return;
+      }
+      syncDeclarationFreeTyping(editor);
+      if (isEditorFreeTyping(editor)) {
+        dismissSuggestUi(editor);
+        dismissInlineGhost(editor);
         return;
       }
       if (Date.now() - (editor._reaperLastContentEditAt || 0) < 80) return;
@@ -10035,6 +10173,12 @@
       keybindings: [monaco.KeyCode.Enter],
       precondition: 'inlineSuggestionVisible && !suggestWidgetVisible',
       run: (ed) => {
+        if (isEditorFreeTyping(ed)) {
+          dismissInlineGhost(ed);
+          dismissSuggestUi(ed);
+          ed.trigger('keyboard', 'type', { text: '\n' });
+          return;
+        }
         acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace: true });
       },
     });
