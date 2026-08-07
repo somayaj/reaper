@@ -1,4 +1,4 @@
-Reaper 0.1.7 (build 485) — macOS split release.
+Reaper 0.1.7 (build 486) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,7 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Space no longer reopens suggest:** Pressing Space dismisses the popup and does not bounce it back open on trailing whitespace — type the next word first. Build **486**.
 - **Escape no longer freezes typing:** Escape closes suggest via Monaco (not stolen in capture); if the widget context sticks, keys are force-typed so the caret never dies. Build **485**.
 - **Suggest without forced accept:** Autocomplete/AI may still auto-popup, but nothing is preselected and Space/Enter/letters keep typing — only Tab accepts (Escape dismisses). Build **484**.
 - **Free typing after Escape / `var`:** Escape (and declaration lead-ins like `var` / `Type name`) latch free-typing on the line — suggest/AI/tab-complete stay off until `=` / `;`, leaving the line, or Ctrl+Space. Build **483**.

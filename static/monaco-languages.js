@@ -7247,6 +7247,11 @@
       const completionPrefix = memberContext
         ? (memberContext.memberPrefix || prefix || '')
         : (prefix || '');
+      // Plain Space leaves an empty token — never open/reopen the widget.
+      if (!force && !memberContext && !completionPrefix && /\s$/.test(linePrefix)) {
+        dismissSuggestUi(ed);
+        return;
+      }
       const content = editorContent(ed, model);
       if (
         !force
@@ -7446,6 +7451,16 @@
     function scheduleAutocompleteSuggest(ed, force) {
       clearTimeout(ed._reaperSuggestTimer);
       if (!force && completionEscapedRecently(ed)) return;
+      const model = ed.getModel();
+      const position = ed.getPosition();
+      if (!force && model && position) {
+        const linePrefix = editorLinePrefix(model, position);
+        // Space / trailing whitespace must not reopen suggest.
+        if (/\s$/.test(linePrefix)) return;
+        if (!shouldAutoOpenSuggest(model, position, helpers.getActivePath?.() || '', editorContent(ed, model))) {
+          return;
+        }
+      }
       const delay = force ? 0 : 280;
       ed._reaperSuggestTimer = setTimeout(() => {
         fireCompletionsSuggest(ed, { force });
@@ -8887,8 +8902,12 @@
     }
 
     function shouldAutoOpenSuggest(model, position, path, content) {
-      if (completionEscapedRecently(activeEditor())) return false;
+      const ed = activeEditor();
+      if (completionEscapedRecently(ed)) return false;
       const linePrefix = editorLinePrefix(model, position);
+      // After Space the partial token is empty — never reopen the popup on whitespace.
+      if (/\s$/.test(linePrefix)) return false;
+      if (dotQualifierFromLinePrefix(linePrefix)) return true;
       if (
         path && content && shouldPreferAiStatementInline(
           path, linePrefix, content, position.lineNumber,
@@ -8898,8 +8917,8 @@
       }
       const word = model.getWordUntilPosition(position);
       const p = word.word || extractInlinePartialToken(linePrefix) || '';
+      if (!p) return false;
       if (isControlKeywordPrefix(p)) return true;
-      if (dotQualifierFromLinePrefix(linePrefix)) return true;
       if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix)) return true;
       if (p.length >= 2) return true;
       if (p.length === 1 && isKeywordPrefixTyping(path || helpers.getActivePath?.() || '', p)) {
@@ -9435,6 +9454,12 @@
         return;
       }
 
+      // Trailing Space: keep the typed space; do not bounce the suggest popup back open.
+      if (/\s$/.test(linePrefix)) {
+        dismissSuggestUi(ed);
+        return;
+      }
+
       if (isSpringConfigFile(path)) {
         scheduleSpringConfigInline(ed);
         scheduleAutocompleteSuggest(ed);
@@ -9443,7 +9468,7 @@
 
       if (!preferAi) {
         const tok = extractInlinePartialToken(linePrefix);
-        if (!isModifierLeadInFreeTyping(path, linePrefix, tok)) {
+        if (tok && !isModifierLeadInFreeTyping(path, linePrefix, tok)) {
           scheduleAutocompleteSuggest(ed);
         }
       }
@@ -9877,12 +9902,13 @@
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
-      // Space never accepts suggest/AI — dismiss and type a real space.
+      // Space: always type whitespace — dismiss popup and suppress reopen briefly.
       if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
-        if (hasActiveInlineSuggestion(editor) || completionUiBlocksTyping(editor)) {
-          dismissInlineGhost(editor);
-          dismissSuggestUi(editor);
-        }
+        clearTimeout(editor._reaperSuggestTimer);
+        editor._reaperSuggestTimer = null;
+        editor._reaperSuggestEscapedUntil = Date.now() + 900;
+        dismissInlineGhost(editor);
+        dismissSuggestUi(editor);
       }
     });
 
