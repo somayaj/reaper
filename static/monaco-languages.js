@@ -6962,6 +6962,7 @@
       ed._reaperSuggestTimer = null;
       ed._reaperMemberSuggestTimer = null;
       ed._reaperInlinePauseTimer = null;
+      ed._reaperSuggestSeq = (ed._reaperSuggestSeq || 0) + 1;
       ed._reaperSuggestEscapedUntil = Date.now() + 400;
       ed._reaperMemberFallbackNavigated = false;
       cancelAiInlineFetch();
@@ -7340,8 +7341,21 @@
         localLabels ? `items=${localLabels}` : (memberContext ? 'items=(none)' : ''),
       ], { warn: !!(memberContext && localN === 0 && jdkN === 0) });
 
+      // Invalidate in-flight popups when Space/Escape bumps the sequence.
+      const suggestSeq = ed._reaperSuggestSeq || 0;
       const showSuggestPopup = (merged) => {
         if (!merged.length) return;
+        if ((ed._reaperSuggestSeq || 0) !== suggestSeq) return;
+        if (!force) {
+          if (completionEscapedRecently(ed)) return;
+          const curModel = ed.getModel();
+          const curPos = ed.getPosition();
+          if (curModel && curPos) {
+            const curPrefix = editorLinePrefix(curModel, curPos);
+            // Space / trailing whitespace must never bounce the list open.
+            if (/\s$/.test(curPrefix) && !dotQualifierFromLinePrefix(curPrefix)) return;
+          }
+        }
         for (const item of merged) {
           enrichJavaSuggestion(item, content, path);
         }
@@ -7450,21 +7464,19 @@
 
     function scheduleAutocompleteSuggest(ed, force) {
       clearTimeout(ed._reaperSuggestTimer);
-      if (!force && completionEscapedRecently(ed)) return;
+      // Typing never auto-opens the list — only Ctrl+Space / Ctrl+Shift+Space (force).
+      if (!force) return;
+      if (completionEscapedRecently(ed)) return;
       const model = ed.getModel();
       const position = ed.getPosition();
-      if (!force && model && position) {
+      if (model && position) {
         const linePrefix = editorLinePrefix(model, position);
         // Space / trailing whitespace must not reopen suggest.
-        if (/\s$/.test(linePrefix)) return;
-        if (!shouldAutoOpenSuggest(model, position, helpers.getActivePath?.() || '', editorContent(ed, model))) {
-          return;
-        }
+        if (/\s$/.test(linePrefix) && !dotQualifierFromLinePrefix(linePrefix)) return;
       }
-      const delay = force ? 0 : 280;
       ed._reaperSuggestTimer = setTimeout(() => {
-        fireCompletionsSuggest(ed, { force });
-      }, delay);
+        fireCompletionsSuggest(ed, { force: true });
+      }, 0);
     }
 
     function handleDotCompletion(ed = editor) {
@@ -8901,29 +8913,9 @@
       ed.trigger('reaper', 'tab', null);
     }
 
-    function shouldAutoOpenSuggest(model, position, path, content) {
-      const ed = activeEditor();
-      if (completionEscapedRecently(ed)) return false;
-      const linePrefix = editorLinePrefix(model, position);
-      // After Space the partial token is empty — never reopen the popup on whitespace.
-      if (/\s$/.test(linePrefix)) return false;
-      if (dotQualifierFromLinePrefix(linePrefix)) return true;
-      if (
-        path && content && shouldPreferAiStatementInline(
-          path, linePrefix, content, position.lineNumber,
-        )
-      ) {
-        return false;
-      }
-      const word = model.getWordUntilPosition(position);
-      const p = word.word || extractInlinePartialToken(linePrefix) || '';
-      if (!p) return false;
-      if (isControlKeywordPrefix(p)) return true;
-      if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix)) return true;
-      if (p.length >= 2) return true;
-      if (p.length === 1 && isKeywordPrefixTyping(path || helpers.getActivePath?.() || '', p)) {
-        return true;
-      }
+    function shouldAutoOpenSuggest(_model, _position, _path, _content) {
+      // Suggest popup is shortcut-only (Ctrl+Space / Ctrl+Shift+Space).
+      // Typing and Space never auto-open — never reopen the popup on whitespace.
       return false;
     }
 
@@ -9454,7 +9446,7 @@
         return;
       }
 
-      // Trailing Space: keep the typed space; do not bounce the suggest popup back open.
+      // Trailing Space / typing: never auto-open suggest (shortcut only).
       if (/\s$/.test(linePrefix)) {
         dismissSuggestUi(ed);
         return;
@@ -9462,16 +9454,8 @@
 
       if (isSpringConfigFile(path)) {
         scheduleSpringConfigInline(ed);
-        scheduleAutocompleteSuggest(ed);
-        return;
       }
-
-      if (!preferAi) {
-        const tok = extractInlinePartialToken(linePrefix);
-        if (tok && !isModifierLeadInFreeTyping(path, linePrefix, tok)) {
-          scheduleAutocompleteSuggest(ed);
-        }
-      }
+      // Suggest list: Ctrl+Space / Ctrl+Shift+Space only (no typing auto-popup).
     }
 
     function prefetchIndexInlineGhost(ed, linePrefix, prefix) {
@@ -9513,9 +9497,7 @@
             );
             return;
           }
-          if (items?.length && tokenPrefix) {
-            scheduleAutocompleteSuggest(ed, true);
-          }
+          // Never force-open the suggest list from an index prefetch — that raced with Space.
         })
         .catch(() => {});
     }
@@ -9902,11 +9884,12 @@
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
-      // Space: always type whitespace — dismiss popup and suppress reopen briefly.
+      // Space: always type whitespace — dismiss popup and kill in-flight reopen.
       if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         clearTimeout(editor._reaperSuggestTimer);
         editor._reaperSuggestTimer = null;
-        editor._reaperSuggestEscapedUntil = Date.now() + 900;
+        editor._reaperSuggestSeq = (editor._reaperSuggestSeq || 0) + 1;
+        editor._reaperSuggestEscapedUntil = Date.now() + 1500;
         dismissInlineGhost(editor);
         dismissSuggestUi(editor);
       }
@@ -9975,12 +9958,16 @@
 
     editor.addAction({
       id: 'reaper.triggerSuggest',
-      label: 'Trigger Suggest',
+      label: 'Complete Code',
       keybindings: [
+        monaco.KeyMod.Ctrl | monaco.KeyMod.Shift | monaco.KeyCode.Space,
+        monaco.KeyMod.WinCtrl | monaco.KeyMod.Shift | monaco.KeyCode.Space,
         monaco.KeyMod.Ctrl | monaco.KeyCode.Space,
         monaco.KeyMod.WinCtrl | monaco.KeyCode.Space,
         monaco.KeyMod.Alt | monaco.KeyCode.Space,
       ],
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 1.5,
       run: (ed) => fireCompletionsSuggest(ed, { force: true }),
     });
 
@@ -10073,7 +10060,8 @@
       id: 'reaper.parameterInfo',
       label: 'Parameter Info',
       keybindings: [
-        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Space,
+        // Ctrl+Shift+Space is Complete Code; keep parameter hints on Alt+Shift+Space.
+        monaco.KeyMod.Alt | monaco.KeyMod.Shift | monaco.KeyCode.Space,
       ],
       contextMenuGroupId: 'navigation',
       contextMenuOrder: 4.0,

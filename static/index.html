@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="reaper-ui-build" content="486" />
+  <meta name="reaper-ui-build" content="487" />
   <meta name="reaper-app-version" content="0.1.7" />
   <title>Reaper — IDE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -11,7 +11,7 @@
     html,body{margin:0;height:100%;background:transparent}
     html:not(.ij-native-titlebar),html:not(.ij-native-titlebar) body{background:#0a0a0a!important}
   </style>
-  <link rel="stylesheet" href="/logo-animated.css?v=486" />
+  <link rel="stylesheet" href="/logo-animated.css?v=487" />
   <script>
     (function () {
       window.__reaperSplashAt = Date.now();
@@ -71,9 +71,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/reaper-ui.css?v=486" />
-  <link rel="stylesheet" href="/logo-animated.css?v=486" />
-  <link rel="stylesheet" href="/launch-splash-layout.css?v=486" />
+  <link rel="stylesheet" href="/reaper-ui.css?v=487" />
+  <link rel="stylesheet" href="/logo-animated.css?v=487" />
+  <link rel="stylesheet" href="/launch-splash-layout.css?v=487" />
   <script src="/vendor/dompurify.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/agent-markdown.js?v=6"></script>
@@ -96,8 +96,8 @@
       <p class="ij-launch-status">Starting IDE<span class="ij-launch-dots" aria-hidden="true"></span></p>
     </div>
   </div>
-  <script src="/logo.js?v=486"></script>
-  <script src="/launch-splash.js?v=486"></script>
+  <script src="/logo.js?v=487"></script>
+  <script src="/launch-splash.js?v=487"></script>
 
   <!-- Loading overlay -->
   <div id="loading-overlay" class="fixed inset-0 z-[60] hidden items-center justify-center bg-surface-950/80 backdrop-blur-sm">
@@ -146,6 +146,7 @@
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="save" disabled>Save<span class="ij-kbd">⌘S</span></button>
             <button type="button" class="ij-menu-item" data-action="format" disabled>Reformat code<span class="ij-kbd">⇧⌥F</span></button>
+            <button type="button" class="ij-menu-item" data-action="trigger-suggest" disabled>Complete code…<span class="ij-kbd">⌃⇧Space</span></button>
             <div class="ij-menu-sep"></div>
             <button type="button" class="ij-menu-item" data-action="close-tab" disabled>Close tab<span class="ij-kbd">⌘W</span></button>
           </div>
@@ -1446,7 +1447,7 @@
                 <input id="settings-ai-inline-complete" type="checkbox" class="rounded border-surface-600 bg-surface-950 text-accent focus:ring-accent-ring" />
                 AI inline completions
               </label>
-              <p class="text-[11px] text-gray-600">Ghost text (AI) as you type — <strong class="text-gray-500">Tab</strong> or <strong class="text-gray-500">Enter</strong> to accept. Member list after <strong class="text-gray-500">.</strong> or <strong class="text-gray-500">Ctrl+Space</strong> for full autocomplete.</p>
+              <p class="text-[11px] text-gray-600">Ghost text (AI) as you type — <strong class="text-gray-500">Tab</strong> to accept. Full autocomplete: <strong class="text-gray-500">Ctrl+Shift+Space</strong> or <strong class="text-gray-500">Ctrl+Space</strong> (File → Complete code…). Space never opens the list.</p>
             </div>
             <div class="space-y-2 border-t border-surface-700 pt-4">
               <label for="settings-gemini-model" class="block text-xs font-medium text-gray-400">Model</label>
@@ -1651,9 +1652,9 @@
   <script src="/vendor/xterm/addon-fit.js"></script>
   <script src="/vendor/monaco-editor/min/vs/loader.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'"></script>
   <script src="/icons.js?v=3"></script>
-  <script src="/reaper-lang-core.js?v=486"></script>
-  <script src="/monaco-languages.js?v=486" onerror="window.__reaperLangBundleError=true"></script>
+  <script src="/reaper-lang-core.js?v=487"></script>
+  <script src="/monaco-languages.js?v=487" onerror="window.__reaperLangBundleError=true"></script>
   <script src="/themes.js?v=14"></script>
-  <script src="/app.js?v=486"></script>
+  <script src="/app.js?v=487"></script>
 </body>
 </html>

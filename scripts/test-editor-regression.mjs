@@ -1941,20 +1941,38 @@ function testInlineCompletionRegression(win) {
       && mlSrc.includes('onEditorEscapeKeydown')
       && mlSrc.includes('_reaperForceTypeThroughUntil')
       && mlSrc.includes('stealEscape')
-      && mlSrc.includes('suppress reopen briefly'),
+      && mlSrc.includes('_reaperSuggestSeq'),
     'Escape lets Monaco close suggest (no steal); force type-through if widget stuck',
   );
   ok(
     appSrc.includes("acceptSuggestionOnEnter: 'off'")
       && appSrc.includes("selectionMode: 'never'")
-      && appSrc.includes('preview: false'),
-    'Suggest widget does not preselect/preview/Enter-accept (typing stays free)',
+      && appSrc.includes('preview: false')
+      && appSrc.includes('other: false')
+      && appSrc.includes('suggestOnTriggerCharacters: false'),
+    'Suggest widget does not preselect/preview/Enter-accept; no typing auto-popup',
   );
   ok(
     mlSrc.includes('never reopen the popup on whitespace')
-      && mlSrc.includes('Trailing Space: keep the typed space')
-      && mlSrc.includes('suppress reopen briefly'),
-    'Space / trailing whitespace does not auto-open suggest',
+      && mlSrc.includes('Typing never auto-opens the list')
+      && mlSrc.includes('kill in-flight reopen')
+      && mlSrc.includes('_reaperSuggestSeq')
+      && (mlSrc.includes('Ctrl+Shift+Space') || mlSrc.includes('KeyMod.Shift | monaco.KeyCode.Space')
+        || mlSrc.includes('KeyMod.Ctrl | monaco.KeyMod.Shift | monaco.KeyCode.Space')),
+    'Suggest is shortcut-only; Space kills in-flight reopen',
+  );
+  ok(
+    appSrc.includes("'trigger-suggest'")
+      && appSrc.includes('reaper.triggerSuggest')
+      && appSrc.includes('Complete code'),
+    'Complete code menu / palette action wired',
+  );
+  const indexHtmlSuggest = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+  ok(
+    indexHtmlSuggest.includes('data-action="trigger-suggest"')
+      && indexHtmlSuggest.includes('Complete code')
+      && indexHtmlSuggest.includes('⌃⇧Space'),
+    'File menu shows Complete code with ⌃⇧Space shortcut',
   );
   ok(
     mlSrc.includes('function editorAcceptsInlineAi(')

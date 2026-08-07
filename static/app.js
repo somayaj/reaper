@@ -6160,9 +6160,10 @@ function updateMenuState() {
   const hasTab = !!state.activeTab;
   const dirty = !!(hasTab && state.dirty.has(state.activeTab) && !isExternalEditorPath(state.activeTab));
   const canRun = !($('#tb-run')?.disabled ?? true);
-  setMenuDisabled('save', !dirty);
-  setMenuDisabled('format', !hasTab);
-  setMenuDisabled('close-tab', !hasTab);
+    setMenuDisabled('save', !dirty);
+    setMenuDisabled('format', !hasTab);
+    setMenuDisabled('trigger-suggest', !hasTab);
+    setMenuDisabled('close-tab', !hasTab);
   setMenuDisabled('pull', !hasRepo);
   setMenuDisabled('push', !hasRepo);
   setMenuDisabled('switch-branch', !hasRepo);
@@ -6206,6 +6207,7 @@ function runMenuAction(action) {
     'new-file': showFileModal,
     save: saveFile,
     format: formatDocument,
+    'trigger-suggest': () => runEditorMonacoAction('reaper.triggerSuggest'),
     'close-tab': () => state.activeTab && closeTab(state.activeTab),
     'commit-panel': () => switchPanel('git'),
     pull: syncPull,
@@ -6279,6 +6281,7 @@ const PALETTE_COMMANDS = [
   { id: 'new-file', label: 'New file', kbd: '⌘N', run: showFileModal, needsRepo: true },
   { id: 'save', label: 'Save', kbd: '⌘S', run: saveFile, needsTab: true, needsDirty: true },
   { id: 'format', label: 'Reformat code', kbd: '⇧⌥F', run: formatDocument, needsTab: true },
+  { id: 'trigger-suggest', label: 'Complete code…', kbd: '⌃⇧Space', run: () => runEditorMonacoAction('reaper.triggerSuggest'), needsTab: true },
   { id: 'find-usages', label: 'Find Usages', kbd: 'Alt+F7', run: () => runEditorMonacoAction('reaper.findUsages'), needsTab: true },
   { id: 'rename-symbol', label: 'Rename Symbol', kbd: 'F6', run: () => runEditorMonacoAction('reaper.renameSymbol'), needsTab: true },
   { id: 'java-refactor', label: 'Refactor…', kbd: '⇧⌥R', run: () => runEditorMonacoAction('reaper.javaRefactor'), needsTab: true },
@@ -12155,10 +12158,11 @@ function initEditor() {
       links: true,
       hover: { enabled: true, delay: 300, sticky: true },
       wordBasedSuggestions: 'off',
-      quickSuggestions: { other: true, strings: true, comments: false },
+      // Suggest popup is shortcut-only (Ctrl+Space / Ctrl+Shift+Space) — never while typing/Space.
+      quickSuggestions: { other: false, strings: false, comments: false },
       quickSuggestionsDelay: 120,
-      suggestOnTriggerCharacters: true,
-      // Never auto-insert from the suggest widget — Tab/Ctrl+Space only.
+      suggestOnTriggerCharacters: false,
+      // Never auto-insert from the suggest widget — Tab accepts; shortcuts open the list.
       acceptSuggestionOnEnter: 'off',
       acceptSuggestionOnCommitCharacter: false,
       suggest: {
