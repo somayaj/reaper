@@ -1966,6 +1966,12 @@ function testInlineCompletionRegression(win) {
     'Suggest is shortcut-only; Space types through and never freezes caret',
   );
   ok(
+    mlSrc.includes('function typeThroughDelete(')
+      && mlSrc.includes('Backspace/Delete must always work')
+      && mlSrc.includes('Only force type-through when suggest was actually up'),
+    'Backspace works after Space / stuck suggest (declaration editing)',
+  );
+  ok(
     appSrc.includes("'trigger-suggest'")
       && appSrc.includes('reaper.triggerSuggest')
       && appSrc.includes('Complete code'),

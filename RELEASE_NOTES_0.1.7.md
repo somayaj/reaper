@@ -1,4 +1,4 @@
-Reaper 0.1.7 (build 489) — macOS split release.
+Reaper 0.1.7 (build 490) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,7 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Backspace works after Space:** Stuck suggest no longer swallows Backspace/Delete when editing lines like `String name = …`. Build **490**.
 - **Space never freezes the caret:** Space always inserts a real space, dismisses suggest, and clears stuck Monaco suggest state so typing continues. Build **489**.
 - **Typing never opens suggest:** Completing words like `String` no longer pops the list — only **Ctrl+Shift+Space** / **Ctrl+Space**, or member access after `.`. Build **488**.
 - **Suggest is shortcut-only:** Autocomplete opens with **Ctrl+Shift+Space** or **Ctrl+Space** (File → Complete code… / editor context menu). Typing and Space never open or bounce the list. Build **487**.

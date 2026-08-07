@@ -7048,6 +7048,51 @@
       ed.focus();
     }
 
+    function typeThroughDelete(ed, key) {
+      clearTimeout(ed._reaperSuggestTimer);
+      hideMemberSuggestFallback();
+      dismissMonacoSuggestWidget(ed);
+      dismissInlineGhost(ed);
+      ed._reaperForceTypeThroughUntil = 0;
+      const model = ed.getModel();
+      const sel = ed.getSelection?.() || null;
+      const pos = ed.getPosition();
+      if (!model || !pos) return;
+      if (sel && !sel.isEmpty()) {
+        ed.executeEdits('reaper-type-through-delete', [{ range: sel, text: '' }]);
+        ed.focus();
+        return;
+      }
+      if (key === 'Backspace') {
+        if (pos.column > 1) {
+          ed.executeEdits('reaper-type-through-delete', [{
+            range: new monaco.Range(pos.lineNumber, pos.column - 1, pos.lineNumber, pos.column),
+            text: '',
+          }]);
+        } else if (pos.lineNumber > 1) {
+          const prevLen = model.getLineMaxColumn(pos.lineNumber - 1);
+          ed.executeEdits('reaper-type-through-delete', [{
+            range: new monaco.Range(pos.lineNumber - 1, prevLen, pos.lineNumber, pos.column),
+            text: '',
+          }]);
+        }
+      } else if (key === 'Delete') {
+        const maxCol = model.getLineMaxColumn(pos.lineNumber);
+        if (pos.column < maxCol) {
+          ed.executeEdits('reaper-type-through-delete', [{
+            range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column + 1),
+            text: '',
+          }]);
+        } else if (pos.lineNumber < model.getLineCount()) {
+          ed.executeEdits('reaper-type-through-delete', [{
+            range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber + 1, 1),
+            text: '',
+          }]);
+        }
+      }
+      ed.focus();
+    }
+
     function onCompletionTypeThroughKeydown(e) {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === 'Escape') return; // handled separately — must reach Monaco
@@ -7060,6 +7105,7 @@
       const suggestStuck = !!ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible');
       const forceThrough = forceTypeThroughActive(ed);
       const hadFallback = !!memberFallbackEl;
+      const hadUi = suggestStuck || hadFallback || hasDismissibleCompletionUi(ed);
 
       // Plain Space: always dismiss, cool down, and type a real space. Never leave
       // suggestWidgetVisible stuck (that freezes the caret after Space).
@@ -7068,13 +7114,32 @@
         ed._reaperSuggestTimer = null;
         ed._reaperSuggestSeq = (ed._reaperSuggestSeq || 0) + 1;
         ed._reaperSuggestEscapedUntil = Date.now() + 2000;
-        ed._reaperForceTypeThroughUntil = Date.now() + 3000;
+        // Only force type-through when suggest was actually up — otherwise Backspace
+        // and normal editing stay with Monaco after Space.
+        if (hadUi) {
+          ed._reaperForceTypeThroughUntil = Date.now() + 1200;
+        } else {
+          ed._reaperForceTypeThroughUntil = 0;
+        }
         dismissInlineGhost(ed);
         dismissSuggestUi(ed);
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
         typeThroughCompletion(ed, ' ');
+        refocusEditorInput(ed);
+        return;
+      }
+
+      // Backspace/Delete must always work — stuck suggest otherwise swallows them.
+      if (
+        (e.key === 'Backspace' || e.key === 'Delete')
+        && (hadUi || forceThrough || suggestStuck || hadFallback || completionEscapedRecently(ed))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        typeThroughDelete(ed, e.key);
         refocusEditorInput(ed);
         return;
       }
