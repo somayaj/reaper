@@ -281,7 +281,7 @@
     if (dotQualifierFromLinePrefix(linePrefix)) return true;
     const token = extractInlinePartialToken(linePrefix);
     if (token && shouldPreferControlKeywordInline(path, linePrefix, token)) return false;
-    if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
+    if (shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
     return shouldFetchIndexCompletions(linePrefix, token || '', path, { content, lineNumber });
   }
 
@@ -1053,7 +1053,11 @@
   }
 
   function extractInlinePartialToken(linePrefix) {
-    const trimmed = linePrefix.trimEnd();
+    const s = String(linePrefix || '');
+    // Cursor after whitespace starts a new token — do not complete the previous word
+    // (`private ` must not keep matching PrivateKeyEntry / privateField).
+    if (/\s$/.test(s)) return '';
+    const trimmed = s.trimEnd();
     if (!trimmed) return '';
     const m = trimmed.match(/([A-Za-z_$][\w$]*)$/);
     return m ? m[1] : '';
@@ -1586,7 +1590,7 @@
         || shouldFetchEmptyLineInline(path, linePrefix, content, lineNumber);
     }
     const token = extractInlinePartialToken(linePrefix);
-    if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
+    if (shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
     if (dotQualifierFromLinePrefix(linePrefix)) {
       return supportsWorkspaceIndexInline(path);
     }
@@ -4261,12 +4265,10 @@
     if (isImportTypingLine(path, linePrefix)) return false;
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
     if (isDeclarationTyping(path, linePrefix)) return false;
-    // Modifier keyword gate only when typing a lowercase word — skip on empty-line
-    // AI routing (hot path in perf benches / pause prefetch).
-    const prefixTrimmed = String(linePrefix || '').trimEnd();
-    if (prefixTrimmed && /[a-z]$/.test(prefixTrimmed)) {
+    // Modifier lead-in (`private` / `private ` / `stat`) — never AI-hijack the next word.
+    {
       const modToken = extractInlinePartialToken(linePrefix);
-      if (modToken && shouldPreferModifierKeywordInline(path, linePrefix, modToken)) return false;
+      if (shouldPreferModifierKeywordInline(path, linePrefix, modToken)) return false;
     }
     if (localGhost) return false;
     if (shouldPreferAiStatementInline(path, linePrefix, content, lineNumber)) return true;
@@ -4367,30 +4369,122 @@
     return isControlKeywordPrefix(token);
   }
 
-  /** Access / member modifiers — never complete into types like PrivateKeyEntry. */
-  const JAVA_MODIFIER_KEYWORDS = [
+  /**
+   * Access / member modifiers by language — never complete into types that share a
+   * prefix (PrivateKeyEntry, InternalError, …) while typing or right after Space.
+   */
+  const JVM_MODIFIER_KEYWORDS = [
     'public', 'private', 'protected', 'static', 'final', 'abstract',
     'synchronized', 'volatile', 'transient', 'native', 'default', 'sealed',
   ];
+  const MODIFIER_KEYWORDS_BY_LANG = {
+    java: JVM_MODIFIER_KEYWORDS,
+    kotlin: [
+      ...JVM_MODIFIER_KEYWORDS,
+      'internal', 'open', 'override', 'suspend', 'lateinit', 'crossinline', 'noinline',
+    ],
+    kts: [
+      ...JVM_MODIFIER_KEYWORDS,
+      'internal', 'open', 'override', 'suspend', 'lateinit', 'crossinline', 'noinline',
+    ],
+    groovy: JVM_MODIFIER_KEYWORDS,
+    csharp: [
+      'public', 'private', 'protected', 'internal', 'static', 'readonly', 'volatile',
+      'const', 'abstract', 'sealed', 'override', 'virtual', 'async', 'partial', 'extern',
+      'unsafe', 'required',
+    ],
+    cpp: [
+      'public', 'private', 'protected', 'static', 'const', 'constexpr', 'mutable',
+      'virtual', 'inline', 'explicit', 'friend', 'volatile', 'extern', 'override', 'final',
+    ],
+    c: [
+      'static', 'const', 'volatile', 'extern', 'inline', 'register', 'signed', 'unsigned',
+      'restrict',
+    ],
+    swift: [
+      'public', 'private', 'internal', 'fileprivate', 'open', 'static', 'final', 'lazy',
+      'weak', 'unowned', 'override', 'mutating', 'nonmutating', 'dynamic', 'optional',
+    ],
+    php: [
+      'public', 'private', 'protected', 'static', 'final', 'abstract', 'readonly',
+    ],
+    typescript: [
+      'public', 'private', 'protected', 'static', 'readonly', 'abstract', 'async',
+      'override', 'declare',
+    ],
+    javascript: ['static', 'async'],
+    rust: ['pub', 'const', 'static', 'async', 'unsafe', 'mut', 'extern'],
+    dart: ['static', 'final', 'const', 'abstract', 'async', 'covariant', 'late'],
+  };
 
-  function isModifierKeywordPrefix(token) {
-    if (!token || /[A-Z]/.test(token)) return false;
+  const modifierRegexCache = new Map();
+
+  function modifierKeywordsForPath(path) {
+    const lang = langForPath(path || '');
+    return MODIFIER_KEYWORDS_BY_LANG[lang] || null;
+  }
+
+  function modifierRegexesForPath(path) {
+    const keywords = modifierKeywordsForPath(path);
+    if (!keywords?.length) return null;
+    const lang = langForPath(path || '');
+    let cached = modifierRegexCache.get(lang);
+    if (cached) return cached;
+    const alt = keywords
+      .map((kw) => kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    cached = {
+      keywords,
+      lead: new RegExp(`^(?:(?:${alt})(?:\\s+|$))+$`),
+      partial: new RegExp(`^(?:(?:${alt})\\s+)*[a-z][a-z]*$`),
+      afterFinished: new RegExp(`^(?:(?:${alt})\\s+)`),
+    };
+    modifierRegexCache.set(lang, cached);
+    return cached;
+  }
+
+  function isModifierKeywordPrefix(token, path) {
+    const keywords = modifierKeywordsForPath(path);
+    if (!keywords || !token || /[A-Z]/.test(token)) return false;
     const lower = token.toLowerCase();
-    return JAVA_MODIFIER_KEYWORDS.some((kw) => kw.startsWith(lower));
+    return keywords.some((kw) => kw.startsWith(lower));
+  }
+
+  /** Line is only finished modifiers (`private` / `private ` / `public static `). */
+  function isCompleteModifierSequence(linePrefix, path) {
+    const rx = modifierRegexesForPath(path);
+    if (!rx) return false;
+    const trimmed = String(linePrefix || '').trimStart();
+    return !!trimmed && rx.lead.test(trimmed);
+  }
+
+  function modifierKeywordInlineSuffix(token, path) {
+    const keywords = modifierKeywordsForPath(path);
+    if (!keywords || !token || /[A-Z]/.test(token)) return '';
+    const lower = token.toLowerCase();
+    let best = null;
+    for (const kw of keywords) {
+      if (kw.startsWith(lower) && kw.length > token.length) {
+        const suffix = kw.slice(token.length);
+        if (!best || suffix.length < best.length) best = suffix;
+      }
+    }
+    return best || '';
   }
 
   /**
    * Typing `private` / `public static` at a member start — prefer the keyword, not
    * classpath types that share a prefix (PrivateKeyEntry, PublicKey, …).
+   * Also true right after a finished modifier so Space/next words are not hijacked.
    */
   function shouldPreferModifierKeywordInline(path, linePrefix, token) {
-    if (!token || !isJavaLikePath(path)) return false;
-    if (!isModifierKeywordPrefix(token)) return false;
+    const rx = modifierRegexesForPath(path);
+    if (!rx) return false;
+    if (isCompleteModifierSequence(linePrefix, path)) return true;
+    if (!token || /[A-Z]/.test(token)) return false;
+    if (!isModifierKeywordPrefix(token, path)) return false;
     const trimmed = String(linePrefix || '').trimStart();
-    // Optional full modifiers, then the partial token being typed.
-    return /^(?:(?:public|private|protected|static|final|abstract|synchronized|volatile|transient|native|default|sealed)\s+)*[a-z][a-z]*$/.test(
-      trimmed,
-    );
+    return rx.partial.test(trimmed);
   }
 
   function rankIndexItemsForInline(items) {
@@ -5399,10 +5493,23 @@
     if (token) {
       // Access modifiers before scope identifiers — otherwise `private` + nearby
       // `privateField` / `stat` + `status` ghosts steal Space and feel like autocorrect.
+      // At bare statement start, single-letter f/i/w still prefer for/if/while over final.
+      const modRx = modifierRegexesForPath(path);
+      const leadTrimmed = String(linePrefix || '').trimStart();
+      const afterFinishedModifiers = !!(modRx
+        && modRx.partial.test(leadTrimmed)
+        && modRx.afterFinished.test(leadTrimmed));
       if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
-        const modSuffix = keywordInlineSuffix(path, token);
-        if (modSuffix) return modSuffix;
-        return '';
+        if (!token) return '';
+        const preferControlOverFinal = !afterFinishedModifiers
+          && token.length <= 1
+          && shouldPreferControlKeywordInline(path, linePrefix, token)
+          && !hasCompleteControlKeyword(trimmed);
+        if (!preferControlOverFinal) {
+          const modSuffix = modifierKeywordInlineSuffix(token, path);
+          if (modSuffix) return modSuffix;
+          return '';
+        }
       }
       if (
         (!fast || token.length <= 2)
@@ -5542,8 +5649,14 @@
       ? (member.memberPrefix || '')
       : (prefix || extractInlinePartialToken(linePrefix) || '');
 
-    // Never turn `private` into PrivateKeyEntry (or similar) via index ghosts.
-    if (!member && shouldPreferModifierKeywordInline(path, linePrefix, tokenPrefix)) {
+    // Never turn `private` / `private ` into PrivateKeyEntry (or similar) via index ghosts.
+    if (
+      !member
+      && (
+        shouldPreferModifierKeywordInline(path, linePrefix, tokenPrefix)
+        || isCompleteModifierSequence(linePrefix, path)
+      )
+    ) {
       return '';
     }
 
@@ -9428,9 +9541,10 @@
             dismissInlineGhost(editor);
             return;
           }
-          // Typing `private` / `static` / … — only Space-accept the modifier keyword itself.
-          if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) {
-            const modSuffix = keywordInlineSuffix(path, token);
+          // After `private` / `private ` — never Space-accept index/AI ghosts; only a
+          // real modifier suffix (`priv`→`ate`, `stat`→`ic`) may be accepted.
+          if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
+            const modSuffix = token ? modifierKeywordInlineSuffix(token, path) : '';
             if (!modSuffix || ghost !== modSuffix) {
               dismissInlineGhost(editor);
               return;
@@ -9836,6 +9950,9 @@
       shouldPreferJavaTypeInline,
       shouldPreferControlKeywordInline,
       shouldPreferModifierKeywordInline,
+      isCompleteModifierSequence,
+      modifierKeywordInlineSuffix,
+      modifierKeywordsForPath,
       isModifierKeywordPrefix,
       controlStructureInlineSuffix,
       rankIndexItemsForInline,

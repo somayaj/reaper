@@ -935,6 +935,193 @@ function testInlineCompletionRegression(win) {
     'modifier typing prefers static over nearby status identifier',
   );
   ok(
+    h.extractInlinePartialToken('    private ') === '',
+    'no partial token after modifier trailing space',
+  );
+  ok(
+    h.isCompleteModifierSequence('    private ', 'src/App.java'),
+    'private + space is a complete modifier sequence',
+  );
+  ok(
+    h.shouldPreferModifierKeywordInline('src/App.java', '    private ', ''),
+    'after private space still prefers modifier lead-in',
+  );
+  ok(
+    h.inlineSuffixFromIndexItems(
+      [{ label: 'PrivateKeyEntry', kind: 'class' }, { label: 'private', kind: 'keyword' }],
+      '    private ',
+      '',
+      'src/App.java',
+    ) === '',
+    'index ghost suppressed after private trailing space',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    private ',
+      'public class App {\n    private String privateField;\n    private \n}\n',
+      3,
+      17,
+      13,
+      null,
+      { fast: true },
+    ) === '',
+    'no ghost after private space — typing next word must be free',
+  );
+  ok(
+    !h.shouldPrefetchInlineOnPause(
+      'src/App.java',
+      '    private ',
+      'public class App {\n    private \n}\n',
+      2,
+    ),
+    'do not prefetch index after private space',
+  );
+  ok(
+    h.modifierKeywordInlineSuffix('s', 'src/App.java') === 'tatic',
+    'modifier suffix for s is static not switch',
+  );
+
+  // Cross-language: same Space-after-modifier freedom (not Java-only).
+  const modifierLangCases = [
+    {
+      path: 'src/Main.kt',
+      prefix: '    private ',
+      body: 'class App {\n    private \n}\n',
+      line: 2,
+      col: 13,
+      label: 'kotlin',
+    },
+    {
+      path: 'src/App.groovy',
+      prefix: '    public ',
+      body: 'class App {\n    public \n}\n',
+      line: 2,
+      col: 12,
+      label: 'groovy',
+    },
+    {
+      path: 'Program.cs',
+      prefix: '    private ',
+      body: 'class Program {\n    private \n}\n',
+      line: 2,
+      col: 13,
+      label: 'csharp',
+      indexItems: [{ label: 'PrivateType', kind: 'class' }],
+    },
+    {
+      path: 'main.cpp',
+      prefix: '    private ',
+      body: 'class Foo {\n    private \n};\n',
+      line: 2,
+      col: 13,
+      label: 'cpp',
+    },
+    {
+      path: 'main.swift',
+      prefix: '    private ',
+      body: 'class Foo {\n    private \n}\n',
+      line: 2,
+      col: 13,
+      label: 'swift',
+      partial: 'filep',
+      partialExpect: 'rivate',
+    },
+    {
+      path: 'src/lib.rs',
+      prefix: '    pub ',
+      body: 'mod m {\n    pub \n}\n',
+      line: 2,
+      col: 9,
+      label: 'rust',
+    },
+    {
+      path: 'app.ts',
+      prefix: '    private ',
+      body: 'class App {\n    private \n}\n',
+      line: 2,
+      col: 13,
+      label: 'typescript',
+    },
+    {
+      path: 'src/User.php',
+      prefix: '    protected ',
+      body: 'class User {\n    protected \n}\n',
+      line: 2,
+      col: 15,
+      label: 'php',
+    },
+  ];
+  for (const cfg of modifierLangCases) {
+    ok(
+      h.shouldPreferModifierKeywordInline(cfg.path, cfg.prefix, ''),
+      `${cfg.label}: after modifier space prefers modifier lead-in`,
+    );
+    ok(
+      h.isCompleteModifierSequence(cfg.prefix, cfg.path),
+      `${cfg.label}: complete modifier sequence after space`,
+    );
+    ok(
+      h.localInlineSuggestion(
+        cfg.path,
+        cfg.prefix,
+        cfg.body,
+        cfg.line,
+        17,
+        cfg.col,
+        null,
+        { fast: true },
+      ) === '',
+      `${cfg.label}: no ghost after modifier space`,
+    );
+    ok(
+      !h.shouldPrefetchInlineOnPause(cfg.path, cfg.prefix, cfg.body, cfg.line),
+      `${cfg.label}: do not prefetch index after modifier space`,
+    );
+    if (cfg.indexItems) {
+      ok(
+        h.inlineSuffixFromIndexItems(cfg.indexItems, cfg.prefix, '', cfg.path) === '',
+        `${cfg.label}: index ghost suppressed after modifier space`,
+      );
+    }
+    if (cfg.partial) {
+      ok(
+        h.modifierKeywordInlineSuffix(cfg.partial, cfg.path) === cfg.partialExpect,
+        `${cfg.label}: partial ${cfg.partial} completes modifier`,
+      );
+    }
+  }
+  ok(
+    h.localInlineSuggestion(
+      'Program.cs',
+      '    priv',
+      'class Program {\n    priv\n}\n',
+      2,
+      17,
+    ) === 'ate',
+    'csharp priv → private',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/Main.kt',
+      '    intern',
+      'class App {\n    intern\n}\n',
+      2,
+      17,
+    ) === 'al',
+    'kotlin intern → internal',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/lib.rs',
+      '    pu',
+      'mod m {\n    pu\n}\n',
+      2,
+      17,
+    ) === 'b',
+    'rust pu → pub',
+  );
+  ok(
     h.localInlineSuggestion(
       'src/Billing.java',
       '    f',
