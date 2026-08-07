@@ -1938,9 +1938,11 @@ function testInlineCompletionRegression(win) {
   );
   ok(
     mlSrc.includes('function escapeEditorCompletionUi(')
-      && mlSrc.includes('_reaperSuggestEscapedUntil')
+      && mlSrc.includes('function armEditorFreeTyping(')
+      && mlSrc.includes('function isEditorFreeTyping(')
+      && mlSrc.includes('quickSuggestions: { other: false')
       && mlSrc.includes('onEditorEscapeKeydown'),
-    'Escape clears suggest/ghosts, refocuses editor, and briefly suppresses reopen',
+    'Escape arms line free-typing (disables quickSuggestions/inline until =/;/other line)',
   );
   ok(
     mlSrc.includes('function editorAcceptsInlineAi(')
