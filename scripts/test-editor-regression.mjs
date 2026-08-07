@@ -689,6 +689,58 @@ function testInlineCompletionRegression(win) {
     'Java String greeting is declaration typing',
   );
   ok(
+    h.isDeclarationTyping('src/App.java', 'String greeting '),
+    'Java String greeting + trailing space stays declaration typing',
+  );
+  ok(
+    h.isDeclarationTyping('src/App.java', 'var '),
+    'Java var + space is declaration typing',
+  );
+  ok(
+    h.isDeclarationTyping('src/App.java', 'var name'),
+    'Java var name is declaration typing',
+  );
+  ok(
+    h.isDeclarationTyping('src/App.java', 'var name '),
+    'Java var name + trailing space stays declaration typing (before =)',
+  );
+  ok(
+    h.isDeclarativeLeadInFreeTyping('src/App.java', 'var'),
+    'Java bare var is declarative free-typing lead-in',
+  );
+  ok(
+    h.isDeclarativeLeadInFreeTyping('src/App.java', 'int'),
+    'Java bare int is declarative free-typing lead-in',
+  );
+  ok(
+    !h.shouldFetchIndexCompletions('var', 'var', 'src/App.java'),
+    'Java bare var does not fetch index',
+  );
+  ok(
+    !h.shouldFetchIndexCompletions('var ', '', 'src/App.java'),
+    'Java var space does not fetch index',
+  );
+  ok(
+    !h.shouldFetchIndexCompletions('var name ', '', 'src/App.java'),
+    'Java var name space does not fetch index',
+  );
+  ok(
+    h.shouldSuppressInlineGhost(
+      'src/App.java', 'var', '.', 'class A {\n  var\n}\n', 2, 6,
+    ),
+    'Java bare var suppresses punctuation ghost',
+  );
+  ok(
+    h.shouldSuppressInlineGhost(
+      'src/App.java', 'var name ', '.', 'class A {\n  var name \n}\n', 2, 12,
+    ),
+    'Java var name space suppresses punctuation ghost (Space must not insert .)',
+  );
+  ok(
+    !h.shouldRouteInlineToAi('src/App.java', 'var ', 'class A {\n  var \n}\n', 2, '', true),
+    'Java var space does not route to AI inline',
+  );
+  ok(
     !h.isDeclarationTyping('src/App.java', 'SpringApplication'),
     'Java partial type on statement line is not declaration typing',
   );
