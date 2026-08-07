@@ -12159,7 +12159,7 @@ function initEditor() {
       hover: { enabled: true, delay: 300, sticky: true },
       wordBasedSuggestions: 'off',
       // Suggest popup is shortcut-only (Ctrl+Space / Ctrl+Shift+Space) — never while typing/Space.
-      quickSuggestions: { other: false, strings: false, comments: false },
+      quickSuggestions: false,
       quickSuggestionsDelay: 120,
       suggestOnTriggerCharacters: false,
       // Never auto-insert from the suggest widget — Tab accepts; shortcuts open the list.

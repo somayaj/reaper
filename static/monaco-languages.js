@@ -6534,11 +6534,16 @@
       }
     }
 
-    function presentCompletionSuggestions(ed, items, { content, path } = {}) {
+    function presentCompletionSuggestions(ed, items, { content, path, force = false } = {}) {
       if (!items?.length) return false;
       const model = ed?.getModel();
       const position = ed?.getPosition();
       if (!model || !position) return false;
+      // Shortcut / explicit force only — never open from typing "String", etc.
+      if (!force) {
+        const linePrefix = editorLinePrefix(model, position);
+        if (!dotQualifierFromLinePrefix(linePrefix)) return false;
+      }
       const text = content ?? model.getValue();
       const filePath = path || helpers.getActivePath?.() || '';
       for (const item of items) {
@@ -7238,13 +7243,17 @@
         if (force) helpers.toast?.('Open a file first', 'info');
         return;
       }
+      const memberContext = dotQualifierFromLinePrefix(linePrefix);
+      // Word typing (e.g. "String") never opens the list — shortcut or member `.` only.
+      if (!force && !memberContext) {
+        return;
+      }
       if (force) {
         ed._reaperSuggestEscapedUntil = 0;
         clearEditorFreeTyping(ed);
       }
       const repo = helpers.getRepo?.();
 
-      const memberContext = dotQualifierFromLinePrefix(linePrefix);
       const completionPrefix = memberContext
         ? (memberContext.memberPrefix || prefix || '')
         : (prefix || '');
@@ -8921,7 +8930,8 @@
 
     // Local + index completions — member access returns instantly (no loading spinner).
     monaco.languages.registerCompletionItemProvider(REAPER_DOC_SELECTOR, {
-      triggerCharacters: ['.', '@', ':', '-', '<', '"', "'", '/', '#', '*', '=', '(', '[', '{'],
+      // No trigger characters — suggest is shortcut-only (`.` uses scheduleMemberCompletions).
+      triggerCharacters: [],
       provideCompletionItems(model, position, context) {
         const path = helpers.getActivePath?.() || '';
         if (!path || !editorScopeMatches(path, model)) {
@@ -8931,17 +8941,17 @@
 
         const linePrefixRaw = editorLinePrefix(model, position);
         const trig = monaco.languages.CompletionTriggerKind;
-        // Monaco fires on '.' before the dot is in the model — filters against "System".
-        if (
-          context.triggerKind === trig.TriggerCharacter
-          && context.triggerCharacter === '.'
-          && !linePrefixRaw.trimEnd().endsWith('.')
-        ) {
+        const manual = context.triggerKind === trig.Invoke;
+        // Typing must never open the list — only Ctrl+Space / Ctrl+Shift+Space (Invoke).
+        if (!manual) {
+          completionDebug(helpers, [
+            'provider', completionTriggerLabel(context), 'skip: shortcut-only',
+            `line=…${linePrefixRaw.slice(-24)}`,
+          ]);
           return { suggestions: [], incomplete: false };
         }
 
         const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
-        const manual = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
         const memberContext = memberCtx || dotQualifierFromLinePrefix(linePrefix);
         const completionPrefix = memberContext
           ? (memberContext.memberPrefix || prefix || '')
