@@ -1449,6 +1449,10 @@
 
   function shouldFetchIndexCompletions(linePrefix, prefix, path, { afterPause = false, content = '', lineNumber = 0 } = {}) {
     if (path && !supportsWorkspaceIndexInline(path)) return false;
+    {
+      const tok = prefix || extractInlinePartialToken(linePrefix) || '';
+      if (shouldPreferModifierKeywordInline(path, linePrefix, tok)) return false;
+    }
     if (path && isImportTypingLine(path, linePrefix)) return true;
     if (path && isSpringConfigFile(path)) {
       const p = prefix || extractInlinePartialToken(linePrefix) || '';
@@ -4487,6 +4491,17 @@
     return rx.partial.test(trimmed);
   }
 
+  /**
+   * Finished a modifier (`private` / `private `) — free typing for the next word.
+   * No suggest popup / index / AI ghosts (those were swallowing Space and next keys).
+   */
+  function isModifierLeadInFreeTyping(path, linePrefix, token) {
+    if (!shouldPreferModifierKeywordInline(path, linePrefix, token)) return false;
+    if (isCompleteModifierSequence(linePrefix, path)) return true;
+    if (!token) return true;
+    return !modifierKeywordInlineSuffix(token, path);
+  }
+
   function rankIndexItemsForInline(items) {
     const rank = (item) => {
       const k = String(item?.kind || '').toLowerCase();
@@ -4920,7 +4935,11 @@
     }
 
     const completionPrefix = prefix || '';
-    if (helpers?.repoApi && helpers.getRepo?.()) {
+    if (
+      helpers?.repoApi
+      && helpers.getRepo?.()
+      && !shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix)
+    ) {
       const cached = readCachedIndexCompletions(helpers, model, position, completionPrefix);
       if (cached?.length) {
         mergeIndexItemsIntoSuggestions(cached, range, seen, null, suggestions, 40, path);
@@ -7019,11 +7038,44 @@
       ) {
         return;
       }
+      // After `private` / `private ` — never open the suggest popup (index hijacks typing).
+      if (
+        !memberContext
+        && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)
+      ) {
+        dismissSuggestUi(ed);
+        dismissInlineGhost(ed);
+        return;
+      }
       if (
         !force
         && !memberContext
         && !shouldFetchIndexCompletions(linePrefix, completionPrefix, path)
       ) {
+        return;
+      }
+      if (
+        !memberContext
+        && shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix)
+      ) {
+        // Partial modifier only — keyword list, never index fetch.
+        const mods = [];
+        const lower = String(completionPrefix || '').toLowerCase();
+        const { range } = completionContext(model, position);
+        for (const kw of modifierKeywordsForPath(path) || []) {
+          if (kw.startsWith(lower) && kw.length > completionPrefix.length) {
+            mods.push({
+              label: kw,
+              kind: completionKind('keyword'),
+              detail: 'keyword',
+              insertText: kw,
+              range,
+              sortText: `0_${kw}`,
+            });
+          }
+        }
+        if (mods.length) showMemberSuggestFallback(ed, mods);
+        else dismissSuggestUi(ed);
         return;
       }
 
@@ -8677,11 +8729,54 @@
         }
 
         const ed = activeEditor();
+        const modifierTyping = !memberContext
+          && shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix);
+
+        // Finished modifier / after Space — close popup and let the next word type freely.
+        if (modifierTyping && !manual && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)) {
+          if (ed) {
+            dismissSuggestUi(ed);
+            dismissInlineGhost(ed);
+          }
+          completionDebug(helpers, [
+            'provider', completionTriggerLabel(context), 'modifier free typing',
+            path.split('/').pop(),
+          ]);
+          return { suggestions: [], incomplete: false };
+        }
+
+        // Partial modifier (`priv`) — only modifier keywords, never index types.
+        if (modifierTyping && !manual) {
+          const mods = [];
+          const lower = String(completionPrefix || '').toLowerCase();
+          for (const kw of modifierKeywordsForPath(path) || []) {
+            if (kw.startsWith(lower) && kw.length > completionPrefix.length) {
+              mods.push({
+                label: kw,
+                kind: completionKind('keyword'),
+                detail: 'keyword',
+                insertText: kw,
+                range,
+                sortText: `0_${kw}`,
+              });
+            }
+          }
+          if (mods.length > 0 && ed) {
+            presentCompletionSuggestions(ed, mods, { content, path });
+          } else if (ed) {
+            dismissSuggestUi(ed);
+          }
+          completionDebug(helpers, [
+            'provider', completionTriggerLabel(context), 'modifier keyword only',
+            `n=${mods.length}`,
+            path.split('/').pop(),
+          ]);
+          return { suggestions: [], incomplete: false };
+        }
+
         const local = buildLocalCompletionSuggestions(model, position, path, helpers, content);
         const suggestions = [...local.suggestions];
         const seen = new Set(suggestions.map((s) => s.label));
-        const modifierTyping = !memberContext
-          && shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix);
 
         const report = (tag, extra = '') => {
           const labels = suggestions.slice(0, 6).map((s) => s.label).join(', ');
@@ -8694,15 +8789,6 @@
             extra,
           ], { warn: !!(memberContext && suggestions.length === 0) });
         };
-
-        // Typing `private` / `public` — local keywords only (never PrivateKeyEntry from index).
-        if (modifierTyping && !manual) {
-          if (suggestions.length > 0 && ed) {
-            presentCompletionSuggestions(ed, suggestions, { content, path });
-          }
-          report('modifier keyword only');
-          return { suggestions: [], incomplete: false };
-        }
 
         if (!helpers.repoApi || !helpers.getRepo?.()) {
           if (suggestions.length > 0 && ed) {
@@ -9001,8 +9087,14 @@
       ) {
         setInlineCache(ed, cacheKey, local, '', meta, { refresh: false });
         queueInlineSuggestion(ed);
-      } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
-        clearInlineCache(ed);
+      } else {
+        const tok = extractInlinePartialToken(linePrefix);
+        if (isModifierLeadInFreeTyping(path, linePrefix, tok)) {
+          clearInlineCache(ed);
+          dismissSuggestUi(ed);
+        } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
+          clearInlineCache(ed);
+        }
       }
     }
 
@@ -9951,6 +10043,7 @@
       shouldPreferControlKeywordInline,
       shouldPreferModifierKeywordInline,
       isCompleteModifierSequence,
+      isModifierLeadInFreeTyping,
       modifierKeywordInlineSuffix,
       modifierKeywordsForPath,
       isModifierKeywordPrefix,
