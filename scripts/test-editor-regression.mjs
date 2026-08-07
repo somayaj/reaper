@@ -1941,7 +1941,7 @@ function testInlineCompletionRegression(win) {
       && mlSrc.includes('onEditorEscapeKeydown')
       && mlSrc.includes('_reaperForceTypeThroughUntil')
       && mlSrc.includes('stealEscape')
-      && mlSrc.includes('Space never accepts suggest/AI'),
+      && mlSrc.includes('suppress reopen briefly'),
     'Escape lets Monaco close suggest (no steal); force type-through if widget stuck',
   );
   ok(
@@ -1949,6 +1949,12 @@ function testInlineCompletionRegression(win) {
       && appSrc.includes("selectionMode: 'never'")
       && appSrc.includes('preview: false'),
     'Suggest widget does not preselect/preview/Enter-accept (typing stays free)',
+  );
+  ok(
+    mlSrc.includes('never reopen the popup on whitespace')
+      && mlSrc.includes('Trailing Space: keep the typed space')
+      && mlSrc.includes('suppress reopen briefly'),
+    'Space / trailing whitespace does not auto-open suggest',
   );
   ok(
     mlSrc.includes('function editorAcceptsInlineAi(')
