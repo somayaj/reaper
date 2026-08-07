@@ -713,16 +713,8 @@ function testInlineCompletionRegression(win) {
     'Java bare int is declarative free-typing lead-in',
   );
   ok(
-    !h.shouldFetchIndexCompletions('var', 'var', 'src/App.java'),
-    'Java bare var does not fetch index',
-  );
-  ok(
-    !h.shouldFetchIndexCompletions('var ', '', 'src/App.java'),
-    'Java var space does not fetch index',
-  );
-  ok(
-    !h.shouldFetchIndexCompletions('var name ', '', 'src/App.java'),
-    'Java var name space does not fetch index',
+    h.shouldFetchIndexCompletions('var name', 'name', 'src/App.java'),
+    'Java var name still allows autocomplete index while typing the name',
   );
   ok(
     h.shouldSuppressInlineGhost(
@@ -737,8 +729,11 @@ function testInlineCompletionRegression(win) {
     'Java var name space suppresses punctuation ghost (Space must not insert .)',
   );
   ok(
-    !h.shouldRouteInlineToAi('src/App.java', 'var ', 'class A {\n  var \n}\n', 2, '', true),
-    'Java var space does not route to AI inline',
+    h.shouldRouteInlineToAi('src/App.java', 'var name', 'class A {\n  var name\n}\n', 2, '', true)
+      || !h.shouldSuppressInlineGhost(
+        'src/App.java', 'var name', 'Something', 'class A {\n  var name\n}\n', 2, 12,
+      ),
+    'Java declaration typing can still show AI/index ghosts (Space does not accept them)',
   );
   ok(
     !h.isDeclarationTyping('src/App.java', 'SpringApplication'),
@@ -1378,8 +1373,8 @@ function testInlineCompletionRegression(win) {
     'typing pause after System.out. prefetches member index',
   );
   ok(
-    !h.shouldPrefetchInlineOnPause('src/Billing.java', 'String greeting'),
-    'typing pause during declaration typing skips index prefetch',
+    h.shouldPrefetchInlineOnPause('src/Billing.java', 'String greeting'),
+    'typing pause during declaration typing still prefetches autocomplete',
   );
   ok(
     !h.shouldPrefetchInlineOnPause('README.md', '    Money'),
@@ -1935,8 +1930,11 @@ function testInlineCompletionRegression(win) {
     'import lines fetch workspace index completions',
   );
   ok(
-    mlSrc.includes('isDeclarationTyping(path, linePrefix)') && mlSrc.includes('dismissSuggestUi(ed)'),
-    'declaration typing dismisses suggest popup so typing is not blocked',
+    mlSrc.includes('NEVER preventDefault')
+      && mlSrc.includes("e.key === ' '")
+      && mlSrc.includes('dismissSuggestUi(ed)')
+      && !mlSrc.includes("typeThroughCompletion(ed, ' ')"),
+    'Space dismisses suggest but never preventDefault/typeThrough (typing stays free)',
   );
   ok(
     mlSrc.includes('function editorAcceptsInlineAi(')
