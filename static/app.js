@@ -12158,8 +12158,11 @@ function initEditor() {
       quickSuggestions: { other: true, strings: true, comments: false },
       quickSuggestionsDelay: 120,
       suggestOnTriggerCharacters: true,
+      // Never auto-insert from the suggest widget — Tab/Ctrl+Space only.
+      acceptSuggestionOnEnter: 'off',
+      acceptSuggestionOnCommitCharacter: false,
       suggest: {
-        preview: true,
+        preview: false,
         showIcons: true,
         snippetsPreventQuickSuggestions: false,
         filterGraceful: true,
@@ -12168,6 +12171,9 @@ function initEditor() {
         shareSuggestSelections: false,
         showInlineDetails: true,
         acceptSuggestionOnCommitCharacter: false,
+        // Do not preselect an item — preselection + typing feels like autocorrect.
+        selectionMode: 'never',
+        insertMode: 'insert',
       },
       inlineSuggest: {
         enabled: true,
@@ -12178,7 +12184,8 @@ function initEditor() {
       lightbulb: {
         enabled: monaco.editor.ShowLightbulbIconMode?.Off ?? false,
       },
-      tabCompletion: 'on',
+      // Avoid Tab stealing keystrokes for ghost/word complete while naming vars.
+      tabCompletion: 'off',
       renderWhitespace: 'selection',
       renderValidationDecorations: 'on',
       unicodeHighlight: {

@@ -1938,11 +1938,16 @@ function testInlineCompletionRegression(win) {
   );
   ok(
     mlSrc.includes('function escapeEditorCompletionUi(')
-      && mlSrc.includes('function armEditorFreeTyping(')
-      && mlSrc.includes('function isEditorFreeTyping(')
-      && mlSrc.includes('quickSuggestions: { other: false')
-      && mlSrc.includes('onEditorEscapeKeydown'),
-    'Escape arms line free-typing (disables quickSuggestions/inline until =/;/other line)',
+      && mlSrc.includes('onEditorEscapeKeydown')
+      && mlSrc.includes('_reaperMemberFallbackNavigated')
+      && mlSrc.includes('Space never accepts suggest/AI'),
+    'Escape dismisses popup; Space never accepts; Enter needs arrow-nav on member fallback',
+  );
+  ok(
+    appSrc.includes("acceptSuggestionOnEnter: 'off'")
+      && appSrc.includes("selectionMode: 'never'")
+      && appSrc.includes('preview: false'),
+    'Suggest widget does not preselect/preview/Enter-accept (typing stays free)',
   );
   ok(
     mlSrc.includes('function editorAcceptsInlineAi(')

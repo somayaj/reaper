@@ -6505,6 +6505,8 @@
       memberFallbackItems = [];
       memberFallbackAllItems = [];
       memberFallbackIndex = 0;
+      const ed = activeEditor();
+      if (ed) ed._reaperMemberFallbackNavigated = false;
     }
 
     function filterVisibleSuggestions(items, model, position) {
@@ -6875,127 +6877,52 @@
       dismissMonacoSuggestWidget(ed || activeEditor());
     }
 
+    /**
+     * Brief Escape cool-down only — popup may auto-open again while typing.
+     * Suggestions never force-accept; Tab accepts, Space/letters type normally.
+     */
     function completionEscapedRecently(ed) {
-      return isEditorFreeTyping(ed);
-    }
-
-    function applyEditorFreeTypingOptions(ed, free) {
-      if (!ed?.updateOptions) return;
-      if (free) {
-        ed.updateOptions({
-          quickSuggestions: { other: false, strings: false, comments: false },
-          suggestOnTriggerCharacters: false,
-          tabCompletion: 'off',
-          inlineSuggest: { enabled: false },
-        });
-      } else {
-        ed.updateOptions({
-          quickSuggestions: { other: true, strings: true, comments: false },
-          suggestOnTriggerCharacters: true,
-          tabCompletion: 'on',
-          inlineSuggest: {
-            enabled: true,
-            showToolbar: false,
-            suppressSuggestions: false,
-            mode: 'prefix',
-          },
-        });
-      }
+      return !!(ed?._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil);
     }
 
     function clearEditorFreeTyping(ed) {
-      if (!ed || !ed._reaperFreeTyping) return;
+      if (!ed) return;
       ed._reaperFreeTyping = false;
       ed._reaperFreeTypingLine = null;
       ed._reaperSuggestEscapedUntil = 0;
-      applyEditorFreeTypingOptions(ed, false);
+      ed._reaperMemberFallbackNavigated = false;
     }
 
-    /**
-     * Latch free-typing on the current line: no suggest/AI/tab-complete until the
-     * caret leaves the line or the statement ends (`=` / `;`). Escape always enters this.
-     */
-    function armEditorFreeTyping(ed) {
-      if (!ed) return;
-      const pos = ed.getPosition();
-      ed._reaperFreeTyping = true;
-      ed._reaperFreeTypingLine = pos?.lineNumber ?? null;
-      ed._reaperSuggestEscapedUntil = Date.now() + 60_000;
+    function isEditorFreeTyping() {
+      // Kept for call sites: we no longer latch a mode that kills autocomplete.
+      // Typing always reaches the editor; only Tab accepts suggestions.
+      return false;
+    }
+
+    function syncDeclarationFreeTyping() {
+      /* no-op: autocomplete may auto-popup; it must not force-accept */
+    }
+
+    /** Escape: dismiss suggest/AI ghosts and refocus — keep typing, popup can return later. */
+    function escapeEditorCompletionUi(ed) {
+      if (!ed) return false;
       clearTimeout(ed._reaperSuggestTimer);
       clearTimeout(ed._reaperMemberSuggestTimer);
       clearTimeout(ed._reaperInlinePauseTimer);
       ed._reaperSuggestTimer = null;
       ed._reaperMemberSuggestTimer = null;
       ed._reaperInlinePauseTimer = null;
+      // Brief pause so Escape isn't immediately undone by the same keystroke's pause timer.
+      ed._reaperSuggestEscapedUntil = Date.now() + 400;
       cancelAiInlineFetch();
       dismissSuggestUi(ed);
       dismissInlineGhost(ed);
-      applyEditorFreeTypingOptions(ed, true);
+      ed._reaperMemberFallbackNavigated = false;
       try {
         ed.trigger('keyboard', 'closeParameterHints', null);
       } catch {
         /* best-effort */
       }
-    }
-
-    function isEditorFreeTyping(ed, path, linePrefix) {
-      if (!ed) return false;
-      if (ed._reaperFreeTyping) {
-        const pos = ed.getPosition();
-        const line = ed._reaperFreeTypingLine;
-        if (line != null && pos && pos.lineNumber !== line) {
-          clearEditorFreeTyping(ed);
-        } else if (linePrefix != null && /[=;]\s*$/.test(String(linePrefix).trimEnd())) {
-          clearEditorFreeTyping(ed);
-        } else {
-          return !!ed._reaperFreeTyping;
-        }
-      }
-      if (ed._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil) {
-        return true;
-      }
-      const p = path ?? (helpers.getActivePath?.() || '');
-      const prefix = linePrefix ?? (() => {
-        const model = ed.getModel();
-        const pos = ed.getPosition();
-        return model && pos ? editorLinePrefix(model, pos) : '';
-      })();
-      const tok = extractInlinePartialToken(prefix) || '';
-      return isModifierLeadInFreeTyping(p, prefix, tok)
-        || isDeclarativeLeadInFreeTyping(p, prefix)
-        || isDeclarationTyping(p, prefix);
-    }
-
-    /** Keep free-typing armed while `var` / `Type name` declarations are in progress. */
-    function syncDeclarationFreeTyping(ed) {
-      if (!ed) return;
-      const model = ed.getModel();
-      const pos = ed.getPosition();
-      if (!model || !pos) return;
-      const path = helpers.getActivePath?.() || '';
-      const linePrefix = editorLinePrefix(model, pos);
-      if (/[=;]\s*$/.test(linePrefix.trimEnd()) || pos.lineNumber !== ed._reaperFreeTypingLine) {
-        if (ed._reaperFreeTyping && pos.lineNumber !== ed._reaperFreeTypingLine) {
-          clearEditorFreeTyping(ed);
-        } else if (ed._reaperFreeTyping && /[=;]\s*$/.test(linePrefix.trimEnd())) {
-          clearEditorFreeTyping(ed);
-        }
-      }
-      if (
-        !ed._reaperFreeTyping
-        && (
-          isDeclarativeLeadInFreeTyping(path, linePrefix)
-          || isDeclarationTyping(path, linePrefix)
-        )
-      ) {
-        armEditorFreeTyping(ed);
-      }
-    }
-
-    /** Escape: clear suggest/ghosts, focus editor, latch free-typing on this line. */
-    function escapeEditorCompletionUi(ed) {
-      if (!ed) return false;
-      armEditorFreeTyping(ed);
       ed.focus();
       return true;
     }
@@ -7106,6 +7033,7 @@
         return;
       }
       if (e.key === 'ArrowDown') {
+        ed._reaperMemberFallbackNavigated = true;
         memberFallbackIndex = (memberFallbackIndex + 1) % memberFallbackItems.length;
         focusMemberFallbackRow();
         e.preventDefault();
@@ -7113,6 +7041,7 @@
         return;
       }
       if (e.key === 'ArrowUp') {
+        ed._reaperMemberFallbackNavigated = true;
         memberFallbackIndex = (memberFallbackIndex - 1 + memberFallbackItems.length)
           % memberFallbackItems.length;
         focusMemberFallbackRow();
@@ -7120,10 +7049,17 @@
         e.stopPropagation();
         return;
       }
+      // Enter only accepts after the user arrow-navigated — otherwise keep typing
+      // (newline). Pre-focused row 0 must not feel like autocorrect.
       if (e.key === 'Enter') {
-        acceptMemberFallbackItem(ed);
-        e.preventDefault();
-        e.stopPropagation();
+        if (ed._reaperMemberFallbackNavigated) {
+          acceptMemberFallbackItem(ed);
+          e.preventDefault();
+          e.stopPropagation();
+        } else {
+          hideMemberSuggestFallback();
+          dismissMonacoSuggestWidget(ed);
+        }
       }
     }
 
@@ -7210,17 +7146,15 @@
       if (!model || !position) return;
       const path = helpers.getActivePath?.() || '';
       const { linePrefix, prefix } = completionContext(model, position);
-      if (!force && isEditorFreeTyping(ed, path, linePrefix)) {
-        dismissSuggestUi(ed);
-        dismissInlineGhost(ed);
-        return;
-      }
+      if (!force && completionEscapedRecently(ed)) return;
       if (!path) {
         if (force) helpers.toast?.('Open a file first', 'info');
         return;
       }
-      // Explicit Ctrl+Space leaves free-typing so suggest can open.
-      if (force) clearEditorFreeTyping(ed);
+      if (force) {
+        ed._reaperSuggestEscapedUntil = 0;
+        clearEditorFreeTyping(ed);
+      }
       const repo = helpers.getRepo?.();
 
       const memberContext = dotQualifierFromLinePrefix(linePrefix);
@@ -8774,12 +8708,6 @@
       const model = ed.getModel();
       const position = ed.getPosition();
       if (!model || !position) return;
-      if (isEditorFreeTyping(ed)) {
-        dismissInlineGhost(ed);
-        dismissSuggestUi(ed);
-        if (newlineOnRedundantBrace) ed.trigger('keyboard', 'type', { text: '\n' });
-        return;
-      }
 
       const linePrefix = editorLinePrefix(model, position);
       const cacheKey = inlineCacheKey(model, position, linePrefix);
@@ -8845,37 +8773,36 @@
     }
 
     function handleEditorTab(ed) {
-      if (isEditorFreeTyping(ed)) {
-        dismissSuggestUi(ed);
-        dismissInlineGhost(ed);
-        ed.trigger('reaper', 'tab', null);
-        return;
-      }
-      if (memberFallbackEl) {
-        hideMemberSuggestFallback();
-        ed.trigger('reaper', 'tab', null);
-        return;
-      }
       const ctx = ed._contextKeyService;
-      if (ctx?.getContextKeyValue('suggestWidgetVisible')) {
-        ed.trigger('reaper', 'acceptSelectedSuggestion', null);
-        return;
-      }
       if (ctx?.getContextKeyValue('inSnippetMode')) {
         ed.trigger('reaper', 'jumpToNextSnippetPlaceholder', null);
+        return;
+      }
+      // Tab is the explicit accept key for suggest / AI ghosts.
+      if (memberFallbackEl) {
+        acceptMemberFallbackItem(ed);
+        return;
+      }
+      if (ctx?.getContextKeyValue('suggestWidgetVisible')) {
+        try {
+          ed.trigger('reaper', 'selectNextSuggestion', null);
+        } catch {
+          /* older Monaco */
+        }
+        ed.trigger('reaper', 'acceptSelectedSuggestion', null);
         return;
       }
       if (hasActiveInlineSuggestion(ed)) {
         acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace: false });
         return;
       }
+      // Nothing to accept — normal indent.
       ed.trigger('reaper', 'tab', null);
     }
 
     function shouldAutoOpenSuggest(model, position, path, content) {
+      if (completionEscapedRecently(activeEditor())) return false;
       const linePrefix = editorLinePrefix(model, position);
-      const ed = activeEditor();
-      if (ed && isEditorFreeTyping(ed, path, linePrefix)) return false;
       if (
         path && content && shouldPreferAiStatementInline(
           path, linePrefix, content, position.lineNumber,
@@ -8889,7 +8816,9 @@
       if (dotQualifierFromLinePrefix(linePrefix)) return true;
       if (AUTOCOMPLETE_TRIGGER_RE.test(linePrefix)) return true;
       if (p.length >= 2) return true;
-      if (p.length === 1 && isKeywordPrefixTyping(path || helpers.getActivePath?.() || '', p)) return true;
+      if (p.length === 1 && isKeywordPrefixTyping(path || helpers.getActivePath?.() || '', p)) {
+        return true;
+      }
       return false;
     }
 
@@ -8922,16 +8851,6 @@
           : (prefix || '');
         const springConfig = isSpringConfigFile(path);
         const content = editorContent(activeEditor(), model);
-        const edForFree = activeEditor();
-        if (
-          !manual
-          && edForFree
-          && isEditorFreeTyping(edForFree, path, linePrefix)
-        ) {
-          dismissSuggestUi(edForFree);
-          dismissInlineGhost(edForFree);
-          return { suggestions: [], incomplete: false };
-        }
         if (
           !manual
           && shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
@@ -9623,7 +9542,7 @@
         const linePrefix = editorLinePrefix(model, position);
         if (!inlineTypingReady()) return { items: [] };
         const content = editorContent(editor, model);
-        if (isEditorFreeTyping(editor, path, linePrefix)) {
+        if (completionEscapedRecently(editor)) {
           clearInlineCache(editor);
           return { items: [] };
         }
@@ -9847,13 +9766,8 @@
       if (model) editor._reaperContent = model.getValue();
       queueMicrotask(() => maybeExpandEmptyBraceBlock(editor));
       queueMicrotask(() => maybeInsertJavaAssignSpace(editor));
-      syncDeclarationFreeTyping(editor);
-      if (isEditorFreeTyping(editor)) {
-        dismissSuggestUi(editor);
-        dismissInlineGhost(editor);
-        return;
-      }
       if (!editorAcceptsInlineAi(editor)) return;
+      if (completionEscapedRecently(editor)) return;
       refreshInlineLocalFast(editor);
       scheduleInlineOnPause(editor);
     });
@@ -9869,59 +9783,15 @@
       if (ev?.key === ' ' && ev.ctrlKey && !ev.metaKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();
-        clearEditorFreeTyping(editor);
+        editor._reaperSuggestEscapedUntil = 0;
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
+      // Space never accepts suggest/AI — dismiss and type a real space.
       if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
-        if (isEditorFreeTyping(editor)) {
+        if (hasActiveInlineSuggestion(editor) || completionUiBlocksTyping(editor)) {
           dismissInlineGhost(editor);
           dismissSuggestUi(editor);
-          return;
-        }
-        if (hasActiveInlineSuggestion(editor)) {
-          const model = editor.getModel();
-          const position = editor.getPosition();
-          const path = helpers.getActivePath?.() || '';
-          const linePrefix = model && position ? editorLinePrefix(model, position) : '';
-          const trimmedEnd = String(linePrefix || '').trimEnd();
-          const token = extractInlinePartialToken(linePrefix);
-          const ghost = String(aiInlineCache.text || '').split('\n')[0];
-          // Only Space-accept an unfinished keyword/type/modifier suffix (priv→ate).
-          // After a finished word (`var`, `value`, `String`) Space must never accept —
-          // suggestions stay visible until Space dismisses them; Tab accepts.
-          const modSuffix = token && shouldPreferModifierKeywordInline(path, linePrefix, token)
-            && !isModifierLeadInFreeTyping(path, linePrefix, token)
-            ? modifierKeywordInlineSuffix(token, path)
-            : '';
-          const controlSuffix = token
-            && shouldPreferControlKeywordInline(path, linePrefix, token)
-            && !hasCompleteControlKeyword(trimmedEnd)
-            ? keywordInlineSuffix(path, token)
-            : '';
-          const typeSuffix = token
-            && shouldPreferJavaTypeInline(path, linePrefix, token)
-            && !isDeclarationTyping(path, linePrefix)
-            && !isDeclarativeLeadInFreeTyping(path, linePrefix)
-            ? javaSyncTypeInlineSuffix(token)
-            : '';
-          const keywordAccept = !!(ghost && /^[\w$]+$/.test(ghost) && (
-            (modSuffix && ghost === modSuffix)
-            || (controlSuffix && ghost === controlSuffix)
-            || (typeSuffix && ghost === typeSuffix)
-          ));
-          if (keywordAccept) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            acceptInlineOrControlSnippet(editor, { newlineOnRedundantBrace: false });
-            if (!ghost.endsWith(' ') && !ghost.endsWith('(') && !ghost.endsWith('.')) {
-              editor.trigger('keyboard', 'type', { text: ' ' });
-            }
-          } else {
-            // Keep the typed Space — only clear ghosts/suggest so they don't swallow it.
-            dismissInlineGhost(editor);
-            dismissSuggestUi(editor);
-          }
         }
       }
     });
@@ -9931,14 +9801,9 @@
         if (editorAcceptsInlineAi(editor)) dismissCompletionOnCursorClick(editor);
         return;
       }
-      syncDeclarationFreeTyping(editor);
-      if (isEditorFreeTyping(editor)) {
-        dismissSuggestUi(editor);
-        dismissInlineGhost(editor);
-        return;
-      }
       if (Date.now() - (editor._reaperLastContentEditAt || 0) < 80) return;
       if (!editorAcceptsInlineAi(editor)) return;
+      if (completionEscapedRecently(editor)) return;
       scheduleInlineOnPause(editor);
     });
 
@@ -10173,13 +10038,10 @@
       keybindings: [monaco.KeyCode.Enter],
       precondition: 'inlineSuggestionVisible && !suggestWidgetVisible',
       run: (ed) => {
-        if (isEditorFreeTyping(ed)) {
-          dismissInlineGhost(ed);
-          dismissSuggestUi(ed);
-          ed.trigger('keyboard', 'type', { text: '\n' });
-          return;
-        }
-        acceptInlineOrControlSnippet(ed, { newlineOnRedundantBrace: true });
+        // Enter never accepts AI/ghost — only Tab does. Keep a real newline.
+        dismissInlineGhost(ed);
+        dismissSuggestUi(ed);
+        ed.trigger('keyboard', 'type', { text: '\n' });
       },
     });
 
