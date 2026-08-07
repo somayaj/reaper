@@ -1,4 +1,4 @@
-Reaper 0.1.7 (build 478) — macOS split release.
+Reaper 0.1.7 (build 479) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -12,7 +12,7 @@ Drag Reaper.app to Applications, then launch.
 ### What's new
 
 - **Faster Cursor agent replies:** Chat no longer waits on session warm before streaming, and successful model checks are cached so each message skips a full model-list round-trip. Build **476**.
-- **Modifiers no longer force autocorrect:** Typing `private` / `public` / `static` / other modifiers prefers the keyword over nearby identifiers. After a finished modifier + space, the next word types freely (no `PrivateKeyEntry` hijack). Applies across Java, Kotlin, Groovy, C#, C/C++, Swift, PHP, TypeScript/JavaScript, Rust, and Dart. Build **478**.
+- **Modifiers no longer force autocorrect:** Typing `private` / `public` / `static` / other modifiers prefers the keyword over nearby identifiers. After a finished modifier (or modifier + space), suggest/index popups are dismissed so the next word types freely — no `PrivateKeyEntry` hijack. Applies across Java, Kotlin, Groovy, C#, C/C++, Swift, PHP, TypeScript/JavaScript, Rust, and Dart. Build **479**.
 
 ### Also in 0.1.6
 

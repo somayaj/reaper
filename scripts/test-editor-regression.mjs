@@ -982,145 +982,224 @@ function testInlineCompletionRegression(win) {
     'modifier suffix for s is static not switch',
   );
 
-  // Cross-language: same Space-after-modifier freedom (not Java-only).
-  const modifierLangCases = [
+  // Every language with modifier keywords: free typing after complete keyword + after Space.
+  const allModifierLangs = [
     {
-      path: 'src/Main.kt',
-      prefix: '    private ',
-      body: 'class App {\n    private \n}\n',
-      line: 2,
-      col: 13,
+      label: 'java',
+      path: 'src/App.java',
+      mod: 'private',
+      partial: 'priv',
+      partialExpect: 'ate',
+      hijack: 'PrivateKeyEntry',
+      body: (p) => `public class App {\n${p}\n}\n`,
+    },
+    {
       label: 'kotlin',
+      path: 'src/Main.kt',
+      mod: 'private',
+      partial: 'intern',
+      partialExpect: 'al',
+      hijack: 'PrivateKeyEntry',
+      body: (p) => `class App {\n${p}\n}\n`,
     },
     {
-      path: 'src/App.groovy',
-      prefix: '    public ',
-      body: 'class App {\n    public \n}\n',
-      line: 2,
-      col: 12,
+      label: 'kotlin-script',
+      path: 'build.gradle.kts',
+      mod: 'private',
+      partial: 'priv',
+      partialExpect: 'ate',
+      hijack: 'PrivateType',
+      body: (p) => `class App {\n${p}\n}\n`,
+    },
+    {
       label: 'groovy',
+      path: 'src/App.groovy',
+      mod: 'public',
+      partial: 'pub',
+      partialExpect: 'lic',
+      hijack: 'PublicKey',
+      body: (p) => `class App {\n${p}\n}\n`,
     },
     {
-      path: 'Program.cs',
-      prefix: '    private ',
-      body: 'class Program {\n    private \n}\n',
-      line: 2,
-      col: 13,
       label: 'csharp',
-      indexItems: [{ label: 'PrivateType', kind: 'class' }],
+      path: 'Program.cs',
+      mod: 'private',
+      partial: 'priv',
+      partialExpect: 'ate',
+      hijack: 'PrivateType',
+      body: (p) => `class Program {\n${p}\n}\n`,
     },
     {
-      path: 'main.cpp',
-      prefix: '    private ',
-      body: 'class Foo {\n    private \n};\n',
-      line: 2,
-      col: 13,
       label: 'cpp',
+      path: 'main.cpp',
+      mod: 'private',
+      partial: 'priv',
+      partialExpect: 'ate',
+      hijack: 'private_field',
+      body: (p) => `class Foo {\n${p}\n};\n`,
     },
     {
-      path: 'main.swift',
-      prefix: '    private ',
-      body: 'class Foo {\n    private \n}\n',
-      line: 2,
-      col: 13,
+      // .c paths map to cpp lang id — C modifiers are covered by the cpp table.
+      label: 'c-as-cpp',
+      path: 'main.c',
+      mod: 'static',
+      partial: 'stat',
+      partialExpect: 'ic',
+      hijack: 'status',
+      body: (p) => `${p}\nint x;\n`,
+      line: 1,
+    },
+    {
       label: 'swift',
+      path: 'main.swift',
+      mod: 'private',
       partial: 'filep',
       partialExpect: 'rivate',
+      hijack: 'privateVar',
+      body: (p) => `class Foo {\n${p}\n}\n`,
     },
     {
-      path: 'src/lib.rs',
-      prefix: '    pub ',
-      body: 'mod m {\n    pub \n}\n',
-      line: 2,
-      col: 9,
-      label: 'rust',
-    },
-    {
-      path: 'app.ts',
-      prefix: '    private ',
-      body: 'class App {\n    private \n}\n',
-      line: 2,
-      col: 13,
-      label: 'typescript',
-    },
-    {
-      path: 'src/User.php',
-      prefix: '    protected ',
-      body: 'class User {\n    protected \n}\n',
-      line: 2,
-      col: 15,
       label: 'php',
+      path: 'src/User.php',
+      mod: 'protected',
+      partial: 'prot',
+      partialExpect: 'ected',
+      hijack: 'ProtectedType',
+      body: (p) => `<?php\nclass User {\n${p}\n}\n`,
+      line: 3,
+    },
+    {
+      label: 'typescript',
+      path: 'app.ts',
+      mod: 'private',
+      partial: 'priv',
+      partialExpect: 'ate',
+      hijack: 'PrivateKey',
+      body: (p) => `class App {\n${p}\n}\n`,
+    },
+    {
+      label: 'javascript',
+      path: 'app.js',
+      mod: 'static',
+      partial: 'stat',
+      partialExpect: 'ic',
+      hijack: 'status',
+      body: (p) => `class App {\n${p}\n}\n`,
+    },
+    {
+      label: 'rust',
+      path: 'src/lib.rs',
+      mod: 'pub',
+      partial: 'pu',
+      partialExpect: 'b',
+      hijack: 'public_fn',
+      body: (p) => `mod m {\n${p}\n}\n`,
+    },
+    {
+      label: 'dart',
+      path: 'lib/main.dart',
+      mod: 'static',
+      partial: 'fina',
+      partialExpect: 'l',
+      hijack: 'finalizer',
+      body: (p) => `class App {\n${p}\n}\n`,
     },
   ];
-  for (const cfg of modifierLangCases) {
+  for (const cfg of allModifierLangs) {
+    const line = cfg.line || 2;
+    const indent = '    ';
+    const complete = `${indent}${cfg.mod}`;
+    const afterSpace = `${complete} `;
+    const partialLine = `${indent}${cfg.partial}`;
+    const bodyComplete = cfg.body(complete);
+    const bodySpace = cfg.body(afterSpace);
+    const bodyPartial = cfg.body(partialLine);
+    const kws = h.modifierKeywordsForPath(cfg.path);
+    ok(Array.isArray(kws) && kws.includes(cfg.mod), `${cfg.label}: has modifier ${cfg.mod}`);
     ok(
-      h.shouldPreferModifierKeywordInline(cfg.path, cfg.prefix, ''),
-      `${cfg.label}: after modifier space prefers modifier lead-in`,
+      h.isModifierLeadInFreeTyping(cfg.path, complete, cfg.mod),
+      `${cfg.label}: free typing at complete ${cfg.mod}`,
     );
     ok(
-      h.isCompleteModifierSequence(cfg.prefix, cfg.path),
+      h.isModifierLeadInFreeTyping(cfg.path, afterSpace, ''),
+      `${cfg.label}: free typing after ${cfg.mod} + space`,
+    );
+    ok(
+      h.isCompleteModifierSequence(afterSpace, cfg.path),
       `${cfg.label}: complete modifier sequence after space`,
     );
     ok(
-      h.localInlineSuggestion(
-        cfg.path,
-        cfg.prefix,
-        cfg.body,
-        cfg.line,
-        17,
-        cfg.col,
-        null,
-        { fast: true },
-      ) === '',
-      `${cfg.label}: no ghost after modifier space`,
+      !h.shouldFetchIndexCompletions(complete, cfg.mod, cfg.path),
+      `${cfg.label}: no index fetch on complete ${cfg.mod}`,
     );
     ok(
-      !h.shouldPrefetchInlineOnPause(cfg.path, cfg.prefix, cfg.body, cfg.line),
-      `${cfg.label}: do not prefetch index after modifier space`,
+      !h.shouldFetchIndexCompletions(afterSpace, '', cfg.path),
+      `${cfg.label}: no index fetch after ${cfg.mod} space`,
     );
-    if (cfg.indexItems) {
-      ok(
-        h.inlineSuffixFromIndexItems(cfg.indexItems, cfg.prefix, '', cfg.path) === '',
-        `${cfg.label}: index ghost suppressed after modifier space`,
-      );
-    }
-    if (cfg.partial) {
-      ok(
-        h.modifierKeywordInlineSuffix(cfg.partial, cfg.path) === cfg.partialExpect,
-        `${cfg.label}: partial ${cfg.partial} completes modifier`,
-      );
-    }
+    ok(
+      h.inlineSuffixFromIndexItems(
+        [{ label: cfg.hijack, kind: 'class' }, { label: cfg.mod, kind: 'keyword' }],
+        complete,
+        cfg.mod,
+        cfg.path,
+      ) === '',
+      `${cfg.label}: index cannot extend ${cfg.mod} → ${cfg.hijack}`,
+    );
+    ok(
+      h.inlineSuffixFromIndexItems(
+        [{ label: cfg.hijack, kind: 'class' }],
+        afterSpace,
+        '',
+        cfg.path,
+      ) === '',
+      `${cfg.label}: index ghost suppressed after ${cfg.mod} space`,
+    );
+    ok(
+      h.localInlineSuggestion(
+        cfg.path, complete, bodyComplete, line, 17, complete.length + 1, null, { fast: true },
+      ) === '',
+      `${cfg.label}: no ghost on complete ${cfg.mod}`,
+    );
+    ok(
+      h.localInlineSuggestion(
+        cfg.path, afterSpace, bodySpace, line, 17, afterSpace.length + 1, null, { fast: true },
+      ) === '',
+      `${cfg.label}: no ghost after ${cfg.mod} space`,
+    );
+    ok(
+      !h.shouldPrefetchInlineOnPause(cfg.path, afterSpace, bodySpace, line),
+      `${cfg.label}: no prefetch after ${cfg.mod} space`,
+    );
+    ok(
+      !h.shouldRouteInlineToAi(cfg.path, afterSpace, bodySpace, line, '', true),
+      `${cfg.label}: no AI route after ${cfg.mod} space`,
+    );
+    ok(
+      h.modifierKeywordInlineSuffix(cfg.partial, cfg.path) === cfg.partialExpect,
+      `${cfg.label}: ${cfg.partial} → ${cfg.partialExpect}`,
+    );
+    ok(
+      h.localInlineSuggestion(
+        cfg.path, partialLine, bodyPartial, line, 17,
+      ) === cfg.partialExpect,
+      `${cfg.label}: local inline ${cfg.partial} → ${cfg.partialExpect}`,
+    );
+    ok(
+      !h.isModifierLeadInFreeTyping(cfg.path, partialLine, cfg.partial),
+      `${cfg.label}: partial ${cfg.partial} still completes (not free-typing yet)`,
+    );
   }
-  ok(
-    h.localInlineSuggestion(
-      'Program.cs',
-      '    priv',
-      'class Program {\n    priv\n}\n',
-      2,
-      17,
-    ) === 'ate',
-    'csharp priv → private',
-  );
-  ok(
-    h.localInlineSuggestion(
-      'src/Main.kt',
-      '    intern',
-      'class App {\n    intern\n}\n',
-      2,
-      17,
-    ) === 'al',
-    'kotlin intern → internal',
-  );
-  ok(
-    h.localInlineSuggestion(
-      'src/lib.rs',
-      '    pu',
-      'mod m {\n    pu\n}\n',
-      2,
-      17,
-    ) === 'b',
-    'rust pu → pub',
-  );
+  // Languages without access-modifier lead-in must not enter the free-typing gate.
+  for (const path of ['app.py', 'main.go', 'README.md', 'data.json', 'style.css']) {
+    ok(
+      !h.shouldPreferModifierKeywordInline(path, '    private ', ''),
+      `${path}: no modifier lead-in gate`,
+    );
+    ok(
+      !h.isModifierLeadInFreeTyping(path, '    private ', 'private'),
+      `${path}: not free-typing modifier mode`,
+    );
+  }
   ok(
     h.localInlineSuggestion(
       'src/Billing.java',
