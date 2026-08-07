@@ -719,7 +719,7 @@
     return true;
   }
 
-  /** Google Java Format: single spaces around `=` in assignments (not `==`, `+=`, …). */
+  /** Google Java Format: spaces around `=` in assignments (not `==`, `+=`, …). */
   function maybeInsertJavaAssignSpace(ed) {
     if (ed._reaperAssignSpaceEdit || ed._reaperExpandingBrace) return;
     const path = ed._reaperHelpers?.getActivePath?.() || '';
@@ -734,12 +734,18 @@
     if ('!<>=+-*/%&|^'.includes(prev)) return;
     if (line[col - 1] === '=') return;
     const after = line[col - 1];
-    if (after === ' ' || after === '\t') return;
+    const needBefore = !!prev && prev !== ' ' && prev !== '\t';
+    const needAfter = after !== ' ' && after !== '\t';
+    if (!needBefore && !needAfter) return;
     ed._reaperAssignSpaceEdit = true;
     try {
+      // One replace keeps the caret stable: `name=x` → `name = x`, `name=` → `name = `.
+      const startCol = col - 1; // `=` under caret-1
+      const endCol = col;
+      const text = `${needBefore ? ' ' : ''}=${needAfter ? ' ' : ''}`;
       ed.executeEdits('reaper-java-assign-space', [{
-        range: new monaco.Range(pos.lineNumber, col, pos.lineNumber, col),
-        text: ' ',
+        range: new monaco.Range(pos.lineNumber, startCol, pos.lineNumber, endCol),
+        text,
       }]);
     } finally {
       ed._reaperAssignSpaceEdit = false;
@@ -1452,6 +1458,9 @@
     {
       const tok = prefix || extractInlinePartialToken(linePrefix) || '';
       if (shouldPreferModifierKeywordInline(path, linePrefix, tok)) return false;
+      if (isDeclarativeLeadInFreeTyping(path, linePrefix) || isDeclarationTyping(path, linePrefix)) {
+        return false;
+      }
     }
     if (path && isImportTypingLine(path, linePrefix)) return true;
     if (path && isSpringConfigFile(path)) {
@@ -1581,7 +1590,9 @@
 
   /** After a typing pause, try workspace index inline when there is something to complete. */
   function shouldPrefetchInlineOnPause(path, linePrefix, content, lineNumber) {
-    if (!path || isDeclarationTyping(path, linePrefix)) return false;
+    if (!path || isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
+      return false;
+    }
     if (isImportTypingLine(path, linePrefix)) return supportsWorkspaceIndexInline(path);
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
     const trimmedAll = String(linePrefix || '').trim();
@@ -4268,7 +4279,9 @@
     if (dotQualifierFromLinePrefix(linePrefix)) return false;
     if (isImportTypingLine(path, linePrefix)) return false;
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber)) return false;
-    if (isDeclarationTyping(path, linePrefix)) return false;
+    if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
+      return false;
+    }
     // Modifier lead-in (`private` / `private ` / `stat`) — never AI-hijack the next word.
     {
       const modToken = extractInlinePartialToken(linePrefix);
@@ -4536,6 +4549,30 @@
       || typePart.includes('[');
   }
 
+  /**
+   * `var` / `int` / `String name` / `String name ` — declaration lead-in where Space must
+   * type normally (no index/AI ghost accept turning Space into `.` or eating spaces).
+   */
+  function isDeclarativeLeadInFreeTyping(path, linePrefix) {
+    if (!isJavaLikePath(path)) return false;
+    if (isDeclarationTyping(path, linePrefix)) return true;
+    const raw = String(linePrefix || '');
+    const trimmed = raw.trimStart();
+    if (!trimmed || trimmed.includes('=') || trimmed.includes(';')) return false;
+    if (/\.\w/.test(trimmed)) return false;
+    const mod = '(?:(?:public|private|protected|static|final|volatile|transient|abstract|native|synchronized|default|sealed)\\s+)*';
+    // Complete primitive/`var` with no trailing chars yet — next key is Space or name.
+    const bareType = trimmed.match(new RegExp(`^${mod}([A-Za-z_][\\w]*)$`));
+    if (bareType) {
+      const typePart = bareType[1];
+      if (/^(if|for|while|return|new|throw|catch|switch|try|else|class|interface|enum|record)\b/.test(typePart)) {
+        return false;
+      }
+      return JAVA_PRIMITIVE_TYPES.has(typePart);
+    }
+    return false;
+  }
+
   /** Suppress inline ghost only while typing `Type varName`, not partial statement identifiers (`S`). */
   function isDeclarationTyping(path, linePrefix) {
     const lang = langForPath(path);
@@ -4544,14 +4581,22 @@
     if (/\.\w/.test(trimmed)) return false;
 
     if (lang === 'java' || lang === 'kotlin' || lang === 'kts' || lang === 'groovy') {
-      const declRe = /^(?:(?:public|private|protected|static|final|volatile|transient)\s+)*([\w][\w.<>\[\]]*)\s*([\w$]*)$/;
-      const m = trimmed.match(declRe);
-      if (!m) return false;
-      const typePart = m[1];
-      const namePart = m[2] || '';
-      if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
-      if (!isJavaLikeTypeToken(typePart)) return false;
-      return hasDeclarationNameSlot(trimmed, typePart, namePart);
+      const mod = '(?:(?:public|private|protected|static|final|volatile|transient)\\s+)*';
+      // `Type name` or `Type name   ` (space before `=` must stay free).
+      let m = trimmed.match(new RegExp(`^${mod}([\\w][\\w.<>\\[\\]]*)\\s+([\\w$]+)\\s*$`));
+      if (m) {
+        const typePart = m[1];
+        if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
+        return isJavaLikeTypeToken(typePart);
+      }
+      // `Type ` / `var ` — name slot open.
+      m = trimmed.match(new RegExp(`^${mod}([\\w][\\w.<>\\[\\]]*)\\s+$`));
+      if (m) {
+        const typePart = m[1];
+        if (/^(if|for|while|return|new|throw|catch|switch|try)\b/.test(typePart)) return false;
+        return isJavaLikeTypeToken(typePart);
+      }
+      return false;
     }
 
     if (lang === 'typescript' || lang === 'javascript') {
@@ -4634,7 +4679,9 @@
 
   function shouldSuppressInlineGhost(path, linePrefix, ghostText, content, lineNumber, column) {
     if (shouldPauseInlineAtCursor(path, linePrefix, content, lineNumber, column)) return true;
-    if (isDeclarationTyping(path, linePrefix)) return true;
+    if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
+      return true;
+    }
     if (!inlineGhostSafeAfter(linePrefix, ghostText)) return true;
     if (isRedundantCloseBraceGhost(linePrefix, ghostText, content, lineNumber, column)) return true;
     if (content && lineNumber && column && ghostText) {
@@ -6795,7 +6842,9 @@
       const path = helpers.getActivePath?.() || '';
       const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
       const content = editorContent(activeEditor(), model);
-      if (isDeclarationTyping(path, linePrefix)) return false;
+      if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
+        return false;
+      }
       if (shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
         return false;
       }
@@ -7038,10 +7087,14 @@
       ) {
         return;
       }
-      // After `private` / `private ` — never open the suggest popup (index hijacks typing).
+      // After `private` / `var` / `var name ` — never open suggest (index hijacks typing).
       if (
         !memberContext
-        && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)
+        && (
+          isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)
+          || isDeclarativeLeadInFreeTyping(path, linePrefix)
+          || isDeclarationTyping(path, linePrefix)
+        )
       ) {
         dismissSuggestUi(ed);
         dismissInlineGhost(ed);
@@ -8732,14 +8785,22 @@
         const modifierTyping = !memberContext
           && shouldPreferModifierKeywordInline(path, linePrefix, completionPrefix);
 
-        // Finished modifier / after Space — close popup and let the next word type freely.
-        if (modifierTyping && !manual && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix)) {
+        // Finished modifier / `var` / declaration — close popup; next keys type freely.
+        if (
+          !manual
+          && !memberContext
+          && (
+            (modifierTyping && isModifierLeadInFreeTyping(path, linePrefix, completionPrefix))
+            || isDeclarativeLeadInFreeTyping(path, linePrefix)
+            || isDeclarationTyping(path, linePrefix)
+          )
+        ) {
           if (ed) {
             dismissSuggestUi(ed);
             dismissInlineGhost(ed);
           }
           completionDebug(helpers, [
-            'provider', completionTriggerLabel(context), 'modifier free typing',
+            'provider', completionTriggerLabel(context), 'declaration free typing',
             path.split('/').pop(),
           ]);
           return { suggestions: [], incomplete: false };
@@ -8976,6 +9037,7 @@
         if (
           routeAi
           && !isDeclarationTyping(path, linePrefix)
+          && !isDeclarativeLeadInFreeTyping(path, linePrefix)
           && !shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)
         ) {
           scheduleAiInlineFetch();
@@ -8985,7 +9047,7 @@
         dismissInlineGhost(ed);
         dismissSuggestUi(ed);
       } else {
-        if (isDeclarationTyping(path, linePrefix)) {
+        if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
           dismissSuggestUi(ed);
         }
         queueInlineSuggestion(ed, { emptyLine: isWhitespaceOnlyLine(linePrefix) });
@@ -9036,10 +9098,11 @@
       const cacheKey = buildInlineCacheKey(
         repo, path, position.lineNumber, position.column, linePrefix,
       );
-      if (isDeclarationTyping(path, linePrefix)) {
+      if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
         dismissSuggestUi(ed);
       }
       if (isDeclarationTyping(path, linePrefix)
+        || isDeclarativeLeadInFreeTyping(path, linePrefix)
         || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
         clearInlineCache(ed);
         return;
@@ -9089,7 +9152,11 @@
         queueInlineSuggestion(ed);
       } else {
         const tok = extractInlinePartialToken(linePrefix);
-        if (isModifierLeadInFreeTyping(path, linePrefix, tok)) {
+        if (
+          isModifierLeadInFreeTyping(path, linePrefix, tok)
+          || isDeclarativeLeadInFreeTyping(path, linePrefix)
+          || isDeclarationTyping(path, linePrefix)
+        ) {
           clearInlineCache(ed);
           dismissSuggestUi(ed);
         } else if (aiInlineCache.key && aiInlineCache.key !== cacheKey) {
@@ -9117,6 +9184,7 @@
       const aiOn = aiInlineFetchEnabled();
 
       if (isDeclarationTyping(path, linePrefix)
+        || isDeclarativeLeadInFreeTyping(path, linePrefix)
         || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
         clearInlineCache(ed);
         return;
@@ -9355,7 +9423,9 @@
         const linePrefix = editorLinePrefix(model, position);
         if (dotQualifierFromLinePrefix(linePrefix)) return;
         if (!inlineTypingReady()) return;
-        if (isDeclarationTyping(path, linePrefix)) return;
+        if (isDeclarationTyping(path, linePrefix) || isDeclarativeLeadInFreeTyping(path, linePrefix)) {
+          return;
+        }
         if (shouldPauseInlineAtCursor(path, linePrefix, editorContent(editor, model), position.lineNumber, position.column)) {
           return;
         }
@@ -9385,6 +9455,7 @@
         if (!inlineTypingReady()) return { items: [] };
         const content = editorContent(editor, model);
         if (isDeclarationTyping(path, linePrefix)
+          || isDeclarativeLeadInFreeTyping(path, linePrefix)
           || shouldPauseInlineAtCursor(path, linePrefix, content, position.lineNumber, position.column)) {
           clearInlineCache(editor);
           return { items: [] };
@@ -9507,7 +9578,7 @@
           }
         }
 
-        if (!isDeclarationTyping(path, linePrefix)) {
+        if (!isDeclarationTyping(path, linePrefix) && !isDeclarativeLeadInFreeTyping(path, linePrefix)) {
           const local = inlineGhostSuffix(
             path, linePrefix, content, position.lineNumber, javaLevel, position.column, indexCtx,
             { fast: true },
@@ -9628,31 +9699,48 @@
           }
           const token = extractInlinePartialToken(linePrefix);
           const ghost = String(aiInlineCache.text || '').split('\n')[0];
-          // Nothing useful to accept → let Space type normally.
-          if (!ghost || !ghost.trim()) {
+          // Nothing useful / punctuation ghosts (`.` etc.) → let Space type normally.
+          if (!ghost || !ghost.trim() || ghost.startsWith('.') || /[^\w$]/.test(ghost)) {
             dismissInlineGhost(editor);
             return;
           }
-          // After `private` / `private ` — never Space-accept index/AI ghosts; only a
-          // real modifier suffix (`priv`→`ate`, `stat`→`ic`) may be accepted.
-          if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
-            const modSuffix = token ? modifierKeywordInlineSuffix(token, path) : '';
-            if (!modSuffix || ghost !== modSuffix) {
-              dismissInlineGhost(editor);
-              return;
-            }
+          // Declarations / finished modifiers — Space is whitespace, never accept.
+          if (
+            isModifierLeadInFreeTyping(path, linePrefix, token)
+            || isDeclarativeLeadInFreeTyping(path, linePrefix)
+            || isDeclarationTyping(path, linePrefix)
+          ) {
+            dismissInlineGhost(editor);
+            return;
           }
-          const completingWord = !!(token && ghost && /^[\w$]+$/.test(ghost));
+          // Only Space-accept exact keyword/type suffixes (priv→ate, f→or, Sp→ring…).
+          // Random identifier ghosts use Tab — Space must stay a real space.
+          const modSuffix = token && shouldPreferModifierKeywordInline(path, linePrefix, token)
+            ? modifierKeywordInlineSuffix(token, path)
+            : '';
+          const controlSuffix = token
+            && shouldPreferControlKeywordInline(path, linePrefix, token)
+            && !hasCompleteControlKeyword(trimmedEnd)
+            ? keywordInlineSuffix(path, token)
+            : '';
+          const typeSuffix = token && shouldPreferJavaTypeInline(path, linePrefix, token)
+            ? javaSyncTypeInlineSuffix(token)
+            : '';
+          const keywordAccept = (modSuffix && ghost === modSuffix)
+            || (controlSuffix && ghost === controlSuffix)
+            || (typeSuffix && ghost === typeSuffix);
           const contextual = isOperandContext(linePrefix)
             || isReturnContext(linePrefix)
             || isCallArgContext(linePrefix, path);
-          if (completingWord || contextual) {
+          if (keywordAccept || (contextual && /^[\w$]+$/.test(ghost))) {
             ev.preventDefault();
             ev.stopPropagation();
             acceptInlineOrControlSnippet(editor, { newlineOnRedundantBrace: false });
             if (ghost && !ghost.endsWith(' ') && !ghost.endsWith('(') && !ghost.endsWith('.')) {
               editor.trigger('keyboard', 'type', { text: ' ' });
             }
+          } else {
+            dismissInlineGhost(editor);
           }
         }
       }
@@ -10044,6 +10132,7 @@
       shouldPreferModifierKeywordInline,
       isCompleteModifierSequence,
       isModifierLeadInFreeTyping,
+      isDeclarativeLeadInFreeTyping,
       modifierKeywordInlineSuffix,
       modifierKeywordsForPath,
       isModifierKeywordPrefix,
