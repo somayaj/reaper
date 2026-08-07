@@ -1955,14 +1955,15 @@ function testInlineCompletionRegression(win) {
   ok(
     mlSrc.includes('never reopen the popup on whitespace')
       && mlSrc.includes('Typing never auto-opens the list')
-      && mlSrc.includes('kill in-flight reopen')
       && mlSrc.includes('_reaperSuggestSeq')
       && mlSrc.includes('skip: shortcut-only')
       && mlSrc.includes('triggerCharacters: []')
       && mlSrc.includes('Word typing (e.g. "String") never opens the list')
+      && mlSrc.includes('freezes the caret after Space')
+      && mlSrc.includes('skip: trailing whitespace')
       && (mlSrc.includes('Ctrl+Shift+Space') || mlSrc.includes('KeyMod.Shift | monaco.KeyCode.Space')
         || mlSrc.includes('KeyMod.Ctrl | monaco.KeyMod.Shift | monaco.KeyCode.Space')),
-    'Suggest is shortcut-only; typing String / Space never opens list',
+    'Suggest is shortcut-only; Space types through and never freezes caret',
   );
   ok(
     appSrc.includes("'trigger-suggest'")
