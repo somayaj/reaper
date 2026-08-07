@@ -1,4 +1,4 @@
-Reaper 0.1.7 (build 487) — macOS split release.
+Reaper 0.1.7 (build 488) — macOS split release.
 
 **Install:** download the **DMG for your Mac** below. Ignore GitHub's automatic "Source code (zip)" and "Source code (tar.gz)" links — those archives are empty placeholders and are not distributable builds.
 
@@ -11,6 +11,7 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
+- **Typing never opens suggest:** Completing words like `String` no longer pops the list — only **Ctrl+Shift+Space** / **Ctrl+Space**, or member access after `.`. Build **488**.
 - **Suggest is shortcut-only:** Autocomplete opens with **Ctrl+Shift+Space** or **Ctrl+Space** (File → Complete code… / editor context menu). Typing and Space never open or bounce the list. Build **487**.
 - **Space no longer reopens suggest:** Pressing Space dismisses the popup and does not bounce it back open on trailing whitespace — type the next word first. Build **486**.
 - **Escape no longer freezes typing:** Escape closes suggest via Monaco (not stolen in capture); if the widget context sticks, keys are force-typed so the caret never dies. Build **485**.
