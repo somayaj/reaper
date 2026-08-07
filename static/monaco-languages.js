@@ -6742,7 +6742,23 @@
       return null;
     }
 
-    function showMemberSuggestFallback(ed, items) {
+    function showMemberSuggestFallback(ed, items, { force = false } = {}) {
+      if (!force) {
+        if (completionEscapedRecently(ed)) {
+          completionDebug(helpers, ['fallback', 'skip: escaped / Space cool-down']);
+          return;
+        }
+        const modelEarly = ed?.getModel?.();
+        const posEarly = ed?.getPosition?.();
+        if (modelEarly && posEarly) {
+          const lp = editorLinePrefix(modelEarly, posEarly);
+          // Never open/reopen the list right after Space / trailing whitespace.
+          if (/\s$/.test(lp) && !dotQualifierFromLinePrefix(lp)) {
+            completionDebug(helpers, ['fallback', 'skip: trailing whitespace']);
+            return;
+          }
+        }
+      }
       hideMemberSuggestFallback();
       if (!items.length) {
         completionDebug(helpers, ['fallback', 'skip: no items']);
@@ -6864,9 +6880,13 @@
     }
 
     function suggestPopupShouldStayOpen(model, position) {
+      const ed = activeEditor();
+      if (completionEscapedRecently(ed)) return false;
       const path = helpers.getActivePath?.() || '';
       const { linePrefix, prefix, range, memberCtx } = completionContext(model, position);
-      const content = editorContent(activeEditor(), model);
+      // Space / trailing whitespace — always close; never keep the list open.
+      if (/\s$/.test(linePrefix)) return false;
+      const content = editorContent(ed, model);
       {
         const tok = prefix || '';
         if (isModifierLeadInFreeTyping(path, linePrefix, tok)) return false;
@@ -7039,11 +7059,30 @@
 
       const suggestStuck = !!ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible');
       const forceThrough = forceTypeThroughActive(ed);
-      if (!suggestStuck && !memberFallbackEl && !forceThrough) return;
+      const hadFallback = !!memberFallbackEl;
 
-      // After Escape, Monaco can leave suggestWidgetVisible stuck — letters never
-      // reach the buffer. Force-insert printable keys until the widget is gone.
-      if (forceThrough && e.key.length === 1) {
+      // Plain Space: always dismiss, cool down, and type a real space. Never leave
+      // suggestWidgetVisible stuck (that freezes the caret after Space).
+      if (e.key === ' ' && !e.isComposing) {
+        clearTimeout(ed._reaperSuggestTimer);
+        ed._reaperSuggestTimer = null;
+        ed._reaperSuggestSeq = (ed._reaperSuggestSeq || 0) + 1;
+        ed._reaperSuggestEscapedUntil = Date.now() + 2000;
+        ed._reaperForceTypeThroughUntil = Date.now() + 3000;
+        dismissInlineGhost(ed);
+        dismissSuggestUi(ed);
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        typeThroughCompletion(ed, ' ');
+        refocusEditorInput(ed);
+        return;
+      }
+
+      if (!suggestStuck && !hadFallback && !forceThrough) return;
+
+      // Stuck suggest / force-through: letters never reach the buffer — insert them.
+      if ((forceThrough || suggestStuck) && e.key.length === 1) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
@@ -7056,10 +7095,9 @@
         return;
       }
 
-      // Space / punctuation / brackets: dismiss the popup; let the key type.
+      // Punctuation / brackets: dismiss the popup; type through when stuck.
       if (
-        e.key === ' '
-        || e.key === ':'
+        e.key === ':'
         || e.key === '('
         || e.key === ')'
         || e.key === '['
@@ -7070,11 +7108,11 @@
       ) {
         dismissSuggestUi(ed);
         dismissInlineGhost(ed);
-        if (forceThrough) {
+        if (forceThrough || suggestStuck) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
-          typeThroughCompletion(ed, e.key === ' ' ? ' ' : e.key);
+          typeThroughCompletion(ed, e.key);
         }
       }
     }
@@ -7368,7 +7406,7 @@
         for (const item of merged) {
           enrichJavaSuggestion(item, content, path);
         }
-        showMemberSuggestFallback(ed, merged);
+        showMemberSuggestFallback(ed, merged, { force });
       };
 
       const showMemberMerged = (fromIndex) => {
@@ -9894,15 +9932,8 @@
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
-      // Space: always type whitespace — dismiss popup and kill in-flight reopen.
-      if (ev?.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
-        clearTimeout(editor._reaperSuggestTimer);
-        editor._reaperSuggestTimer = null;
-        editor._reaperSuggestSeq = (editor._reaperSuggestSeq || 0) + 1;
-        editor._reaperSuggestEscapedUntil = Date.now() + 1500;
-        dismissInlineGhost(editor);
-        dismissSuggestUi(editor);
-      }
+      // Space handled in capture-phase onCompletionTypeThroughKeydown (types through,
+      // dismisses, and clears stuck suggestWidgetVisible so the caret never freezes).
     });
 
     editor.onDidChangeCursorPosition((e) => {
