@@ -1930,18 +1930,19 @@ function testInlineCompletionRegression(win) {
     'import lines fetch workspace index completions',
   );
   ok(
-    mlSrc.includes('NEVER preventDefault')
-      && mlSrc.includes("e.key === ' '")
+    mlSrc.includes("e.key === ' '")
       && mlSrc.includes('dismissSuggestUi(ed)')
-      && !mlSrc.includes("typeThroughCompletion(ed, ' ')"),
-    'Space dismisses suggest but never preventDefault/typeThrough (typing stays free)',
+      && mlSrc.includes('_reaperForceTypeThroughUntil')
+      && mlSrc.includes('typeThroughCompletion(ed, e.key'),
+    'After Escape, stuck suggest type-throughs keys so typing never dies',
   );
   ok(
     mlSrc.includes('function escapeEditorCompletionUi(')
       && mlSrc.includes('onEditorEscapeKeydown')
-      && mlSrc.includes('_reaperMemberFallbackNavigated')
+      && mlSrc.includes('_reaperForceTypeThroughUntil')
+      && mlSrc.includes('stealEscape')
       && mlSrc.includes('Space never accepts suggest/AI'),
-    'Escape dismisses popup; Space never accepts; Enter needs arrow-nav on member fallback',
+    'Escape lets Monaco close suggest (no steal); force type-through if widget stuck',
   );
   ok(
     appSrc.includes("acceptSuggestionOnEnter: 'off'")

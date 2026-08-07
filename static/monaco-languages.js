@@ -6527,6 +6527,11 @@
       } catch {
         /* best-effort */
       }
+      try {
+        ed.trigger('keyboard', 'editor.action.hideSuggestWidget', null);
+      } catch {
+        /* best-effort */
+      }
     }
 
     function presentCompletionSuggestions(ed, items, { content, path } = {}) {
@@ -6885,11 +6890,16 @@
       return !!(ed?._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil);
     }
 
+    function forceTypeThroughActive(ed) {
+      return !!(ed?._reaperForceTypeThroughUntil && Date.now() < ed._reaperForceTypeThroughUntil);
+    }
+
     function clearEditorFreeTyping(ed) {
       if (!ed) return;
       ed._reaperFreeTyping = false;
       ed._reaperFreeTypingLine = null;
       ed._reaperSuggestEscapedUntil = 0;
+      ed._reaperForceTypeThroughUntil = 0;
       ed._reaperMemberFallbackNavigated = false;
     }
 
@@ -6903,33 +6913,86 @@
       /* no-op: autocomplete may auto-popup; it must not force-accept */
     }
 
-    /** Escape: dismiss suggest/AI ghosts and refocus — keep typing, popup can return later. */
-    function escapeEditorCompletionUi(ed) {
+    function hasDismissibleCompletionUi(ed) {
       if (!ed) return false;
+      if (memberFallbackEl) return true;
+      const ctx = ed._contextKeyService;
+      return !!(
+        ctx?.getContextKeyValue('suggestWidgetVisible')
+        || ctx?.getContextKeyValue('parameterHintsVisible')
+        || ctx?.getContextKeyValue('inlineSuggestionVisible')
+        || aiInlineCache.text
+        || aiInlineCache.controlSnippet
+        || ed._reaperPendingControlSnippet
+      );
+    }
+
+    function refocusEditorInput(ed) {
+      if (!ed) return;
+      try {
+        ed.focus();
+      } catch {
+        /* best-effort */
+      }
+      const textarea = ed.getDomNode?.()?.querySelector?.('textarea.inputarea');
+      if (textarea && typeof textarea.focus === 'function') {
+        try {
+          textarea.focus({ preventScroll: true });
+        } catch {
+          textarea.focus();
+        }
+      }
+    }
+
+    /**
+     * Escape dismisses our overlays. For Monaco's suggest widget, let Escape reach
+     * Monaco (do not preventDefault) — stealing Escape left suggestWidgetVisible
+     * stuck true and the caret could not type afterward.
+     * Returns { hadUi, stealEscape } — stealEscape only for our custom fallback.
+     */
+    function escapeEditorCompletionUi(ed) {
+      if (!ed) return { hadUi: false, stealEscape: false };
+      const hadFallback = !!memberFallbackEl;
+      const suggestOpen = !!ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible');
+      const hadUi = hasDismissibleCompletionUi(ed);
+
       clearTimeout(ed._reaperSuggestTimer);
       clearTimeout(ed._reaperMemberSuggestTimer);
       clearTimeout(ed._reaperInlinePauseTimer);
       ed._reaperSuggestTimer = null;
       ed._reaperMemberSuggestTimer = null;
       ed._reaperInlinePauseTimer = null;
-      // Brief pause so Escape isn't immediately undone by the same keystroke's pause timer.
       ed._reaperSuggestEscapedUntil = Date.now() + 400;
-      cancelAiInlineFetch();
-      dismissSuggestUi(ed);
-      dismissInlineGhost(ed);
       ed._reaperMemberFallbackNavigated = false;
+      cancelAiInlineFetch();
+      hideMemberSuggestFallback();
+      dismissInlineGhost(ed);
       try {
         ed.trigger('keyboard', 'closeParameterHints', null);
       } catch {
         /* best-effort */
       }
-      ed.focus();
-      return true;
+
+      if (suggestOpen) {
+        // Let Monaco handle Escape; backup-hide after it runs.
+        queueMicrotask(() => {
+          dismissMonacoSuggestWidget(ed);
+          refocusEditorInput(ed);
+        });
+        // If Monaco's context key stays stuck, type-through letters until clear.
+        ed._reaperForceTypeThroughUntil = Date.now() + 3000;
+      } else {
+        dismissMonacoSuggestWidget(ed);
+        refocusEditorInput(ed);
+      }
+
+      return { hadUi, stealEscape: hadFallback };
     }
 
     function completionUiBlocksTyping(ed) {
       if (!ed) return false;
       if (memberFallbackEl) return true;
+      if (forceTypeThroughActive(ed)) return true;
       const ctx = ed._contextKeyService;
       // Only the Monaco suggest widget / custom member popup — not inline ghost text.
       // Treating inlineSuggestionVisible as blocking stole `:`, `(`, etc. and broke
@@ -6961,20 +7024,33 @@
 
     function onCompletionTypeThroughKeydown(e) {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === 'Escape') return; // handled separately — must reach Monaco
       const ed = activeEditor();
       if (!ed || !editorIsTypingTarget(ed)) return;
       const model = ed.getModel();
       const pos = ed.getPosition();
       if (!model || !pos) return;
 
-      // Do not intercept merely because the caret follows an identifier, or because
-      // an inline ghost is visible — that stalled the caret after `:` / `()` in Java/YAML.
-      if (!completionUiBlocksTyping(ed)) return;
+      const suggestStuck = !!ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible');
+      const forceThrough = forceTypeThroughActive(ed);
+      if (!suggestStuck && !memberFallbackEl && !forceThrough) return;
 
-      // Space / punctuation / brackets: dismiss the popup so it cannot swallow the
-      // key, but NEVER preventDefault — typing must always reach the editor.
-      // (Manual insert via preventDefault+executeEdits was dropping Space after
-      // `var name` / `String value` when suggest/fallback was open.)
+      // After Escape, Monaco can leave suggestWidgetVisible stuck — letters never
+      // reach the buffer. Force-insert printable keys until the widget is gone.
+      if (forceThrough && e.key.length === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        dismissSuggestUi(ed);
+        dismissInlineGhost(ed);
+        typeThroughCompletion(ed, e.key);
+        if (!ed._contextKeyService?.getContextKeyValue('suggestWidgetVisible') && !memberFallbackEl) {
+          ed._reaperForceTypeThroughUntil = 0;
+        }
+        return;
+      }
+
+      // Space / punctuation / brackets: dismiss the popup; let the key type.
       if (
         e.key === ' '
         || e.key === ':'
@@ -6988,7 +7064,12 @@
       ) {
         dismissSuggestUi(ed);
         dismissInlineGhost(ed);
-        return;
+        if (forceThrough) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          typeThroughCompletion(ed, e.key === ' ' ? ' ' : e.key);
+        }
       }
     }
 
@@ -7022,10 +7103,12 @@
         return;
       }
       if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        escapeEditorCompletionUi(ed);
+        const result = escapeEditorCompletionUi(ed);
+        if (result.stealEscape) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+        }
         return;
       }
       if (e.key === 'Tab') {
@@ -7105,7 +7188,10 @@
       if (e.key !== 'Escape' || e.ctrlKey || e.metaKey || e.altKey) return;
       const ed = activeEditor();
       if (!ed || !editorIsTypingTarget(ed)) return;
-      if (!escapeEditorCompletionUi(ed)) return;
+      const result = escapeEditorCompletionUi(ed);
+      // Only steal Escape for our custom member fallback. Monaco suggest must
+      // receive Escape or suggestWidgetVisible stays stuck and typing dies.
+      if (!result.stealEscape) return;
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
@@ -9775,15 +9861,19 @@
     editor.onKeyDown((e) => {
       const ev = e.browserEvent;
       if (ev?.key === 'Escape' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-        escapeEditorCompletionUi(editor);
-        e.preventDefault();
-        e.stopPropagation();
+        // Clear ghosts/timers only — do not preventDefault (Monaco must close suggest).
+        const result = escapeEditorCompletionUi(editor);
+        if (result.stealEscape) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
         return;
       }
       if (ev?.key === ' ' && ev.ctrlKey && !ev.metaKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();
         editor._reaperSuggestEscapedUntil = 0;
+        editor._reaperForceTypeThroughUntil = 0;
         setTimeout(() => fireCompletionsSuggest(activeEditor(), { force: true }), 0);
         return;
       }
