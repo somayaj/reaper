@@ -910,6 +910,32 @@ function testInlineCompletionRegression(win) {
   );
   ok(
     h.localInlineSuggestion(
+      'src/App.java',
+      '    private',
+      'public class App {\n    private String privateField;\n    private\n}\n',
+      3,
+      17,
+      12,
+      null,
+      { fast: true },
+    ) === '',
+    'fast scope must not ghost privateField after complete private modifier',
+  );
+  ok(
+    h.localInlineSuggestion(
+      'src/App.java',
+      '    private stat',
+      'public class App {\n    String status;\n    private stat\n}\n',
+      3,
+      17,
+      16,
+      null,
+      { fast: true },
+    ) === 'ic',
+    'modifier typing prefers static over nearby status identifier',
+  );
+  ok(
+    h.localInlineSuggestion(
       'src/Billing.java',
       '    f',
       'public class Billing {\n  void m() {\n    f\n  }\n}\n',

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +11,9 @@ mod spawn;
 pub use spawn::{ensure_bridge_running, last_bridge_error, reclaim_bridge_port, stop_bridge};
 
 static BRIDGE_URL: RwLock<Option<String>> = RwLock::new(None);
+/// Successful model validations: (api_key\0model) → (ok, checked_at).
+static MODEL_VALIDATE_CACHE: LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn set_bridge_url(url: String) {
     if let Ok(mut guard) = BRIDGE_URL.write() {
@@ -249,6 +252,17 @@ impl CursorBridge {
     }
 
     pub async fn validate_model(&self, api_key: &str, model: &str) -> Result<()> {
+        // Cache successes so each chat message does not re-list models (slow TTFB).
+        const MODEL_VALIDATE_TTL: Duration = Duration::from_secs(300);
+        let cache_key = format!("{api_key}\0{model}");
+        if let Ok(guard) = MODEL_VALIDATE_CACHE.lock() {
+            if let Some((ok, at)) = guard.get(&cache_key) {
+                if *ok && at.elapsed() < MODEL_VALIDATE_TTL {
+                    return Ok(());
+                }
+            }
+        }
+
         let value = self.list_models(api_key).await?;
         let models = value
             .get("models")
@@ -258,9 +272,15 @@ impl CursorBridge {
             entry.get("id").and_then(|v| v.as_str()) == Some(model)
         });
         if !supported {
+            if let Ok(mut guard) = MODEL_VALIDATE_CACHE.lock() {
+                guard.remove(&cache_key);
+            }
             bail!(
                 "Model \"{model}\" isn't available for your Cursor API key. Choose a supported model in the agent panel."
             );
+        }
+        if let Ok(mut guard) = MODEL_VALIDATE_CACHE.lock() {
+            guard.insert(cache_key, (true, Instant::now()));
         }
         Ok(())
     }
