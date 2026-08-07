@@ -6875,6 +6875,44 @@
       dismissMonacoSuggestWidget(ed || activeEditor());
     }
 
+    function completionEscapedRecently(ed) {
+      return !!(ed?._reaperSuggestEscapedUntil && Date.now() < ed._reaperSuggestEscapedUntil);
+    }
+
+    /** Escape: clear suggest/ghosts, keep focus in the editor, briefly suppress reopen. */
+    function escapeEditorCompletionUi(ed) {
+      if (!ed) return false;
+      const ctx = ed._contextKeyService;
+      const had = !!(
+        memberFallbackEl
+        || ctx?.getContextKeyValue('suggestWidgetVisible')
+        || ctx?.getContextKeyValue('parameterHintsVisible')
+        || ctx?.getContextKeyValue('inlineSuggestionVisible')
+        || aiInlineCache.text
+        || aiInlineCache.controlSnippet
+        || ed._reaperPendingControlSnippet
+      );
+      clearTimeout(ed._reaperSuggestTimer);
+      clearTimeout(ed._reaperMemberSuggestTimer);
+      clearTimeout(ed._reaperInlinePauseTimer);
+      ed._reaperSuggestTimer = null;
+      ed._reaperMemberSuggestTimer = null;
+      ed._reaperInlinePauseTimer = null;
+      cancelAiInlineFetch();
+      dismissSuggestUi(ed);
+      dismissInlineGhost(ed);
+      try {
+        ed.trigger('keyboard', 'closeParameterHints', null);
+      } catch {
+        /* best-effort */
+      }
+      if (had) {
+        ed._reaperSuggestEscapedUntil = Date.now() + 1200;
+      }
+      ed.focus();
+      return had;
+    }
+
     function completionUiBlocksTyping(ed) {
       if (!ed) return false;
       if (memberFallbackEl) return true;
@@ -6969,12 +7007,15 @@
         hideMemberSuggestFallback();
         return;
       }
-      if (e.key === 'Escape' || e.key === 'Tab') {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        escapeEditorCompletionUi(ed);
+        return;
+      }
+      if (e.key === 'Tab') {
         hideMemberSuggestFallback();
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          e.stopPropagation();
-        }
         return;
       }
       if (e.key === 'ArrowDown') {
@@ -7037,8 +7078,19 @@
       dismissSuggestUi(ed);
     }
 
+    function onEditorEscapeKeydown(e) {
+      if (e.key !== 'Escape' || e.ctrlKey || e.metaKey || e.altKey) return;
+      const ed = activeEditor();
+      if (!ed || !editorIsTypingTarget(ed)) return;
+      if (!escapeEditorCompletionUi(ed)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
+
     document.addEventListener('keydown', onCompletionTypeThroughKeydown, true);
     document.addEventListener('keydown', onMemberFallbackKeydown, true);
+    document.addEventListener('keydown', onEditorEscapeKeydown, true);
     document.addEventListener('mousedown', (e) => {
       if (!memberFallbackEl) return;
       if (memberFallbackEl.contains(e.target)) return;
@@ -7069,6 +7121,7 @@
       const model = ed.getModel();
       const position = ed.getPosition();
       if (!model || !position) return;
+      if (!force && completionEscapedRecently(ed)) return;
       const path = helpers.getActivePath?.() || '';
       if (!path) {
         if (force) helpers.toast?.('Open a file first', 'info');
@@ -7279,6 +7332,7 @@
 
     function scheduleAutocompleteSuggest(ed, force) {
       clearTimeout(ed._reaperSuggestTimer);
+      if (!force && completionEscapedRecently(ed)) return;
       const delay = force ? 0 : 280;
       ed._reaperSuggestTimer = setTimeout(() => {
         fireCompletionsSuggest(ed, { force });
@@ -8992,6 +9046,7 @@
 
     function scheduleInlineOnPause(ed) {
       if (!editorAcceptsInlineAi(ed)) return;
+      if (completionEscapedRecently(ed)) return;
       clearTimeout(ed._reaperInlinePauseTimer);
       let delay = INLINE_PAUSE_MS;
       const model = ed.getModel();
@@ -9078,6 +9133,11 @@
       const path = helpers.getActivePath?.() || '';
       if (!model || !position || !repo || !path) {
         clearInlineCache(ed);
+        return;
+      }
+      if (completionEscapedRecently(ed)) {
+        clearInlineCache(ed);
+        dismissSuggestUi(ed);
         return;
       }
       const linePrefix = editorLinePrefix(model, position);
@@ -9673,6 +9733,13 @@
 
     editor.onKeyDown((e) => {
       const ev = e.browserEvent;
+      if (ev?.key === 'Escape' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        if (escapeEditorCompletionUi(editor)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
       if (ev?.key === ' ' && ev.ctrlKey && !ev.metaKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();

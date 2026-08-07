@@ -1937,6 +1937,12 @@ function testInlineCompletionRegression(win) {
     'Space dismisses suggest but never preventDefault/typeThrough (typing stays free)',
   );
   ok(
+    mlSrc.includes('function escapeEditorCompletionUi(')
+      && mlSrc.includes('_reaperSuggestEscapedUntil')
+      && mlSrc.includes('onEditorEscapeKeydown'),
+    'Escape clears suggest/ghosts, refocuses editor, and briefly suppresses reopen',
+  );
+  ok(
     mlSrc.includes('function editorAcceptsInlineAi(')
       && mlSrc.includes('function cancelAiInlineFetch('),
     'AI inline gated on editor focus + cancel on blur',
