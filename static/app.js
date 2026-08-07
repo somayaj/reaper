@@ -20254,11 +20254,8 @@ async function runAgentChat(prompt, opts = {}) {
       const modelErr = cursorModelStatusError();
       if (modelErr) throw new Error(modelErr);
       setAgentActivity('Connecting…');
-      // Don't block chat forever if warm hangs while the bridge boots.
-      await Promise.race([
-        warmCursorSession(state.repo),
-        new Promise((resolve) => setTimeout(resolve, 12_000)),
-      ]);
+      // Warm in the background — awaiting it delays the first streamed token.
+      void warmCursorSession(state.repo);
     }
 
     setAgentActivity('Waiting for reply…');

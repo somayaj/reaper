@@ -5397,13 +5397,12 @@
     const trimmed = linePrefix.trimEnd();
     const token = extractInlinePartialToken(linePrefix);
     if (token) {
-      if (fast && token.length >= 1) {
-        const fastScope = fastLineWindowScopeSuffix(content, path, lineNumber, token);
-        if (fastScope) return fastScope;
-      }
-      if (!fast && token.length >= MIN_INDEX_INLINE_CHARS) {
-        const scopeSuffix = scopeIdentifierInlineSuffix(content, path, lineNumber, token);
-        if (scopeSuffix) return scopeSuffix;
+      // Access modifiers before scope identifiers — otherwise `private` + nearby
+      // `privateField` / `stat` + `status` ghosts steal Space and feel like autocorrect.
+      if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
+        const modSuffix = keywordInlineSuffix(path, token);
+        if (modSuffix) return modSuffix;
+        return '';
       }
       if (
         (!fast || token.length <= 2)
@@ -5413,11 +5412,13 @@
         const kwSuffix = keywordInlineSuffix(path, token);
         if (kwSuffix) return kwSuffix;
       }
-      // `private` / `public` / … at member start: keyword only — not PrivateKeyEntry.
-      if (shouldPreferModifierKeywordInline(path, linePrefix, token)) {
-        const modSuffix = keywordInlineSuffix(path, token);
-        if (modSuffix) return modSuffix;
-        return '';
+      if (fast && token.length >= 1) {
+        const fastScope = fastLineWindowScopeSuffix(content, path, lineNumber, token);
+        if (fastScope) return fastScope;
+      }
+      if (!fast && token.length >= MIN_INDEX_INLINE_CHARS) {
+        const scopeSuffix = scopeIdentifierInlineSuffix(content, path, lineNumber, token);
+        if (scopeSuffix) return scopeSuffix;
       }
       if (indexCtx?.helpers && indexCtx?.model && indexCtx?.position) {
         const indexSuffix = inlineSuffixFromCachedIndex(
@@ -9426,6 +9427,14 @@
           if (!ghost || !ghost.trim()) {
             dismissInlineGhost(editor);
             return;
+          }
+          // Typing `private` / `static` / … — only Space-accept the modifier keyword itself.
+          if (token && shouldPreferModifierKeywordInline(path, linePrefix, token)) {
+            const modSuffix = keywordInlineSuffix(path, token);
+            if (!modSuffix || ghost !== modSuffix) {
+              dismissInlineGhost(editor);
+              return;
+            }
           }
           const completingWord = !!(token && ghost && /^[\w$]+$/.test(ghost));
           const contextual = isOperandContext(linePrefix)
