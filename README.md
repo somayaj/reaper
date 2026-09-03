@@ -2,6 +2,23 @@
 
 A local **developer git studio** built in Rust. Host bare repositories over HTTP, edit files in a Monaco-powered IDE, import private company repos with a PAT, and run git commands — all through a Tailwind CSS UI.
 
+## Install
+
+macOS builds are on [reaper-org/releases](https://github.com/reaper-org/releases/releases). Download the **DMG for your Mac** from the latest release. Ignore GitHub’s “Source code (zip)” and “Source code (tar.gz)” links — those archives are empty placeholders, not the app.
+
+| Mac | File |
+|-----|------|
+| Apple Silicon (M1/M2/M3/M4) | `reaper-<version>-macos-arm64.dmg` |
+| Intel (2015–2020 MacBook Pro, iMac, etc.) | `reaper-<version>-macos-x86_64.dmg` |
+
+1. Open the DMG and drag **Reaper.app** into **Applications**.
+2. Launch Reaper from Applications or Spotlight.
+3. If macOS says the app is from an unidentified developer: right-click **Reaper.app** → **Open**, or use **System Settings → Privacy & Security → Open Anyway**.
+
+Opening the same DMG more than once mounts another Finder volume each time. Eject old Reaper drives when you are done.
+
+To run from source instead, see [Run](#run) below.
+
 ## Features
 
 - **Host git repos** — bare repositories with smart HTTP (`clone`, `fetch`, `push`)
