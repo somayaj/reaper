@@ -203,7 +203,9 @@ const server = http.createServer(async (req, res) => {
       const mode = body.mode || "agent";
       const prompt = preparePrompt(rawPrompt, mode);
       const sdkMode = normalizeSdkMode(mode);
-      const sendOptions = { mode: sdkMode };
+      // Drop a leftover local run before this message. The first send has nothing
+      // to expire; follow-ups otherwise wait on the previous run and feel stuck.
+      const sendOptions = { mode: sdkMode, local: { force: true } };
       if (body.model) {
         sendOptions.model = { id: body.model };
       }
