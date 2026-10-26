@@ -11,6 +11,6 @@ Drag Reaper.app to Applications, then launch.
 
 ### What's new
 
-- **Faster Cursor follow-ups:** Each agent message clears a leftover local run before it starts, so the second prompt does not wait on the first.
+- **Faster Cursor follow-ups:** Each message uses a fresh agent. The next one is created in the background, with only the last turn kept as context, so later prompts stay as fast as the first.
 
 **Tip:** opening the .dmg repeatedly mounts a new Finder volume each time — eject old Reaper drives or run `scripts/eject-reaper-dmgs.sh`.
