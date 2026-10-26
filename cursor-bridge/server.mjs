@@ -4,6 +4,7 @@ import { Agent, Cursor } from "@cursor/sdk";
 
 const PORT = Number(process.env.REAPER_CURSOR_BRIDGE_PORT || 8091);
 const sessions = new Map();
+const CONTEXT_LIMIT = 8000;
 
 function json(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -27,19 +28,77 @@ async function readBody(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-async function disposeSession(id) {
-  const session = sessions.get(id);
-  if (!session) return false;
+function clip(text) {
+  if (!text) return "";
+  return text.length <= CONTEXT_LIMIT ? text : text.slice(-CONTEXT_LIMIT);
+}
+
+function withPriorTurn(prompt, session) {
+  if (!session.lastUser && !session.lastAssistant) return prompt;
+  const parts = ["Previous turn (context only, do not repeat it):"];
+  if (session.lastUser) parts.push(`User: ${clip(session.lastUser)}`);
+  if (session.lastAssistant) parts.push(`Assistant: ${clip(session.lastAssistant)}`);
+  parts.push("", "New request:", prompt);
+  return parts.join("\n");
+}
+
+async function disposeAgent(agent) {
+  if (!agent) return;
   try {
-    await session.agent[Symbol.asyncDispose]?.();
+    await agent[Symbol.asyncDispose]?.();
   } catch {
     try {
-      await session.agent.close?.();
+      await agent.close?.();
     } catch {
       /* ignore */
     }
   }
+}
+
+function createAgent(session) {
+  return Agent.create({
+    apiKey: session.apiKey,
+    model: { id: session.model || "composer-2.5" },
+    mode: normalizeSdkMode(session.mode || "agent"),
+    local: { cwd: session.cwd, settingSources: [] },
+  });
+}
+
+function armNextAgent(session) {
+  session.agent = null;
+  const pending = createAgent(session)
+    .then((agent) => {
+      if (session.closed) {
+        disposeAgent(agent);
+        return null;
+      }
+      session.agent = agent;
+      return agent;
+    })
+    .finally(() => {
+      if (session.warming === pending) session.warming = null;
+    });
+  session.warming = pending;
+  return pending;
+}
+
+async function readyAgent(session) {
+  if (session.agent) return session.agent;
+  if (session.warming) return session.warming;
+  return armNextAgent(session);
+}
+
+async function disposeSession(id) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  session.closed = true;
   sessions.delete(id);
+  const current = session.agent;
+  session.agent = null;
+  if (current) await disposeAgent(current);
+  if (session.warming) {
+    session.warming.then((next) => disposeAgent(next)).catch(() => {});
+  }
   return true;
 }
 
@@ -67,7 +126,7 @@ function emitTool(res, text, extra = {}) {
   emit(res, { type: "tool", text: `${text}\n`, ...extra });
 }
 
-function handleSdkMessage(res, event) {
+function handleSdkMessage(res, event, collect) {
   if (event.type === "status") {
     if (event.status === "ERROR" && event.message) {
       emit(res, { type: "error", error: event.message });
@@ -78,6 +137,7 @@ function handleSdkMessage(res, event) {
   if (event.type === "assistant") {
     for (const block of event.message?.content || []) {
       if (block.type === "text" && block.text) {
+        if (collect) collect.text += block.text;
         emit(res, { type: "text", text: block.text });
       } else if (block.type === "tool_use" && block.name) {
         const path = toolTargetPath(block.input);
@@ -143,23 +203,25 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: "cwd and apiKey required" });
       }
 
-      const sdkMode = normalizeSdkMode(mode || "agent");
-      const agent = await Agent.create({
-        apiKey,
-        model: { id: model || "composer-2.5" },
-        mode: sdkMode,
-        local: { cwd, settingSources: [] },
-      });
-
       const sessionId = randomUUID();
       const now = Date.now();
-      sessions.set(sessionId, {
-        agent,
+      const session = {
         cwd,
+        apiKey,
+        model: model || "composer-2.5",
+        mode: mode || "agent",
+        agent: null,
+        warming: null,
         createdAt: now,
         lastUsedAt: now,
         activeChat: null,
-      });
+        lastUser: "",
+        lastAssistant: "",
+        closed: false,
+        busy: false,
+      };
+      sessions.set(sessionId, session);
+      await armNextAgent(session);
       return json(res, 201, { sessionId });
     }
 
@@ -191,7 +253,7 @@ const server = http.createServer(async (req, res) => {
       if (!session) {
         return json(res, 404, { error: "session not found" });
       }
-      if (session.activeChat?.run) {
+      if (session.busy || session.activeChat?.run) {
         return json(res, 409, { error: "agent run already in progress" });
       }
 
@@ -200,15 +262,10 @@ const server = http.createServer(async (req, res) => {
       if (!rawPrompt) {
         return json(res, 400, { error: "prompt required" });
       }
-      const mode = body.mode || "agent";
-      const prompt = preparePrompt(rawPrompt, mode);
-      const sdkMode = normalizeSdkMode(mode);
-      // Drop a leftover local run before this message. The first send has nothing
-      // to expire; follow-ups otherwise wait on the previous run and feel stuck.
-      const sendOptions = { mode: sdkMode, local: { force: true } };
-      if (body.model) {
-        sendOptions.model = { id: body.model };
-      }
+      const mode = body.mode || session.mode || "agent";
+      if (body.model) session.model = body.model;
+      session.mode = mode;
+      session.busy = true;
 
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -216,10 +273,26 @@ const server = http.createServer(async (req, res) => {
         Connection: "keep-alive",
       });
 
+      let agent;
       let run;
+      const collect = { text: "" };
       try {
-        run = await session.agent.send(prompt, sendOptions);
+        agent = await readyAgent(session);
+        if (!agent) throw new Error("Cursor agent failed to start");
+        session.agent = null;
+        const prompt = withPriorTurn(preparePrompt(rawPrompt, mode), session);
+        const sendOptions = {
+          mode: normalizeSdkMode(mode),
+          local: { force: true },
+        };
+        if (session.model) sendOptions.model = { id: session.model };
+        run = await agent.send(prompt, sendOptions);
       } catch (err) {
+        session.busy = false;
+        if (agent) {
+          await disposeAgent(agent);
+          if (!session.closed) armNextAgent(session);
+        }
         emit(res, { type: "error", error: err instanceof Error ? err.message : String(err) });
         res.end();
         return;
@@ -240,7 +313,7 @@ const server = http.createServer(async (req, res) => {
       try {
         for await (const event of run.stream()) {
           if (session.activeChat?.run !== run) break;
-          handleSdkMessage(res, event);
+          handleSdkMessage(res, event, collect);
         }
 
         if (session.activeChat?.run === run) {
@@ -271,6 +344,11 @@ const server = http.createServer(async (req, res) => {
         if (session.activeChat?.run === run) {
           session.activeChat = null;
         }
+        session.lastUser = rawPrompt;
+        session.lastAssistant = collect.text.trim();
+        session.busy = false;
+        await disposeAgent(agent);
+        if (!session.closed) armNextAgent(session);
         if (!res.writableEnded) {
           res.end();
         }
