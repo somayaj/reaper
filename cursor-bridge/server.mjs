@@ -152,7 +152,14 @@ const server = http.createServer(async (req, res) => {
       });
 
       const sessionId = randomUUID();
-      sessions.set(sessionId, { agent, cwd, createdAt: Date.now(), activeChat: null });
+      const now = Date.now();
+      sessions.set(sessionId, {
+        agent,
+        cwd,
+        createdAt: now,
+        lastUsedAt: now,
+        activeChat: null,
+      });
       return json(res, 201, { sessionId });
     }
 
@@ -216,6 +223,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      session.lastUsedAt = Date.now();
       session.activeChat = { run, res };
 
       const onClose = () => {
