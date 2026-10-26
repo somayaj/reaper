@@ -46,9 +46,14 @@ pub fn save_bridge_port(port: u16) {
     }
 }
 
+struct StoredSession {
+    id: String,
+    last_used: Instant,
+}
+
 #[derive(Default)]
 pub struct SessionStore {
-    inner: Mutex<HashMap<String, String>>,
+    inner: Mutex<HashMap<String, StoredSession>>,
 }
 
 impl SessionStore {
@@ -56,24 +61,50 @@ impl SessionStore {
         self.inner
             .lock()
             .ok()
-            .and_then(|g| g.get(repo).cloned())
+            .and_then(|g| g.get(repo).map(|s| s.id.clone()))
     }
 
     pub fn set(&self, repo: &str, session_id: String) {
         if let Ok(mut g) = self.inner.lock() {
-            g.insert(repo.to_string(), session_id);
+            g.insert(
+                repo.to_string(),
+                StoredSession {
+                    id: session_id,
+                    last_used: Instant::now(),
+                },
+            );
         }
     }
 
+    pub fn touch(&self, repo: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(session) = g.get_mut(repo) {
+                session.last_used = Instant::now();
+            }
+        }
+    }
+
+    /// Drop an idle session id so the caller can dispose it and open a fresh agent.
+    /// Recent sessions stay put — recreating on every message drops conversation state
+    /// and pays Agent.create latency again.
+    pub fn take_if_idle(&self, repo: &str, max_idle: Duration) -> Option<String> {
+        let mut g = self.inner.lock().ok()?;
+        let idle = g
+            .get(repo)
+            .map(|s| s.last_used.elapsed() >= max_idle)
+            .unwrap_or(false);
+        if idle { g.remove(repo).map(|s| s.id) } else { None }
+    }
+
     pub fn remove(&self, repo: &str) -> Option<String> {
-        self.inner.lock().ok()?.remove(repo)
+        self.inner.lock().ok()?.remove(repo).map(|s| s.id)
     }
 
     pub fn drain_all(&self) -> Vec<(String, String)> {
         self.inner
             .lock()
             .ok()
-            .map(|mut g| g.drain().collect())
+            .map(|mut g| g.drain().map(|(repo, s)| (repo, s.id)).collect())
             .unwrap_or_default()
     }
 }

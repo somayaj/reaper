@@ -17,6 +17,20 @@ use crate::state::AppState;
 use crate::workspace;
 
 const BRIDGE_HEALTH_TTL: Duration = Duration::from_secs(8);
+/// Cursor SDK agents sit on a cloud connection that goes cold after a short idle.
+/// Recreate before the next send instead of waiting for a slow or failed call.
+const CURSOR_SESSION_IDLE: Duration = Duration::from_secs(90);
+
+async fn refresh_idle_cursor_session(state: &AppState, name: &str) {
+    let Some(stale_id) = state
+        .cursor_sessions
+        .take_if_idle(name, CURSOR_SESSION_IDLE)
+    else {
+        return;
+    };
+    tracing::debug!("refreshing idle cursor session for {name}");
+    let _ = state.cursor_bridge.delete_session(&stale_id).await;
+}
 
 #[derive(Deserialize)]
 pub struct ChatBody {
@@ -257,6 +271,8 @@ async fn warm_cursor_session(
         return resp;
     }
 
+    refresh_idle_cursor_session(&state, &name).await;
+
     match ensure_cursor_session(&state, &name, &cwd, &api_key, &model, &mode).await {
         Ok(session_id) => Json(serde_json::json!({
             "ok": true,
@@ -282,6 +298,8 @@ async fn cursor_chat_stream_with_retry(
     mode: &str,
     prompt: &str,
 ) -> Result<reqwest::Response, Response> {
+    refresh_idle_cursor_session(state, name).await;
+
     for attempt in 0..2 {
         if attempt > 0 {
             if let Some(stale_id) = state.cursor_sessions.remove(name) {
@@ -300,7 +318,10 @@ async fn cursor_chat_stream_with_retry(
             .chat_stream(&session_id, prompt, Some(model), Some(mode))
             .await
         {
-            Ok(resp) => return Ok(resp),
+            Ok(resp) => {
+                state.cursor_sessions.touch(name);
+                return Ok(resp);
+            }
             Err(e) => {
                 let msg = e.to_string();
                 if attempt == 0 && cursor_session_stale(&msg) {
