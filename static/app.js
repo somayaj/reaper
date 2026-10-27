@@ -557,6 +557,8 @@ const state = {
   agentMessageQueue: [],
   /** Live one-line activity while the agent runs (tool name / path). */
   agentActivity: null,
+  /** Assistant bubble receiving the current stream (show activity while is-waiting). */
+  agentStreamTarget: null,
   agentAbortController: null,
   agentStopRequested: false,
   agentLastRevertibleTurn: null,
@@ -19419,10 +19421,18 @@ function formatAgentActivity(data) {
   return null;
 }
 
+function refreshAgentStreamWaitStatus() {
+  const target = state.agentStreamTarget;
+  if (!target?.wrap?.classList.contains('is-waiting') || !target.content) return;
+  const label = state.agentActivity || 'Working…';
+  window.ReaperAgentMarkdown?.renderPlain(target.content, label);
+}
+
 function setAgentActivity(detail) {
   const next = detail && String(detail).trim() ? String(detail).trim() : null;
   if (state.agentActivity === next) return;
   state.agentActivity = next;
+  refreshAgentStreamWaitStatus();
   updateAgentUi();
 }
 
@@ -20255,6 +20265,8 @@ async function runAgentChat(prompt, opts = {}) {
 
   const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…', { provider: chatProvider });
   assistantWrap.classList.add('is-streaming', 'is-waiting');
+  state.agentStreamTarget = { wrap: assistantWrap, content: assistantEl };
+  refreshAgentStreamWaitStatus();
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
@@ -20290,7 +20302,6 @@ async function runAgentChat(prompt, opts = {}) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let sseBuffer = '';
-    window.ReaperAgentMarkdown?.renderPlain(assistantEl, '');
     setAgentActivity('Thinking…');
 
     while (true) {
@@ -20384,6 +20395,7 @@ async function runAgentChat(prompt, opts = {}) {
       window.ReaperAgentMarkdown?.renderPlain(assistantEl, msg);
     }
   } finally {
+    state.agentStreamTarget = null;
     assistantWrap.classList.remove('is-streaming', 'is-waiting');
     clearAgentActivity();
     state.agentBusy = false;
