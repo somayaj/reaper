@@ -9331,6 +9331,7 @@ main { background: var(--ij-bg); }
 
 .agent-msg-assistant.is-streaming.is-waiting .agent-text,
 .agent-msg-assistant.is-streaming.is-waiting .agent-text-plain {
+  color: var(--ij-text-dim);
   animation: agent-wait-pulse 1.2s ease-in-out infinite;
 }
 
