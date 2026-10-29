@@ -17,6 +17,9 @@ fn main() {
     println!("cargo:rerun-if-changed=static/index.html");
     println!("cargo:rerun-if-changed=scripts/test-editor-regression.mjs");
     println!("cargo:rerun-if-changed=scripts/test-editor-regression.sh");
+    println!("cargo:rerun-if-changed=scripts/lib/gui-window-harness.mjs");
+    println!("cargo:rerun-if-changed=src/gui_ipc.rs");
+    println!("cargo:rerun-if-changed=src/gui.rs");
     println!("cargo:rerun-if-changed=scripts/test-java-editor-integration.mjs");
     println!("cargo:rerun-if-changed=scripts/test-java-editor-integration.sh");
     println!("cargo:rerun-if-changed=scripts/lib/javac-edit-loop.mjs");

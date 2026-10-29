@@ -240,6 +240,14 @@
             </label>
           </div>
         </div>
+        <div class="ij-menu-root" data-menu="window">
+          <button type="button" class="ij-menu-trigger">Window</button>
+          <div class="ij-menu-dropdown">
+            <button type="button" class="ij-menu-item" data-action="show-open-windows">Show Open Windows…</button>
+            <div class="ij-menu-sep"></div>
+            <div id="window-menu-list" class="ij-window-menu-list" aria-label="Open IDE windows"></div>
+          </div>
+        </div>
         <div class="ij-menu-root" data-menu="run">
           <button type="button" class="ij-menu-trigger">Run</button>
           <div class="ij-menu-dropdown">
@@ -1595,6 +1603,15 @@
       <div class="ij-goto-class-header">Repositories</div>
       <div id="repo-picker-results" class="max-h-80 overflow-auto panel-scroll py-1" role="listbox"></div>
       <div class="ij-goto-class-hint">Open a repo · × then Remove (files stay on disk) · Esc close</div>
+    </div>
+  </div>
+
+  <!-- Open IDE windows (native multi-window) -->
+  <div id="windows-picker-overlay" class="ij-overlay">
+    <div class="ij-palette ij-windows-picker">
+      <div class="ij-goto-class-header">Open Windows</div>
+      <div id="windows-picker-results" class="max-h-80 overflow-auto panel-scroll py-1" role="listbox"></div>
+      <div class="ij-goto-class-hint">Switch to another Reaper window · Esc close</div>
     </div>
   </div>
 
