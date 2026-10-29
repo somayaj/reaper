@@ -3773,6 +3773,17 @@ async function main() {
     elideHarness.testElideManifestRegression(appSrc, monacoSrc, ok);
   }
 
+  section('GUI window drag + open windows regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    const guiRs = fs.readFileSync(path.join(ROOT, 'src/gui.rs'), 'utf8');
+    const guiIpcRs = fs.readFileSync(path.join(ROOT, 'src/gui_ipc.rs'), 'utf8');
+    const guiWindowHarness = await import(path.join(ROOT, 'scripts/lib/gui-window-harness.mjs'));
+    guiWindowHarness.testGuiWindowStaticRegression(appSrc, indexHtml, guiRs, guiIpcRs, ok);
+    guiWindowHarness.testGuiWindowJsIntegration(ok);
+  }
+
   section('Compiler settings regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

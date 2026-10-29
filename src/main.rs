@@ -9,6 +9,7 @@ mod auth;
 mod gradle;
 mod maven;
 mod gui;
+mod gui_ipc;
 mod jdk;
 mod local_https;
 mod repos;

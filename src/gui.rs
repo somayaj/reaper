@@ -10,6 +10,9 @@ pub struct GuiLaunch {
 }
 
 #[cfg(target_os = "macos")]
+const MENU_SHOW_WINDOWS_ID: &str = crate::gui_ipc::MENU_SHOW_WINDOWS_ID;
+
+#[cfg(target_os = "macos")]
 pub fn show_error(message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let _ = std::process::Command::new("osascript")
@@ -28,7 +31,7 @@ pub fn show_error(message: &str) {
 
 #[cfg(target_os = "macos")]
 fn install_macos_menu() -> muda::Menu {
-    use muda::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+    use muda::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
     let menu = Menu::new();
 
@@ -63,7 +66,17 @@ fn install_macos_menu() -> muda::Menu {
         &PredefinedMenuItem::select_all(None),
     ]);
 
-    let _ = menu.append_items(&[&app, &edit]);
+    let window = Submenu::new("Window", true);
+    let show_windows = MenuItem::with_id(MENU_SHOW_WINDOWS_ID, "Show Open Windows…", true, None);
+    let _ = window.append_items(&[
+        &show_windows,
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::minimize(None),
+        &PredefinedMenuItem::maximize(None),
+        &PredefinedMenuItem::bring_all_to_front(None),
+    ]);
+
+    let _ = menu.append_items(&[&app, &edit, &window]);
     menu.init_for_nsapp();
     menu
 }
@@ -73,58 +86,101 @@ enum UserEvent {
     OpenWindow(String),
     ShowWindow(tao::window::WindowId),
     ToggleFullscreen(tao::window::WindowId),
+    StartWindowDrag(tao::window::WindowId),
+    DeliverWindowsList {
+        requester: tao::window::WindowId,
+    },
+    FocusWindow {
+        label: u32,
+    },
+    ShowOpenWindowsPicker,
+    ShowOpenWindowsPickerFor {
+        requester: tao::window::WindowId,
+    },
+    MacMenu(muda::MenuId),
 }
 
 #[cfg(target_os = "macos")]
-fn window_title_from_url(url: &str) -> String {
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(repo) = parsed
-            .query_pairs()
-            .find(|(key, _)| key == "repo")
-            .map(|(_, value)| value.into_owned())
-            .filter(|name| !name.is_empty())
-        {
-            return format!("Reaper — {repo}");
-        }
-    }
-    "Reaper".to_string()
+struct OpenWindow {
+    label: u32,
+    title: String,
+    window: tao::window::Window,
+    webview: wry::WebView,
 }
 
 #[cfg(target_os = "macos")]
-fn parse_ipc_open_url(body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("type")?.as_str()? != "open-repo-window" {
-        return None;
-    }
-    let url = value.get("url")?.as_str()?.trim();
-    if url.is_empty() {
-        None
-    } else {
-        Some(url.to_string())
+fn windows_list_json(
+    webviews: &std::collections::HashMap<tao::window::WindowId, OpenWindow>,
+    requester: tao::window::WindowId,
+) -> String {
+    let requester_label = webviews
+        .get(&requester)
+        .map(|entry| entry.label)
+        .unwrap_or(0);
+    let entries: Vec<crate::gui_ipc::WindowListEntry> = webviews
+        .values()
+        .map(|entry| crate::gui_ipc::WindowListEntry {
+            label: entry.label,
+            title: entry.title.clone(),
+        })
+        .collect();
+    crate::gui_ipc::windows_list_json(&entries, requester_label)
+}
+
+#[cfg(target_os = "macos")]
+fn deliver_windows_list(
+    webviews: &std::collections::HashMap<tao::window::WindowId, OpenWindow>,
+    requester: tao::window::WindowId,
+) {
+    let Some(entry) = webviews.get(&requester) else {
+        return;
+    };
+    let json = windows_list_json(webviews, requester);
+    let script = crate::gui_ipc::deliver_windows_list_script(&json);
+    if let Err(e) = entry.webview.evaluate_script(&script) {
+        tracing::warn!("Failed to deliver window list to webview: {e:#}");
     }
 }
 
-fn parse_ipc_toggle_fullscreen(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(|t| t == "toggle-fullscreen"))
-        .unwrap_or(false)
+#[cfg(target_os = "macos")]
+fn show_open_windows_picker(
+    webviews: &std::collections::HashMap<tao::window::WindowId, OpenWindow>,
+    preferred: Option<tao::window::WindowId>,
+) {
+    let target = preferred
+        .and_then(|id| webviews.get(&id).map(|entry| (id, entry)))
+        .or_else(|| {
+            webviews
+                .iter()
+                .find(|(_, entry)| entry.window.is_focused())
+                .map(|(id, entry)| (*id, entry))
+        })
+        .or_else(|| webviews.iter().next().map(|(id, entry)| (*id, entry)));
+    let Some((window_id, entry)) = target else {
+        return;
+    };
+    let json = windows_list_json(webviews, window_id);
+    let script = crate::gui_ipc::show_windows_picker_script(&json);
+    if let Err(e) = entry.webview.evaluate_script(&script) {
+        tracing::warn!("Failed to open window picker in webview: {e:#}");
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn create_window(
     launch: &GuiLaunch,
+    window_label: u32,
     protocol_bridge: SharedGuiProtocolBridge,
     event_loop: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
-) -> anyhow::Result<(tao::window::Window, wry::WebView)> {
+) -> anyhow::Result<OpenWindow> {
     use tao::platform::macos::WindowBuilderExtMacOS;
     use tao::window::WindowBuilder;
     use wry::{http::Request, PageLoadEvent, WebViewBuilder};
 
-    let title = window_title_from_url(&launch.webview_url);
+    let title = crate::gui_ipc::window_title_from_url(&launch.webview_url);
     let window = WindowBuilder::new()
-        .with_title(title)
+        .with_title(title.clone())
         .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 840.0))
         .with_visible(false)
         .with_background_color((0, 0, 0, 0))
@@ -138,7 +194,8 @@ fn create_window(
     let ipc_proxy = proxy.clone();
     let popup_proxy = proxy.clone();
     let init_script = format!(
-        "document.documentElement.classList.add('ij-native-titlebar');\n\
+        "window.__reaperWindowLabel = {window_label};\n\
+         document.documentElement.classList.add('ij-native-titlebar');\n\
          document.documentElement.style.backgroundColor='transparent';\n\
          document.body.style.backgroundColor='transparent';\n{}",
         launch.init_script
@@ -164,10 +221,32 @@ fn create_window(
             }
         })
         .with_ipc_handler(move |req: Request<String>| {
-            if let Some(next_url) = parse_ipc_open_url(req.body()) {
-                let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
-            } else if parse_ipc_toggle_fullscreen(req.body()) {
-                let _ = ipc_proxy.send_event(UserEvent::ToggleFullscreen(window_id));
+            let Some(message) = crate::gui_ipc::parse_ipc_message(req.body()) else {
+                return;
+            };
+            match message {
+                crate::gui_ipc::IpcFromWeb::OpenWindow(next_url) => {
+                    let _ = ipc_proxy.send_event(UserEvent::OpenWindow(next_url));
+                }
+                crate::gui_ipc::IpcFromWeb::ToggleFullscreen => {
+                    let _ = ipc_proxy.send_event(UserEvent::ToggleFullscreen(window_id));
+                }
+                crate::gui_ipc::IpcFromWeb::StartWindowDrag => {
+                    let _ = ipc_proxy.send_event(UserEvent::StartWindowDrag(window_id));
+                }
+                crate::gui_ipc::IpcFromWeb::ListWindows => {
+                    let _ = ipc_proxy.send_event(UserEvent::DeliverWindowsList {
+                        requester: window_id,
+                    });
+                }
+                crate::gui_ipc::IpcFromWeb::FocusWindow(label) => {
+                    let _ = ipc_proxy.send_event(UserEvent::FocusWindow { label });
+                }
+                crate::gui_ipc::IpcFromWeb::ShowOpenWindows => {
+                    let _ = ipc_proxy.send_event(UserEvent::ShowOpenWindowsPickerFor {
+                        requester: window_id,
+                    });
+                }
             }
         })
         .with_new_window_req_handler(move |target_url| {
@@ -176,7 +255,12 @@ fn create_window(
         })
         .build(&window)?;
 
-    Ok((window, webview))
+    Ok(OpenWindow {
+        label: window_label,
+        title,
+        window,
+        webview,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -193,13 +277,26 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
-    let mut webviews: HashMap<WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
+    let menu_proxy = proxy.clone();
+    muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
+        let _ = menu_proxy.send_event(UserEvent::MacMenu(event.id().clone()));
+    }));
+
+    let mut webviews: HashMap<WindowId, OpenWindow> = HashMap::new();
+    let mut next_window_label = 1u32;
 
     let protocol_bridge_loop = Arc::clone(&protocol_bridge);
     let child_init_script = launch.init_script.clone();
 
-    let (window, webview) = create_window(launch, protocol_bridge, &event_loop, proxy.clone())?;
-    webviews.insert(window.id(), (window, webview));
+    let initial = create_window(
+        launch,
+        next_window_label,
+        protocol_bridge,
+        &event_loop,
+        proxy.clone(),
+    )?;
+    next_window_label += 1;
+    webviews.insert(initial.window.id(), initial);
 
     event_loop.run(move |event, event_loop, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -216,20 +313,47 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
                 }
             }
             Event::UserEvent(UserEvent::ShowWindow(window_id)) => {
-                if let Some((window, _)) = webviews.get(&window_id) {
-                    window.set_visible(true);
-                    window.set_focus();
+                if let Some(entry) = webviews.get(&window_id) {
+                    entry.window.set_visible(true);
+                    entry.window.set_focus();
                 }
             }
             Event::UserEvent(UserEvent::ToggleFullscreen(window_id)) => {
-                if let Some((window, _)) = webviews.get(&window_id) {
+                if let Some(entry) = webviews.get(&window_id) {
                     use tao::window::Fullscreen;
-                    let next = if window.fullscreen().is_some() {
+                    let next = if entry.window.fullscreen().is_some() {
                         None
                     } else {
                         Some(Fullscreen::Borderless(None))
                     };
-                    window.set_fullscreen(next);
+                    entry.window.set_fullscreen(next);
+                }
+            }
+            Event::UserEvent(UserEvent::StartWindowDrag(window_id)) => {
+                if let Some(entry) = webviews.get(&window_id) {
+                    if let Err(e) = entry.window.drag_window() {
+                        tracing::warn!("Window drag failed: {e:?}");
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::DeliverWindowsList { requester }) => {
+                deliver_windows_list(&webviews, requester);
+            }
+            Event::UserEvent(UserEvent::FocusWindow { label }) => {
+                if let Some((_, entry)) = webviews.iter().find(|(_, w)| w.label == label) {
+                    entry.window.set_visible(true);
+                    entry.window.set_focus();
+                }
+            }
+            Event::UserEvent(UserEvent::ShowOpenWindowsPicker) => {
+                show_open_windows_picker(&webviews, None);
+            }
+            Event::UserEvent(UserEvent::ShowOpenWindowsPickerFor { requester }) => {
+                show_open_windows_picker(&webviews, Some(requester));
+            }
+            Event::UserEvent(UserEvent::MacMenu(id)) => {
+                if id.0 == MENU_SHOW_WINDOWS_ID {
+                    show_open_windows_picker(&webviews, None);
                 }
             }
             Event::UserEvent(UserEvent::OpenWindow(next_url)) => {
@@ -239,12 +363,14 @@ pub fn run(launch: &GuiLaunch, protocol_bridge: SharedGuiProtocolBridge) -> anyh
                 };
                 match create_window(
                     &child_launch,
+                    next_window_label,
                     Arc::clone(&protocol_bridge_loop),
                     event_loop,
                     proxy.clone(),
                 ) {
-                    Ok((window, webview)) => {
-                        webviews.insert(window.id(), (window, webview));
+                    Ok(entry) => {
+                        next_window_label += 1;
+                        webviews.insert(entry.window.id(), entry);
                     }
                     Err(e) => tracing::error!("Failed to open Reaper window: {e:#}"),
                 }

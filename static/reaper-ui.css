@@ -524,6 +524,19 @@ html.ij-native-titlebar {
   display: none;
 }
 
+.ij-window-menu-list .ij-menu-item.current {
+  opacity: 0.55;
+}
+
+.ij-window-menu-list .ij-menu-item--hint {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.ij-windows-picker-item.current {
+  opacity: 0.75;
+}
+
 .ij-workspace {
   flex: 1;
   min-height: 0;

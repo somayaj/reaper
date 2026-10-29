@@ -1438,6 +1438,94 @@ function openRepoInNewWindow(repoName) {
   return true;
 }
 
+function requestNativeWindowsList() {
+  if (window.ipc?.postMessage) {
+    window.ipc.postMessage(JSON.stringify({ type: 'list-windows' }));
+    return;
+  }
+  const title = state.repo ? `Reaper — ${state.repo}` : 'Reaper';
+  const windows = [{ id: 1, title, current: true }];
+  deliverNativeWindowsList(windows);
+}
+
+function focusNativeWindow(windowId) {
+  if (window.ipc?.postMessage) {
+    window.ipc.postMessage(JSON.stringify({ type: 'focus-window', id: windowId }));
+  }
+  hideWindowsPicker();
+  closeAllMenus();
+}
+
+function renderWindowsPickerResults(windows) {
+  const results = $('#windows-picker-results');
+  if (!results) return;
+  const rows = Array.isArray(windows) ? windows : [];
+  if (!rows.length) {
+    results.innerHTML = '<p class="ij-repo-picker-empty">No other Reaper windows</p>';
+    return;
+  }
+  results.innerHTML = rows.map((w, i) => {
+    const title = escapeHtml(String(w.title || 'Reaper'));
+    const current = !!w.current;
+    return `<button type="button" class="ij-windows-picker-item ij-palette-item${i === 0 && !current ? ' active' : ''}${current ? ' current' : ''}" data-window-id="${Number(w.id)}" role="option">
+      <span class="ij-repo-picker-name">${title}</span>
+      ${current ? '<span class="ij-repo-picker-tag">this window</span>' : ''}
+    </button>`;
+  }).join('');
+}
+
+function renderWindowMenuList(windows) {
+  const host = $('#window-menu-list');
+  if (!host) return;
+  const rows = Array.isArray(windows) ? windows : [];
+  if (!rows.length) {
+    host.innerHTML = '<div class="ij-menu-item ij-menu-item--hint" aria-disabled="true">No windows</div>';
+    return;
+  }
+  host.innerHTML = rows.map((w) => {
+    const title = escapeHtml(String(w.title || 'Reaper'));
+    const current = !!w.current;
+    const suffix = current ? ' (current)' : '';
+    return `<button type="button" class="ij-menu-item ij-window-menu-item${current ? ' current' : ''}" data-window-id="${Number(w.id)}"${current ? ' disabled' : ''}>${title}${suffix}</button>`;
+  }).join('');
+  host.querySelectorAll('[data-window-id]:not([disabled])').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      focusNativeWindow(Number(btn.dataset.windowId));
+    });
+  });
+}
+
+function deliverNativeWindowsList(windows) {
+  renderWindowsPickerResults(windows);
+  renderWindowMenuList(windows);
+}
+
+window.__reaperDeliverWindowsList = deliverNativeWindowsList;
+
+window.__reaperShowWindowsPicker = (windows) => {
+  if (Array.isArray(windows)) deliverNativeWindowsList(windows);
+  showWindowsPicker({ skipRequest: true });
+};
+
+function showWindowsPicker({ skipRequest = false } = {}) {
+  closeAllMenus();
+  $('#windows-picker-overlay')?.classList.add('open');
+  if (!skipRequest) requestNativeWindowsList();
+}
+
+function hideWindowsPicker() {
+  $('#windows-picker-overlay')?.classList.remove('open');
+}
+
+function showOpenWindowsMenuAction() {
+  if (window.ipc?.postMessage) {
+    window.ipc.postMessage(JSON.stringify({ type: 'show-open-windows' }));
+    return;
+  }
+  showWindowsPicker();
+}
+
 function isWelcomeVisible() {
   const empty = $('#empty-state');
   return !!(empty && !empty.classList.contains('hidden'));
@@ -4210,6 +4298,14 @@ function toggleWindowFullscreen() {
 }
 
 function bindHeaderBrand() {
+  const titlebar = $('#window-titlebar');
+  titlebar?.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !window.ipc?.postMessage) return;
+    if (e.target.closest('button, a, input, select, textarea, label')) return;
+    if (e.detail > 1) return;
+    e.preventDefault();
+    window.ipc.postMessage(JSON.stringify({ type: 'start-window-drag' }));
+  });
   $('#window-titlebar')?.addEventListener('dblclick', (e) => {
     e.preventDefault();
     toggleWindowFullscreen();
@@ -6252,6 +6348,7 @@ function runMenuAction(action) {
     'header-open-repo': () => showRepoPicker(),
     'header-search': () => showSearchEverywhere(),
     'header-palette': () => showPalette(),
+    'show-open-windows': showOpenWindowsMenuAction,
     settings: () => showSettingsModal('git'),
     'settings-git': () => showSettingsModal('git'),
     'settings-cursor': () => showSettingsModal('cursor'),
@@ -7558,6 +7655,18 @@ function bindBranchPicker() {
   });
 }
 
+function bindWindowsPicker() {
+  $('#windows-picker-overlay')?.addEventListener('click', (e) => {
+    if (e.target === $('#windows-picker-overlay')) hideWindowsPicker();
+  });
+  $('#windows-picker-results')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-window-id]');
+    if (!btn || btn.disabled) return;
+    e.preventDefault();
+    focusNativeWindow(Number(btn.dataset.windowId));
+  });
+}
+
 function bindRepoPicker() {
   $('#repo-picker-btn')?.addEventListener('click', () => showRepoPicker());
   $('#repo-picker-overlay')?.addEventListener('click', (e) => {
@@ -7610,7 +7719,10 @@ function bindMenus() {
       const root = btn.closest('.ij-menu-root');
       const wasOpen = root?.classList.contains('open');
       closeAllMenus();
-      if (!wasOpen) root?.classList.add('open');
+      if (!wasOpen) {
+        root?.classList.add('open');
+        if (root?.dataset.menu === 'window') requestNativeWindowsList();
+      }
     });
   });
   $$('.ij-menu-item[data-action]').forEach((item) => {
@@ -20926,6 +21038,11 @@ function bindEvents() {
         hideRepoPicker();
         return;
       }
+      if ($('#windows-picker-overlay')?.classList.contains('open')) {
+        e.preventDefault();
+        hideWindowsPicker();
+        return;
+      }
       if ($('#branch-picker-overlay')?.classList.contains('open')) {
         e.preventDefault();
         hideBranchPicker();
@@ -21130,6 +21247,7 @@ async function init() {
   bindSearchEverywhere();
   bindBranchPicker();
   bindRepoPicker();
+  bindWindowsPicker();
   bindHeaderBrand();
   mountReaperIcons();
   void initStatusFooter();
