@@ -3486,9 +3486,19 @@ function testAppPerformanceGuards() {
   );
   ok(
     contentHandler.includes('scheduleEditorContentSync()')
-      && contentHandler.includes('scheduleRenderTabs()')
       && !contentHandler.includes('state.tabContents.set(state.activeTab, state.editor.getValue())'),
     'keystroke path debounces getValue tab sync',
+  );
+  ok(
+    contentHandler.includes('markActiveTabDirty()')
+      && !contentHandler.includes('scheduleRenderTabs()'),
+    'keystroke path avoids rebuilding tab strip (dirty dot updated incrementally)',
+  );
+  ok(
+    appSrc.includes('function scheduleUpdateRunButtons')
+      && contentHandler.includes('scheduleUpdateRunButtons()')
+      && !contentHandler.includes('updateRunButtons()'),
+    'run toolbar updates debounced off keystroke path',
   );
   ok(
     contentHandler.includes('if (state.buildTasksPanelOpen) scheduleBuildTasksRefresh()'),

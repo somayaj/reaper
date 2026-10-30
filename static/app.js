@@ -49,6 +49,7 @@ const JAVA_DIAG_FULL_STAGGER_MS = 500;
 const CONFIG_DIAG_DELAY_MS = 900;
 const BUILD_DIAG_DELAY_MS = 1400;
 const TAB_RENDER_DELAY_MS = 200;
+const RUN_BUTTONS_DELAY_MS = 150;
 const EDITOR_CONTENT_SYNC_DELAY_MS = 120;
 const TEST_DECOR_DELAY_MS = 200;
 const COVERAGE_CLEAR_DELAY_MS = 250;
@@ -679,6 +680,7 @@ const state = {
 let diagTimer = null;
 let allJavaDiagTimer = null;
 let tabRenderTimer = null;
+let runButtonsTimer = null;
 let editorContentSyncTimer = null;
 let testDecorTimer = null;
 let coverageClearTimer = null;
@@ -12265,7 +12267,7 @@ function initEditor() {
       folding: true,
       bracketPairColorization: { enabled: true },
       guides: { bracketPairs: true, indentation: true },
-      renderLineHighlight: 'all',
+      renderLineHighlight: 'line',
       cursorBlinking: 'solid',
       cursorStyle: 'line',
       smoothScrolling: true,
@@ -12424,8 +12426,7 @@ function initEditor() {
       markActiveTabDirty();
       scheduleEditorContentSync();
       if (isRunToolbarPath(state.activeTab)) refreshRunInfo();
-      else if (state.activeTab?.endsWith('.java')) updateRunButtons();
-      scheduleRenderTabs();
+      else if (state.activeTab?.endsWith('.java')) scheduleUpdateRunButtons();
       scheduleAutoSave();
       scheduleDiagnostics();
       scheduleStructureRefresh();
@@ -12455,7 +12456,7 @@ function initEditor() {
       scheduleStructureCaretHighlight();
       if (state.activeTab?.endsWith('.java') || state.activeTab?.endsWith('.rb')
         || state.activeTab?.endsWith('.py') || state.activeTab?.endsWith('.pyw')
-        || state.activeTab?.endsWith('.go') || isNativeSourcePath(state.activeTab)) updateRunButtons();
+        || state.activeTab?.endsWith('.go') || isNativeSourcePath(state.activeTab)) scheduleUpdateRunButtons();
     });
     window.ReaperThemes?.syncMonacoOverflowWidgetTheme?.(
       window.ReaperThemes.getTheme(window.ReaperThemes.getStoredTheme()).dark,
@@ -16616,6 +16617,20 @@ async function refreshGradleInfo() {
   await refreshRunInfo();
 }
 
+function scheduleUpdateRunButtons({ immediate = false } = {}) {
+  if (immediate) {
+    clearTimeout(runButtonsTimer);
+    runButtonsTimer = null;
+    updateRunButtons();
+    return;
+  }
+  clearTimeout(runButtonsTimer);
+  runButtonsTimer = setTimeout(() => {
+    runButtonsTimer = null;
+    updateRunButtons();
+  }, RUN_BUTTONS_DELAY_MS);
+}
+
 function updateRunButtons() {
   const tbRun = $('#tb-run');
   const taskSel = $('#gradle-task');
@@ -20434,13 +20449,22 @@ async function runAgentChat(prompt, opts = {}) {
           window.ReaperAgentMarkdown?.renderPlain(assistantEl, textBuffer);
           scheduleAgentMarkdownPreview(assistantEl, textBuffer);
           scrollAgentToBottom();
-        } else if (data.type === 'tool') {
-          buffer += data.text;
-          assistantWrap.classList.remove('is-waiting');
-          const activity = formatAgentActivity(data);
+        } else if (data.type === 'activity') {
+          const activity = (data.text && String(data.text).trim()) || formatAgentActivity(data);
           if (activity) setAgentActivity(activity);
-          window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer);
+          refreshAgentStreamWaitStatus();
           scrollAgentToBottom();
+        } else if (data.type === 'tool') {
+          if (textBuffer.trim()) {
+            buffer += data.text;
+            assistantWrap.classList.remove('is-waiting');
+            window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer);
+            scrollAgentToBottom();
+          } else {
+            const activity = formatAgentActivity(data);
+            if (activity) setAgentActivity(activity);
+            refreshAgentStreamWaitStatus();
+          }
           scheduleAgentWorkspaceRefresh(data.path || null);
         } else if (data.type === 'error') {
           throw new Error(data.error);
