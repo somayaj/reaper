@@ -20425,9 +20425,11 @@ async function runAgentChat(prompt, opts = {}) {
     if (def.id === 'cursor') {
       const modelErr = cursorModelStatusError();
       if (modelErr) throw new Error(modelErr);
-      setAgentActivity('Connecting…');
-      // Warm in the background — awaiting it delays the first streamed token.
-      void warmCursorSession(state.repo);
+      setAgentActivity('Warming agent…');
+      await Promise.race([
+        warmCursorSession(state.repo),
+        new Promise((resolve) => setTimeout(resolve, 12_000)),
+      ]);
     }
 
     setAgentActivity('Connecting…');
