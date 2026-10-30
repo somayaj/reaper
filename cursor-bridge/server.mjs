@@ -106,6 +106,54 @@ function emit(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function emitActivity(res, payload) {
+  emit(res, { type: "activity", ...payload });
+}
+
+function friendlyToolActivity(name, path, status) {
+  const tool = (name || "").toLowerCase();
+  const short = path ? String(path).replace(/\\/g, "/").split("/").filter(Boolean).slice(-2).join("/") : null;
+  if (status === "completed" || status === "error") return null;
+  if (tool.includes("read")) return short ? `Reading ${short}…` : "Reading…";
+  if (tool.includes("write") || tool.includes("edit") || tool.includes("replace") || tool.includes("patch")) {
+    return short ? `Editing ${short}…` : "Editing…";
+  }
+  if (tool.includes("shell") || tool.includes("bash") || tool.includes("terminal")) return "Running command…";
+  if (tool.includes("grep") || tool.includes("glob") || tool.includes("search")) {
+    return short ? `Searching ${short}…` : "Searching…";
+  }
+  if (tool.includes("delete")) return short ? `Deleting ${short}…` : "Deleting…";
+  if (tool.includes("task") || tool.includes("agent")) return "Delegating…";
+  if (tool.includes("web") || tool.includes("fetch")) return "Fetching…";
+  if (name) return short ? `${name}: ${short}…` : `${name}…`;
+  return "Working…";
+}
+
+function handleSdkDelta(res, update) {
+  if (!update || typeof update !== "object") return;
+  switch (update.type) {
+    case "thinking-delta":
+      emitActivity(res, { text: "Thinking…", phase: "thinking" });
+      break;
+    case "thinking-completed":
+      emitActivity(res, { text: "Thinking…", phase: "thinking" });
+      break;
+    case "tool-call-started":
+      emitActivity(res, {
+        text: friendlyToolActivity(update.name || update.toolName, toolTargetPath(update.args), "running"),
+        tool: update.name || update.toolName || null,
+        path: toolTargetPath(update.args),
+        status: "running",
+      });
+      break;
+    case "step-started":
+      emitActivity(res, { text: "Working…", phase: "step" });
+      break;
+    default:
+      break;
+  }
+}
+
 function describeToolCall(event) {
   const name = event.name || "tool";
   const path = toolTargetPath(event.args);
@@ -141,9 +189,11 @@ function handleSdkMessage(res, event, collect) {
         emit(res, { type: "text", text: block.text });
       } else if (block.type === "tool_use" && block.name) {
         const path = toolTargetPath(block.input);
-        emitTool(res, path ? `→ ${block.name}: ${path}` : `→ ${block.name}…`, {
+        emitActivity(res, {
+          text: friendlyToolActivity(block.name, path, "running"),
           tool: block.name,
           path,
+          status: "running",
         });
       }
     }
@@ -151,11 +201,21 @@ function handleSdkMessage(res, event, collect) {
   }
 
   if (event.type === "tool_call") {
+    const path = toolTargetPath(event.args);
+    if (event.status === "running") {
+      emitActivity(res, {
+        text: friendlyToolActivity(event.name, path, "running"),
+        tool: event.name || null,
+        path,
+        status: "running",
+      });
+      return;
+    }
     const text = describeToolCall(event);
     if (text) {
       emitTool(res, text, {
         tool: event.name || null,
-        path: toolTargetPath(event.args),
+        path,
         status: event.status || null,
       });
     }
@@ -163,12 +223,16 @@ function handleSdkMessage(res, event, collect) {
   }
 
   if (event.type === "task" && event.text) {
-    emitTool(res, event.text);
+    emitActivity(res, { text: "Delegating…", phase: "task", detail: event.text.slice(0, 120) });
     return;
   }
 
-  if (event.type === "thinking" && event.text) {
-    emitTool(res, `… ${event.text.slice(0, 120)}${event.text.length > 120 ? "…" : ""}`);
+  if (event.type === "thinking") {
+    emitActivity(res, {
+      text: "Thinking…",
+      phase: "thinking",
+      detail: event.text ? event.text.slice(0, 120) : null,
+    });
   }
 }
 
@@ -286,6 +350,8 @@ const server = http.createServer(async (req, res) => {
           local: { force: true },
         };
         if (session.model) sendOptions.model = { id: session.model };
+        sendOptions.onDelta = (update) => handleSdkDelta(res, update);
+        emitActivity(res, { text: "Starting agent…", phase: "start" });
         run = await agent.send(prompt, sendOptions);
       } catch (err) {
         session.busy = false;
