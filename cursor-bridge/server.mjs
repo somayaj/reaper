@@ -66,6 +66,7 @@ function createAgent(session) {
 
 function armNextAgent(session) {
   session.agent = null;
+  session.lastAgentError = null;
   const pending = createAgent(session)
     .then((agent) => {
       if (session.closed) {
@@ -74,6 +75,12 @@ function armNextAgent(session) {
       }
       session.agent = agent;
       return agent;
+    })
+    .catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      session.lastAgentError = message;
+      console.error("cursor-bridge Agent.create failed:", message);
+      return null;
     })
     .finally(() => {
       if (session.warming === pending) session.warming = null;
@@ -331,7 +338,7 @@ const server = http.createServer(async (req, res) => {
         busy: false,
       };
       sessions.set(sessionId, session);
-      await armNextAgent(session);
+      void armNextAgent(session);
       return json(res, 201, { sessionId });
     }
 
@@ -391,7 +398,10 @@ const server = http.createServer(async (req, res) => {
       try {
         emitActivity(res, { text: "Warming Cursor agent…", phase: "warm" });
         agent = await readyAgent(session);
-        if (!agent) throw new Error("Cursor agent failed to start");
+        if (!agent) {
+          const detail = session.lastAgentError || "Cursor agent failed to start";
+          throw new Error(detail);
+        }
         session.agent = null;
         const prompt = withPriorTurn(preparePrompt(rawPrompt, mode), session);
         const sendOptions = {

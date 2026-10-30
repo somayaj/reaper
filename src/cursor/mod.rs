@@ -28,6 +28,15 @@ pub fn bridge_url() -> String {
         .unwrap_or_else(|| load_saved_bridge_url().unwrap_or_else(|| "http://127.0.0.1:8091".into()))
 }
 
+fn refresh_bridge_url_from_disk() {
+    if std::env::var("REAPER_CURSOR_BRIDGE_URL").is_ok() {
+        return;
+    }
+    if let Some(url) = load_saved_bridge_url() {
+        set_bridge_url(url);
+    }
+}
+
 fn bridge_port_file() -> std::path::PathBuf {
     crate::config::Config::resolve_data_dir().join("cursor-bridge.port")
 }
@@ -200,6 +209,7 @@ impl CursorBridge {
         model: &str,
         mode: &str,
     ) -> Result<String> {
+        refresh_bridge_url_from_disk();
         let resp = self
             .client
             .post(format!("{}/sessions", self.base()))
@@ -234,6 +244,7 @@ impl CursorBridge {
         model: Option<&str>,
         mode: Option<&str>,
     ) -> Result<reqwest::Response> {
+        refresh_bridge_url_from_disk();
         let resp = self
             .client
             .post(format!("{}/sessions/{session_id}/chat", self.base()))
