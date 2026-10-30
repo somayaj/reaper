@@ -143,11 +143,20 @@ function handleSdkDelta(res, update) {
       emitActivity(res, { text: "Thinking…", phase: "thinking" });
       break;
     case "tool-call-started":
+    case "partial-tool-call":
       emitActivity(res, {
         text: friendlyToolActivity(update.name || update.toolName, toolTargetPath(update.args), "running"),
         tool: update.name || update.toolName || null,
         path: toolTargetPath(update.args),
         status: "running",
+      });
+      break;
+    case "tool-call-completed":
+      emitActivity(res, {
+        text: friendlyToolActivity(update.name || update.toolName, toolTargetPath(update.args), "completed"),
+        tool: update.name || update.toolName || null,
+        path: toolTargetPath(update.args),
+        status: "completed",
       });
       break;
     case "step-started":
@@ -347,6 +356,7 @@ const server = http.createServer(async (req, res) => {
       let run;
       const collect = { text: "" };
       try {
+        emitActivity(res, { text: "Warming Cursor agent…", phase: "warm" });
         agent = await readyAgent(session);
         if (!agent) throw new Error("Cursor agent failed to start");
         session.agent = null;
@@ -356,8 +366,11 @@ const server = http.createServer(async (req, res) => {
           local: { force: true },
         };
         if (session.model) sendOptions.model = { id: session.model };
-        sendOptions.onDelta = (update) => handleSdkDelta(res, update);
-        emitActivity(res, { text: "Starting agent…", phase: "start" });
+        sendOptions.onDelta = ({ update }) => handleSdkDelta(res, update);
+        sendOptions.onStep = () => {
+          emitActivity(res, { text: "Working…", phase: "step" });
+        };
+        emitActivity(res, { text: "Sending to agent…", phase: "start" });
         run = await agent.send(prompt, sendOptions);
       } catch (err) {
         session.busy = false;
