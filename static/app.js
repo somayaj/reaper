@@ -19557,10 +19557,10 @@ function refreshAgentStreamWaitStatus() {
 
 function setAgentActivity(detail) {
   const next = detail && String(detail).trim() ? String(detail).trim() : null;
-  if (state.agentActivity === next) return;
+  const unchanged = state.agentActivity === next;
   state.agentActivity = next;
   refreshAgentStreamWaitStatus();
-  updateAgentUi();
+  if (!unchanged) updateAgentUi();
 }
 
 function clearAgentActivity() {
@@ -20408,7 +20408,7 @@ async function runAgentChat(prompt, opts = {}) {
       void warmCursorSession(state.repo);
     }
 
-    setAgentActivity('Waiting for reply…');
+    setAgentActivity('Connecting…');
     const chatUrl = repoApi(state.repo, def.chatPath);
     const res = await fetch(chatUrl, {
       method: 'POST',
@@ -20429,7 +20429,7 @@ async function runAgentChat(prompt, opts = {}) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let sseBuffer = '';
-    setAgentActivity('Thinking…');
+    let sawStreamEvent = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -20438,10 +20438,12 @@ async function runAgentChat(prompt, opts = {}) {
       const parts = sseBuffer.split('\n\n');
       sseBuffer = parts.pop() || '';
       for (const part of parts) {
+        if (!part.trim() || part.trimStart().startsWith(':')) continue;
         const line = part.split('\n').find((l) => l.startsWith('data: '));
         if (!line) continue;
         const data = JSON.parse(line.slice(6));
         if (data.type === 'text') {
+          sawStreamEvent = true;
           buffer += data.text;
           textBuffer += data.text;
           assistantWrap.classList.remove('is-waiting');
@@ -20450,11 +20452,13 @@ async function runAgentChat(prompt, opts = {}) {
           scheduleAgentMarkdownPreview(assistantEl, textBuffer);
           scrollAgentToBottom();
         } else if (data.type === 'activity') {
+          sawStreamEvent = true;
           const activity = (data.text && String(data.text).trim()) || formatAgentActivity(data);
           if (activity) setAgentActivity(activity);
           refreshAgentStreamWaitStatus();
           scrollAgentToBottom();
         } else if (data.type === 'tool') {
+          sawStreamEvent = true;
           if (textBuffer.trim()) {
             buffer += data.text;
             assistantWrap.classList.remove('is-waiting');
