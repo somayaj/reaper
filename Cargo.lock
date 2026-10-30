@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "reaper"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "aws-config",
