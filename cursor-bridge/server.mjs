@@ -106,6 +106,10 @@ function emit(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function emitSseKeepalive(res) {
+  res.write(": keepalive\n\n");
+}
+
 function emitActivity(res, payload) {
   emit(res, { type: "activity", ...payload });
 }
@@ -336,6 +340,8 @@ const server = http.createServer(async (req, res) => {
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
       });
+      emitSseKeepalive(res);
+      emitActivity(res, { text: "Connecting to agent…", phase: "connect" });
 
       let agent;
       let run;

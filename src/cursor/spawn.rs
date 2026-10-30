@@ -46,7 +46,7 @@ fn runtime_bridge_dir() -> Option<PathBuf> {
     Some(crate::config::Config::resolve_data_dir().join("cursor-bridge"))
 }
 
-fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
+fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<bool> {
     let version = env!("CARGO_PKG_VERSION");
     let marker = dest.join(".bridge-version");
     let ready = bridge_deps_ready(dest);
@@ -55,7 +55,7 @@ fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
         .unwrap_or(false);
 
     if ready && same_version && dest.join("server.mjs").is_file() {
-        return Ok(());
+        return Ok(false);
     }
 
     tracing::info!(
@@ -89,7 +89,36 @@ fn sync_bridge_to_runtime(source: &Path, dest: &Path) -> Result<()> {
         bail!("failed to copy cursor-bridge into Reaper data directory");
     }
     fs::write(&marker, version)?;
-    Ok(())
+    Ok(true)
+}
+
+async fn kill_bridge_on_saved_port() {
+    let Some(url) = load_saved_bridge_url() else {
+        return;
+    };
+    let Some(port) = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .and_then(|host_port| host_port.rsplit(':').next())
+        .and_then(|p| p.parse::<u16>().ok())
+    else {
+        return;
+    };
+    let script = format!("lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true");
+    let _ = Command::new("sh").arg("-lc").arg(script).status().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+async fn refresh_runtime_bridge_if_stale() -> Result<bool> {
+    if !running_in_app_bundle() {
+        return Ok(false);
+    }
+    let source = bridge_source_dir();
+    let Some(dest) = runtime_bridge_dir() else {
+        return Ok(false);
+    };
+    sync_bridge_to_runtime(&source, &dest)
 }
 
 async fn prepare_bridge_dir() -> Result<PathBuf> {
@@ -311,32 +340,30 @@ pub async fn ensure_bridge_running() -> Result<()> {
         set_bridge_url(url);
     }
 
+    let bridge_refreshed = refresh_runtime_bridge_if_stale().await?;
+    if bridge_refreshed {
+        tracing::info!("Cursor bridge runtime updated to {}", env!("CARGO_PKG_VERSION"));
+        stop_bridge().await;
+        kill_bridge_on_saved_port().await;
+    }
+
     let bridge = CursorBridge::new();
     if bridge.health().await {
         let owned = bridge_child_slot().lock().await.is_some();
-        if owned {
+        if owned && !bridge_refreshed {
             tracing::debug!("Cursor bridge already running at {}", bridge_url());
             return Ok(());
         }
-        tracing::warn!(
-            "Replacing orphan Cursor bridge at {} (not managed by this Reaper process)",
-            bridge_url()
-        );
-        if let Some(url) = load_saved_bridge_url() {
-            if let Some(port) = url
-                .trim_start_matches("http://")
-                .split('/')
-                .next()
-                .and_then(|host_port| host_port.rsplit(':').next())
-                .and_then(|p| p.parse::<u16>().ok())
-            {
-                let script = format!(
-                    "lsof -ti tcp:{port} 2>/dev/null | xargs kill -9 2>/dev/null || true"
-                );
-                let _ = Command::new("sh").arg("-lc").arg(script).status().await;
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
+        if owned {
+            tracing::info!("Restarting Cursor bridge after runtime refresh…");
+            stop_bridge().await;
+        } else {
+            tracing::warn!(
+                "Replacing orphan Cursor bridge at {} (not managed by this Reaper process)",
+                bridge_url()
+            );
         }
+        kill_bridge_on_saved_port().await;
     }
 
     if std::env::var("REAPER_CURSOR_BRIDGE_DISABLE").is_ok() {
