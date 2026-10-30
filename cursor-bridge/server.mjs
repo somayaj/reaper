@@ -143,22 +143,26 @@ function handleSdkDelta(res, update) {
       emitActivity(res, { text: "Thinking…", phase: "thinking" });
       break;
     case "tool-call-started":
-    case "partial-tool-call":
+    case "partial-tool-call": {
+      const { name, path } = deltaToolInfo(update);
       emitActivity(res, {
-        text: friendlyToolActivity(update.name || update.toolName, toolTargetPath(update.args), "running"),
-        tool: update.name || update.toolName || null,
-        path: toolTargetPath(update.args),
+        text: friendlyToolActivity(name, path, "running"),
+        tool: name,
+        path,
         status: "running",
       });
       break;
-    case "tool-call-completed":
+    }
+    case "tool-call-completed": {
+      const { name, path } = deltaToolInfo(update);
       emitActivity(res, {
-        text: friendlyToolActivity(update.name || update.toolName, toolTargetPath(update.args), "completed"),
-        tool: update.name || update.toolName || null,
-        path: toolTargetPath(update.args),
-        status: "completed",
+        text: friendlyToolActivity(name, path, "running") || "Working…",
+        tool: name,
+        path,
+        status: "running",
       });
       break;
+    }
     case "step-started":
       emitActivity(res, { text: "Working…", phase: "step" });
       break;
@@ -180,7 +184,36 @@ function describeToolCall(event) {
 
 function toolTargetPath(args) {
   if (!args || typeof args !== "object") return null;
-  return args.path || args.file || args.file_path || args.target || null;
+  return args.path || args.file || args.file_path || args.target || args.workingDirectory || null;
+}
+
+function deltaToolInfo(update) {
+  if (!update || typeof update !== "object") return { name: null, path: null };
+  if (update.toolCall && typeof update.toolCall === "object") {
+    const tc = update.toolCall;
+    const name = tc.type || tc.name || null;
+    const args = tc.args || tc.input || null;
+    return { name, path: toolTargetPath(args) };
+  }
+  return {
+    name: update.name || update.toolName || null,
+    path: toolTargetPath(update.args),
+  };
+}
+
+function sdkToolInfo(event) {
+  if (!event || typeof event !== "object") return { name: null, path: null };
+  if (event.toolCall && typeof event.toolCall === "object") {
+    const tc = event.toolCall;
+    return {
+      name: tc.type || tc.name || event.name || null,
+      path: toolTargetPath(tc.args || tc.input || event.args),
+    };
+  }
+  return {
+    name: event.name || event.tool_name || null,
+    path: toolTargetPath(event.args),
+  };
 }
 
 function emitTool(res, text, extra = {}) {
@@ -214,11 +247,11 @@ function handleSdkMessage(res, event, collect) {
   }
 
   if (event.type === "tool_call") {
-    const path = toolTargetPath(event.args);
+    const { name, path } = sdkToolInfo(event);
     if (event.status === "running") {
       emitActivity(res, {
-        text: friendlyToolActivity(event.name, path, "running"),
-        tool: event.name || null,
+        text: friendlyToolActivity(name, path, "running"),
+        tool: name || null,
         path,
         status: "running",
       });
@@ -227,7 +260,7 @@ function handleSdkMessage(res, event, collect) {
     const text = describeToolCall(event);
     if (text) {
       emitTool(res, text, {
-        tool: event.name || null,
+        tool: name || event.name || null,
         path,
         status: event.status || null,
       });

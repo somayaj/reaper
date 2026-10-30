@@ -19555,12 +19555,34 @@ function refreshAgentStreamWaitStatus() {
   window.ReaperAgentMarkdown?.renderPlain(target.content, label);
 }
 
+function showAgentLiveActivity(label) {
+  const text = label && String(label).trim() ? String(label).trim() : null;
+  if (!text) return;
+  const box = $('#agent-messages');
+  if (!box) return;
+  let chip = $('#agent-live-activity');
+  if (!chip) {
+    chip = document.createElement('div');
+    chip.id = 'agent-live-activity';
+    chip.className = 'agent-msg-system agent-live-activity text-[11px] text-gray-400 py-1 px-1 border-l-2 border-accent/40';
+    chip.setAttribute('aria-live', 'polite');
+    box.appendChild(chip);
+  }
+  chip.textContent = text;
+  scrollAgentToBottom();
+}
+
+function clearAgentLiveActivity() {
+  $('#agent-live-activity')?.remove();
+}
+
 function setAgentActivity(detail) {
   const next = detail && String(detail).trim() ? String(detail).trim() : null;
   const unchanged = state.agentActivity === next;
   state.agentActivity = next;
   refreshAgentStreamWaitStatus();
-  if (!unchanged) updateAgentUi();
+  if (next) showAgentLiveActivity(next);
+  updateAgentUi();
 }
 
 function clearAgentActivity() {
@@ -20444,6 +20466,7 @@ async function runAgentChat(prompt, opts = {}) {
         const data = JSON.parse(line.slice(6));
         if (data.type === 'text') {
           sawStreamEvent = true;
+          clearAgentLiveActivity();
           buffer += data.text;
           textBuffer += data.text;
           assistantWrap.classList.remove('is-waiting');
@@ -20537,6 +20560,7 @@ async function runAgentChat(prompt, opts = {}) {
   } finally {
     state.agentStreamTarget = null;
     assistantWrap.classList.remove('is-streaming', 'is-waiting');
+    clearAgentLiveActivity();
     clearAgentActivity();
     state.agentBusy = false;
     state.agentStopRequested = false;
