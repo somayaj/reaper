@@ -14,6 +14,10 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
+if [[ -x "$APP/Contents/Resources/jdtls/bin/jdtls" ]]; then
+  "$ROOT/scripts/warm-bundled-jdtls-config.sh" "$APP"
+fi
+
 sign_args=(--force --sign "$IDENTITY")
 if [[ "$IDENTITY" != "-" ]]; then
   sign_args+=(--options runtime --timestamp)

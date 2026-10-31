@@ -17,7 +17,7 @@ fi
 rm -rf "$DEST"
 mkdir -p "$DEST"
 cp -R "$SRC/." "$DEST/"
-# Runtime workspace cache — must not ship (breaks codesign seal / notarization).
+# Drop dev-machine OSGi cache; build-macos-app runs warm-bundled-jdtls-config.sh before sign.
 rm -rf "$DEST/configuration"
 chmod +x "$DEST/bin/jdtls"
 echo "Bundled jdtls → $DEST"

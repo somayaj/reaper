@@ -3826,7 +3826,18 @@ async function main() {
     startupHarness.testShouldEagerWarmCursorSessionUnit(ok);
   }
 
-  section('Edit smoothness regression (no jarring while typing)');
+  section('macOS release / jdtls warm regression');
+  {
+    const signSh = fs.readFileSync(path.join(ROOT, 'scripts/sign-macos-app.sh'), 'utf8');
+    const copyJdtlsSh = fs.readFileSync(path.join(ROOT, 'scripts/copy-bundled-jdtls.sh'), 'utf8');
+    const warmSh = fs.readFileSync(path.join(ROOT, 'scripts/warm-bundled-jdtls-config.sh'), 'utf8');
+    const releaseSh = fs.readFileSync(path.join(ROOT, 'scripts/release-macos.sh'), 'utf8');
+    const releaseReadme = fs.readFileSync(path.join(ROOT, 'release-notes/README.md'), 'utf8');
+    const macosReleaseHarness = await import(path.join(ROOT, 'scripts/lib/macos-release-harness.mjs'));
+    macosReleaseHarness.testMacosReleaseStaticRegression(signSh, copyJdtlsSh, warmSh, releaseSh, releaseReadme, ok);
+  }
+
+    section('Edit smoothness regression (no jarring while typing)');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
     const editHarness = await import(path.join(ROOT, 'scripts/lib/edit-smoothness-harness.mjs'));
