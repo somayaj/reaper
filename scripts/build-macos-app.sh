@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/macos-signing.sh
+source "$ROOT/scripts/lib/macos-signing.sh"
+reaper_ensure_macos_sign_identity "$ROOT"
 APP="$ROOT/dist/Reaper.app"
 BINARY="$ROOT/target/release/reaper"
 

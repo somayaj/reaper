@@ -5,6 +5,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/macos-signing.sh
+source "$ROOT/scripts/lib/macos-signing.sh"
+reaper_ensure_macos_sign_identity "$ROOT"
 APP="$ROOT/dist/Reaper.app"
 STAGING="$ROOT/dist/dmg-staging"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"

@@ -11,4 +11,14 @@ macOS release notes for [Reaper](https://github.com/reaper-org/reaper). Publishe
 
 Older versions: `v0.1.*.md` in this directory.
 
-When cutting a release, add `release-notes/vX.Y.Z.md` and set `REAPER_RELEASE_NOTES` or rely on `scripts/release-macos.sh` auto-discovery.
+When cutting a release, add `release-notes/vX.Y.Z.md` and run `./scripts/release-macos.sh` (auto-discovery for notes).
+
+## macOS signing (Developer ID)
+
+Release builds use **Developer ID Application** when available:
+
+1. Copy `packaging/macos/signing.env.example` → `packaging/macos/signing.env` (gitignored), or rely on Keychain auto-detect.
+2. `./scripts/release-macos.sh` — signs `Reaper.app` and the DMG on every cut.
+3. Optional Gatekeeper notarization: `REAPER_NOTARIZE=1` and `REAPER_NOTARY_KEYCHAIN_PROFILE` in `signing.env` after `xcrun notarytool store-credentials`.
+
+The download site ([reaper-web](https://github.com/somayaj/reaper-web)) points at GitHub release assets; upload DMGs with `release-macos.sh` per architecture (`REAPER_MACOS_ARCH=arm64` / `x86_64`).

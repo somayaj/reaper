@@ -6,6 +6,9 @@
 .DS_Store
 .env
 .env.*
+packaging/macos/signing.env
+packaging/macos/signing/*.key
+packaging/macos/signing/*.p12
 
 # Cursor bridge deps (installed locally via install-deps.mjs)
 /cursor-bridge/node_modules/

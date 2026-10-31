@@ -11,9 +11,15 @@
 #   REAPER_SKIP_BUILD=1 ./scripts/release-macos.sh   # upload existing DMG
 #   REAPER_RELEASE_NOTES=notes.md ./scripts/release-macos.sh
 #   REAPER_RELEASES_DIR=/path/to/releases/checkout ./scripts/release-macos.sh
+#
+# Signing: installs Developer ID from Keychain or packaging/macos/signing.env (see signing.env.example).
+# Notarization (optional): REAPER_NOTARIZE=1 and REAPER_NOTARY_KEYCHAIN_PROFILE in signing.env
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/macos-signing.sh
+source "$ROOT/scripts/lib/macos-signing.sh"
+reaper_ensure_macos_sign_identity "$ROOT"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 ARCH="${REAPER_MACOS_ARCH:-$(uname -m)}"
 TAG="v${VERSION}"
@@ -57,6 +63,10 @@ else
   else
     "$ROOT/scripts/build-macos-dmg.sh"
   fi
+fi
+
+if [[ "${REAPER_NOTARIZE:-}" == "1" ]]; then
+  "$ROOT/scripts/notarize-macos-dmg.sh" "$DMG"
 fi
 
 if [[ -n "${REAPER_RELEASES_DIR:-}" && -d "$REAPER_RELEASES_DIR/.git" ]]; then
