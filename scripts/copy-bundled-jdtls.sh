@@ -17,5 +17,7 @@ fi
 rm -rf "$DEST"
 mkdir -p "$DEST"
 cp -R "$SRC/." "$DEST/"
+# Runtime workspace cache — must not ship (breaks codesign seal / notarization).
+rm -rf "$DEST/configuration"
 chmod +x "$DEST/bin/jdtls"
 echo "Bundled jdtls → $DEST"

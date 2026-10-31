@@ -80,7 +80,14 @@ EOF
 fi
 
 echo "Submitting to Apple notary service: $DMG"
-xcrun notarytool "${notary_submit_args[@]}"
+NOTARY_OUT="$(mktemp -t reaper-notary.XXXXXX)"
+xcrun notarytool "${notary_submit_args[@]}" | tee "$NOTARY_OUT"
+if grep -q 'status: Invalid' "$NOTARY_OUT"; then
+  echo "Notarization failed (Invalid). See log with: xcrun notarytool log <id> --keychain-profile ..." >&2
+  rm -f "$NOTARY_OUT"
+  exit 1
+fi
+rm -f "$NOTARY_OUT"
 
 echo "Stapling notarization ticket…"
 xcrun stapler staple "$DMG"
