@@ -3826,6 +3826,14 @@ async function main() {
     startupHarness.testShouldEagerWarmCursorSessionUnit(ok);
   }
 
+  section('Edit smoothness regression (no jarring while typing)');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const editHarness = await import(path.join(ROOT, 'scripts/lib/edit-smoothness-harness.mjs'));
+    editHarness.testEditSmoothnessStaticRegression(appSrc, ok);
+    editHarness.testDiagnosticsSignatureUnit(ok);
+  }
+
   section('Compiler settings regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

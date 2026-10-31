@@ -106,7 +106,11 @@ export function testStartupOpenStaticRegression(
     'cursor: Agent.create serialized per repo under concurrent warm',
   );
   ok(stateRs.includes('cursor_session_create_locks'), 'state: session create locks wired on AppState');
-  ok(cursorModRs.includes('struct SessionCreateLocks'), 'cursor: SessionCreateLocks defined');
+  ok(
+    cursorModRs.includes('struct SessionCreateLocks'),
+    'cursor: SessionCreateLocks defined',
+  );
+
 }
 
 /**

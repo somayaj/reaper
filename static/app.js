@@ -50,8 +50,9 @@ const CONFIG_DIAG_DELAY_MS = 900;
 const BUILD_DIAG_DELAY_MS = 1400;
 const TAB_RENDER_DELAY_MS = 200;
 const RUN_BUTTONS_DELAY_MS = 150;
+const RUN_INFO_REFRESH_DELAY_MS = 450;
 const EDITOR_CONTENT_SYNC_DELAY_MS = 120;
-const TEST_DECOR_DELAY_MS = 200;
+const TEST_DECOR_DELAY_MS = 350;
 const COVERAGE_CLEAR_DELAY_MS = 250;
 const PROJECT_RELOAD_DELAY_MS = 2000;
 const PROJECT_BUILD_RELOAD_DELAY_MS = 3000;
@@ -611,6 +612,8 @@ const state = {
   diagDecorationIds: [],
   testRunWidgets: [],
   testCovWidgets: [],
+  testGutterPaintKey: null,
+  runToolbarSig: null,
   testMethodsByLine: new Map(),
   fileCoverage: new Map(),
   coverageDecorationIds: [],
@@ -681,6 +684,7 @@ let diagTimer = null;
 let allJavaDiagTimer = null;
 let tabRenderTimer = null;
 let runButtonsTimer = null;
+let refreshRunInfoTimer = null;
 let editorContentSyncTimer = null;
 let testDecorTimer = null;
 let coverageClearTimer = null;
@@ -8161,6 +8165,7 @@ function clearTestRunWidgets() {
     }
   }
   state.testCovWidgets = [];
+  state.testGutterPaintKey = null;
 }
 
 function projectSupportsCoverage() {
@@ -8341,14 +8346,43 @@ function createTestCoverageWidget(method) {
   };
 }
 
+function testGutterPaintKey(path, content) {
+  if (!path) return '';
+  if (path.endsWith('.java')) {
+    let methods = listJavaTestMethods(path, content);
+    if (!methods.length) methods = classLevelTestMethods(path, content);
+    if (methods.length) {
+      const cov = projectSupportsCoverage() ? 1 : 0;
+      return `java:${methods.map((m) => `${m.glyphLine}:${m.filter}:${m.isClass ? 1 : 0}`).join('|')}:cov=${cov}`;
+    }
+    const springApps = listSpringBootAppGutterTargets(path, content);
+    if (springApps.length) {
+      return `spring:${springApps.map((a) => `${a.glyphLine}:${a.qualifiedName}`).join('|')}`;
+    }
+    return 'java:none';
+  }
+  if (isNativeSourcePath(path)) {
+    const mainLine = findNativeMainLine(content);
+    const target = resolveRunTarget(path, content, state.runInfo);
+    if (mainLine > 0 && target?.runnable && (target.mode === 'native' || target.mode === 'native-test')) {
+      return `native:${mainLine}:${target.mode}:${runTargetLabel(target, content, path)}`;
+    }
+    return 'native:none';
+  }
+  return '';
+}
+
 function applyTestRunDecorations() {
   if (!state.editor || !window.monaco) return;
-  clearTestRunWidgets();
-  state.testMethodsByLine = new Map();
   if (typeof state.editor.addGlyphMarginWidget !== 'function') return;
   const paint = () => {
     const path = state.activeTab;
     const content = state.editor.getModel()?.getValue() ?? '';
+    const key = testGutterPaintKey(path, content);
+    if (key === state.testGutterPaintKey) return;
+    state.testGutterPaintKey = key;
+    clearTestRunWidgets();
+    state.testMethodsByLine = new Map();
     if (path?.endsWith('.java')) {
       let methods = listJavaTestMethods(path, content);
       if (!methods.length) {
@@ -8366,7 +8400,6 @@ function applyTestRunDecorations() {
         }
         return;
       }
-      clearTestRunWidgets();
       state.testRunWidgets = [];
       state.testCovWidgets = [];
       const showCoverage = projectSupportsCoverage();
@@ -8394,7 +8427,7 @@ function applyTestRunDecorations() {
       }
     }
   };
-  requestAnimationFrame(() => requestAnimationFrame(paint));
+  requestAnimationFrame(paint);
 }
 
 function clearCoverageDecorations() {
@@ -12190,15 +12223,6 @@ function flushPendingEditorContent() {
   setEditorContent(path, content);
 }
 
-function flushPendingEditorContent() {
-  if (!state.editor || pendingEditorPath == null) return;
-  const path = pendingEditorPath;
-  const content = pendingEditorContent;
-  pendingEditorPath = null;
-  pendingEditorContent = null;
-  setEditorContent(path, content);
-}
-
 function syncEditorFromActiveTab() {
   if (!state.editor || !state.activeTab || !state.tabContents.has(state.activeTab)) return;
   setEditorContent(state.activeTab, state.tabContents.get(state.activeTab));
@@ -12425,8 +12449,6 @@ function initEditor() {
       if (isExternalEditorPath(state.activeTab)) return;
       markActiveTabDirty();
       scheduleEditorContentSync();
-      if (isRunToolbarPath(state.activeTab)) refreshRunInfo();
-      else if (state.activeTab?.endsWith('.java')) scheduleUpdateRunButtons();
       scheduleAutoSave();
       scheduleDiagnostics();
       scheduleStructureRefresh();
@@ -12437,7 +12459,6 @@ function initEditor() {
       }
       if (state.conflictFiles.has(state.activeTab)) updateConflictUi();
       scheduleTestRunDecorations();
-      scheduleCoverageClear();
       const model = state.editor.getModel();
       const position = state.editor.getPosition();
       if (model && position) {
@@ -12454,9 +12475,16 @@ function initEditor() {
     state.editor.onDidChangeCursorPosition((e) => {
       updateEditorStatus(e.position);
       scheduleStructureCaretHighlight();
-      if (state.activeTab?.endsWith('.java') || state.activeTab?.endsWith('.rb')
-        || state.activeTab?.endsWith('.py') || state.activeTab?.endsWith('.pyw')
-        || state.activeTab?.endsWith('.go') || isNativeSourcePath(state.activeTab)) scheduleUpdateRunButtons();
+      const path = state.activeTab;
+      if (!path) return;
+      const line = e.position?.lineNumber;
+      if (line && line !== state.runToolbarCursorLine) {
+        state.runToolbarCursorLine = line;
+        if (path.endsWith('.java') || path.endsWith('.rb') || path.endsWith('.py') || path.endsWith('.pyw')
+          || path.endsWith('.go') || isNativeSourcePath(path)) {
+          scheduleUpdateRunButtons();
+        }
+      }
     });
     window.ReaperThemes?.syncMonacoOverflowWidgetTheme?.(
       window.ReaperThemes.getTheme(window.ReaperThemes.getStoredTheme()).dark,
@@ -14774,7 +14802,9 @@ function scheduleEditorContentSync() {
 }
 
 function scheduleTestRunDecorations() {
-  if (!state.activeTab?.endsWith('.java')) return;
+  const path = state.activeTab;
+  if (!path) return;
+  if (!path.endsWith('.java') && !isNativeSourcePath(path)) return;
   clearTimeout(testDecorTimer);
   testDecorTimer = setTimeout(() => {
     testDecorTimer = null;
@@ -14915,6 +14945,9 @@ function activateTabShell(path) {
   setStatusMessage(path.split('/').pop() || path);
   fileDiags = [];
   diagJumpIndex = 0;
+  lastAppliedDiagSig = '';
+  state.runToolbarCursorLine = null;
+  state.runToolbarSig = null;
   updateDiagnosticsStatusBar(path, []);
   if (path?.endsWith('.java')) {
     scheduleJavaFullDiagnostics();
@@ -15715,6 +15748,7 @@ async function refreshAllJavaTabDiagnostics() {
 }
 
 let javaFullDiagDeferTimer = null;
+let lastAppliedDiagSig = '';
 
 /** Coalesce Java javac: one compile at a time, latest buffer wins. */
 function queueJavaDiagnostics(path, content, { scope = 'full', immediate = false, force = false } = {}) {
@@ -15772,9 +15806,17 @@ function refreshProjectClasspathUi() {
   if (state.activeTab?.endsWith('.java') || isNativeSourcePath(state.activeTab)) applyTestRunDecorations();
 }
 
+function diagnosticsSignature(diags) {
+  if (!diags?.length) return '';
+  return diags.map((d) => `${d.line}:${d.column}:${d.severity}:${d.message}`).join('|');
+}
+
 function applyDiagnostics(path, diags) {
   const model = state.editor?.getModel();
   if (!model || state.activeTab !== path || !window.monaco) return;
+  const sig = diagnosticsSignature(diags);
+  if (sig === lastAppliedDiagSig) return;
+  lastAppliedDiagSig = sig;
   fileDiags = diags;
   diagJumpIndex = 0;
   const markers = diags.map((d) => ({
@@ -16546,6 +16588,14 @@ function resolveRunTarget(path, content, info, cursorLine) {
   return detectJavaRunTarget(path, content, info, cursorLine);
 }
 
+function scheduleRefreshRunInfo() {
+  clearTimeout(refreshRunInfoTimer);
+  refreshRunInfoTimer = setTimeout(() => {
+    refreshRunInfoTimer = null;
+    void refreshRunInfo();
+  }, RUN_INFO_REFRESH_DELAY_MS);
+}
+
 async function refreshRunInfo() {
   if (!state.repo || !state.activeTab) {
     state.runInfo = null;
@@ -16607,7 +16657,12 @@ async function refreshRunInfo() {
     }
   }
   updateRunButtons();
-  if (state.activeTab?.endsWith('.java') || isNativeSourcePath(state.activeTab)) applyTestRunDecorations();
+  if (state.activeTab?.endsWith('.java') || isNativeSourcePath(state.activeTab)) {
+    const path = state.activeTab;
+    const content = state.tabContents.get(path) ?? state.editor?.getValue?.() ?? '';
+    const key = testGutterPaintKey(path, content);
+    if (key !== state.testGutterPaintKey) applyTestRunDecorations();
+  }
 }
 
 async function refreshGradleInfo() {
@@ -16666,6 +16721,22 @@ function updateRunButtons() {
   const showSqlRun = path?.endsWith('.sql');
   const showRunToolbar = showTaskPicker || showJavaRun || showRubyRun || showPythonRun || showGoRun || showRustRun || showJsRun || showKotlinRun || showPhpRun || showDartRun || showShellRun || showNativeRun || showSqlRun;
   const canRun = target.runnable || showTaskPicker;
+  const runToolbarSig = JSON.stringify({
+    showRunToolbar,
+    canRun,
+    mode: target.mode,
+    label: runTargetLabel(target, content, path),
+    reason: target.reason || '',
+    task: showTaskPicker ? (taskSel?.value || info?.default_task || '') : '',
+  });
+  if (runToolbarSig === state.runToolbarSig) {
+    const tbFormat = $('#tb-format');
+    const tbSave = $('#tb-save');
+    if (tbFormat) tbFormat.disabled = !state.activeTab || isExternalEditorPath(state.activeTab);
+    if (tbSave) tbSave.disabled = !state.activeTab || !state.dirty.has(state.activeTab) || isExternalEditorPath(state.activeTab);
+    return;
+  }
+  state.runToolbarSig = runToolbarSig;
 
   if (showRunToolbar && canRun) {
     if (showTaskPicker) {

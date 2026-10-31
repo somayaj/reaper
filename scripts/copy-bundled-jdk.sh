@@ -22,6 +22,8 @@ copy_one() {
   rm -rf "$dest"
   mkdir -p "$(dirname "$dest")"
   cp -R "$src/." "$dest/"
+  # jmods hold unsigned Mach-O inside archives; runtime does not need them and notary rejects them.
+  rm -rf "$dest/Contents/Home/jmods"
   # .vendor-version must not live at the .jdk bundle root — it breaks codesign sealing.
   rm -f "$dest/.vendor-version"
   # Temurin legal/ files are read-only; signing runs xattr -cr on the app bundle.

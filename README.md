@@ -6,7 +6,9 @@ Open a crate, run it, test it, debug it, commit it.
 
 ## Install
 
-macOS builds are on [reaper-org/releases](https://github.com/reaper-org/releases/releases). Download the **DMG for your Mac** from the latest release. Ignore GitHub’s “Source code (zip)” and “Source code (tar.gz)” links — those archives are empty placeholders, not the app.
+**macOS:** Download the signed, notarized **DMG for your Mac** from **[reaper-ide.app](https://reaper-ide.app)** (official download page; binaries come from GitHub Releases).
+
+Builds are also listed on [reaper-org/releases](https://github.com/reaper-org/releases/releases). Ignore GitHub’s “Source code (zip)” and “Source code (tar.gz)” links — those archives are empty placeholders, not the app.
 
 | Mac | File |
 |-----|------|

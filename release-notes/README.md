@@ -4,6 +4,7 @@ macOS release notes for [Reaper](https://github.com/reaper-org/reaper). Publishe
 
 | Version | Notes |
 |---------|--------|
+| [0.1.22](v0.1.22.md) | Smooth editing + notarized macOS bundle (505) |
 | [0.1.21](v0.1.21.md) | Window open + import performance (504) |
 | [0.1.20](v0.1.20.md) | Cursor agent status UI (503) |
 | [0.1.19](v0.1.19.md) | Cursor agent chat reliability (502) |
