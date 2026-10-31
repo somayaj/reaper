@@ -114,6 +114,8 @@ pub type SharedGuiProtocolBridge = Arc<GuiProtocolBridge>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Response};
     use axum::routing::get;
     use axum::Json;
 
@@ -133,5 +135,34 @@ mod tests {
         assert!(response.status().is_success());
         let body = String::from_utf8(response.body().clone()).unwrap();
         assert!(body.contains("\"ok\":true"));
+    }
+
+    #[tokio::test]
+    async fn custom_protocol_can_return_finite_event_stream_body() {
+        use axum::body::Body;
+        use axum::http::header;
+
+        let router = Router::new().route(
+            "/api/agent-ping",
+            get(|| async {
+                Response::builder()
+                    .status(200)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(
+                        ": keepalive\n\ndata: {\"type\":\"activity\",\"text\":\"ok\"}\n\n",
+                    ))
+                    .unwrap()
+            }),
+        );
+        let bridge = GuiProtocolBridge::new(router, Handle::current());
+
+        let request = wry::http::Request::builder()
+            .uri("reaper://localhost/api/agent-ping")
+            .body(Vec::new())
+            .unwrap();
+        let response = bridge.dispatch(request).await.unwrap();
+        assert!(response.status().is_success());
+        let body = String::from_utf8(response.body().clone()).unwrap();
+        assert!(body.contains("activity"), "finite SSE should buffer through custom protocol");
     }
 }
