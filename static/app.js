@@ -12539,10 +12539,11 @@ async function hydrateRepoWorkspace(name, opened, token) {
       console.warn('[Reaper] git history during open', err);
     });
 
-    await openInitialWorkspaceFile();
-    if (token !== repoSelectToken) return;
-    terminalLog(`Opened workspace: ${name}`);
-    void warmCursorSession(name);
+    void openInitialWorkspaceFile().then(() => {
+      if (token !== repoSelectToken) return;
+      terminalLog(`Opened workspace: ${name}`);
+    });
+    if (shouldEagerWarmCursorSession()) void warmCursorSession(name);
   } catch (err) {
     if (token !== repoSelectToken) return;
     console.warn('[Reaper] repo hydrate failed', err);
@@ -13032,7 +13033,7 @@ async function cloneRepo(e) {
 
   setCloneModalState({
     busy: true,
-    status: 'Cloning from remote — large repos can take a minute or two…',
+    status: 'Cloning from remote — large repos can take a few minutes…',
   });
 
   try {
@@ -13080,7 +13081,7 @@ async function importLocalRepo() {
 
   setCloneModalState({
     busy: true,
-    status: 'Importing from local folder…',
+    status: 'Copying git objects into Reaper — large repos can take a few minutes…',
   });
 
   try {
@@ -18248,8 +18249,15 @@ let agentMarkdownTimer = null;
 let cursorWarmInflight = null;
 let cursorWarmRepo = null;
 
-async function warmCursorSession(repo = state.repo) {
+/** Only the first Reaper window eagerly warms Cursor; others warm on first chat send. */
+function shouldEagerWarmCursorSession() {
+  const label = window.__reaperWindowLabel;
+  return label == null || label === 1;
+}
+
+async function warmCursorSession(repo = state.repo, { force = false } = {}) {
   if (!repo || state.agentProvider !== 'cursor' || !state.cursorConfigured) return;
+  if (!force && !shouldEagerWarmCursorSession()) return;
   if (cursorWarmRepo === repo && cursorWarmInflight) return cursorWarmInflight;
   cursorWarmRepo = repo;
   cursorWarmInflight = api(repoApi(repo, '/cursor/session/warm'), { method: 'POST', body: '{}' })
@@ -20239,7 +20247,9 @@ async function loadCursorStatus() {
     await loadCursorModels();
     state.cursorModel = normalizeCursorModel(state.cursorModel);
     refreshAgentProviderUi();
-    if (state.repo && cfg.configured && cfg.bridge_ok) void warmCursorSession();
+    if (state.repo && cfg.configured && cfg.bridge_ok && shouldEagerWarmCursorSession()) {
+      void warmCursorSession();
+    }
   } catch {
     state.cursorConfigured = false;
     state.cursorBridgeOk = false;
@@ -20262,7 +20272,7 @@ async function restartBridge() {
     }
     if (cfg.bridge_ok) await loadCursorModels();
     toast(cfg.bridge_ok ? 'Bridge connected' : (cfg.bridge_error || 'Bridge still offline'), cfg.bridge_ok ? 'success' : 'error');
-    if (cfg.bridge_ok && state.repo) await warmCursorSession(state.repo);
+    if (cfg.bridge_ok && state.repo) await warmCursorSession(state.repo, { force: true });
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -20610,7 +20620,7 @@ async function runAgentChat(prompt, opts = {}) {
       if (modelErr) throw new Error(modelErr);
       setAgentActivity('Warming agent…');
       await Promise.race([
-        warmCursorSession(state.repo),
+        warmCursorSession(state.repo, { force: true }),
         new Promise((resolve) => setTimeout(resolve, 12_000)),
       ]);
     }
@@ -21436,7 +21446,7 @@ async function init() {
   ensureTerminals();
   renderTerminalTabs();
   syncDotfilesControls(getShowDotfiles());
-  await ensureGeminiReady();
+  void ensureGeminiReady();
   initEditor();
   bindEvents();
   bindMenus();

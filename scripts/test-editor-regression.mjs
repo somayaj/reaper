@@ -3805,6 +3805,27 @@ async function main() {
     guiWindowHarness.testGuiWindowJsIntegration(ok);
   }
 
+  section('Startup / open-window / import performance regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const guiRs = fs.readFileSync(path.join(ROOT, 'src/gui.rs'), 'utf8');
+    const apiRs = fs.readFileSync(path.join(ROOT, 'src/web/api.rs'), 'utf8');
+    const cursorRs = fs.readFileSync(path.join(ROOT, 'src/web/cursor.rs'), 'utf8');
+    const stateRs = fs.readFileSync(path.join(ROOT, 'src/state.rs'), 'utf8');
+    const cursorModRs = fs.readFileSync(path.join(ROOT, 'src/cursor/mod.rs'), 'utf8');
+    const startupHarness = await import(path.join(ROOT, 'scripts/lib/startup-open-harness.mjs'));
+    startupHarness.testStartupOpenStaticRegression(
+      appSrc,
+      guiRs,
+      apiRs,
+      cursorRs,
+      stateRs,
+      cursorModRs,
+      ok,
+    );
+    startupHarness.testShouldEagerWarmCursorSessionUnit(ok);
+  }
+
   section('Compiler settings regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

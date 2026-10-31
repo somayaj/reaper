@@ -62,8 +62,8 @@ export function testInlineProviderRegression(appSrc, langSrc, agentModSrc, apiSr
     'inline provider: cursor bridge availability helper exported',
   );
   ok(
-    appSrc.includes('await warmCursorSession(state.repo)'),
-    'inline provider: agent chat awaits cursor session warm before first message',
+    appSrc.includes('warmCursorSession(state.repo, { force: true })'),
+    'inline provider: agent chat forces cursor session warm before first message',
   );
 
   ok(
@@ -224,13 +224,14 @@ export function testCursorSessionRegression(appSrc, cursorRsSrc, ok) {
     retryBody.includes('cursor_sessions.remove(name)'),
     'cursor session: evicts stale session id before retry',
   );
-  ok(
-    appSrc.includes('await warmCursorSession(state.repo)'),
-    'cursor session: UI awaits warm session before cursor chat',
-  );
   const restartBridgeBody = appSrc.match(/async function restartBridge\(\) \{[\s\S]*?\n\}/)?.[0] || '';
   ok(
-    restartBridgeBody.includes('await warmCursorSession(state.repo)'),
-    'cursor session: bridge restart re-warms repo session',
+    restartBridgeBody.includes('warmCursorSession(state.repo') && restartBridgeBody.includes('force: true'),
+    'cursor session: bridge restart re-warms repo session (forced)',
+  );
+  const runAgentBody = appSrc.match(/async function runAgentChat\([\s\S]*?\n\}/)?.[0] || '';
+  ok(
+    runAgentBody.includes('warmCursorSession(state.repo, { force: true })'),
+    'cursor session: chat send forces warm even on secondary windows',
   );
 }

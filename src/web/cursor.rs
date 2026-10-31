@@ -141,6 +141,12 @@ async fn ensure_cursor_session(
         return Ok(id);
     }
 
+    let _create_guard = state.cursor_session_create_locks.guard(name).await;
+
+    if let Some(id) = state.cursor_sessions.get(name) {
+        return Ok(id);
+    }
+
     match state
         .cursor_bridge
         .create_session(
@@ -272,6 +278,15 @@ async fn warm_cursor_session(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+
+    if state.cursor_sessions.get(&name).is_some() {
+        return Json(serde_json::json!({
+            "ok": true,
+            "warmed": true,
+            "reused": true,
+        }))
+        .into_response();
+    }
 
     let model = state.settings.cursor_model();
     let mode = state.settings.cursor_mode();

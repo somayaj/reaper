@@ -252,9 +252,15 @@ async fn import_repo_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ImportRepoRequest>,
 ) -> impl IntoResponse {
-    match import_repo(&state.config, &state.settings, body) {
-        Ok(repo) => (StatusCode::CREATED, Json(repo)).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let config = Arc::clone(&state.config);
+    let settings = state.settings.clone();
+    match tokio::task::spawn_blocking(move || import_repo(&config, &settings, body)).await {
+        Ok(Ok(repo)) => (StatusCode::CREATED, Json(repo)).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("import repo task"),
+        ),
     }
 }
 
@@ -262,9 +268,15 @@ async fn import_local_repo_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ImportLocalRepoRequest>,
 ) -> impl IntoResponse {
-    match import_local_repo(&state.config, &state.settings, body) {
-        Ok(repo) => (StatusCode::CREATED, Json(repo)).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let config = Arc::clone(&state.config);
+    let settings = state.settings.clone();
+    match tokio::task::spawn_blocking(move || import_local_repo(&config, &settings, body)).await {
+        Ok(Ok(repo)) => (StatusCode::CREATED, Json(repo)).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            anyhow::Error::from(e).context("import local repo task"),
+        ),
     }
 }
 

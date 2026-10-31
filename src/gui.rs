@@ -216,7 +216,8 @@ fn create_window(
             },
         )
         .with_on_page_load_handler(move |event, _loaded_url| {
-            if matches!(event, PageLoadEvent::Finished) {
+            // Show as soon as HTML/splash is parsing — don't wait for Monaco and other late assets.
+            if matches!(event, PageLoadEvent::Started) {
                 let _ = show_proxy.send_event(UserEvent::ShowWindow(window_id));
             }
         })

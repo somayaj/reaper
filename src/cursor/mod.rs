@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -58,6 +58,24 @@ pub fn save_bridge_port(port: u16) {
 struct StoredSession {
     id: String,
     last_used: Instant,
+}
+
+/// Serialize concurrent Agent.create calls for the same repo (multi-window warm races).
+#[derive(Default)]
+pub struct SessionCreateLocks {
+    inner: tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl SessionCreateLocks {
+    pub async fn guard(&self, repo: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.inner.lock().await;
+            map.entry(repo.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
 }
 
 #[derive(Default)]
@@ -416,5 +434,37 @@ impl CursorBridge {
             .send()
             .await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionCreateLocks;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn session_create_locks_allow_different_repos_in_parallel() {
+        let locks = Arc::new(SessionCreateLocks::default());
+        let locks_a = Arc::clone(&locks);
+        let locks_b = Arc::clone(&locks);
+        let (a, b) = tokio::join!(locks_a.guard("repo-a"), locks_b.guard("repo-b"));
+        drop(a);
+        drop(b);
+    }
+
+    #[tokio::test]
+    async fn session_create_locks_serialize_same_repo() {
+        let locks = Arc::new(SessionCreateLocks::default());
+        let hold = locks.guard("same").await;
+        let locks2 = Arc::clone(&locks);
+        let raced = tokio::time::timeout(Duration::from_millis(80), async move {
+            let _g = locks2.guard("same").await;
+        })
+        .await;
+        assert!(raced.is_err(), "second guard for same repo should wait on first");
+        drop(hold);
+        let ok = tokio::time::timeout(Duration::from_millis(500), locks.guard("same")).await;
+        assert!(ok.is_ok(), "guard released after first holder dropped");
     }
 }
