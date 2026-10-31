@@ -41,6 +41,8 @@ NOTES_TMP_DIR="$(mktemp -d)"
 NOTES_FILE="$NOTES_TMP_DIR/RELEASE_NOTES.md"
 if [[ -n "${REAPER_RELEASE_NOTES:-}" && -f "$REAPER_RELEASE_NOTES" ]]; then
   cp "$REAPER_RELEASE_NOTES" "$NOTES_FILE"
+elif [[ -f "$ROOT/release-notes/v${VERSION}.md" ]]; then
+  cp "$ROOT/release-notes/v${VERSION}.md" "$NOTES_FILE"
 else
   cat >"$NOTES_FILE" <<EOF
 Reaper ${VERSION} — macOS split release.

@@ -105,6 +105,9 @@ if [[ -n "${REAPER_RELEASE_NOTES:-}" ]]; then
     exit 1
   fi
   NOTES_TMP=0
+elif [[ -f "$ROOT/release-notes/v${VERSION}.md" ]]; then
+  NOTES_FILE="$ROOT/release-notes/v${VERSION}.md"
+  NOTES_TMP=0
 else
   NOTES_TMP_DIR="$(mktemp -d)"
   NOTES_FILE="$NOTES_TMP_DIR/RELEASE_NOTES.md"
