@@ -33,6 +33,12 @@ async fn set_bridge_error(msg: Option<String>) {
     *bridge_error_slot().lock().await = msg;
 }
 
+fn bridge_stderr_is_noise(line: &str) -> bool {
+    line.contains("ExperimentalWarning:")
+        || line.contains("Use `node --trace-warnings`")
+        || (line.contains("(node:") && line.contains("ExperimentalWarning"))
+}
+
 pub fn bridge_dir() -> PathBuf {
     bridge_source_dir()
 }
@@ -175,6 +181,28 @@ fn bridge_source_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cursor-bridge")
 }
 
+fn node_version(path: &Path) -> Option<(u32, u32, u32)> {
+    let output = std::process::Command::new(path)
+        .arg("-v")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let digits = raw.trim().trim_start_matches('v');
+    let mut parts = digits.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// `@cursor/sdk` 1.2+ uses Node's experimental SQLite; Node 22.x can hang in `agent.send()`.
+fn node_ok_for_cursor_bridge(path: &Path) -> bool {
+    node_version(path).is_some_and(|(maj, _, _)| maj >= 23)
+}
+
 fn find_node() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("REAPER_NODE") {
         let p = PathBuf::from(path);
@@ -183,28 +211,47 @@ fn find_node() -> Result<PathBuf> {
         }
     }
 
+    for path in [
+        PathBuf::from("/opt/homebrew/bin/node"),
+        PathBuf::from("/usr/local/bin/node"),
+        PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node"),
+    ] {
+        if path.is_file() && node_ok_for_cursor_bridge(&path) {
+            tracing::info!("Using system Node.js for Cursor bridge at {}", path.display());
+            return Ok(path);
+        }
+    }
+
+    if let Ok(path) = find_node_via_login_path() {
+        if node_ok_for_cursor_bridge(&path) {
+            tracing::info!("Using Node.js for Cursor bridge at {}", path.display());
+            return Ok(path);
+        }
+    }
+
     if let Some(bundled) = crate::config::bundled_node() {
-        return Ok(bundled);
+        if node_ok_for_cursor_bridge(&bundled) {
+            return Ok(bundled);
+        }
+        tracing::warn!(
+            "Bundled Node.js at {} is too old for @cursor/sdk 1.2 — install Node 23+ (`brew install node`) or set REAPER_NODE",
+            bundled.display()
+        );
     }
 
     if running_in_app_bundle() {
         bail!(
-            "Bundled Node.js missing from Reaper.app — reinstall from https://github.com/reaper-org/releases"
+            "Node.js 23+ required for Cursor agent (SDK 1.2). Install with `brew install node` or set REAPER_NODE."
         );
     }
 
     for path in [
         PathBuf::from("/opt/homebrew/bin/node"),
         PathBuf::from("/usr/local/bin/node"),
-        PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node"),
     ] {
         if path.is_file() {
             return Ok(path);
         }
-    }
-
-    if let Ok(path) = find_node_via_login_path() {
-        return Ok(path);
     }
 
     if let Ok(path) = which_node() {
@@ -400,7 +447,9 @@ pub async fn ensure_bridge_running() -> Result<()> {
         .current_dir(&dir)
         .env("REAPER_CURSOR_BRIDGE_PORT", bridge_port.to_string())
         .kill_on_drop(true)
-        .stdout(Stdio::piped())
+        // SDK/Node can write a lot to stdout during agent.send(); a piped stdout
+        // that nobody reads fills (~64KiB) and deadlocks the bridge mid-chat.
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to start cursor bridge with {}", node.display()))?;
@@ -410,6 +459,9 @@ pub async fn ensure_bridge_running() -> Result<()> {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::warn!("cursor-bridge: {line}");
+                if bridge_stderr_is_noise(&line) {
+                    continue;
+                }
                 set_bridge_error(Some(line)).await;
             }
         });

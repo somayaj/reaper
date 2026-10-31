@@ -6,6 +6,6 @@
     "start": "node server.mjs"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.22"
+    "@cursor/sdk": "^1.2.0"
   }
 }

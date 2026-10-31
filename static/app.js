@@ -18645,6 +18645,181 @@ function resolveLoopbackWsBase() {
   return null;
 }
 
+/** SSE/agent streams must use loopback HTTP — reaper:// buffers the whole body and fails. */
+function resolveLoopbackHttpBase() {
+  const injected = window.__REAPER_LOOPBACK_HTTP__;
+  if (typeof injected === 'string' && injected.trim()) {
+    return injected.trim().replace(/\/$/, '');
+  }
+  const ws = resolveLoopbackWsBase();
+  if (ws && /^wss?:\/\//i.test(ws)) {
+    return ws.replace(/^ws/i, 'http');
+  }
+  const proto = location.protocol;
+  if (proto === 'http:' || proto === 'https:') {
+    return `${proto}//${location.host}`;
+  }
+  return null;
+}
+
+async function resolveStreamingApiUrl(path) {
+  const rel = path.startsWith('/') ? path : `/${path}`;
+  if (!usesInProcessApi()) return rel;
+  await ensureLoopbackWsBase();
+  const base = resolveLoopbackHttpBase();
+  if (!base) {
+    throw new Error('Loopback HTTP unavailable — restart Reaper');
+  }
+  return `${base}${rel}`;
+}
+
+function drainAgentSseEvents(sseBuffer, onEvent) {
+  const parts = sseBuffer.split('\n\n');
+  const rest = parts.pop() || '';
+  for (const part of parts) {
+    if (!part.trim() || part.trimStart().startsWith(':')) continue;
+    const line = part.split('\n').find((l) => l.startsWith('data: '));
+    if (!line) continue;
+    let data;
+    try {
+      data = JSON.parse(line.slice(6));
+    } catch {
+      continue;
+    }
+    onEvent(data);
+  }
+  return rest;
+}
+
+function processAgentStreamEvent(data, ctx) {
+  const {
+    def,
+    assistantWrap,
+    assistantEl,
+    stateRefs,
+  } = ctx;
+  if (data.type === 'text') {
+    stateRefs.sawStreamEvent = true;
+    clearAgentLiveActivity();
+    stateRefs.buffer += data.text;
+    stateRefs.textBuffer += data.text;
+    assistantWrap.classList.remove('is-waiting');
+    setAgentActivity('Writing reply…');
+    window.ReaperAgentMarkdown?.renderPlain(assistantEl, stateRefs.textBuffer);
+    scheduleAgentMarkdownPreview(assistantEl, stateRefs.textBuffer);
+    scrollAgentToBottom();
+  } else if (data.type === 'activity') {
+    stateRefs.sawStreamEvent = true;
+    const activity = (data.text && String(data.text).trim()) || formatAgentActivity(data);
+    if (activity) setAgentActivity(activity);
+    scrollAgentToBottom();
+  } else if (data.type === 'tool') {
+    stateRefs.sawStreamEvent = true;
+    if (stateRefs.textBuffer.trim()) {
+      stateRefs.buffer += data.text;
+      assistantWrap.classList.remove('is-waiting');
+      window.ReaperAgentMarkdown?.renderPlain(assistantEl, stateRefs.buffer);
+      scrollAgentToBottom();
+    } else {
+      const activity = formatAgentActivity(data);
+      if (activity) setAgentActivity(activity);
+    }
+    scheduleAgentWorkspaceRefresh(data.path || null);
+  } else if (data.type === 'error') {
+    throw new Error(data.error);
+  } else if (data.type === 'done') {
+    stateRefs.doneSummary = data.summary || null;
+    if (data.status === 'cancelled') {
+      stateRefs.cancelled = true;
+      stateRefs.buffer = stateRefs.buffer || 'Stopped.';
+      stateRefs.textBuffer = stateRefs.textBuffer || stateRefs.buffer;
+    } else if (data.status === 'error') {
+      const errText = data.error || data.summary || 'Agent run failed';
+      if (!stateRefs.buffer) throw new Error(errText);
+    } else if (!stateRefs.buffer && data.status === 'finished') {
+      stateRefs.buffer = def.capabilities.tools
+        ? 'Done — check Source Control for file changes, or reopen files in the editor.'
+        : def.emptyReply();
+      stateRefs.textBuffer = stateRefs.buffer;
+    } else if (!stateRefs.buffer && data.status === 'error') {
+      throw new Error(data.error || data.summary || 'Agent run failed');
+    }
+  }
+}
+
+async function consumeAgentChatLoopbackWs(def, prompt, signal, ctx) {
+  await ensureLoopbackWsBase();
+  const wsBase = resolveLoopbackWsBase();
+  if (!wsBase) {
+    throw new Error('Loopback WebSocket unavailable — restart Reaper');
+  }
+  const wsUrl = `${wsBase}/api/repos/${encodeURIComponent(state.repo)}${def.chatPath}/ws`;
+  let sseBuffer = '';
+
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      fn(arg);
+    };
+    const streamLooksOk = () =>
+      ctx.stateRefs.sawStreamEvent || Boolean(ctx.stateRefs.buffer?.trim());
+    const onAbort = () => {
+      try {
+        ws.close();
+      } catch { /* ignore */ }
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify(def.chatBody(prompt)));
+    };
+    ws.onmessage = (ev) => {
+      try {
+        if (typeof ev.data === 'string') {
+          let payload;
+          try {
+            payload = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (payload?.type === 'error') {
+            finish(reject, new Error(payload.error || 'Agent failed'));
+            try {
+              ws.close();
+            } catch { /* ignore */ }
+            return;
+          }
+          return;
+        }
+        const chunk = ev.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(ev.data)
+          : String(ev.data);
+        sseBuffer += chunk;
+        sseBuffer = drainAgentSseEvents(sseBuffer, (data) => processAgentStreamEvent(data, ctx));
+      } catch (err) {
+        finish(reject, err);
+        try {
+          ws.close();
+        } catch { /* ignore */ }
+      }
+    };
+    // WebKit often fires onerror when the server closes the loopback WS after a good SSE run.
+    ws.onerror = () => {
+      if (streamLooksOk()) return;
+      finish(reject, new Error('Agent connection failed'));
+    };
+    ws.onclose = () => {
+      if (streamLooksOk()) finish(resolve);
+      else finish(reject, new Error('Agent connection failed'));
+    };
+  });
+}
+
 function ensureLoopbackWsBase() {
   const existing = resolveLoopbackWsBase();
   if (existing) return Promise.resolve(existing);
@@ -19578,11 +19753,18 @@ function clearAgentLiveActivity() {
 
 function setAgentActivity(detail) {
   const next = detail && String(detail).trim() ? String(detail).trim() : null;
-  const unchanged = state.agentActivity === next;
   state.agentActivity = next;
   refreshAgentStreamWaitStatus();
-  if (next) showAgentLiveActivity(next);
   updateAgentUi();
+  // During Cursor/SSE chat the assistant "…" bubble already shows status (is-waiting).
+  // Avoid a second (or third) duplicate line in the message list.
+  const statusInAssistantBubble =
+    state.agentStreamTarget?.wrap?.classList?.contains('is-waiting');
+  if (next && !statusInAssistantBubble) {
+    showAgentLiveActivity(next);
+  } else {
+    clearAgentLiveActivity();
+  }
 }
 
 function clearAgentActivity() {
@@ -20398,7 +20580,8 @@ async function runAgentChat(prompt, opts = {}) {
   }
   state.agentBusy = true;
   state.agentStopRequested = false;
-  state.agentActivity = 'Connecting…';
+  state.agentActivity = null;
+  clearAgentLiveActivity();
   state.agentAbortController = new AbortController();
   state.agentLiveFollow = !!def.capabilities.liveFollow && state.cursorMode === 'agent';
   state.agentLiveDiffPath = null;
@@ -20415,7 +20598,7 @@ async function runAgentChat(prompt, opts = {}) {
   const { wrap: assistantWrap, content: assistantEl } = appendAgentMessage('assistant', '…', { provider: chatProvider });
   assistantWrap.classList.add('is-streaming', 'is-waiting');
   state.agentStreamTarget = { wrap: assistantWrap, content: assistantEl };
-  refreshAgentStreamWaitStatus();
+  setAgentActivity('Connecting…');
   let buffer = '';
   let textBuffer = '';
   let doneSummary = null;
@@ -20432,91 +20615,55 @@ async function runAgentChat(prompt, opts = {}) {
       ]);
     }
 
-    setAgentActivity('Connecting…');
-    const chatUrl = repoApi(state.repo, def.chatPath);
-    const res = await fetch(chatUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(def.chatBody(prompt)),
-      signal: state.agentAbortController.signal,
-    });
+    const streamCtx = {
+      def,
+      assistantWrap,
+      assistantEl,
+      stateRefs: { buffer, textBuffer, doneSummary, cancelled, sawStreamEvent: false },
+    };
+    const useLoopbackAgentWs = usesInProcessApi() && def.chatPath === '/cursor/chat';
 
-    if (!res.ok) {
-      let errMsg = res.statusText;
-      try {
-        const err = await res.json();
-        errMsg = err.error || errMsg;
-      } catch { /* ignore */ }
-      throw new Error(errMsg);
-    }
+    if (useLoopbackAgentWs) {
+      await consumeAgentChatLoopbackWs(
+        def,
+        prompt,
+        state.agentAbortController.signal,
+        streamCtx,
+      );
+    } else {
+      const chatUrl = repoApi(state.repo, def.chatPath);
+      const res = await fetch(chatUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(def.chatBody(prompt)),
+        signal: state.agentAbortController.signal,
+      });
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let sseBuffer = '';
-    let sawStreamEvent = false;
+      if (!res.ok) {
+        let errMsg = res.statusText;
+        try {
+          const err = await res.json();
+          errMsg = err.error || errMsg;
+        } catch { /* ignore */ }
+        throw new Error(errMsg);
+      }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-      const parts = sseBuffer.split('\n\n');
-      sseBuffer = parts.pop() || '';
-      for (const part of parts) {
-        if (!part.trim() || part.trimStart().startsWith(':')) continue;
-        const line = part.split('\n').find((l) => l.startsWith('data: '));
-        if (!line) continue;
-        const data = JSON.parse(line.slice(6));
-        if (data.type === 'text') {
-          sawStreamEvent = true;
-          clearAgentLiveActivity();
-          buffer += data.text;
-          textBuffer += data.text;
-          assistantWrap.classList.remove('is-waiting');
-          setAgentActivity('Writing reply…');
-          window.ReaperAgentMarkdown?.renderPlain(assistantEl, textBuffer);
-          scheduleAgentMarkdownPreview(assistantEl, textBuffer);
-          scrollAgentToBottom();
-        } else if (data.type === 'activity') {
-          sawStreamEvent = true;
-          const activity = (data.text && String(data.text).trim()) || formatAgentActivity(data);
-          if (activity) setAgentActivity(activity);
-          refreshAgentStreamWaitStatus();
-          scrollAgentToBottom();
-        } else if (data.type === 'tool') {
-          sawStreamEvent = true;
-          if (textBuffer.trim()) {
-            buffer += data.text;
-            assistantWrap.classList.remove('is-waiting');
-            window.ReaperAgentMarkdown?.renderPlain(assistantEl, buffer);
-            scrollAgentToBottom();
-          } else {
-            const activity = formatAgentActivity(data);
-            if (activity) setAgentActivity(activity);
-            refreshAgentStreamWaitStatus();
-          }
-          scheduleAgentWorkspaceRefresh(data.path || null);
-        } else if (data.type === 'error') {
-          throw new Error(data.error);
-        } else if (data.type === 'done') {
-          doneSummary = data.summary || null;
-          if (data.status === 'cancelled') {
-            cancelled = true;
-            buffer = buffer || 'Stopped.';
-            textBuffer = textBuffer || buffer;
-          } else if (data.status === 'error') {
-            const errText = data.error || data.summary || 'Agent run failed';
-            if (!buffer) throw new Error(errText);
-          } else if (!buffer && data.status === 'finished') {
-            buffer = def.capabilities.tools
-              ? 'Done — check Source Control for file changes, or reopen files in the editor.'
-              : def.emptyReply();
-            textBuffer = buffer;
-          } else if (!buffer && data.status === 'error') {
-            throw new Error(data.error || data.summary || 'Agent run failed');
-          }
-        }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        sseBuffer = drainAgentSseEvents(sseBuffer, (data) => processAgentStreamEvent(data, streamCtx));
       }
     }
+
+    buffer = streamCtx.stateRefs.buffer;
+    textBuffer = streamCtx.stateRefs.textBuffer;
+    doneSummary = streamCtx.stateRefs.doneSummary;
+    cancelled = streamCtx.stateRefs.cancelled;
 
     clearTimeout(agentRefreshTimer);
     clearTimeout(agentMarkdownTimer);

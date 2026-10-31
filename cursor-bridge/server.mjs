@@ -1,8 +1,18 @@
 import http from "node:http";
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Agent, Cursor } from "@cursor/sdk";
 
 const PORT = Number(process.env.REAPER_CURSOR_BRIDGE_PORT || 8091);
+const TRACE = process.env.REAPER_CURSOR_BRIDGE_TRACE || "";
+function trace(msg) {
+  if (!TRACE) return;
+  try {
+    fs.appendFileSync(TRACE, `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    /* ignore */
+  }
+}
 const sessions = new Map();
 const CONTEXT_LIMIT = 8000;
 
@@ -402,11 +412,9 @@ const server = http.createServer(async (req, res) => {
           const detail = session.lastAgentError || "Cursor agent failed to start";
           throw new Error(detail);
         }
-        session.agent = null;
         const prompt = withPriorTurn(preparePrompt(rawPrompt, mode), session);
         const sendOptions = {
           mode: normalizeSdkMode(mode),
-          local: { force: true },
         };
         if (session.model) sendOptions.model = { id: session.model };
         sendOptions.onDelta = ({ update }) => handleSdkDelta(res, update);
@@ -414,8 +422,11 @@ const server = http.createServer(async (req, res) => {
           emitActivity(res, { text: "Working…", phase: "step" });
         };
         emitActivity(res, { text: "Sending to agent…", phase: "start" });
+        trace(`chat send begin session=${sessionId.slice(0, 8)}`);
         run = await agent.send(prompt, sendOptions);
+        trace(`chat send ok run=${run?.id ?? "?"} status=${run?.status ?? "?"}`);
       } catch (err) {
+        trace(`chat send err ${err instanceof Error ? err.stack || err.message : err}`);
         session.busy = false;
         if (agent) {
           await disposeAgent(agent);
@@ -429,20 +440,15 @@ const server = http.createServer(async (req, res) => {
       session.lastUsedAt = Date.now();
       session.activeChat = { run, res };
 
-      const onClose = () => {
-        if (session.activeChat?.run === run) {
-          session.activeChat = null;
-          run.cancel().catch(() => {});
-        }
-      };
-      req.on("close", onClose);
-      res.on("close", onClose);
-
       try {
+        trace(`chat stream begin run=${run?.id ?? "?"}`);
+        console.error(`cursor-bridge chat stream start session=${sessionId.slice(0, 8)} run=${run.id?.slice?.(0, 8) ?? "?"}`);
         for await (const event of run.stream()) {
           if (session.activeChat?.run !== run) break;
+          trace(`chat stream event type=${event?.type ?? "?"}`);
           handleSdkMessage(res, event, collect);
         }
+        trace(`chat stream loop done events_collected=${collect.text.length}`);
 
         if (session.activeChat?.run === run) {
           const result = await run.wait();
@@ -465,10 +471,15 @@ const server = http.createServer(async (req, res) => {
       } catch (err) {
         if (session.activeChat?.run === run) {
           const message = err instanceof Error ? err.message : String(err);
-          console.error("cursor-bridge chat error:", message);
+          trace(`chat stream err ${err instanceof Error ? err.stack || err.message : message}`);
+          console.error(
+            "cursor-bridge chat error:",
+            err instanceof Error ? err.stack || err.message : message,
+          );
           emit(res, { type: "error", error: message });
         }
       } finally {
+        trace(`chat finally writableEnded=${res.writableEnded} busy=${session.busy}`);
         if (session.activeChat?.run === run) {
           session.activeChat = null;
         }

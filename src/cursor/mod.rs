@@ -166,7 +166,11 @@ pub fn invalidate_health_cache() {
 impl CursorBridge {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .http1_only()
+                .pool_max_idle_per_host(0)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 
@@ -209,7 +213,6 @@ impl CursorBridge {
         model: &str,
         mode: &str,
     ) -> Result<String> {
-        refresh_bridge_url_from_disk();
         let resp = self
             .client
             .post(format!("{}/sessions", self.base()))
@@ -244,7 +247,6 @@ impl CursorBridge {
         model: Option<&str>,
         mode: Option<&str>,
     ) -> Result<reqwest::Response> {
-        refresh_bridge_url_from_disk();
         let resp = self
             .client
             .post(format!("{}/sessions/{session_id}/chat", self.base()))

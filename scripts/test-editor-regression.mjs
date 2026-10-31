@@ -3744,6 +3744,17 @@ async function main() {
     terminalHarness.testTerminalBuildTaskStreamRegression(appSrc, ok);
   }
 
+  section('Cursor agent loopback WebSocket regression');
+  {
+    const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+    const cursorRs = fs.readFileSync(path.join(ROOT, 'src/web/cursor.rs'), 'utf8');
+    const customProtocolRs = fs.readFileSync(path.join(ROOT, 'src/web/custom_protocol.rs'), 'utf8');
+    const cursorHarness = await import(path.join(ROOT, 'scripts/lib/cursor-agent-harness.mjs'));
+    cursorHarness.testCursorAgentSourceFilesExist(ok);
+    cursorHarness.testDrainAgentSseEventsUnit(ok);
+    cursorHarness.testCursorAgentLoopbackWsRegression(appSrc, cursorRs, customProtocolRs, ok);
+  }
+
   section('Debugger regression');
   {
     const appSrc = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');

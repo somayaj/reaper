@@ -24,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-changed=scripts/test-java-editor-integration.sh");
     println!("cargo:rerun-if-changed=scripts/lib/javac-edit-loop.mjs");
     println!("cargo:rerun-if-changed=scripts/lib/terminal-harness.mjs");
+    println!("cargo:rerun-if-changed=scripts/lib/cursor-agent-harness.mjs");
+    println!("cargo:rerun-if-changed=src/web/cursor.rs");
     println!("cargo:rerun-if-changed=scripts/test-terminal-integration.mjs");
     println!("cargo:rerun-if-changed=scripts/test-terminal-integration.sh");
     println!("cargo:rerun-if-changed=scripts/lib/ast-structure-harness.mjs");
